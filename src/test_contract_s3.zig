@@ -49,8 +49,8 @@ fn expectXmlTag(body: []const u8, tag: []const u8) ![]const u8 {
 }
 
 test "contract: s3 bucket lifecycle returns exact codes and xml" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     try support.cleanupS3TestState();
     defer support.cleanupS3TestState() catch {};
@@ -75,8 +75,8 @@ test "contract: s3 bucket lifecycle returns exact codes and xml" {
 }
 
 test "contract: s3 object lifecycle preserves bytes and metadata" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     try support.cleanupS3TestState();
     defer support.cleanupS3TestState() catch {};
@@ -114,8 +114,8 @@ test "contract: s3 object lifecycle preserves bytes and metadata" {
 }
 
 test "contract: s3 delete object is idempotent and bucket delete rejects non-empty buckets" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     try support.cleanupS3TestState();
     defer support.cleanupS3TestState() catch {};
@@ -144,8 +144,8 @@ test "contract: s3 delete object is idempotent and bucket delete rejects non-emp
 }
 
 test "contract: s3 list objects honors prefix for nested keys" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     try support.cleanupS3TestState();
     defer support.cleanupS3TestState() catch {};
@@ -165,8 +165,8 @@ test "contract: s3 list objects honors prefix for nested keys" {
 }
 
 test "contract: s3 multipart completion assembles the final object" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     try support.cleanupS3TestState();
     defer support.cleanupS3TestState() catch {};
@@ -206,8 +206,8 @@ test "contract: s3 multipart completion assembles the final object" {
 }
 
 test "contract: s3 multipart abort invalidates the upload id" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     try support.cleanupS3TestState();
     defer support.cleanupS3TestState() catch {};
@@ -234,8 +234,8 @@ test "contract: s3 multipart abort invalidates the upload id" {
 }
 
 test "contract: s3 multipart upload id is bound to the original object key" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     try support.cleanupS3TestState();
     defer support.cleanupS3TestState() catch {};
@@ -260,8 +260,8 @@ test "contract: s3 multipart upload id is bound to the original object key" {
 }
 
 test "contract: s3 invalid bucket and key return exact client errors" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     try support.cleanupS3TestState();
     defer support.cleanupS3TestState() catch {};

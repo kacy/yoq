@@ -91,10 +91,8 @@ fn queryDnsARecord(host: []const u8) ![4]u8 {
 
 fn loadDnsServer() ![4]u8 {
     var buf: [256]u8 = undefined;
-    const file = std.fs.cwd().openFile("/etc/resolv.conf", .{}) catch return error.DnsLookupFailed;
-    defer file.close();
-    const len = file.readAll(&buf) catch return error.DnsLookupFailed;
-    var lines = std.mem.splitScalar(u8, buf[0..len], '\n');
+    const data = std.Io.Dir.cwd().readFile(std.Options.debug_io, "/etc/resolv.conf", &buf) catch return error.DnsLookupFailed;
+    var lines = std.mem.splitScalar(u8, data, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \r\t");
         if (!std.mem.startsWith(u8, trimmed, "nameserver")) continue;

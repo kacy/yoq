@@ -166,6 +166,11 @@ pub fn build(b: *std.Build) void {
     const run_tests = createArtifactRunner(b, tests, "run test", false);
     test_step.dependOn(&run_tests.step);
 
+    const hardening_test_step = b.step(
+        "test-hardening",
+        "Run deterministic non-privileged hardening tests",
+    );
+
     // -- operator smoke tests (sqlite required, no root) --
     //
     // these are the preferred regression lanes for the app-first control plane:
@@ -225,6 +230,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_gpu_tests = createArtifactRunner(b, gpu_tests, "run gpu tests", false);
     gpu_test_step.dependOn(&run_gpu_tests.step);
+    hardening_test_step.dependOn(gpu_test_step);
 
     // -- integration tests (no sqlite required) --
     //
@@ -241,12 +247,15 @@ pub fn build(b: *std.Build) void {
     // from modules under test (e.g. loader → ../lib/toml) resolve correctly.
     // tests cover manifest loading, validation, and JSON output — all without
     // sqlite, so they run in any environment.
+    const integration_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_integration.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    addLinuxImport(integration_test_mod, b);
     const integration_tests_mod = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/test_integration.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = integration_test_mod,
     });
     const run_integration = createArtifactRunner(b, integration_tests_mod, "run integration tests", false);
     integration_test_step.dependOn(&run_integration.step);
@@ -261,6 +270,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_helpers = createArtifactRunner(b, helper_tests, "run helper tests", false);
     integration_test_step.dependOn(&run_helpers.step);
+    hardening_test_step.dependOn(integration_test_step);
 
     // -- contract tests (no sqlite/root required) --
     //
@@ -281,6 +291,7 @@ pub fn build(b: *std.Build) void {
     const run_contract = createArtifactRunner(b, contract_tests, "run contract tests", true);
     run_contract.step.dependOn(b.getInstallStep());
     contract_test_step.dependOn(&run_contract.step);
+    hardening_test_step.dependOn(contract_test_step);
 
     // -- deterministic simulation tests (require sqlite, no root) --
     //
@@ -300,6 +311,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_sim = createArtifactRunner(b, sim_tests, "run simulation tests", true);
     sim_test_step.dependOn(&run_sim.step);
+    hardening_test_step.dependOn(sim_test_step);
 
     // -- privileged integration tests (require root + linux 6.1+) --
     //
@@ -485,6 +497,7 @@ pub fn build(b: *std.Build) void {
             const comp = b.addTest(.{ .root_module = mod });
             const run = createArtifactRunner(b, comp, b.fmt("run {s}", .{ft.name}), false);
             step.dependOn(&run.step);
+            hardening_test_step.dependOn(step);
         }
 
         // fuzz-manifest: lives in src/ so loader's relative imports resolve
@@ -494,10 +507,13 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/test_fuzz_manifest.zig"),
                 .target = target,
                 .optimize = optimize,
+                .link_libc = true,
             });
+            addLinuxImport(mod, b);
             const comp = b.addTest(.{ .root_module = mod });
             const run = createArtifactRunner(b, comp, "run fuzz-manifest", false);
             step.dependOn(&run.step);
+            hardening_test_step.dependOn(step);
         }
 
         // fuzz-dns: lives in src/ so dns.zig's relative imports resolve; needs sqlite
@@ -512,6 +528,7 @@ pub fn build(b: *std.Build) void {
             const comp = b.addTest(.{ .root_module = mod });
             const run = createArtifactRunner(b, comp, "run fuzz-dns", false);
             step.dependOn(&run.step);
+            hardening_test_step.dependOn(step);
         }
 
         // fuzz-wireguard: lives in src/ so wireguard.zig's relative imports resolve
@@ -522,9 +539,11 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
             });
+            addSqlite(mod, b);
             const comp = b.addTest(.{ .root_module = mod });
             const run = createArtifactRunner(b, comp, "run fuzz-wireguard", false);
             step.dependOn(&run.step);
+            hardening_test_step.dependOn(step);
         }
 
         // manifest edge cases (adversarial parser inputs)
@@ -534,13 +553,16 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/test_fuzz_manifest_edge.zig"),
                 .target = target,
                 .optimize = optimize,
+                .link_libc = true,
             });
+            addLinuxImport(mod, b);
             const comp = b.addTest(.{ .root_module = mod });
             const run = std.Build.Step.Run.create(b, "run test-manifest-edge");
             run.producer = comp;
             run.addArtifactArg(comp);
             run.has_side_effects = true;
             step.dependOn(&run.step);
+            hardening_test_step.dependOn(step);
         }
     }
 

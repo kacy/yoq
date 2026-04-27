@@ -295,8 +295,8 @@ test "cluster loses quorum when majority fails" {
 }
 
 fn fileExists(path: []const u8) bool {
-    const file = std.fs.cwd().openFile(path, .{}) catch return false;
-    file.close();
+    const file = std.Io.Dir.cwd().openFile(std.testing.io, path, .{}) catch return false;
+    file.close(std.testing.io);
     return true;
 }
 

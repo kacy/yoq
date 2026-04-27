@@ -3,6 +3,14 @@ const paths = @import("lib/paths.zig");
 
 pub var contract_lock: std.Io.Mutex = .init;
 
+pub fn lockContractTests() !void {
+    try contract_lock.lock(std.testing.io);
+}
+
+pub fn unlockContractTests() void {
+    contract_lock.unlock(std.testing.io);
+}
+
 pub fn cleanupS3TestState() !void {
     var path_buf: [paths.max_path]u8 = undefined;
     const object_root = try paths.dataPath(&path_buf, "s3");

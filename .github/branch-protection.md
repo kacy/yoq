@@ -9,6 +9,7 @@ required checks:
 - `ci / docker-build`
 - `ci / examples-validate`
 - `ci / unit-tests`
+- `ci / hardening-smoke`
 - `ci / bpf-consistency`
 
 recommended settings:

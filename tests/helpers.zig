@@ -6,6 +6,15 @@
 
 const std = @import("std");
 
+fn nowNanoseconds() u64 {
+    const now = std.Io.Timestamp.now(std.testing.io, .real).nanoseconds;
+    return @intCast(now);
+}
+
+fn fillRandom(bytes: []u8) void {
+    std.testing.io.random(bytes);
+}
+
 pub const RunOptions = struct {
     env_map: ?*const std.process.EnvMap = null,
     cwd: ?[]const u8 = null,
@@ -84,13 +93,13 @@ pub fn runYoqWithOptions(alloc: std.mem.Allocator, args: []const []const u8, opt
 pub fn tmpDir() !TmpDir {
     // generate a pseudo-random name using the clock
     var name_buf: [32]u8 = undefined;
-    const ts: u64 = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
+    const ts = nowNanoseconds();
     const name = std.fmt.bufPrint(&name_buf, "yoq-test-{x}", .{ts}) catch unreachable;
 
     var path_buf: [128]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/tmp/{s}", .{name}) catch unreachable;
 
-    std.fs.cwd().makeDir(path) catch |err| {
+    std.Io.Dir.cwd().createDir(std.testing.io, path, .default_dir) catch |err| {
         if (err == error.PathAlreadyExists) {
             // extremely unlikely with nanosecond timestamp, but handle it
             return error.TmpDirFailed;
@@ -115,7 +124,7 @@ pub const TmpDir = struct {
 
     /// remove the temp directory and all its contents.
     pub fn cleanup(self: *const TmpDir) void {
-        std.fs.cwd().deleteTree(self.slice()) catch {};
+        std.Io.Dir.cwd().deleteTree(std.testing.io, self.slice()) catch {};
     }
 };
 
@@ -131,16 +140,16 @@ pub const TestEnv = struct {
         var tmp = try tmpDir();
         errdefer tmp.cleanup();
 
-        const cwd = try std.fs.cwd().realpathAlloc(alloc, ".");
+        const cwd = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", alloc);
         errdefer alloc.free(cwd);
 
         const home = try std.fmt.allocPrint(alloc, "{s}/home", .{tmp.slice()});
         errdefer alloc.free(home);
-        try std.fs.cwd().makePath(home);
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, home);
 
         const xdg_data_home = try std.fmt.allocPrint(alloc, "{s}/xdg-data", .{tmp.slice()});
         errdefer alloc.free(xdg_data_home);
-        try std.fs.cwd().makePath(xdg_data_home);
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, xdg_data_home);
 
         var env_map = try std.process.getEnvMap(alloc);
         errdefer env_map.deinit();
@@ -198,11 +207,11 @@ pub const RootfsBinary = struct {
 
 pub fn uniqueName(alloc: std.mem.Allocator, prefix: []const u8) ![]const u8 {
     var rand_bytes: [4]u8 = undefined;
-    std.crypto.random.bytes(&rand_bytes);
+    fillRandom(&rand_bytes);
     var rand_hex: [8]u8 = undefined;
     _ = std.fmt.bufPrint(&rand_hex, "{s}", .{std.fmt.bytesToHex(rand_bytes[0..], .lower)}) catch unreachable;
 
-    const ts: u64 = @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())));
+    const ts = nowNanoseconds();
     return std.fmt.allocPrint(alloc, "{s}-{x}-{s}", .{
         prefix,
         ts,
@@ -245,10 +254,10 @@ fn createEmptyRootfs(alloc: std.mem.Allocator) !RootfsFixture {
     const rootfs_path = try std.fmt.allocPrint(alloc, "{s}/rootfs", .{tmp.slice()});
     errdefer alloc.free(rootfs_path);
 
-    try std.fs.cwd().makePath(rootfs_path);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, rootfs_path);
     const tmp_path = try std.fmt.allocPrint(alloc, "{s}/tmp", .{rootfs_path});
     defer alloc.free(tmp_path);
-    try std.fs.cwd().makePath(tmp_path);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, tmp_path);
 
     return .{
         .alloc = alloc,
@@ -298,7 +307,7 @@ fn copyHostFileIntoRootfs(alloc: std.mem.Allocator, rootfs_path: []const u8, sou
 }
 
 fn copyRepoBinaryIntoRootfs(alloc: std.mem.Allocator, rootfs_path: []const u8, source_path: []const u8, dest_path: []const u8) !void {
-    const absolute = try std.fs.cwd().realpathAlloc(alloc, source_path);
+    const absolute = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, source_path, alloc);
     defer alloc.free(absolute);
 
     try copyHostFileIntoRootfsAt(alloc, rootfs_path, absolute, dest_path);
@@ -314,8 +323,8 @@ fn copyHostFileIntoRootfsAt(alloc: std.mem.Allocator, rootfs_path: []const u8, s
     defer alloc.free(destination);
 
     const parent = std.fs.path.dirname(destination) orelse rootfs_path;
-    try std.fs.cwd().makePath(parent);
-    std.fs.cwd().copyFile(source_path, std.fs.cwd(), destination, .{}) catch |err| switch (err) {
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, parent);
+    std.Io.Dir.cwd().copyFile(source_path, std.Io.Dir.cwd(), destination, std.testing.io, .{}) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -323,12 +332,10 @@ fn copyHostFileIntoRootfsAt(alloc: std.mem.Allocator, rootfs_path: []const u8, s
 
 /// write content to a file inside a directory.
 pub fn writeFile(dir_path: []const u8, filename: []const u8, content: []const u8) !void {
-    var dir = try std.fs.cwd().openDir(dir_path, .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, dir_path, .{});
+    defer dir.close(std.testing.io);
 
-    var file = try dir.createFile(filename, .{});
-    defer file.close();
-    try file.writeAll(content);
+    try dir.writeFile(std.testing.io, .{ .sub_path = filename, .data = content });
 }
 
 /// assert that a string contains a substring.
@@ -352,10 +359,10 @@ test "tmpDir creates and cleans up" {
     defer dir.cleanup();
 
     // directory should exist
-    var d = std.fs.cwd().openDir(dir.slice(), .{}) catch {
+    var d = std.Io.Dir.cwd().openDir(std.testing.io, dir.slice(), .{}) catch {
         return error.TmpDirNotCreated;
     };
-    d.close();
+    d.close(std.testing.io);
 }
 
 test "writeFile creates file in directory" {
@@ -364,9 +371,9 @@ test "writeFile creates file in directory" {
 
     try writeFile(dir.slice(), "test.txt", "hello");
 
-    var d = try std.fs.cwd().openDir(dir.slice(), .{});
-    defer d.close();
-    const contents = try d.readFileAlloc(std.testing.allocator, "test.txt", 1024);
+    var d = try std.Io.Dir.cwd().openDir(std.testing.io, dir.slice(), .{});
+    defer d.close(std.testing.io);
+    const contents = try d.readFileAlloc(std.testing.io, "test.txt", std.testing.allocator, .limited(1024));
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqualStrings("hello", contents);
 }

@@ -386,7 +386,7 @@ test "checked-in example manifests load and validate cleanly" {
     defer walker.deinit();
 
     var checked: usize = 0;
-    while (try walker.next()) |entry| {
+    while (try walker.next(std.testing.io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.eql(u8, entry.basename, "manifest.toml")) continue;
 

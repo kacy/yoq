@@ -1,6 +1,5 @@
 const std = @import("std");
 const linux_platform = @import("linux_platform");
-const posix = std.posix;
 const http = @import("api/http.zig");
 const routes = @import("api/routes.zig");
 const connection_runtime = @import("api/server/connection_runtime.zig");
@@ -17,7 +16,7 @@ fn runHandleConnectionRaw(alloc: std.mem.Allocator, raw_request: []const u8) ![]
     try file.writeStreamingAll(std.testing.io, raw_request);
     _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
 
-    const dup_fd = try posix.dup(file.handle);
+    const dup_fd = try linux_platform.posix.dup(file.handle);
     connection_runtime.handleConnection(alloc, dup_fd);
 
     _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
@@ -36,8 +35,8 @@ fn responseBody(response: []const u8) ![]const u8 {
 }
 
 test "contract: unauthorized operator route returns exact json body" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     const saved_api = routes.api_token;
     const saved_join = routes.join_token;
@@ -59,8 +58,8 @@ test "contract: unauthorized operator route returns exact json body" {
 }
 
 test "contract: bearer header name is case insensitive but prefix is case sensitive" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     const saved_api = routes.api_token;
     const saved_join = routes.join_token;
@@ -93,8 +92,8 @@ test "contract: bearer header name is case insensitive but prefix is case sensit
 }
 
 test "contract: empty bearer token is rejected" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     const saved_api = routes.api_token;
     const saved_join = routes.join_token;
@@ -117,8 +116,8 @@ test "contract: empty bearer token is rejected" {
 }
 
 test "contract: join token only authorizes join routes" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     const saved_api = routes.api_token;
     const saved_join = routes.join_token;
@@ -150,8 +149,8 @@ test "contract: join token only authorizes join routes" {
 }
 
 test "contract: public routes stay accessible when auth is configured" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     const saved_api = routes.api_token;
     const saved_join = routes.join_token;
@@ -177,8 +176,8 @@ test "contract: public routes stay accessible when auth is configured" {
 }
 
 test "contract: malformed content-length returns 400 json response" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     const response = try runHandleConnectionRaw(
         std.testing.allocator,
@@ -192,8 +191,8 @@ test "contract: malformed content-length returns 400 json response" {
 }
 
 test "contract: duplicate content-length returns 400 json response" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     const response = try runHandleConnectionRaw(
         std.testing.allocator,
@@ -207,8 +206,8 @@ test "contract: duplicate content-length returns 400 json response" {
 }
 
 test "contract: oversized headers return 431" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     var big_header: [17 * 1024]u8 = undefined;
     @memset(&big_header, 'A');
@@ -228,8 +227,8 @@ test "contract: oversized headers return 431" {
 }
 
 test "contract: content-length above max returns 413" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     var req_buf: [256]u8 = undefined;
     const raw = try std.fmt.bufPrint(
@@ -246,8 +245,8 @@ test "contract: content-length above max returns 413" {
 }
 
 test "contract: incomplete body returns 400 timeout-style error" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     const response = try runHandleConnectionRaw(
         std.testing.allocator,
@@ -260,8 +259,8 @@ test "contract: incomplete body returns 400 timeout-style error" {
 }
 
 test "contract: unauthorized raw response uses json content type" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     const saved_api = routes.api_token;
     const saved_join = routes.join_token;
@@ -285,8 +284,8 @@ test "contract: unauthorized raw response uses json content type" {
 }
 
 test "contract: s3 missing key raw response uses xml content type" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     try support.cleanupS3TestState();
     defer support.cleanupS3TestState() catch {};
@@ -305,8 +304,8 @@ test "contract: s3 missing key raw response uses xml content type" {
 }
 
 test "contract: HEAD omits body bytes but preserves content length" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     try support.cleanupS3TestState();
     defer support.cleanupS3TestState() catch {};

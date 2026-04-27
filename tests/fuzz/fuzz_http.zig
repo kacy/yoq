@@ -6,9 +6,17 @@
 const std = @import("std");
 const http = @import("http");
 
+fn fuzzInput(smith: *std.testing.Smith, buffer: []u8) []const u8 {
+    if (smith.in) |input| return input;
+    return buffer[0..smith.slice(buffer)];
+}
+
 test "fuzz parseRequest with arbitrary bytes" {
     try std.testing.fuzz({}, struct {
-        fn testOne(_: void, input: []const u8) anyerror!void {
+        fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buffer: [4096]u8 = undefined;
+            const input = fuzzInput(smith, &buffer);
+
             // parseRequest must never crash — only return null, error, or valid request
             const result = http.parseRequest(input) catch |err| {
                 // all errors must be HttpError variants
@@ -42,9 +50,12 @@ test "fuzz parseRequest with arbitrary bytes" {
 
 test "fuzz findContentLength with arbitrary headers" {
     try std.testing.fuzz({}, struct {
-        fn testOne(_: void, input: []const u8) anyerror!void {
+        fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buffer: [2048]u8 = undefined;
+            const input = fuzzInput(smith, &buffer);
+
             // findContentLength must never crash
-            _ = http.findContentLength(input);
+            _ = http.findContentLength(input) catch {};
         }
     }.testOne, .{
         .corpus = &.{

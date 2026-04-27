@@ -127,6 +127,11 @@ For the app/control-plane smoke lane, use `make test-operator` or `zig build tes
 For the network/service-rollout smoke lane, use `make test-network` or `zig build test-network`. It keeps deterministic status/metrics, service-registry bridge, rollout-flag, and reconciler coverage together without depending on privileged proxy/runtime tests.
 
 For GPU-focused validation without running the full suite, use `zig build test-gpu`. For a real-host smoke checklist, see [docs/gpu-validation.md](docs/gpu-validation.md).
+
+Before landing runtime or parser-sensitive changes, run `make test-hardening`. It collects the non-privileged integration, contract, simulation, GPU, manifest edge, and corpus fuzz lanes that are too broad for the fastest local loop but should stay green before main.
+
+Privileged runtime coverage still lives behind `sudo make test-privileged`; use it for namespace, cgroup, networking, and container lifecycle changes.
+
 For a temporary 5-node GCP validation rig that exercises cluster networking and GPU hosts, see [docs/gcp-cluster-validation.md](docs/gcp-cluster-validation.md).
 For an end-to-end operator evaluation flow across local runtime, HTTP routing, and clustered deployment, see [docs/golden-path.md](docs/golden-path.md).
 For cluster bootstrap, day-2 operations, and failure drills, see [docs/cluster-guide.md](docs/cluster-guide.md).

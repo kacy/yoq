@@ -59,8 +59,8 @@ fn expectMissingPath(path: []const u8) !void {
 }
 
 test "contract: s3 route writes durable object bytes to storage" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     try support.cleanupS3TestState();
     defer support.cleanupS3TestState() catch {};
@@ -83,8 +83,8 @@ test "contract: s3 route writes durable object bytes to storage" {
 }
 
 test "contract: multipart staging persists on disk until completion and then cleans up" {
-    support.contract_lock.lock();
-    defer support.contract_lock.unlock();
+    try support.lockContractTests();
+    defer support.unlockContractTests();
 
     try support.cleanupS3TestState();
     defer support.cleanupS3TestState() catch {};

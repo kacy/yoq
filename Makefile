@@ -1,4 +1,4 @@
-.PHONY: build run test test-operator test-network test-integration test-contract test-sim test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor release-cross
+.PHONY: build run test test-operator test-network test-integration test-contract test-sim test-gpu test-hardening test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor release-cross
 
 build:
 	zig build -Doptimize=ReleaseSafe
@@ -23,6 +23,12 @@ test-contract:
 
 test-sim:
 	zig build test-sim -Doptimize=ReleaseSafe
+
+test-gpu:
+	zig build test-gpu -Doptimize=ReleaseSafe
+
+test-hardening:
+	YOQ_SKIP_SLOW_TESTS=1 zig build test-hardening -Doptimize=ReleaseSafe
 
 test-privileged: build
 	sudo zig build test-privileged -Doptimize=ReleaseSafe

@@ -6,9 +6,17 @@
 const std = @import("std");
 const transport = @import("transport");
 
+fn fuzzInput(smith: *std.testing.Smith, buffer: []u8) []const u8 {
+    if (smith.in) |input| return input;
+    return buffer[0..smith.slice(buffer)];
+}
+
 test "fuzz transport decode with arbitrary bytes" {
     try std.testing.fuzz({}, struct {
-        fn testOne(_: void, input: []const u8) anyerror!void {
+        fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buffer: [4096]u8 = undefined;
+            const input = fuzzInput(smith, &buffer);
+
             const msg = transport.decode(std.testing.allocator, input) catch {
                 // any decode error is fine — just no crashes
                 return;

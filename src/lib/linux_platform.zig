@@ -803,6 +803,10 @@ pub const posix = struct {
         return usizeResult(std.os.linux.lseek(fd, offset, whence));
     }
 
+    pub fn dup(fd: std.posix.fd_t) !std.posix.fd_t {
+        return fdResult(std.os.linux.dup(fd));
+    }
+
     pub fn dup2(old_fd: std.posix.fd_t, new_fd: std.posix.fd_t) !void {
         try voidResult(std.os.linux.dup2(old_fd, new_fd));
     }

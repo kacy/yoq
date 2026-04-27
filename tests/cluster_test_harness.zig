@@ -81,7 +81,7 @@ pub const TestCluster = struct {
             });
             errdefer alloc.free(data_dir);
 
-            try std.fs.cwd().makePath(data_dir);
+            try std.Io.Dir.cwd().createDirPath(std.testing.io, data_dir);
 
             // Write API token to node's data dir
             const token_path = try std.fmt.allocPrint(alloc, "{s}/api_token", .{data_dir});
@@ -205,7 +205,7 @@ pub const TestCluster = struct {
         try env_map.put("HOME", node.data_dir);
         try env_map.put("XDG_DATA_HOME", node.data_dir);
 
-        const cwd = try std.fs.cwd().realpathAlloc(self.alloc, ".");
+        const cwd = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, ".", self.alloc);
         defer self.alloc.free(cwd);
 
         const id_str = try std.fmt.allocPrint(self.alloc, "{d}", .{node.id});
@@ -475,7 +475,7 @@ fn tryConnect(port: u16) bool {
 
 fn generateHexToken(buf: *[64]u8) !void {
     var rand_bytes: [32]u8 = undefined;
-    std.crypto.random.bytes(&rand_bytes);
+    std.Options.debug_io.random(&rand_bytes);
     _ = try std.fmt.bufPrint(buf, "{s}", .{std.fmt.bytesToHex(rand_bytes[0..], .lower)});
 }
 

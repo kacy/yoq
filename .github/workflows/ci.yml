@@ -31,6 +31,7 @@ jobs:
           filters: |
             non_docs:
               - 'src/**'
+              - 'tests/**'
               - 'tools/**'
               - 'bpf/**'
               - 'examples/**'
@@ -118,6 +119,18 @@ jobs:
       command: YOQ_SKIP_SLOW_TESTS=1 zig build test-network -Doptimize=ReleaseSafe
       timeout-minutes: 30
       failure-artifact-name: network-smoke-log
+
+  hardening-smoke:
+    name: hardening-smoke
+    needs:
+      - changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: hardening-smoke
+      command: YOQ_SKIP_SLOW_TESTS=1 zig build test-hardening -Doptimize=ReleaseSafe
+      timeout-minutes: 45
+      failure-artifact-name: hardening-smoke-log
 
   bpf-consistency:
     name: bpf-consistency

@@ -27,7 +27,7 @@ test "edge: extremely long service name" {
     var stream: std.Io.Writer = .fixed(&buf);
     const writer = &stream;
     try writer.writeAll("[service.");
-    try writer.writeByteNTimes('a', 1000);
+    try writer.splatByteAll('a', 1000);
     try writer.writeAll("]\nimage = \"nginx\"\n");
     const input = stream.buffered();
 

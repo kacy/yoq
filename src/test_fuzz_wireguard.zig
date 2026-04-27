@@ -8,9 +8,17 @@
 const std = @import("std");
 const wg = @import("network/wireguard.zig");
 
+fn fuzzInput(smith: *std.testing.Smith, buffer: []u8) []const u8 {
+    if (smith.in) |input| return input;
+    return buffer[0..smith.slice(buffer)];
+}
+
 test "fuzz WireGuard handshake: base64 key decode with arbitrary bytes" {
     try std.testing.fuzz({}, struct {
-        fn testOne(_: void, input: []const u8) anyerror!void {
+        fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buffer: [512]u8 = undefined;
+            const input = fuzzInput(smith, &buffer);
+
             // attempt to decode as a base64-encoded X25519 key
             const decoder = std.base64.standard.Decoder;
             var decoded: [32]u8 = undefined;
@@ -49,7 +57,10 @@ test "fuzz WireGuard handshake: base64 key decode with arbitrary bytes" {
 
 test "fuzz WireGuard handshake: PeerConfig construction with arbitrary strings" {
     try std.testing.fuzz({}, struct {
-        fn testOne(_: void, input: []const u8) anyerror!void {
+        fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buffer: [512]u8 = undefined;
+            const input = fuzzInput(smith, &buffer);
+
             // split input into fields at null bytes to get varied inputs
             // for public_key, endpoint, and allowed_ips
             var parts: [4][]const u8 = .{ "", "", "", "" };
@@ -113,7 +124,10 @@ test "fuzz WireGuard handshake: PeerConfig construction with arbitrary strings" 
 
 test "fuzz WireGuard handshake: X25519 key exchange with arbitrary seed" {
     try std.testing.fuzz({}, struct {
-        fn testOne(_: void, input: []const u8) anyerror!void {
+        fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buffer: [512]u8 = undefined;
+            const input = fuzzInput(smith, &buffer);
+
             if (input.len < 32) return;
 
             const X25519 = std.crypto.dh.X25519;

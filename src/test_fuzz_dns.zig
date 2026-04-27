@@ -7,9 +7,17 @@
 const std = @import("std");
 const dns = @import("network/dns.zig");
 
+fn fuzzInput(smith: *std.testing.Smith, buffer: []u8) []const u8 {
+    if (smith.in) |input| return input;
+    return buffer[0..smith.slice(buffer)];
+}
+
 test "fuzz DNS parseHeader with arbitrary bytes" {
     try std.testing.fuzz({}, struct {
-        fn testOne(_: void, input: []const u8) anyerror!void {
+        fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buffer: [1024]u8 = undefined;
+            const input = fuzzInput(smith, &buffer);
+
             _ = dns.parseHeader(input);
         }
     }.testOne, .{
@@ -26,7 +34,10 @@ test "fuzz DNS parseHeader with arbitrary bytes" {
 
 test "fuzz DNS parseQuestion with arbitrary bytes" {
     try std.testing.fuzz({}, struct {
-        fn testOne(_: void, input: []const u8) anyerror!void {
+        fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buffer: [1024]u8 = undefined;
+            const input = fuzzInput(smith, &buffer);
+
             _ = dns.parseQuestion(input);
         }
     }.testOne, .{
@@ -43,7 +54,10 @@ test "fuzz DNS parseQuestion with arbitrary bytes" {
 
 test "fuzz DNS buildResponse with arbitrary bytes" {
     try std.testing.fuzz({}, struct {
-        fn testOne(_: void, input: []const u8) anyerror!void {
+        fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buffer: [1024]u8 = undefined;
+            const input = fuzzInput(smith, &buffer);
+
             var response_buf: [512]u8 = undefined;
             _ = dns.buildResponse(input, input.len, .{ 10, 42, 0, 2 }, &response_buf);
         }
