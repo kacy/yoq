@@ -87,6 +87,8 @@ an eBPF program on the bridge implements FNV-1a consistent hashing for load bala
 
 eBPF-based allow/deny rules between services. policies are stored in SQLite and loaded into BPF maps at runtime.
 
+Policy sync rebuilds the BPF maps from the stored rules each time policies change, so removed rules stop applying. If a service name has not resolved to an IP yet, that rule is skipped during the current sync and picked up once the service appears.
+
 ### WireGuard hub-and-spoke
 
 for multi-node clusters, WireGuard tunnels provide encrypted cross-node connectivity.

@@ -60,6 +60,11 @@ pub const PolicyEnforcer = struct {
         _ = map_support.mapDelete(self.isolation_fd, std.mem.asBytes(&key));
     }
 
+    pub fn clear(self: *const PolicyEnforcer) void {
+        clearMap(PolicyKey, self.policy_fd, policy_prog.maps[0].max_entries);
+        clearMap(u32, self.isolation_fd, policy_prog.maps[1].max_entries);
+    }
+
     pub fn deinit(self: *PolicyEnforcer) void {
         attach_support.detachTC(self.if_index) catch |e| {
             log.debug("ebpf: failed to detach policy enforcer: {}", .{e});
@@ -117,4 +122,17 @@ pub fn load(bridge_if_index: u32) common.EbpfError!PolicyEnforcer {
         .isolation_fd = isolation_fd,
         .if_index = bridge_if_index,
     };
+}
+
+fn clearMap(comptime Key: type, map_fd: posix.fd_t, max_entries: u32) void {
+    var next_key: Key = std.mem.zeroes(Key);
+    var removed: u32 = 0;
+
+    while (removed <= max_entries) : (removed += 1) {
+        var start_key: Key = std.mem.zeroes(Key);
+        if (!map_support.mapGetNextKey(map_fd, std.mem.asBytes(&start_key), std.mem.asBytes(&next_key))) return;
+        _ = map_support.mapDelete(map_fd, std.mem.asBytes(&next_key));
+    }
+
+    log.warn("ebpf: stopped clearing policy map after {d} entries", .{max_entries});
 }
