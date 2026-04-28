@@ -110,6 +110,8 @@ comptime {
     _ = @import("api/routes/cluster_agents/apply_request.zig");
     _ = @import("api/routes/cluster_agents/cluster_readiness.zig");
     _ = @import("api/routes/cluster_agents/cluster_rollback.zig");
+    _ = @import("api/routes/cluster_agents/app_rollout_control.zig");
+    _ = @import("api/routes/cluster_agents/app_route_responses.zig");
     _ = @import("api/routes/cluster_agents/app_routes.zig");
     _ = @import("api/routes/cluster_agents/deploy_routes.zig");
     _ = @import("api/routes/cluster_agents/rollout_targets.zig");
