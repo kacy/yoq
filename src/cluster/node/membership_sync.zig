@@ -117,7 +117,10 @@ pub fn tickGossip(self: anytype) void {
 
     g.tick() catch return;
 
-    const actions = g.drainActions();
+    const actions = g.drainActions() catch |err| {
+        logger.warn("gossip: failed to drain tick actions: {}", .{err});
+        return;
+    };
     defer g.freeActions(actions);
     processGossipActions(self, actions);
 
@@ -164,7 +167,10 @@ pub fn receiveGossipMessages(self: anytype) void {
         }
     }
 
-    const actions = g.drainActions();
+    const actions = g.drainActions() catch |err| {
+        logger.warn("gossip: failed to drain received-message actions: {}", .{err});
+        return;
+    };
     defer g.freeActions(actions);
     processGossipActions(self, actions);
 }

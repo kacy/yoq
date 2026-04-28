@@ -47,7 +47,7 @@ jobs:
     uses: ./.github/workflows/_build-test.yml
     with:
       job-name: hardening-smoke
-      command: YOQ_SKIP_SLOW_TESTS=1 zig build test-hardening -Doptimize=ReleaseSafe
+      command: bash tools/panic_audit.sh && YOQ_SKIP_SLOW_TESTS=1 zig build test-hardening -Doptimize=ReleaseSafe
       timeout-minutes: 45
       failure-artifact-name: quality-hardening-smoke-log
 
