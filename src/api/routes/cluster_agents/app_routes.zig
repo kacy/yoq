@@ -5,6 +5,7 @@ const cluster_node = @import("../../../cluster/node.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const apply_release = @import("../../../manifest/apply_release.zig");
+const app_view = @import("../../../manifest/app_view.zig");
 const app_snapshot = @import("../../../manifest/app_snapshot.zig");
 const schema = @import("../../../state/schema.zig");
 const store = @import("../../../state/store.zig");
@@ -284,137 +285,14 @@ fn formatAppStatusResponseFromDeployments(
     latest: store.DeploymentRecord,
     previous_successful: ?store.DeploymentRecord,
 ) ![]u8 {
-    return formatAppStatusResponse(
-        alloc,
-        apply_release.reportFromDeployment(latest),
-        if (previous_successful) |dep| apply_release.reportFromDeployment(dep) else null,
-        app_snapshot.summarize(latest.config_snapshot),
-        store.summarizeTrainingJobsByAppInDb(db, alloc, latest.app_name.?) catch .{},
-    );
+    return app_view.renderStatus(alloc, app_view.statusViewFromDeploymentsInDb(db, alloc, latest, previous_successful));
 }
 
 fn formatAppHistoryResponse(alloc: std.mem.Allocator, deployments: []const store.DeploymentRecord) ![]u8 {
-    const current_release_id = if (deployments.len > 0) deployments[0].id else null;
-    const previous_successful_release_id = findPreviousSuccessfulReleaseId(deployments);
+    var entries = try app_view.releaseViewsFromDeployments(alloc, deployments);
+    defer app_view.deinitReleaseViews(alloc, &entries);
 
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
-
-    const writer = &json_buf_writer.writer;
-
-    try writer.writeByte('[');
-    for (deployments, 0..) |dep, i| {
-        const report = apply_release.reportFromDeployment(dep);
-        const summary = app_snapshot.summarize(dep.config_snapshot);
-        const is_current = current_release_id != null and std.mem.eql(u8, dep.id, current_release_id.?);
-        const is_previous_successful = previous_successful_release_id != null and std.mem.eql(u8, dep.id, previous_successful_release_id.?);
-        if (i > 0) try writer.writeByte(',');
-        try writer.writeByte('{');
-        try json_helpers.writeJsonStringField(writer, "id", report.release_id orelse "");
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "app", dep.app_name);
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "service", dep.service_name);
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "trigger", report.trigger.toString());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "rollout_control_state", report.rollout_control_state.toString());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
-        try writer.print(",\"created_at\":{d}", .{report.created_at});
-        try writer.print(",\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
-            summary.service_count,
-            summary.worker_count,
-            summary.cron_count,
-            summary.training_job_count,
-            report.completed_targets,
-            report.failed_targets,
-            report.remainingTargets(),
-        });
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "rollout_checkpoint", report.rollout_checkpoint_json);
-        try writer.writeAll(",\"rollout\":{");
-        try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
-        try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
-            report.completed_targets,
-            report.failed_targets,
-            report.remainingTargets(),
-        });
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "targets", report.rollout_targets_json);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "checkpoint", report.rollout_checkpoint_json);
-        try writer.writeByte('}');
-        try writer.print(",\"is_current\":{},\"is_previous_successful\":{}", .{ is_current, is_previous_successful });
-        try writer.writeAll(",\"release\":{");
-        try json_helpers.writeJsonStringField(writer, "id", report.release_id orelse "");
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "trigger", report.trigger.toString());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "rollout_control_state", report.rollout_control_state.toString());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
-        try writer.print(",\"created_at\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d},\"current\":{},\"previous_successful\":{}", .{
-            report.created_at,
-            report.completed_targets,
-            report.failed_targets,
-            report.remainingTargets(),
-            is_current,
-            is_previous_successful,
-        });
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "rollout_checkpoint", report.rollout_checkpoint_json);
-        try writer.writeByte('}');
-        try writer.print(",\"workloads\":{{\"services\":{d},\"workers\":{d},\"crons\":{d},\"training_jobs\":{d}}}", .{
-            summary.service_count,
-            summary.worker_count,
-            summary.cron_count,
-            summary.training_job_count,
-        });
-        try writer.writeByte('}');
-    }
-    try writer.writeByte(']');
-    return json_buf_writer.toOwnedSlice();
+    return app_view.renderHistory(alloc, entries.items);
 }
 
 fn formatAppStatusResponse(
@@ -424,243 +302,20 @@ fn formatAppStatusResponse(
     summary: app_snapshot.Summary,
     training_summary: store.TrainingJobSummary,
 ) ![]u8 {
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
-
-    const writer = &json_buf_writer.writer;
-
-    try writer.writeByte('{');
-    try json_helpers.writeJsonStringField(writer, "app_name", report.app_name);
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "trigger", report.trigger.toString());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "release_id", report.release_id orelse "");
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "rollout_control_state", report.rollout_control_state.toString());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
-    try writer.print(",\"created_at\":{d},\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"active_training_jobs\":{d},\"paused_training_jobs\":{d},\"failed_training_jobs\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
-        report.created_at,
-        summary.service_count,
-        summary.worker_count,
-        summary.cron_count,
-        summary.training_job_count,
-        training_summary.active,
-        training_summary.paused,
-        training_summary.failed,
-        report.completed_targets,
-        report.failed_targets,
-        report.remainingTargets(),
-    });
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_release_id", if (previous_successful) |prev| prev.release_id else null);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_trigger", if (previous_successful) |prev| prev.trigger.toString() else null);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_status", if (previous_successful) |prev| prev.status.toString() else null);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_rollout_state", if (previous_successful) |prev| prev.rolloutState() else null);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_rollout_control_state", if (previous_successful) |prev| prev.rollout_control_state.toString() else null);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_manifest_hash", if (previous_successful) |prev| prev.manifest_hash else null);
-    if (previous_successful) |prev| {
-        try writer.print(",\"previous_successful_created_at\":{d}", .{prev.created_at});
-        try writer.print(",\"previous_successful_completed_targets\":{d},\"previous_successful_failed_targets\":{d},\"previous_successful_remaining_targets\":{d}", .{
-            prev.completed_targets,
-            prev.failed_targets,
-            prev.remainingTargets(),
-        });
-    } else {
-        try writer.writeAll(",\"previous_successful_created_at\":null");
-        try writer.writeAll(",\"previous_successful_completed_targets\":0,\"previous_successful_failed_targets\":0,\"previous_successful_remaining_targets\":0");
-    }
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_source_release_id", if (previous_successful) |prev| prev.source_release_id else null);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_resumed_from_release_id", if (previous_successful) |prev| prev.resumed_from_release_id else null);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_superseded_by_release_id", if (previous_successful) |prev| prev.superseded_by_release_id else null);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "previous_successful_message", if (previous_successful) |prev| prev.message else null);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "previous_successful_failure_details", if (previous_successful) |prev| prev.failure_details_json else null);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "previous_successful_rollout_targets", if (previous_successful) |prev| prev.rollout_targets_json else null);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "previous_successful_rollout_checkpoint", if (previous_successful) |prev| prev.rollout_checkpoint_json else null);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "rollout_checkpoint", report.rollout_checkpoint_json);
-    try writer.writeAll(",\"rollout\":{");
-    try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
-    try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
-        report.completed_targets,
-        report.failed_targets,
-        report.remainingTargets(),
-    });
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "targets", report.rollout_targets_json);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "checkpoint", report.rollout_checkpoint_json);
-    try writer.writeByte('}');
-    try writer.writeAll(",\"current_release\":{");
-    try json_helpers.writeJsonStringField(writer, "id", report.release_id orelse "");
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "trigger", report.trigger.toString());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "rollout_control_state", report.rollout_control_state.toString());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "manifest_hash", report.manifest_hash);
-    try writer.print(",\"created_at\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
-        report.created_at,
-        report.completed_targets,
-        report.failed_targets,
-        report.remainingTargets(),
-    });
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "message", report.message);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "rollout_checkpoint", report.rollout_checkpoint_json);
-    try writer.writeByte(',');
-    try writer.writeAll("\"rollout\":{");
-    try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", report.superseded_by_release_id);
-    try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
-        report.completed_targets,
-        report.failed_targets,
-        report.remainingTargets(),
-    });
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "targets", report.rollout_targets_json);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "checkpoint", report.rollout_checkpoint_json);
-    try writer.writeByte('}');
-    try writer.writeByte('}');
-    try writer.writeAll(",\"previous_successful_release\":");
-    if (previous_successful) |prev| {
-        try writer.writeByte('{');
-        try json_helpers.writeJsonStringField(writer, "id", prev.release_id orelse "");
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "trigger", prev.trigger.toString());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "status", prev.status.toString());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "rollout_state", prev.rolloutState());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "rollout_control_state", prev.rollout_control_state.toString());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "manifest_hash", prev.manifest_hash);
-        try writer.print(",\"created_at\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
-            prev.created_at,
-            prev.completed_targets,
-            prev.failed_targets,
-            prev.remainingTargets(),
-        });
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "source_release_id", prev.source_release_id);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", prev.resumed_from_release_id);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", prev.superseded_by_release_id);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "message", prev.message);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "failure_details", prev.failure_details_json);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", prev.rollout_targets_json);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "rollout_checkpoint", prev.rollout_checkpoint_json);
-        try writer.writeByte(',');
-        try writer.writeAll("\"rollout\":{");
-        try json_helpers.writeJsonStringField(writer, "state", prev.rolloutState());
-        try writer.writeByte(',');
-        try json_helpers.writeJsonStringField(writer, "control_state", prev.rollout_control_state.toString());
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", prev.resumed_from_release_id);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonStringField(writer, "superseded_by_release_id", prev.superseded_by_release_id);
-        try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
-            prev.completed_targets,
-            prev.failed_targets,
-            prev.remainingTargets(),
-        });
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "failure_details", prev.failure_details_json);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "targets", prev.rollout_targets_json);
-        try writer.writeByte(',');
-        try json_helpers.writeNullableJsonRawField(writer, "checkpoint", prev.rollout_checkpoint_json);
-        try writer.writeByte('}');
-        try writer.writeByte('}');
-    } else {
-        try writer.writeAll("null");
-    }
-    try writer.print(",\"workloads\":{{\"services\":{d},\"workers\":{d},\"crons\":{d},\"training_jobs\":{d}}}", .{
-        summary.service_count,
-        summary.worker_count,
-        summary.cron_count,
-        summary.training_job_count,
-    });
-    try writer.print(",\"training_runtime\":{{\"active\":{d},\"paused\":{d},\"failed\":{d}}}", .{
-        training_summary.active,
-        training_summary.paused,
-        training_summary.failed,
-    });
-    try writer.writeByte('}');
-    return json_buf_writer.toOwnedSlice();
-}
-
-fn findPreviousSuccessfulReleaseId(deployments: []const store.DeploymentRecord) ?[]const u8 {
-    if (deployments.len == 0) return null;
-    for (deployments[1..]) |dep| {
-        if (std.mem.eql(u8, dep.status, "completed")) return dep.id;
-    }
-    return null;
+    return app_view.renderStatus(
+        alloc,
+        app_view.statusViewFromReports(
+            report,
+            previous_successful,
+            report.app_name,
+            report.app_name,
+            if (previous_successful) |previous| previous.app_name else null,
+            if (previous_successful) |previous| previous.app_name else null,
+            summary,
+            null,
+            training_summary,
+        ),
+    );
 }
 
 const RouteFlowHarness = struct {

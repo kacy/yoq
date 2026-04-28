@@ -3,6 +3,7 @@ const cli = @import("../../lib/cli.zig");
 const json_out = @import("../../lib/json_output.zig");
 const apply_release = @import("../../manifest/apply_release.zig");
 const app_snapshot = @import("../../manifest/app_snapshot.zig");
+const app_view = @import("../../manifest/app_view.zig");
 const store = @import("../../state/store.zig");
 const monitor = @import("../monitor.zig");
 const cgroups = @import("../cgroups.zig");
@@ -287,7 +288,7 @@ fn statusLocalApp(alloc: std.mem.Allocator, app_name: []const u8) StatusError!vo
     defer if (previous_successful) |dep| dep.deinit(alloc);
 
     const snapshot = snapshotFromDeployments(alloc, latest, previous_successful);
-    printAppStatus(snapshot);
+    try printAppStatus(alloc, snapshot);
 }
 
 fn statusRemote(io: std.Io, alloc: std.mem.Allocator, addr: [4]u8, port: u16, verbose: bool) StatusError!void {
@@ -389,13 +390,13 @@ fn statusRemoteApp(io: std.Io, alloc: std.mem.Allocator, addr: [4]u8, port: u16,
     }
 
     const snapshot = parseAppStatusResponse(resp.body);
-    printAppStatus(snapshot);
+    try printAppStatus(alloc, snapshot);
 }
 
 fn appsLocal(alloc: std.mem.Allocator, filters: AppListFilters) StatusError!void {
     var snapshots = try collectLocalAppSnapshots(alloc, filters);
     defer deinitAppStatusSnapshots(alloc, &snapshots);
-    printAppStatuses(snapshots.items);
+    try printAppStatuses(alloc, snapshots.items);
 }
 
 fn loadPreviousSuccessfulDeployment(
@@ -426,7 +427,7 @@ fn appsRemote(io: std.Io, alloc: std.mem.Allocator, addr: [4]u8, port: u16, filt
 
     var snapshots = try collectRemoteAppSnapshotsFromJson(alloc, resp.body, filters);
     defer deinitAppStatusSnapshots(alloc, &snapshots);
-    printAppStatuses(snapshots.items);
+    try printAppStatuses(alloc, snapshots.items);
 }
 
 fn collectLocalAppSnapshots(alloc: std.mem.Allocator, filters: AppListFilters) StatusError!std.ArrayList(AppStatusSnapshot) {
@@ -479,12 +480,76 @@ fn collectRemoteAppSnapshotsFromJson(
     return snapshots;
 }
 
-fn printAppStatus(snapshot: AppStatusSnapshot) void {
+fn snapshotToStatusView(snapshot: AppStatusSnapshot) app_view.AppStatusView {
+    return .{
+        .current = snapshotToCurrentRelease(snapshot),
+        .previous_successful = snapshotToPreviousSuccessfulRelease(snapshot),
+        .active_training_jobs = snapshot.active_training_jobs,
+        .paused_training_jobs = snapshot.paused_training_jobs,
+        .failed_training_jobs = snapshot.failed_training_jobs,
+    };
+}
+
+fn snapshotToCurrentRelease(snapshot: AppStatusSnapshot) app_view.ReleaseView {
+    return .{
+        .id = snapshot.release_id,
+        .app = snapshot.app_name,
+        .service = snapshot.app_name,
+        .trigger = snapshot.trigger,
+        .status = snapshot.status,
+        .rollout_state = snapshot.rollout_state,
+        .rollout_control_state = snapshot.rollout_control_state,
+        .manifest_hash = snapshot.manifest_hash,
+        .created_at = snapshot.created_at,
+        .service_count = snapshot.service_count,
+        .worker_count = snapshot.worker_count,
+        .cron_count = snapshot.cron_count,
+        .training_job_count = snapshot.training_job_count,
+        .completed_targets = snapshot.completed_targets,
+        .failed_targets = snapshot.failed_targets,
+        .remaining_targets = snapshot.remaining_targets,
+        .source_release_id = snapshot.source_release_id,
+        .resumed_from_release_id = snapshot.resumed_from_release_id,
+        .superseded_by_release_id = snapshot.superseded_by_release_id,
+        .message = snapshot.message,
+        .failure_details_json = snapshot.failure_details_json,
+        .rollout_targets_json = snapshot.rollout_targets_json,
+        .rollout_checkpoint_json = snapshot.rollout_checkpoint_json,
+        .is_current = true,
+    };
+}
+
+fn snapshotToPreviousSuccessfulRelease(snapshot: AppStatusSnapshot) ?app_view.ReleaseView {
+    const release_id = snapshot.previous_successful_release_id orelse return null;
+    return .{
+        .id = release_id,
+        .app = snapshot.app_name,
+        .service = snapshot.app_name,
+        .trigger = snapshot.previous_successful_trigger orelse "apply",
+        .status = snapshot.previous_successful_status orelse "completed",
+        .rollout_state = snapshot.previous_successful_rollout_state orelse "unknown",
+        .rollout_control_state = snapshot.previous_successful_rollout_control_state orelse "active",
+        .manifest_hash = snapshot.previous_successful_manifest_hash orelse "?",
+        .created_at = snapshot.previous_successful_created_at orelse 0,
+        .completed_targets = snapshot.previous_successful_completed_targets,
+        .failed_targets = snapshot.previous_successful_failed_targets,
+        .remaining_targets = snapshot.previous_successful_remaining_targets,
+        .source_release_id = snapshot.previous_successful_source_release_id,
+        .resumed_from_release_id = snapshot.previous_successful_resumed_from_release_id,
+        .superseded_by_release_id = snapshot.previous_successful_superseded_by_release_id,
+        .message = snapshot.previous_successful_message,
+        .failure_details_json = snapshot.previous_successful_failure_details_json,
+        .rollout_targets_json = snapshot.previous_successful_rollout_targets_json,
+        .rollout_checkpoint_json = snapshot.previous_successful_rollout_checkpoint_json,
+        .is_previous_successful = true,
+    };
+}
+
+fn printAppStatus(alloc: std.mem.Allocator, snapshot: AppStatusSnapshot) StatusError!void {
     if (cli.output_mode == .json) {
-        var w = json_out.JsonWriter{};
-        writeAppStatusJsonObject(&w, snapshot);
-        w.endObject();
-        w.flush();
+        const json = app_view.renderStatus(alloc, snapshotToStatusView(snapshot)) catch return StatusError.OutOfMemory;
+        defer alloc.free(json);
+        write("{s}\n", .{json});
         return;
     }
 
@@ -492,16 +557,18 @@ fn printAppStatus(snapshot: AppStatusSnapshot) void {
     printAppStatusRow(snapshot);
 }
 
-fn printAppStatuses(snapshots: []const AppStatusSnapshot) void {
+fn printAppStatuses(alloc: std.mem.Allocator, snapshots: []const AppStatusSnapshot) StatusError!void {
     if (cli.output_mode == .json) {
-        var w = json_out.JsonWriter{};
-        w.beginArray();
+        var views: std.ArrayList(app_view.AppStatusView) = .empty;
+        defer views.deinit(alloc);
+
         for (snapshots) |snapshot| {
-            writeAppStatusJsonObject(&w, snapshot);
-            w.endObject();
+            views.append(alloc, snapshotToStatusView(snapshot)) catch return StatusError.OutOfMemory;
         }
-        w.endArray();
-        w.flush();
+
+        const json = app_view.renderStatusList(alloc, views.items) catch return StatusError.OutOfMemory;
+        defer alloc.free(json);
+        write("{s}\n", .{json});
         return;
     }
 
@@ -560,16 +627,7 @@ fn printAppStatusRow(snapshot: AppStatusSnapshot) void {
 }
 
 fn formatStatusMessage(buf: []u8, message: ?[]const u8, failure_details_json: ?[]const u8) []const u8 {
-    if (message == null or message.?.len == 0) {
-        return json_helpers.summarizeFailureDetails(buf, failure_details_json) orelse "";
-    }
-
-    const prefix = std.fmt.bufPrint(buf, "{s}", .{message.?}) catch return message.?;
-    if (failure_details_json == null) return prefix;
-
-    const sep = std.fmt.bufPrint(buf[prefix.len..], " | ", .{}) catch return prefix;
-    const summary = json_helpers.summarizeFailureDetails(buf[prefix.len + sep.len ..], failure_details_json) orelse return prefix;
-    return buf[0 .. prefix.len + sep.len + summary.len];
+    return app_view.formatMessage(buf, message, failure_details_json);
 }
 
 fn formatAppProgress(buf: []u8, snapshot: AppStatusSnapshot) []const u8 {
@@ -601,9 +659,7 @@ fn formatTrainingRuntime(buf: []u8, snapshot: AppStatusSnapshot) []const u8 {
 }
 
 fn formatRolloutControlState(control_state: []const u8) []const u8 {
-    if (std.mem.eql(u8, control_state, "active")) return "-";
-    if (std.mem.eql(u8, control_state, "cancel_requested")) return "cancel";
-    return control_state;
+    return app_view.formatRolloutControlState(control_state);
 }
 
 fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
@@ -859,27 +915,19 @@ fn currentAppNameAlloc(io: std.Io, alloc: std.mem.Allocator) ![]u8 {
 }
 
 fn appMatchesFilters(snapshot: AppStatusSnapshot, filters: AppListFilters) bool {
-    if (filters.status) |status_filter| {
-        if (!std.mem.eql(u8, snapshot.status, status_filter) and !std.mem.eql(u8, snapshot.rollout_state, status_filter)) return false;
-    }
-    if (filters.failed_only and !isFailedLikeRollout(snapshot.status, snapshot.rollout_state)) return false;
-    if (filters.in_progress_only and !isInProgressRollout(snapshot.status, snapshot.rollout_state)) return false;
-    return true;
+    return app_view.appMatchesFilters(snapshotToStatusView(snapshot), .{
+        .status = filters.status,
+        .failed_only = filters.failed_only,
+        .in_progress_only = filters.in_progress_only,
+    });
 }
 
 fn isFailedLikeRollout(status_text: []const u8, rollout_state: []const u8) bool {
-    return std.mem.eql(u8, status_text, "failed") or
-        std.mem.eql(u8, status_text, "partially_failed") or
-        std.mem.eql(u8, rollout_state, "blocked") or
-        std.mem.eql(u8, rollout_state, "degraded");
+    return app_view.isFailedLikeRollout(status_text, rollout_state);
 }
 
 fn isInProgressRollout(status_text: []const u8, rollout_state: []const u8) bool {
-    return std.mem.eql(u8, status_text, "pending") or
-        std.mem.eql(u8, status_text, "in_progress") or
-        std.mem.eql(u8, rollout_state, "pending") or
-        std.mem.eql(u8, rollout_state, "starting") or
-        std.mem.eql(u8, rollout_state, "rolling");
+    return app_view.isInProgressRollout(status_text, rollout_state);
 }
 
 fn printStatusTable(snapshots: []const monitor.ServiceSnapshot, verbose: bool) void {

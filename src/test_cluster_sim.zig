@@ -549,6 +549,9 @@ fn runRandomSeed(seed: u64, trace: *std.ArrayList(u8)) !void {
                     3 => &.{ 1, 2 },
                     else => unreachable,
                 });
+                // commit_index is volatile raft state. After a restart, the
+                // monotonicity check starts from the restored runtime value.
+                prev_commit[@intCast(nodes[target].id)] = nodes[target].raft.commit_index;
                 try appendTrace(trace, "step {d}: restart node {d}\n", .{ step, nodes[target].id });
             },
             6 => {
