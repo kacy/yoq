@@ -11,6 +11,7 @@ const resource_support = @import("resource_support.zig");
 const request_support = @import("request_support.zig");
 const gossip_support = @import("gossip_support.zig");
 const assignment_runtime = @import("assignment_runtime.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
@@ -32,7 +33,7 @@ pub fn agentLoop(self: anytype) void {
 
         var remaining: u32 = agentHeartbeatTicks(self);
         while (remaining > 0 and self.running.load(.acquire)) : (remaining -= 1) {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
+            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(100), "agent heartbeat loop")) return;
             if (remaining % 5 == 0) gossip_support.tickGossipLoop(self);
             gossip_support.receiveGossipLoop(self);
         }

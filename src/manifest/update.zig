@@ -21,6 +21,7 @@ const log = @import("../lib/log.zig");
 const common = @import("update/common.zig");
 const deployment_store = @import("update/deployment_store.zig");
 const batch_runtime = @import("update/batch_runtime.zig");
+const runtime_wait = @import("../lib/runtime_wait.zig");
 
 pub const FailureAction = common.FailureAction;
 pub const DeploymentStatus = common.DeploymentStatus;
@@ -186,7 +187,17 @@ pub fn performRollingUpdate(
         // step 4: delay between batches (if configured and not the last batch)
         if (strategy.delay_between_batches > 0 and batch_end < total) {
             log.info("update: waiting {d}s before next batch", .{strategy.delay_between_batches});
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(@intCast(strategy.delay_between_batches)), .awake) catch unreachable;
+            if (!runtime_wait.sleep(std.Io.Duration.fromSeconds(@intCast(strategy.delay_between_batches)), "rolling update batch delay")) {
+                progress.failed += batch_new_ids.items.len;
+                return batch_runtime.handleBatchFailure(
+                    strategy,
+                    context,
+                    deployment_id,
+                    &new_container_ids,
+                    &progress,
+                    "interrupted while waiting between update batches",
+                );
+            }
         }
 
         batch_start = batch_end;

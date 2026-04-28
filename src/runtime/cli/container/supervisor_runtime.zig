@@ -6,6 +6,7 @@ const store = @import("../../../state/store.zig");
 const cli = @import("../../../lib/cli.zig");
 const net_setup = @import("../../../network/setup.zig");
 const common = @import("common.zig");
+const runtime_wait = @import("../../../lib/runtime_wait.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -75,7 +76,7 @@ pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, a
         if (attach) {
             writeErr("container {s} exited ({d}), restarting in {d}ms...\n", .{ id, last_exit, backoff_ms });
         }
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(backoff_ms)), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(@intCast(backoff_ms)), "container supervisor restart backoff")) break;
         backoff_ms = @min(std.math.mul(u32, backoff_ms, 2) catch 30_000, 30_000);
         first_start = false;
     }
@@ -97,7 +98,9 @@ pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) Con
         return ContainerError.ProcessNotFound;
     };
 
-    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
+    runtime_wait.sleepWithIoOrError(io, std.Io.Duration.fromMilliseconds(100), "container supervisor spawn settle") catch {
+        return ContainerError.ProcessNotFound;
+    };
 
     if (process.sendSignal(child.id orelse return ContainerError.ProcessNotFound, 0)) |_| {
         return;
@@ -116,7 +119,7 @@ pub fn stopProcess(pid: i32) ContainerError!void {
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
         if (process.sendSignal(pid, 0)) |_| {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
+            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container process terminate wait")) break;
         } else |_| {
             return;
         }
@@ -127,7 +130,7 @@ pub fn stopProcess(pid: i32) ContainerError!void {
     attempts = 0;
     while (attempts < 40) : (attempts += 1) {
         if (process.sendSignal(pid, 0)) |_| {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
+            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container process kill wait")) break;
         } else |_| {
             return;
         }

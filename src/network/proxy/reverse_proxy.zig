@@ -17,6 +17,7 @@ const request_plan = @import("request_plan.zig");
 const proxy_runtime = @import("runtime.zig");
 const router = @import("router.zig");
 const upstream_mod = @import("upstream.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const proxy_loop_header = "X-Yoq-Proxy";
 const x_forwarded_for_header = "X-Forwarded-For";
@@ -120,7 +121,7 @@ pub const ReverseProxy = struct {
 
     pub fn deinit(self: *ReverseProxy) void {
         while (self.active_mirror_requests.load(.acquire) != 0) {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(1), .awake) catch unreachable;
+            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(1), "reverse proxy mirror drain")) break;
         }
     }
 

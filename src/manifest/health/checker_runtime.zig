@@ -6,6 +6,7 @@ const service_registry_runtime = @import("../../network/service_registry_runtime
 const types = @import("types.zig");
 const checks = @import("check_runtime.zig");
 const registry = @import("registry_support.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const Transition = enum {
     none,
@@ -73,14 +74,14 @@ fn schedulerLoop() void {
     while (registry.checker_running.load(.acquire)) {
         const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
         scheduleDueChecks(now);
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(types.scheduler_interval_ms)), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(@intCast(types.scheduler_interval_ms)), "health scheduler loop")) return;
     }
 }
 
 fn workerLoop(_: usize) void {
     while (registry.checker_running.load(.acquire)) {
         const item = registry.dequeueCheck() orelse {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
+            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "health worker idle wait")) return;
             continue;
         };
 

@@ -26,6 +26,7 @@ const cert_store = @import("cert_store.zig");
 const backend_mod = @import("backend.zig");
 const acme_mod = @import("acme.zig");
 const managed_runtime = @import("acme/managed_runtime.zig");
+const runtime_wait = @import("../lib/runtime_wait.zig");
 
 const max_connections: u32 = 256;
 var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
@@ -289,7 +290,7 @@ pub const TlsProxy = struct {
             var elapsed: u64 = 0;
             while (elapsed < config.check_interval_s and self.running.load(.acquire)) {
                 const step: u64 = @min(5, config.check_interval_s - elapsed);
-                std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(@intCast(step)), .awake) catch unreachable;
+                if (!runtime_wait.sleep(std.Io.Duration.fromSeconds(@intCast(step)), "tls renewal wait")) return;
                 elapsed += step;
             }
             if (!self.running.load(.acquire)) break;

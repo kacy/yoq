@@ -4,6 +4,7 @@ const process = @import("../../process.zig");
 const cgroups = @import("../../cgroups.zig");
 const cli = @import("../../../lib/cli.zig");
 const common = @import("common.zig");
+const runtime_wait = @import("../../../lib/runtime_wait.zig");
 
 const writeErr = cli.writeErr;
 const ContainerError = common.ContainerError;
@@ -59,7 +60,7 @@ pub fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
         const record = store.load(alloc, id) catch {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
+            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container stopped-state load wait")) return false;
             continue;
         };
         defer record.deinit(alloc);
@@ -75,7 +76,7 @@ pub fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
                 .running => {},
             }
         }
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container stopped-state wait")) return false;
     }
 
     return false;
@@ -85,7 +86,7 @@ pub fn waitForContainerStart(alloc: std.mem.Allocator, id: []const u8) Container
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
         const record = store.load(alloc, id) catch {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
+            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container start load wait")) break;
             continue;
         };
         defer record.deinit(alloc);
@@ -96,7 +97,7 @@ pub fn waitForContainerStart(alloc: std.mem.Allocator, id: []const u8) Container
             return ContainerError.ProcessNotFound;
         }
 
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container start wait")) break;
     }
 
     writeErr("timed out waiting for container start\n", .{});

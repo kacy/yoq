@@ -16,6 +16,7 @@ const service_rollout = @import("../network/service_rollout.zig");
 const service_reconciler = @import("../network/service_reconciler.zig");
 const listener_runtime = @import("../network/proxy/listener_runtime.zig");
 const json_helpers = @import("../lib/json_helpers.zig");
+const runtime_wait = @import("../lib/runtime_wait.zig");
 
 const writeErr = cli.writeErr;
 
@@ -833,7 +834,7 @@ fn waitHealthyIfSupported(
 
 fn maybeDelayBetweenBatches(delay_seconds: u32, should_delay: bool) void {
     if (!should_delay or delay_seconds == 0) return;
-    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(@intCast(delay_seconds)), .awake) catch unreachable;
+    _ = runtime_wait.sleep(std.Io.Duration.fromSeconds(@intCast(delay_seconds)), "local apply batch delay");
 }
 
 fn replacementFailureOutcome(
@@ -1086,7 +1087,7 @@ const LocalApplyBackend = struct {
                         }
                     }
                     if (remaining == 0) return results;
-                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
+                    if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(100), "local apply health wait")) return results;
                 }
                 return results;
             }

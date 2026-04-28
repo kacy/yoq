@@ -7,6 +7,7 @@ const cgroups = @import("../../../runtime/cgroups.zig");
 const log = @import("../../../lib/log.zig");
 const common = @import("../common.zig");
 const writers = @import("writers.zig");
+const runtime_wait = @import("../../../lib/runtime_wait.zig");
 
 const Response = common.Response;
 const stop_poll_attempts: usize = 10;
@@ -105,7 +106,7 @@ pub fn waitForProcessExit(id: []const u8, pid: i32) bool {
         const cg = cgroups.Cgroup.open(id) catch return true;
         if (!cg.containsProcess(pid)) return true;
         process.sendSignal(pid, 0) catch return true;
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(stop_poll_interval_ms)), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(@intCast(stop_poll_interval_ms)), "container stop wait")) return false;
     }
     return false;
 }

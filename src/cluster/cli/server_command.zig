@@ -13,6 +13,7 @@ const service_rollout = @import("../../network/service_rollout.zig");
 const service_reconciler = @import("../../network/service_reconciler.zig");
 const proxy_control_plane = @import("../../network/proxy/control_plane.zig");
 const listener_runtime = @import("../../network/proxy/listener_runtime.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const writeErr = cli.writeErr;
 const readApiTokenWithIo = cli.readApiTokenWithIo;
@@ -319,7 +320,7 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
 fn recoverClusterRolloutsLoop(node: *cluster_node.Node) void {
     while (node.running.load(.acquire)) {
         if (!node.isLeader()) {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(200), .awake) catch unreachable;
+            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(200), "cluster rollout recovery leader wait")) return;
             continue;
         }
 
@@ -330,6 +331,6 @@ fn recoverClusterRolloutsLoop(node: *cluster_node.Node) void {
             log.warn("cluster rollout recovery pass failed: {}", .{err});
         };
 
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(500), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(500), "cluster rollout recovery interval")) return;
     }
 }

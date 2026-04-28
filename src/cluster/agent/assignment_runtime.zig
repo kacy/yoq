@@ -11,6 +11,7 @@ const manifest_spec = @import("../../manifest/spec.zig");
 const store = @import("../../state/store.zig");
 const logs = @import("../../runtime/logs.zig");
 const agent_store = @import("../agent_store.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const extractJsonString = json_helpers.extractJsonString;
 const extractJsonInt = json_helpers.extractJsonInt;
@@ -427,7 +428,7 @@ fn waitForServiceReadiness(alloc: std.mem.Allocator, container_id: []const u8, m
         switch (manifest_health.getStatus(service_name) orelse .starting) {
             .healthy => return .healthy,
             .unhealthy => return .unhealthy,
-            .starting => std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable,
+            .starting => if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(100), "assignment readiness wait")) return .timeout,
         }
     }
     return .timeout;

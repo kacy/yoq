@@ -8,6 +8,7 @@ const log = @import("../../lib/log.zig");
 const health = @import("../health.zig");
 const cron_scheduler = @import("../cron_scheduler.zig");
 const service_runtime = @import("service_runtime.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const writeErr = cli.writeErr;
 
@@ -247,7 +248,7 @@ pub fn waitForShutdown(self: anytype, shutdown_requested: *const std.atomic.Valu
         }
         if (all_done) break;
 
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(200), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(200), "orchestrator shutdown wait")) return;
     }
 }
 
@@ -270,6 +271,6 @@ pub fn waitForRunning(self: anytype, idx: usize) bool {
         const now = @as(u64, @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds()));
         if (now - start > timeout_ns) return false;
 
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(100), "orchestrator running wait")) return false;
     }
 }

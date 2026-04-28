@@ -33,6 +33,7 @@ comptime {
     _ = @import("lib/completion.zig");
     _ = @import("lib/exec_helpers.zig");
     _ = @import("lib/log.zig");
+    _ = @import("lib/runtime_wait.zig");
     _ = @import("lib/paths.zig");
     _ = @import("lib/toml.zig");
     _ = @import("lib/json_helpers.zig");

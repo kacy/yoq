@@ -13,6 +13,7 @@ const deployment_store = @import("../../../manifest/update/deployment_store.zig"
 const rollout_spec = @import("../../../manifest/spec.zig");
 const store = @import("../../../state/store.zig");
 const common = @import("../common.zig");
+const runtime_wait = @import("../../../lib/runtime_wait.zig");
 
 const Response = common.Response;
 const RouteContext = common.RouteContext;
@@ -239,7 +240,7 @@ pub const ClusterApplyBackend = struct {
 
             if (failed_targets > batch_failed_before) break;
             if (strategy.delay_between_batches > 0 and batch_end < self.requests.len) {
-                std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(@intCast(strategy.delay_between_batches)), .awake) catch unreachable;
+                if (!runtime_wait.sleep(std.Io.Duration.fromSeconds(@intCast(strategy.delay_between_batches)), "cluster rollout batch delay")) return ClusterApplyError.InternalError;
             }
             batch_start = batch_end;
             first_batch = false;
@@ -1095,7 +1096,7 @@ fn resolveTargetReadinessStates(
 
         if (remaining == 0) return states;
         if (nowAwakeNanoseconds() >= deadline_ns) break;
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
+        try runtime_wait.sleepOrError(std.Io.Duration.fromMilliseconds(100), "cluster rollout readiness wait");
     }
 
     return states;

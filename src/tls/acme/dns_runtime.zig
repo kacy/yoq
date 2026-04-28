@@ -4,6 +4,7 @@ const posix = std.posix;
 
 const dns = @import("../../network/dns.zig");
 const types = @import("types.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const fallback_nameserver = [4]u8{ 8, 8, 8, 8 };
 const dns_port: u16 = 53;
@@ -25,7 +26,7 @@ pub fn waitForTxt(
             if (found) return;
         } else |_| {}
 
-        std.Io.sleep(std.Options.debug_io, poll_interval, .awake) catch unreachable;
+        if (!runtime_wait.sleep(poll_interval, "acme dns propagation wait")) return types.AcmeError.Timeout;
     }
 
     return types.AcmeError.Timeout;

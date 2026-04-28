@@ -5,6 +5,7 @@ const csr_mod = @import("../csr.zig");
 const jws = @import("../jws.zig");
 const json_support = @import("json_support.zig");
 const types = @import("types.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
@@ -296,7 +297,7 @@ pub fn waitForAuthorizationValid(self: anytype, auth_url: []const u8) types.Acme
         if (std.mem.eql(u8, status, "valid")) return;
         if (std.mem.eql(u8, status, "invalid")) return types.AcmeError.ChallengeFailed;
 
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromNanoseconds(@intCast(poll_interval_ns)), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromNanoseconds(@intCast(poll_interval_ns)), "acme authorization wait")) return types.AcmeError.Timeout;
     }
 
     return types.AcmeError.Timeout;
@@ -319,7 +320,7 @@ pub fn waitForOrderReady(self: anytype, order: *types.Order) types.AcmeError!voi
         }
         if (std.mem.eql(u8, snapshot.status, "invalid")) return types.AcmeError.OrderCreationFailed;
 
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromNanoseconds(@intCast(poll_interval_ns)), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromNanoseconds(@intCast(poll_interval_ns)), "acme order wait")) return types.AcmeError.Timeout;
     }
 
     return types.AcmeError.Timeout;
@@ -438,7 +439,7 @@ fn waitForOrderValid(order: *types.Order, self: anytype) types.AcmeError!void {
         if (std.mem.eql(u8, snapshot.status, "valid") and order.cert_url != null) return;
         if (std.mem.eql(u8, snapshot.status, "invalid")) return types.AcmeError.FinalizeFailed;
 
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromNanoseconds(@intCast(poll_interval_ns)), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromNanoseconds(@intCast(poll_interval_ns)), "acme finalize wait")) return types.AcmeError.Timeout;
     }
 
     return types.AcmeError.Timeout;

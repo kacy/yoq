@@ -4,6 +4,7 @@ const container = @import("../container.zig");
 const process = @import("../process.zig");
 const common = @import("common.zig");
 const metrics_support = @import("metrics_support.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 pub const CgroupError = common.CgroupError;
 pub const ResourceLimits = common.ResourceLimits;
@@ -247,7 +248,7 @@ pub const Cgroup = struct {
         const max_attempts: u32 = 500;
         while (attempts < max_attempts) : (attempts += 1) {
             if (self.isEmpty()) break;
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
+            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(10), "cgroup destroy wait")) break;
         }
 
         if (!self.isEmpty()) {

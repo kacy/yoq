@@ -6,6 +6,7 @@ const connection_runtime = @import("../../api/server/connection_runtime.zig");
 const common = @import("../../api/routes/common.zig");
 const store = @import("../../state/store.zig");
 const logs = @import("../../runtime/logs.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const TestLogLookupOverride = struct {
     app_name: []const u8,
@@ -61,7 +62,7 @@ pub const LogServer = struct {
         while (self.running.load(.acquire)) {
             const client_fd = linux_platform.posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch |err| switch (err) {
                 error.WouldBlock => {
-                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(50), .awake) catch unreachable;
+                    if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "agent log server accept")) return;
                     continue;
                 },
                 else => return,
@@ -74,10 +75,10 @@ pub const LogServer = struct {
         var attempts: usize = 0;
         while (attempts < 1500) : (attempts += 1) {
             if (self.started.load(.acquire)) {
-                std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(250), .awake) catch unreachable;
+                try runtime_wait.sleepOrError(std.Io.Duration.fromMilliseconds(250), "agent log server startup settle");
                 return;
             }
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(20), .awake) catch unreachable;
+            try runtime_wait.sleepOrError(std.Io.Duration.fromMilliseconds(20), "agent log server startup wait");
         }
         return error.ServerNotReady;
     }

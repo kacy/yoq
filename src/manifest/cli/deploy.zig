@@ -11,6 +11,7 @@ const store = @import("../../state/store.zig");
 const process = @import("../../runtime/process.zig");
 const http_client = @import("../../cluster/http_client.zig");
 const container_cmds = @import("../../runtime/container_commands.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -324,7 +325,7 @@ pub fn down(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocat
                 while (waited < 100) : (waited += 1) {
                     const result = process.wait(pid, true) catch break;
                     switch (result.status) {
-                        .running => std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable,
+                        .running => if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(100), "deploy stop wait")) break,
                         else => break,
                     }
                 }

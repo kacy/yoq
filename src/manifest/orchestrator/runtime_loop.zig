@@ -13,6 +13,7 @@ const watcher_mod = @import("../../dev/watcher.zig");
 const gpu_runtime = @import("../gpu_runtime.zig");
 const service_runtime = @import("service_runtime.zig");
 const startup_runtime = @import("startup_runtime.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const writeErr = cli.writeErr;
 
@@ -279,7 +280,7 @@ fn handleDevModeRestart(
             writeErr("restarting {s}...\n", .{service_name});
             return true;
         }
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(restart_poll_ms)), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(@intCast(restart_poll_ms)), "dev restart wait")) return false;
     }
     return false;
 }
@@ -313,7 +314,7 @@ fn handleRestartPolicyExit(
         if (shutdown_requested.load(.acquire)) return false;
         const remaining = backoff_ms.* - slept_ms;
         const sleep_chunk: u64 = @min(remaining, restart_poll_ms);
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(sleep_chunk)), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(@intCast(sleep_chunk)), "restart backoff wait")) return false;
         slept_ms += sleep_chunk;
     }
 

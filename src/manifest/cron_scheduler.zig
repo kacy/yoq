@@ -15,6 +15,7 @@ const std = @import("std");
 const spec = @import("spec.zig");
 const orchestrator = @import("orchestrator.zig");
 const cli = @import("../lib/cli.zig");
+const runtime_wait = @import("../lib/runtime_wait.zig");
 
 const writeErr = cli.writeErr;
 
@@ -92,7 +93,7 @@ pub const CronScheduler = struct {
 
             const idx = earliest_idx orelse {
                 // no crons — shouldn't happen but sleep and retry
-                std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(1), .awake) catch unreachable;
+                if (!runtime_wait.sleep(std.Io.Duration.fromSeconds(1), "cron scheduler idle wait")) return;
                 continue;
             };
 
@@ -100,7 +101,7 @@ pub const CronScheduler = struct {
             if (earliest_time > now) {
                 var remaining = earliest_time - now;
                 while (remaining > 0 and self.running.load(.acquire)) {
-                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(1), .awake) catch unreachable;
+                    if (!runtime_wait.sleep(std.Io.Duration.fromSeconds(1), "cron scheduler due wait")) return;
                     remaining -= 1;
                 }
                 if (!self.running.load(.acquire)) break;

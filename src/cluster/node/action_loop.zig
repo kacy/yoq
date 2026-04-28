@@ -6,6 +6,7 @@ const agent_registry = @import("../registry.zig");
 const membership_sync = @import("membership_sync.zig");
 const snapshot_support = @import("snapshot_support.zig");
 const logger = @import("../../lib/log.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const NodeId = types.NodeId;
 const SnapshotMeta = types.SnapshotMeta;
@@ -88,14 +89,14 @@ pub fn tickLoop(self: anytype) void {
         if (gossip_tick_due) {
             membership_sync.tickGossip(self);
         }
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(100), "cluster node tick loop")) return;
     }
 }
 
 pub fn recvLoop(self: anytype) void {
     while (self.running.load(.acquire)) {
         const msg = self.transport.receive(self.alloc) catch {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
+            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(10), "cluster node receive retry")) return;
             continue;
         };
 
@@ -107,7 +108,7 @@ pub fn recvLoop(self: anytype) void {
             processActions(self);
         } else {
             membership_sync.receiveGossipMessages(self);
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(10), .awake) catch unreachable;
+            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(10), "cluster node receive idle")) return;
         }
     }
 }

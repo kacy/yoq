@@ -7,6 +7,7 @@ const listener_runtime_mod = @import("listener_runtime.zig");
 const steering_runtime = @import("steering_runtime.zig");
 const posix = std.posix;
 const socket_helpers = @import("socket_helpers.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 pub const sync_interval_secs: u64 = 15;
 
@@ -145,7 +146,7 @@ fn syncLoop() void {
             defer mutex.unlock(std.Options.debug_io);
             break :blk sync_interval_override_ms orelse (sync_interval_secs * std.time.ms_per_s);
         };
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(interval_ms)), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(@intCast(interval_ms)), "proxy control plane sync loop")) return;
         if (!sync_running.load(.acquire)) break;
         runSyncPass(.periodic, true);
     }

@@ -17,6 +17,7 @@ const posix = std.posix;
 const linux = std.os.linux;
 const syscall = @import("../lib/syscall.zig");
 const log = @import("../lib/log.zig");
+const runtime_wait = @import("../lib/runtime_wait.zig");
 
 pub const Watcher = struct {
     fd: posix.fd_t,
@@ -177,7 +178,7 @@ pub const Watcher = struct {
 
         // debounce: wait for the editor to finish writing, then drain
         // any events that piled up during the wait
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromNanoseconds(@intCast(debounce_ns)), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromNanoseconds(@intCast(debounce_ns)), "dev watcher debounce")) return services[0..service_count];
 
         // during drain, collect additional services that had events
         service_count = self.drainPendingMulti(services, service_count);

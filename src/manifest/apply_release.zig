@@ -2,6 +2,7 @@ const std = @import("std");
 const json_helpers = @import("../lib/json_helpers.zig");
 const store = @import("../state/store.zig");
 const update_common = @import("update/common.zig");
+const runtime_wait = @import("../lib/runtime_wait.zig");
 
 pub const ApplyTrigger = enum {
     apply,
@@ -405,7 +406,7 @@ pub const ProgressRecorder = struct {
             switch (state) {
                 .active => return false,
                 .cancel_requested => return true,
-                .paused => std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(100), .awake) catch unreachable,
+                .paused => try runtime_wait.sleepOrError(std.Io.Duration.fromMilliseconds(100), "release pause wait"),
             }
         }
     }

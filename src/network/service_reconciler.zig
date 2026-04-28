@@ -12,6 +12,7 @@ const service_registry_runtime = @import("service_registry_runtime.zig");
 const ebpf = @import("setup/ebpf_module.zig").ebpf;
 const ebpf_support = @import("setup/ebpf_support.zig");
 const store = @import("../state/store.zig");
+const runtime_wait = @import("../lib/runtime_wait.zig");
 
 pub const EventKind = enum {
     container_registered,
@@ -549,7 +550,7 @@ fn bootstrapAuthoritativeLocked() void {
 
 fn auditLoop() void {
     while (audit_running.load(.acquire)) {
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(@intCast(audit_interval_secs)), .awake) catch unreachable;
+        if (!runtime_wait.sleep(std.Io.Duration.fromSeconds(@intCast(audit_interval_secs)), "service reconciler audit loop")) return;
         if (!audit_running.load(.acquire)) break;
         runAuditPassIfEnabled();
     }
