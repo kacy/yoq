@@ -3,11 +3,11 @@ const sqlite = @import("sqlite");
 const gpu_scheduler = @import("../../../gpu/scheduler.zig");
 const scheduler = @import("../../../cluster/scheduler.zig");
 const cluster_node = @import("../../../cluster/node.zig");
-const json_helpers = @import("../../../lib/json_helpers.zig");
 const apply_release = @import("../../../manifest/apply_release.zig");
 const app_snapshot = @import("../../../manifest/app_snapshot.zig");
 const apply_response = @import("apply_response.zig");
 const apply_request = @import("apply_request.zig");
+const rollout_targets_mod = @import("rollout_targets.zig");
 const volumes_mod = @import("../../../state/volumes.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
 const deployment_store = @import("../../../manifest/update/deployment_store.zig");
@@ -18,6 +18,10 @@ const runtime_wait = @import("../../../lib/runtime_wait.zig");
 
 const Response = common.Response;
 const RouteContext = common.RouteContext;
+const ActivatedTarget = rollout_targets_mod.ActivatedTarget;
+const FailureDetailBuilder = rollout_targets_mod.FailureDetailBuilder;
+const RolloutTargetBuilder = rollout_targets_mod.RolloutTargetBuilder;
+const ScheduledTarget = rollout_targets_mod.ScheduledTarget;
 
 fn nowRealSeconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
@@ -620,237 +624,9 @@ fn loadResumeSeed(
     };
 }
 
-const FailureDetail = struct {
-    workload_kind: []const u8,
-    workload_name: []const u8,
-    reason: []const u8,
-};
-
-const RolloutTarget = struct {
-    workload_kind: []const u8,
-    workload_name: []const u8,
-    state: []const u8,
-    reason: ?[]const u8 = null,
-};
-
-const FailureDetailBuilder = struct {
-    alloc: std.mem.Allocator,
-    items: std.ArrayListUnmanaged(FailureDetail) = .empty,
-
-    fn init(alloc: std.mem.Allocator) FailureDetailBuilder {
-        return .{ .alloc = alloc };
-    }
-
-    fn deinit(self: *FailureDetailBuilder) void {
-        self.items.deinit(self.alloc);
-    }
-
-    fn appendRequest(self: *FailureDetailBuilder, req: apply_request.ServiceRequest, reason: []const u8) !void {
-        try self.append(req.request.workload_kind orelse "service", req.request.workload_name orelse req.request.image, reason);
-    }
-
-    fn appendTarget(self: *FailureDetailBuilder, target: ScheduledTarget, reason: []const u8) !void {
-        try self.append(target.request.workload_kind orelse "service", target.request.workload_name orelse target.request.image, reason);
-    }
-
-    fn append(self: *FailureDetailBuilder, workload_kind: []const u8, workload_name: []const u8, reason: []const u8) !void {
-        try self.items.append(self.alloc, .{
-            .workload_kind = workload_kind,
-            .workload_name = workload_name,
-            .reason = reason,
-        });
-    }
-
-    fn toOwnedJson(self: *FailureDetailBuilder) !?[]u8 {
-        if (self.items.items.len == 0) return null;
-
-        var json_buf_writer = std.Io.Writer.Allocating.init(self.alloc);
-        defer json_buf_writer.deinit();
-
-        const writer = &json_buf_writer.writer;
-
-        try writer.writeByte('[');
-        for (self.items.items, 0..) |detail, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writer.writeByte('{');
-            try json_helpers.writeJsonStringField(writer, "workload_kind", detail.workload_kind);
-            try writer.writeByte(',');
-            try json_helpers.writeJsonStringField(writer, "workload_name", detail.workload_name);
-            try writer.writeByte(',');
-            try json_helpers.writeJsonStringField(writer, "reason", detail.reason);
-            try writer.writeByte('}');
-        }
-        try writer.writeByte(']');
-        const owned = try json_buf_writer.toOwnedSlice();
-        return owned;
-    }
-};
-
-const RolloutTargetBuilder = struct {
-    alloc: std.mem.Allocator,
-    items: std.ArrayListUnmanaged(RolloutTarget) = .empty,
-
-    fn init(alloc: std.mem.Allocator) RolloutTargetBuilder {
-        return .{ .alloc = alloc };
-    }
-
-    fn deinit(self: *RolloutTargetBuilder) void {
-        self.items.deinit(self.alloc);
-    }
-
-    fn appendRequests(self: *RolloutTargetBuilder, requests: []const apply_request.ServiceRequest) !void {
-        for (requests) |req| {
-            try self.items.append(self.alloc, .{
-                .workload_kind = req.request.workload_kind orelse "service",
-                .workload_name = req.request.workload_name orelse req.request.image,
-                .state = "pending",
-                .reason = null,
-            });
-        }
-    }
-
-    fn setRequestState(
-        self: *RolloutTargetBuilder,
-        request: scheduler.PlacementRequest,
-        state: []const u8,
-        reason: ?[]const u8,
-    ) void {
-        self.set(
-            request.workload_kind orelse "service",
-            request.workload_name orelse request.image,
-            state,
-            reason,
-        );
-    }
-
-    fn setTargetState(
-        self: *RolloutTargetBuilder,
-        target: ScheduledTarget,
-        state: []const u8,
-        reason: ?[]const u8,
-    ) void {
-        self.set(
-            target.request.workload_kind orelse "service",
-            target.request.workload_name orelse target.request.image,
-            state,
-            reason,
-        );
-    }
-
-    fn setActivatedState(
-        self: *RolloutTargetBuilder,
-        target: ActivatedTarget,
-        state: []const u8,
-        reason: ?[]const u8,
-    ) void {
-        self.set(
-            target.request.workload_kind orelse "service",
-            target.request.workload_name orelse target.request.image,
-            state,
-            reason,
-        );
-    }
-
-    fn set(
-        self: *RolloutTargetBuilder,
-        workload_kind: []const u8,
-        workload_name: []const u8,
-        state: []const u8,
-        reason: ?[]const u8,
-    ) void {
-        for (self.items.items) |*item| {
-            if (std.mem.eql(u8, item.workload_kind, workload_kind) and std.mem.eql(u8, item.workload_name, workload_name)) {
-                item.state = state;
-                item.reason = reason;
-                return;
-            }
-        }
-    }
-
-    fn stateFor(
-        self: *const RolloutTargetBuilder,
-        workload_kind: []const u8,
-        workload_name: []const u8,
-    ) []const u8 {
-        for (self.items.items) |item| {
-            if (std.mem.eql(u8, item.workload_kind, workload_kind) and std.mem.eql(u8, item.workload_name, workload_name)) {
-                return item.state;
-            }
-        }
-        return "pending";
-    }
-
-    fn stateForRequest(self: *const RolloutTargetBuilder, request: scheduler.PlacementRequest) []const u8 {
-        return self.stateFor(
-            request.workload_kind orelse "service",
-            request.workload_name orelse request.image,
-        );
-    }
-
-    fn restoreFromJson(self: *RolloutTargetBuilder, rollout_targets_json: ?[]const u8) void {
-        const json = rollout_targets_json orelse return;
-        var iter = json_helpers.extractJsonObjects(json);
-        while (iter.next()) |obj| {
-            const workload_kind = json_helpers.extractJsonString(obj, "workload_kind") orelse continue;
-            const workload_name = json_helpers.extractJsonString(obj, "workload_name") orelse continue;
-            const state = json_helpers.extractJsonString(obj, "state") orelse continue;
-            const reason = json_helpers.extractJsonString(obj, "reason");
-            self.set(workload_kind, workload_name, state, reason);
-        }
-    }
-
-    fn toOwnedJson(self: *RolloutTargetBuilder) !?[]u8 {
-        if (self.items.items.len == 0) return null;
-
-        var json_buf_writer = std.Io.Writer.Allocating.init(self.alloc);
-        defer json_buf_writer.deinit();
-
-        const writer = &json_buf_writer.writer;
-
-        try writer.writeByte('[');
-        for (self.items.items, 0..) |target, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writer.writeByte('{');
-            try json_helpers.writeJsonStringField(writer, "workload_kind", target.workload_kind);
-            try writer.writeByte(',');
-            try json_helpers.writeJsonStringField(writer, "workload_name", target.workload_name);
-            try writer.writeByte(',');
-            try json_helpers.writeJsonStringField(writer, "state", target.state);
-            try writer.writeByte(',');
-            try json_helpers.writeNullableJsonStringField(writer, "reason", target.reason);
-            try writer.writeByte('}');
-        }
-        try writer.writeByte(']');
-        return try json_buf_writer.toOwnedSlice();
-    }
-};
-
 fn isTerminalRolloutTargetState(state: []const u8) bool {
-    return std.mem.eql(u8, state, "ready") or
-        std.mem.eql(u8, state, "failed") or
-        std.mem.eql(u8, state, "rolled_back");
+    return rollout_targets_mod.isTerminalState(state);
 }
-
-const ScheduledTarget = struct {
-    request: scheduler.PlacementRequest,
-    assignment_ids: []const []const u8,
-    placement_count: usize,
-
-    fn deinit(self: *const ScheduledTarget, alloc: std.mem.Allocator) void {
-        for (self.assignment_ids) |id| alloc.free(id);
-        alloc.free(self.assignment_ids);
-    }
-};
-
-const ActivatedTarget = struct {
-    request: scheduler.PlacementRequest,
-    assignment_ids: []const []const u8,
-
-    fn deinit(self: *const ActivatedTarget, alloc: std.mem.Allocator) void {
-        for (self.assignment_ids) |id| alloc.free(id);
-        alloc.free(self.assignment_ids);
-    }
-};
 
 const PriorAssignmentSnapshot = struct {
     request: scheduler.PlacementRequest,
