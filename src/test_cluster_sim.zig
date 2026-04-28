@@ -28,7 +28,7 @@ const SimNode = struct {
 
     fn restart(self: *SimNode, peers: []const NodeId) !void {
         const alloc = self.raft.alloc;
-        const pending_actions = self.raft.drainActions();
+        const pending_actions = try self.raft.drainActions();
         freeActions(alloc, pending_actions);
         self.raft.deinit();
         self.raft = try Raft.init(alloc, self.id, peers, self.log);
@@ -36,8 +36,9 @@ const SimNode = struct {
 
     fn deinit(self: *SimNode) void {
         const alloc = self.raft.alloc;
-        const pending_actions = self.raft.drainActions();
-        freeActions(alloc, pending_actions);
+        if (self.raft.drainActions()) |pending_actions| {
+            freeActions(alloc, pending_actions);
+        } else |_| {}
         self.raft.deinit();
         self.log.deinit();
         alloc.destroy(self.log);
@@ -100,7 +101,7 @@ fn runElectionWithPeersPlan(
     }
     try std.testing.expect(candidate.raft.role != .follower);
 
-    const vote_actions = candidate.raft.drainActions();
+    const vote_actions = try candidate.raft.drainActions();
     defer alloc.free(vote_actions);
 
     for (vote_actions) |action| {
@@ -154,7 +155,7 @@ fn deliverLeaderActionsToWithPlan(
     const alloc = std.testing.allocator;
 
     for (0..64) |_| {
-        const actions = leader.raft.drainActions();
+        const actions = try leader.raft.drainActions();
         if (actions.len == 0) {
             alloc.free(actions);
             return;
@@ -361,7 +362,7 @@ fn pumpClusterActions(nodes: []const *SimNode, faults: *const RandomFaultPlan) !
     for (0..128) |_| {
         var any = false;
         for (nodes) |sender| {
-            const actions = sender.raft.drainActions();
+            const actions = try sender.raft.drainActions();
             if (actions.len == 0) {
                 std.testing.allocator.free(actions);
                 continue;

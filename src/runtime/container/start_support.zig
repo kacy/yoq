@@ -73,10 +73,10 @@ pub fn setupNetwork(config: anytype, dirs: ?*const id_paths.OverlayDirs, pid: po
 
                 var ip_buf: [16]u8 = undefined;
                 const ip_str = ip.formatIp(info.ip, &ip_buf);
-                const gateway_ip = if (net_config.node_id) |node_id|
-                    (ip.subnetForNode(node_id) catch unreachable).gateway
-                else
-                    bridge.gateway_ip;
+                const gateway_ip = gatewayForNode(net_config.node_id) catch |err| {
+                    log.warn("container: invalid network node id for {s}: {}", .{ config.id, err });
+                    return;
+                };
                 const network_root = if (dirs) |overlay_dirs|
                     overlay_dirs.mergedPath()
                 else
@@ -100,6 +100,10 @@ pub fn setupNetwork(config: anytype, dirs: ?*const id_paths.OverlayDirs, pid: po
     }
 }
 
+fn gatewayForNode(node_id: ?u16) ip.IpError![4]u8 {
+    return if (node_id) |id| (try ip.subnetForNode(id)).gateway else bridge.gateway_ip;
+}
+
 pub fn setupGpu(config: anytype, dirs: ?*const id_paths.OverlayDirs) void {
     if (config.gpu_indices.len == 0) return;
     if (dirs) |overlay_dirs| {
@@ -112,6 +116,14 @@ pub fn setupGpu(config: anytype, dirs: ?*const id_paths.OverlayDirs) void {
             log.warn("GPU passthrough setup failed for {s}: {}", .{ config.id, err });
         };
     }
+}
+
+test "gatewayForNode rejects node ids outside the subnet range" {
+    try std.testing.expectError(ip.IpError.AllocationFailed, gatewayForNode(65535));
+}
+
+test "gatewayForNode returns bridge gateway for single-node containers" {
+    try std.testing.expectEqualSlices(u8, &bridge.gateway_ip, &(try gatewayForNode(null)));
 }
 
 pub fn startLogCapture(config: anytype, runtime: anytype, spawn_result: *namespaces.SpawnResult) void {

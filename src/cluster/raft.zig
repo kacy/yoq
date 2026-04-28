@@ -14,7 +14,7 @@
 //   defer raft.deinit();
 //   raft.tick(); // call periodically (every ~100ms)
 //   const reply = raft.handleRequestVote(args);
-//   const actions = raft.drainActions();
+//   const actions = try raft.drainActions();
 //   // process actions (send messages, apply committed entries)
 
 const std = @import("std");
@@ -230,8 +230,9 @@ pub const Raft = struct {
     }
 
     /// return all pending actions and clear the queue.
-    /// caller owns the returned slice and must free it with self.alloc.free(actions)
-    pub fn drainActions(self: *Raft) []Action {
+    /// caller owns the returned slice and must free it with self.alloc.free(actions).
+    /// on allocation failure, queued actions remain pending for a later drain.
+    pub fn drainActions(self: *Raft) ![]Action {
         return action_queue.drainOwned(Action, self.alloc, &self.actions);
     }
 
@@ -340,7 +341,7 @@ test "single node becomes leader after election timeout" {
 
     try testing.expectEqual(Role.leader, raft.role);
 
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer alloc.free(actions);
 
     // should have a become_leader action
@@ -367,7 +368,7 @@ test "candidate becomes leader with majority vote" {
     try testing.expectEqual(Role.candidate, raft.role);
 
     // drain the request vote actions
-    const election_actions = raft.drainActions();
+    const election_actions = try raft.drainActions();
     defer alloc.free(election_actions);
 
     // one vote from peer 2 is enough for majority (2/3)
@@ -378,7 +379,7 @@ test "candidate becomes leader with majority vote" {
 
     try testing.expectEqual(Role.leader, raft.role);
 
-    const leader_actions = raft.drainActions();
+    const leader_actions = try raft.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, leader_actions);
 }
 
@@ -441,7 +442,7 @@ test "step down on higher term" {
     }
     try testing.expectEqual(Role.candidate, raft.role);
 
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer alloc.free(actions);
 
     // receive append entries from a leader with higher term
@@ -457,7 +458,7 @@ test "step down on higher term" {
     try testing.expect(reply.success);
     try testing.expectEqual(Role.follower, raft.role);
 
-    const step_actions = raft.drainActions();
+    const step_actions = try raft.drainActions();
     defer alloc.free(step_actions);
 }
 
@@ -475,7 +476,7 @@ test "log replication: leader sends entries, follower appends" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    const a1 = leader.drainActions();
+    const a1 = try leader.drainActions();
     defer alloc.free(a1);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
@@ -483,14 +484,14 @@ test "log replication: leader sends entries, follower appends" {
     });
 
     // drain leader actions (become_leader + heartbeats)
-    const la = leader.drainActions();
+    const la = try leader.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, la);
 
     // propose a command
     _ = try leader.propose("SET x 42");
 
     // get the append entries that were sent
-    const propose_actions = leader.drainActions();
+    const propose_actions = try leader.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, propose_actions);
 
     // set up follower
@@ -514,7 +515,7 @@ test "log replication: leader sends entries, follower appends" {
     try testing.expectEqual(@as(LogIndex, 1), reply.match_index);
     try testing.expectEqual(@as(LogIndex, 1), follower_log.lastIndex());
 
-    const fa = follower.drainActions();
+    const fa = try follower.drainActions();
     defer alloc.free(fa);
 }
 
@@ -531,20 +532,20 @@ test "commit advancement when majority matches" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    const ea = leader.drainActions();
+    const ea = try leader.drainActions();
     defer alloc.free(ea);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
         .vote_granted = true,
     });
-    const la = leader.drainActions();
+    const la = try leader.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, la);
 
     // propose and replicate
     const idx = try leader.propose("cmd1");
     try testing.expectEqual(@as(LogIndex, 1), idx);
 
-    const pa = leader.drainActions();
+    const pa = try leader.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, pa);
 
     try testing.expectEqual(@as(LogIndex, 0), leader.commit_index);
@@ -559,7 +560,7 @@ test "commit advancement when majority matches" {
     // with self + peer 2 = 2 out of 3, commit should advance
     try testing.expectEqual(@as(LogIndex, 1), leader.commit_index);
 
-    const commit_actions = leader.drainActions();
+    const commit_actions = try leader.drainActions();
     defer alloc.free(commit_actions);
 
     var found_commit = false;
@@ -587,7 +588,7 @@ test "election timeout triggers new election with higher term" {
     }
     const term1 = raft.currentTerm();
     try testing.expectEqual(Role.candidate, raft.role);
-    const a1 = raft.drainActions();
+    const a1 = try raft.drainActions();
     defer alloc.free(a1);
 
     // no votes received, timeout again -> new election with higher term
@@ -598,7 +599,7 @@ test "election timeout triggers new election with higher term" {
     try testing.expect(term2 > term1);
     try testing.expectEqual(Role.candidate, raft.role);
 
-    const a2 = raft.drainActions();
+    const a2 = try raft.drainActions();
     defer alloc.free(a2);
 }
 
@@ -632,7 +633,7 @@ test "log conflict: follower truncates on mismatch" {
     try testing.expectEqual(@as(Term, 2), entry.term);
     try testing.expectEqualStrings("new", entry.data);
 
-    const actions = follower.drainActions();
+    const actions = try follower.drainActions();
     defer alloc.free(actions);
 }
 
@@ -675,7 +676,7 @@ test "handleInstallSnapshot defers state update until snapshot is finished" {
     try testing.expectEqual(@as(LogIndex, 0), follower.commit_index);
     try testing.expectEqual(@as(LogIndex, 0), follower.last_applied);
 
-    const actions = follower.drainActions();
+    const actions = try follower.drainActions();
     defer alloc.free(actions);
     try testing.expectEqual(@as(usize, 0), actions.len);
 
@@ -735,7 +736,7 @@ test "handleInstallSnapshot rejects stale term" {
     // should NOT have updated commit_index
     try testing.expectEqual(@as(LogIndex, 0), follower.commit_index);
 
-    const actions = follower.drainActions();
+    const actions = try follower.drainActions();
     defer alloc.free(actions);
     // no apply_snapshot action
     for (actions) |action| {
@@ -768,7 +769,7 @@ test "handleInstallSnapshot ignores old snapshot" {
     try testing.expectEqual(@as(Term, 3), reply.term);
     try testing.expectEqual(@as(LogIndex, 100), follower.commit_index); // unchanged
 
-    const actions = follower.drainActions();
+    const actions = try follower.drainActions();
     defer alloc.free(actions);
     for (actions) |action| {
         try testing.expect(action != .apply_snapshot);
@@ -788,13 +789,13 @@ test "leader sends install_snapshot when entries are truncated" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    const ea = leader.drainActions();
+    const ea = try leader.drainActions();
     defer alloc.free(ea);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
         .vote_granted = true,
     });
-    const la = leader.drainActions();
+    const la = try leader.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, la);
 
     // simulate: leader has a snapshot at index 50, log truncated
@@ -818,7 +819,7 @@ test "leader sends install_snapshot when entries are truncated" {
     leader.heartbeat_ticks = heartbeat_interval;
     leader.tick();
 
-    const actions = leader.drainActions();
+    const actions = try leader.drainActions();
     defer alloc.free(actions);
 
     // should have a send_install_snapshot for peer 2
@@ -846,13 +847,13 @@ test "handleInstallSnapshotReply updates peer tracking" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    const ea = leader.drainActions();
+    const ea = try leader.drainActions();
     defer alloc.free(ea);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
         .vote_granted = true,
     });
-    const la = leader.drainActions();
+    const la = try leader.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, la);
 
     leader.snapshot_meta = .{
@@ -883,13 +884,13 @@ test "leader steps down on higher term in install_snapshot_reply" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    const election_actions = leader.drainActions();
+    const election_actions = try leader.drainActions();
     defer alloc.free(election_actions);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
         .vote_granted = true,
     });
-    const leader_actions = leader.drainActions();
+    const leader_actions = try leader.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, leader_actions);
 
     try testing.expectEqual(Role.leader, leader.role);
@@ -901,7 +902,7 @@ test "leader steps down on higher term in install_snapshot_reply" {
 
     try testing.expectEqual(Role.follower, leader.role);
     try testing.expectEqual(original_term + 1, leader.currentTerm());
-    const actions = leader.drainActions();
+    const actions = try leader.drainActions();
     defer alloc.free(actions);
 }
 
@@ -945,7 +946,7 @@ test "heartbeat with empty entries doesn't crash on free" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    const ea = leader.drainActions();
+    const ea = try leader.drainActions();
     defer alloc.free(ea);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
@@ -953,7 +954,7 @@ test "heartbeat with empty entries doesn't crash on free" {
     });
 
     // drain become_leader + initial heartbeats
-    const la = leader.drainActions();
+    const la = try leader.drainActions();
     defer {
         for (la) |action| {
             if (action == .send_append_entries) {
@@ -968,7 +969,7 @@ test "heartbeat with empty entries doesn't crash on free" {
     leader.heartbeat_ticks = heartbeat_interval;
     leader.tick();
 
-    const actions = leader.drainActions();
+    const actions = try leader.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, actions);
 
     // verify we got heartbeats with empty entries
@@ -995,13 +996,13 @@ test "leader steps down on higher term in append_entries_reply" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    const ea = leader.drainActions();
+    const ea = try leader.drainActions();
     defer alloc.free(ea);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
         .vote_granted = true,
     });
-    const la = leader.drainActions();
+    const la = try leader.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, la);
 
     try testing.expectEqual(Role.leader, leader.role);
@@ -1017,7 +1018,7 @@ test "leader steps down on higher term in append_entries_reply" {
     try testing.expectEqual(Role.follower, leader.role);
     try testing.expectEqual(leader_term + 5, leader.currentTerm());
 
-    const actions = leader.drainActions();
+    const actions = try leader.drainActions();
     defer alloc.free(actions);
 }
 
@@ -1036,7 +1037,7 @@ test "duplicate vote from same peer doesn't double count" {
         raft.tick();
     }
     try testing.expectEqual(Role.candidate, raft.role);
-    const ea = raft.drainActions();
+    const ea = try raft.drainActions();
     defer alloc.free(ea);
 
     // peer 2 votes yes
@@ -1053,7 +1054,7 @@ test "duplicate vote from same peer doesn't double count" {
         .vote_granted = true,
     });
 
-    const drain = raft.drainActions();
+    const drain = try raft.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, drain);
     try testing.expectEqual(Role.candidate, raft.role);
     try testing.expectEqual(@as(usize, 0), drain.len);
@@ -1073,7 +1074,7 @@ test "commit index requires majority in 5-node cluster" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    const ea = leader.drainActions();
+    const ea = try leader.drainActions();
     defer alloc.free(ea);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
@@ -1083,12 +1084,12 @@ test "commit index requires majority in 5-node cluster" {
         .term = leader.currentTerm(),
         .vote_granted = true,
     });
-    const la = leader.drainActions();
+    const la = try leader.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, la);
 
     // propose a command
     _ = try leader.propose("cmd1");
-    const pa = leader.drainActions();
+    const pa = try leader.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, pa);
 
     try testing.expectEqual(@as(LogIndex, 0), leader.commit_index);
@@ -1101,7 +1102,7 @@ test "commit index requires majority in 5-node cluster" {
     });
     try testing.expectEqual(@as(LogIndex, 0), leader.commit_index);
 
-    const ca1 = leader.drainActions();
+    const ca1 = try leader.drainActions();
     defer alloc.free(ca1);
 
     // second peer acks — self + 2 = 3 >= quorum. should commit
@@ -1112,7 +1113,7 @@ test "commit index requires majority in 5-node cluster" {
     });
     try testing.expectEqual(@as(LogIndex, 1), leader.commit_index);
 
-    const ca2 = leader.drainActions();
+    const ca2 = try leader.drainActions();
     defer alloc.free(ca2);
 }
 
@@ -1155,7 +1156,7 @@ test "3-node cluster: election + propose + commit" {
     try testing.expectEqual(Role.candidate, r1.role);
 
     // drain vote requests, manually deliver to peers and route replies
-    const vote_actions = r1.drainActions();
+    const vote_actions = try r1.drainActions();
     defer alloc.free(vote_actions);
 
     for (vote_actions) |action| {
@@ -1175,7 +1176,7 @@ test "3-node cluster: election + propose + commit" {
     try testing.expectEqual(Role.leader, r1.role);
 
     // drain the become_leader + heartbeat actions (don't deliver heartbeats)
-    const leader_actions = r1.drainActions();
+    const leader_actions = try r1.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, leader_actions);
 
     // verify exactly 1 leader
@@ -1190,7 +1191,7 @@ test "3-node cluster: election + propose + commit" {
     _ = try r1.propose("INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('test1', 'localhost', 'active', 4, 8192, 0, 0, 0, 1000, 1000);");
 
     // drain append_entries actions
-    const propose_actions = r1.drainActions();
+    const propose_actions = try r1.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, propose_actions);
 
     // deliver to followers manually and route ack replies back to leader
@@ -1213,7 +1214,7 @@ test "3-node cluster: election + propose + commit" {
     try testing.expectEqual(@as(LogIndex, 1), r1.commit_index);
 
     // verify commit_entries action was emitted
-    const commit_actions = r1.drainActions();
+    const commit_actions = try r1.drainActions();
     defer alloc.free(commit_actions);
 
     var found_commit = false;
@@ -1253,7 +1254,7 @@ test "leader loss triggers re-election with higher term" {
     for (0..max_election_ticks + 1) |_| {
         r1.tick();
     }
-    const va = r1.drainActions();
+    const va = try r1.drainActions();
     defer alloc.free(va);
 
     for (va) |action| {
@@ -1270,7 +1271,7 @@ test "leader loss triggers re-election with higher term" {
     }
     try testing.expectEqual(Role.leader, r1.role);
 
-    const la = r1.drainActions();
+    const la = try r1.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, la);
 
     const original_term = r1.currentTerm();
@@ -1282,7 +1283,7 @@ test "leader loss triggers re-election with higher term" {
     try testing.expectEqual(Role.candidate, r2.role);
 
     // route node 2's vote requests to node 3 only (node 1 is "dead")
-    const v2 = r2.drainActions();
+    const v2 = try r2.drainActions();
     defer alloc.free(v2);
 
     for (v2) |action| {
@@ -1301,7 +1302,7 @@ test "leader loss triggers re-election with higher term" {
     try testing.expect(r2.currentTerm() > original_term);
 
     // drain new leader's actions (become_leader + heartbeats)
-    const nl = r2.drainActions();
+    const nl = try r2.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, nl);
 
     // verify become_leader was emitted
@@ -1330,7 +1331,7 @@ fn electLeader3(alloc: std.mem.Allocator, leader: *Raft, p1: *Raft, p2: *Raft) !
     }
 
     // deliver vote requests to peers
-    const va = leader.drainActions();
+    const va = try leader.drainActions();
     defer alloc.free(va);
 
     for (va) |action| {
@@ -1347,14 +1348,14 @@ fn electLeader3(alloc: std.mem.Allocator, leader: *Raft, p1: *Raft, p2: *Raft) !
     }
 
     // drain become_leader + heartbeat actions
-    return leader.drainActions();
+    return try leader.drainActions();
 }
 
 /// helper: propose a command on the leader and replicate to both peers.
 /// returns the commit actions (caller must free).
 fn proposeAndReplicate3(alloc: std.mem.Allocator, leader: *Raft, p1: *Raft, p2: *Raft, data: []const u8) ![]const Action {
     _ = try leader.propose(data);
-    const pa = leader.drainActions();
+    const pa = try leader.drainActions();
     defer test_support.deinitOwnedActions(Action, alloc, pa);
 
     for (pa) |action| {
@@ -1370,7 +1371,7 @@ fn proposeAndReplicate3(alloc: std.mem.Allocator, leader: *Raft, p1: *Raft, p2: 
         }
     }
 
-    return leader.drainActions();
+    return try leader.drainActions();
 }
 
 test "network partition: old leader steps down on reconnect" {
@@ -1410,7 +1411,7 @@ test "network partition: old leader steps down on reconnect" {
     }
     try testing.expectEqual(Role.candidate, r2.role);
 
-    const v2 = r2.drainActions();
+    const v2 = try r2.drainActions();
     defer alloc.free(v2);
 
     for (v2) |action| {
@@ -1425,7 +1426,7 @@ test "network partition: old leader steps down on reconnect" {
     }
     try testing.expectEqual(Role.leader, r2.role);
 
-    const nl = r2.drainActions();
+    const nl = try r2.drainActions();
     defer {
         freeActionEntries(alloc, nl);
         alloc.free(nl);
@@ -1433,7 +1434,7 @@ test "network partition: old leader steps down on reconnect" {
 
     // step 4: r1 proposes "stale_cmd" — appends locally but can't commit
     _ = try r1.propose("stale_cmd");
-    const stale_actions = r1.drainActions();
+    const stale_actions = try r1.drainActions();
     defer {
         freeActionEntries(alloc, stale_actions);
         alloc.free(stale_actions);
@@ -1446,7 +1447,7 @@ test "network partition: old leader steps down on reconnect" {
     for (0..heartbeat_interval + 1) |_| {
         r2.tick();
     }
-    const hb = r2.drainActions();
+    const hb = try r2.drainActions();
     defer {
         freeActionEntries(alloc, hb);
         alloc.free(hb);
@@ -1498,9 +1499,9 @@ test "split vote resolves in subsequent election" {
     try testing.expectEqual(Role.candidate, r3.role);
 
     // step 2: split the votes — r2 votes for r1, r4 votes for r3
-    const v1 = r1.drainActions();
+    const v1 = try r1.drainActions();
     defer alloc.free(v1);
-    const v3 = r3.drainActions();
+    const v3 = try r3.drainActions();
     defer alloc.free(v3);
 
     for (v1) |action| {
@@ -1535,7 +1536,7 @@ test "split vote resolves in subsequent election" {
     }
     try testing.expectEqual(Role.candidate, r1.role);
 
-    const v1b = r1.drainActions();
+    const v1b = try r1.drainActions();
     defer alloc.free(v1b);
 
     // deliver r1's vote requests to r2, r3, r4 — they see higher term, grant votes
@@ -1566,7 +1567,7 @@ test "split vote resolves in subsequent election" {
     try testing.expectEqual(@as(u32, 1), leader_count);
 
     // drain the new leader's actions
-    const fla = r1.drainActions();
+    const fla = try r1.drainActions();
     defer {
         freeActionEntries(alloc, fla);
         alloc.free(fla);
@@ -1602,7 +1603,7 @@ test "log divergence after partition resolved by new leader" {
 
     // step 2: partition r1. r1 proposes "uncommitted" at index 2 (can't commit)
     _ = try r1.propose("uncommitted");
-    const stale = r1.drainActions();
+    const stale = try r1.drainActions();
     defer {
         freeActionEntries(alloc, stale);
         alloc.free(stale);
@@ -1615,7 +1616,7 @@ test "log divergence after partition resolved by new leader" {
     for (0..max_election_ticks + 1) |_| {
         r2.tick();
     }
-    const v2 = r2.drainActions();
+    const v2 = try r2.drainActions();
     defer alloc.free(v2);
 
     for (v2) |action| {
@@ -1630,7 +1631,7 @@ test "log divergence after partition resolved by new leader" {
     }
     try testing.expectEqual(Role.leader, r2.role);
 
-    const nla = r2.drainActions();
+    const nla = try r2.drainActions();
     defer {
         freeActionEntries(alloc, nla);
         alloc.free(nla);
@@ -1638,7 +1639,7 @@ test "log divergence after partition resolved by new leader" {
 
     // r2 proposes "new_cmd" at index 2, replicates to r3 — committed
     _ = try r2.propose("new_cmd");
-    const pa = r2.drainActions();
+    const pa = try r2.drainActions();
     defer {
         freeActionEntries(alloc, pa);
         alloc.free(pa);
@@ -1653,7 +1654,7 @@ test "log divergence after partition resolved by new leader" {
             // don't send to r1 (partitioned)
         }
     }
-    const ca2 = r2.drainActions();
+    const ca2 = try r2.drainActions();
     defer alloc.free(ca2);
     try testing.expectEqual(@as(LogIndex, 2), r2.commit_index);
 
@@ -1662,7 +1663,7 @@ test "log divergence after partition resolved by new leader" {
     for (0..heartbeat_interval + 1) |_| {
         r2.tick();
     }
-    const hb = r2.drainActions();
+    const hb = try r2.drainActions();
     defer {
         freeActionEntries(alloc, hb);
         alloc.free(hb);
@@ -1686,7 +1687,7 @@ test "log divergence after partition resolved by new leader" {
     for (0..heartbeat_interval + 1) |_| {
         r2.tick();
     }
-    const hb2 = r2.drainActions();
+    const hb2 = try r2.drainActions();
     defer {
         freeActionEntries(alloc, hb2);
         alloc.free(hb2);
@@ -1738,7 +1739,7 @@ test "stale leader cannot commit without quorum" {
 
     // step 2: partition r1 from r2 and r3. r1 proposes "cmd2" — appends but can't commit
     _ = try r1.propose("cmd2");
-    const stale = r1.drainActions();
+    const stale = try r1.drainActions();
     defer {
         freeActionEntries(alloc, stale);
         alloc.free(stale);
@@ -1749,7 +1750,7 @@ test "stale leader cannot commit without quorum" {
     for (0..50) |_| {
         r1.tick();
     }
-    const tick_actions = r1.drainActions();
+    const tick_actions = try r1.drainActions();
     defer {
         freeActionEntries(alloc, tick_actions);
         alloc.free(tick_actions);
@@ -1760,7 +1761,7 @@ test "stale leader cannot commit without quorum" {
     for (0..max_election_ticks + 1) |_| {
         r2.tick();
     }
-    const v2 = r2.drainActions();
+    const v2 = try r2.drainActions();
     defer alloc.free(v2);
 
     for (v2) |action| {
@@ -1775,7 +1776,7 @@ test "stale leader cannot commit without quorum" {
     try testing.expectEqual(Role.leader, r2.role);
     try testing.expect(r2.currentTerm() > r1.currentTerm());
 
-    const nla = r2.drainActions();
+    const nla = try r2.drainActions();
     defer {
         freeActionEntries(alloc, nla);
         alloc.free(nla);
@@ -1783,7 +1784,7 @@ test "stale leader cannot commit without quorum" {
 
     // step 5: r2 can advance commit_index with r3's acks
     _ = try r2.propose("cmd_new");
-    const pa = r2.drainActions();
+    const pa = try r2.drainActions();
     defer {
         freeActionEntries(alloc, pa);
         alloc.free(pa);
@@ -1797,7 +1798,7 @@ test "stale leader cannot commit without quorum" {
             }
         }
     }
-    const ca2 = r2.drainActions();
+    const ca2 = try r2.drainActions();
     defer alloc.free(ca2);
     try testing.expect(r2.commit_index > 1);
 
@@ -1819,7 +1820,7 @@ test "single node propose succeeds without peers" {
         raft.tick();
     }
     try testing.expectEqual(Role.leader, raft.role);
-    const ea = raft.drainActions();
+    const ea = try raft.drainActions();
     defer alloc.free(ea);
 
     // propose should succeed
@@ -1827,7 +1828,7 @@ test "single node propose succeeds without peers" {
     try testing.expectEqual(@as(LogIndex, 1), idx);
 
     // no append_entries actions since there are no peers
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer alloc.free(actions);
     for (actions) |action| {
         try testing.expect(action != .send_append_entries);
@@ -1847,14 +1848,14 @@ test "2-node cluster cannot commit without follower ack" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    const ea = leader.drainActions();
+    const ea = try leader.drainActions();
     defer alloc.free(ea);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
         .vote_granted = true,
     });
     try testing.expectEqual(Role.leader, leader.role);
-    const la = leader.drainActions();
+    const la = try leader.drainActions();
     defer {
         freeActionEntries(alloc, la);
         alloc.free(la);
@@ -1862,7 +1863,7 @@ test "2-node cluster cannot commit without follower ack" {
 
     // propose a command
     _ = try leader.propose("cmd1");
-    const pa = leader.drainActions();
+    const pa = try leader.drainActions();
     defer {
         freeActionEntries(alloc, pa);
         alloc.free(pa);
@@ -1890,13 +1891,13 @@ test "advanceCommitIndex skips entries from previous term" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    const ea = leader.drainActions();
+    const ea = try leader.drainActions();
     defer alloc.free(ea);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
         .vote_granted = true,
     });
-    const la = leader.drainActions();
+    const la = try leader.drainActions();
     defer {
         freeActionEntries(alloc, la);
         alloc.free(la);
@@ -1916,7 +1917,7 @@ test "advanceCommitIndex skips entries from previous term" {
     // (Raft §5.4.2: leader only commits entries from its own term)
     try testing.expectEqual(@as(LogIndex, 0), leader.commit_index);
 
-    const actions = leader.drainActions();
+    const actions = try leader.drainActions();
     defer alloc.free(actions);
 }
 
@@ -1938,7 +1939,7 @@ test "follower rejects vote if already voted in same term" {
     });
     try testing.expect(reply_a.vote_granted);
 
-    const a1 = raft.drainActions();
+    const a1 = try raft.drainActions();
     defer alloc.free(a1);
 
     // candidate B (node 3) requests vote at same term 3
@@ -1952,7 +1953,7 @@ test "follower rejects vote if already voted in same term" {
     // should reject — already voted for node 2 in term 3
     try testing.expect(!reply_b.vote_granted);
 
-    const a2 = raft.drainActions();
+    const a2 = try raft.drainActions();
     defer alloc.free(a2);
 }
 
@@ -1972,7 +1973,7 @@ test "candidate steps down on append_entries from new leader" {
     try testing.expectEqual(Role.candidate, raft.role);
     const candidate_term = raft.currentTerm();
 
-    const ea = raft.drainActions();
+    const ea = try raft.drainActions();
     defer alloc.free(ea);
 
     // receive append_entries from node 2 who won the election in same term
@@ -1989,7 +1990,7 @@ test "candidate steps down on append_entries from new leader" {
     try testing.expectEqual(Role.follower, raft.role);
 
     // should have a become_follower action
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer alloc.free(actions);
     var found_become_follower = false;
     for (actions) |action| {
@@ -2026,7 +2027,7 @@ test "handleAppendEntries rejects stale term" {
     try testing.expect(!reply.success);
     try testing.expectEqual(@as(Term, 5), reply.term);
 
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer alloc.free(actions);
 }
 
@@ -2043,13 +2044,13 @@ test "snapshot boundary: sendAppendEntries triggers install_snapshot" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    const ea = leader.drainActions();
+    const ea = try leader.drainActions();
     defer alloc.free(ea);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
         .vote_granted = true,
     });
-    const la = leader.drainActions();
+    const la = try leader.drainActions();
     defer {
         freeActionEntries(alloc, la);
         alloc.free(la);
@@ -2074,7 +2075,7 @@ test "snapshot boundary: sendAppendEntries triggers install_snapshot" {
     leader.heartbeat_ticks = heartbeat_interval;
     leader.tick();
 
-    const actions = leader.drainActions();
+    const actions = try leader.drainActions();
     defer {
         freeActionEntries(alloc, actions);
         alloc.free(actions);
@@ -2109,13 +2110,13 @@ test "transferLeadership steps down leader and advances term" {
     for (0..max_election_ticks + 1) |_| {
         raft.tick();
     }
-    const ea = raft.drainActions();
+    const ea = try raft.drainActions();
     defer alloc.free(ea);
     raft.handleRequestVoteReply(2, .{
         .term = raft.currentTerm(),
         .vote_granted = true,
     });
-    const la = raft.drainActions();
+    const la = try raft.drainActions();
     defer {
         freeActionEntries(alloc, la);
         alloc.free(la);
@@ -2131,7 +2132,7 @@ test "transferLeadership steps down leader and advances term" {
     try testing.expect(raft.currentTerm() > term_before);
 
     // should have a become_follower action
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer alloc.free(actions);
     var found_follower = false;
     for (actions) |action| {
@@ -2181,7 +2182,7 @@ test "finishInstallSnapshot preserves higher commit_index" {
     try testing.expectEqual(@as(LogIndex, 100), raft.commit_index);
     try testing.expectEqual(@as(LogIndex, 100), raft.last_applied);
 
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer alloc.free(actions);
 }
 
@@ -2205,7 +2206,7 @@ test "finishInstallSnapshot advances commit_index when snapshot is ahead" {
     try testing.expectEqual(@as(LogIndex, 200), raft.commit_index);
     try testing.expectEqual(@as(LogIndex, 200), raft.last_applied);
 
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer alloc.free(actions);
 }
 
@@ -2238,7 +2239,7 @@ test "handleAppendEntries advances commit_index from leader_commit" {
     try testing.expectEqual(@as(LogIndex, 2), raft.commit_index);
 
     // should have a commit_entries action
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer alloc.free(actions);
     var found_commit = false;
     for (actions) |action| {
@@ -2278,7 +2279,7 @@ test "handleAppendEntries with conflicting entry truncates and appends" {
     // verify the entry was replaced
     try testing.expectEqual(@as(Term, 2), log.termAt(2));
 
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer alloc.free(actions);
 }
 
@@ -2304,7 +2305,7 @@ test "handleAppendEntries rejects mismatched prev_log" {
     });
     try testing.expect(!reply.success);
 
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer alloc.free(actions);
 }
 
@@ -2321,13 +2322,13 @@ test "leader commit advances when majority matches" {
     for (0..max_election_ticks + 1) |_| {
         raft.tick();
     }
-    const ea = raft.drainActions();
+    const ea = try raft.drainActions();
     defer alloc.free(ea);
     raft.handleRequestVoteReply(2, .{
         .term = raft.currentTerm(),
         .vote_granted = true,
     });
-    const la = raft.drainActions();
+    const la = try raft.drainActions();
     defer {
         freeActionEntries(alloc, la);
         alloc.free(la);
@@ -2347,7 +2348,7 @@ test "leader commit advances when majority matches" {
     // commit should advance (leader + peer 2 = majority of 3)
     try testing.expectEqual(idx, raft.commit_index);
 
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer {
         freeActionEntries(alloc, actions);
         alloc.free(actions);
@@ -2367,13 +2368,13 @@ test "stale append_entries_reply does not regress match_index" {
     for (0..max_election_ticks + 1) |_| {
         raft.tick();
     }
-    const ea = raft.drainActions();
+    const ea = try raft.drainActions();
     defer alloc.free(ea);
     raft.handleRequestVoteReply(2, .{
         .term = raft.currentTerm(),
         .vote_granted = true,
     });
-    const la = raft.drainActions();
+    const la = try raft.drainActions();
     defer {
         freeActionEntries(alloc, la);
         alloc.free(la);
@@ -2382,7 +2383,7 @@ test "stale append_entries_reply does not regress match_index" {
     // propose two entries
     const idx1 = try raft.propose("cmd1");
     const idx2 = try raft.propose("cmd2");
-    const pa = raft.drainActions();
+    const pa = try raft.drainActions();
     defer {
         freeActionEntries(alloc, pa);
         alloc.free(pa);
@@ -2404,7 +2405,7 @@ test "stale append_entries_reply does not regress match_index" {
     });
     try testing.expectEqual(idx2, raft.match_index[0]);
 
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer {
         freeActionEntries(alloc, actions);
         alloc.free(actions);
@@ -2423,13 +2424,13 @@ test "failed append_entries_reply backtracks only above matched prefix" {
     for (0..max_election_ticks + 1) |_| {
         raft.tick();
     }
-    const election_actions = raft.drainActions();
+    const election_actions = try raft.drainActions();
     defer alloc.free(election_actions);
     raft.handleRequestVoteReply(2, .{
         .term = raft.currentTerm(),
         .vote_granted = true,
     });
-    const leader_actions = raft.drainActions();
+    const leader_actions = try raft.drainActions();
     defer {
         freeActionEntries(alloc, leader_actions);
         alloc.free(leader_actions);
@@ -2447,7 +2448,7 @@ test "failed append_entries_reply backtracks only above matched prefix" {
     try testing.expectEqual(@as(LogIndex, 1), raft.match_index[0]);
     try testing.expectEqual(@as(LogIndex, 2), raft.next_index[0]);
 
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer {
         freeActionEntries(alloc, actions);
         alloc.free(actions);
@@ -2474,13 +2475,13 @@ test "stale failed append_entries_reply does not regress next_index or trigger r
     for (0..max_election_ticks + 1) |_| {
         raft.tick();
     }
-    const election_actions = raft.drainActions();
+    const election_actions = try raft.drainActions();
     defer alloc.free(election_actions);
     raft.handleRequestVoteReply(2, .{
         .term = raft.currentTerm(),
         .vote_granted = true,
     });
-    const leader_actions = raft.drainActions();
+    const leader_actions = try raft.drainActions();
     defer {
         freeActionEntries(alloc, leader_actions);
         alloc.free(leader_actions);
@@ -2498,7 +2499,7 @@ test "stale failed append_entries_reply does not regress next_index or trigger r
     try testing.expectEqual(@as(LogIndex, 5), raft.match_index[0]);
     try testing.expectEqual(@as(LogIndex, 6), raft.next_index[0]);
 
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer {
         freeActionEntries(alloc, actions);
         alloc.free(actions);
@@ -2538,7 +2539,7 @@ test "truncation followed by append uses fresh state" {
     try testing.expectEqual(@as(Term, 2), log.termAt(2));
     try testing.expectEqual(@as(Term, 2), log.termAt(3));
 
-    const actions = raft.drainActions();
+    const actions = try raft.drainActions();
     defer alloc.free(actions);
 }
 
@@ -2555,13 +2556,13 @@ test "snapshot reply does not regress match_index" {
     for (0..max_election_ticks + 1) |_| {
         leader.tick();
     }
-    const ea = leader.drainActions();
+    const ea = try leader.drainActions();
     defer alloc.free(ea);
     leader.handleRequestVoteReply(2, .{
         .term = leader.currentTerm(),
         .vote_granted = true,
     });
-    const la = leader.drainActions();
+    const la = try leader.drainActions();
     defer {
         freeActionEntries(alloc, la);
         alloc.free(la);
@@ -2583,7 +2584,7 @@ test "snapshot reply does not regress match_index" {
     try testing.expectEqual(@as(LogIndex, 200), leader.match_index[0]);
     try testing.expectEqual(@as(LogIndex, 201), leader.next_index[0]);
 
-    const actions = leader.drainActions();
+    const actions = try leader.drainActions();
     defer {
         freeActionEntries(alloc, actions);
         alloc.free(actions);

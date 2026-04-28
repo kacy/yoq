@@ -230,7 +230,10 @@ pub fn resolveNodeId(self: anytype, addr: linux_platform.net.Address) ?NodeId {
 }
 
 pub fn processActions(self: anytype) void {
-    const actions = self.raft.drainActions();
+    const actions = self.raft.drainActions() catch |err| {
+        logger.warn("raft: failed to drain pending actions: {}", .{err});
+        return;
+    };
     defer self.alloc.free(actions);
 
     var has_sends = false;

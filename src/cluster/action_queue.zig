@@ -2,9 +2,9 @@ const std = @import("std");
 
 /// Drain an unmanaged action queue into an owned slice without dropping
 /// queued work on allocation failure.
-pub fn drainOwned(comptime T: type, alloc: std.mem.Allocator, queue: *std.ArrayListUnmanaged(T)) []T {
+pub fn drainOwned(comptime T: type, alloc: std.mem.Allocator, queue: *std.ArrayListUnmanaged(T)) ![]T {
     if (queue.items.len == 0) {
-        return alloc.alloc(T, 0) catch unreachable;
+        return try alloc.alloc(T, 0);
     }
 
     var pending = queue.*;
@@ -12,7 +12,7 @@ pub fn drainOwned(comptime T: type, alloc: std.mem.Allocator, queue: *std.ArrayL
 
     return pending.toOwnedSlice(alloc) catch {
         queue.* = pending;
-        return alloc.alloc(T, 0) catch unreachable;
+        return error.OutOfMemory;
     };
 }
 
@@ -24,7 +24,7 @@ test "drainOwned returns owned slice on success" {
     try queue.append(alloc, 1);
     try queue.append(alloc, 2);
 
-    const drained = drainOwned(u8, alloc, &queue);
+    const drained = try drainOwned(u8, alloc, &queue);
     defer alloc.free(drained);
 
     try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, drained);
@@ -43,10 +43,7 @@ test "drainOwned preserves queued items on allocation failure" {
 
     try queue.append(alloc, 7);
 
-    const drained = drainOwned(u8, alloc, &queue);
-    defer alloc.free(drained);
-
-    try std.testing.expectEqual(@as(usize, 0), drained.len);
+    try std.testing.expectError(error.OutOfMemory, drainOwned(u8, alloc, &queue));
     try std.testing.expectEqual(@as(usize, 1), queue.items.len);
     try std.testing.expectEqual(@as(u8, 7), queue.items[0]);
     try std.testing.expect(failing.has_induced_failure);

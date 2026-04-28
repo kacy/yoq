@@ -61,6 +61,15 @@ pub fn waitForHealth(
     callbacks: common.UpdateCallbacks,
     timeout: u32,
 ) bool {
+    return waitForHealthWithSleep(container_ids, callbacks, timeout, sleepHealthPoll);
+}
+
+fn waitForHealthWithSleep(
+    container_ids: *const std.ArrayList([12]u8),
+    callbacks: common.UpdateCallbacks,
+    timeout: u32,
+    sleepFn: *const fn () anyerror!void,
+) bool {
     const deadline = nowAwakeSeconds() + timeout;
 
     while (nowAwakeSeconds() < deadline) {
@@ -74,8 +83,45 @@ pub fn waitForHealth(
         }
 
         if (all_healthy) return true;
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(1), .awake) catch unreachable;
+        sleepFn() catch |err| {
+            log.warn("update: health wait interrupted: {}", .{err});
+            return false;
+        };
     }
 
     return false;
+}
+
+fn sleepHealthPoll() !void {
+    try std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromSeconds(1), .awake);
+}
+
+fn testStopContainer(_: []const u8) bool {
+    return true;
+}
+
+fn testStartContainer(_: []const u8, _: usize) ?[12]u8 {
+    return null;
+}
+
+fn testIsUnhealthy(_: []const u8) bool {
+    return false;
+}
+
+fn failHealthSleep() !void {
+    return error.SleepFailed;
+}
+
+test "waitForHealth returns false when the health wait sleep fails" {
+    var ids: std.ArrayList([12]u8) = .empty;
+    defer ids.deinit(std.testing.allocator);
+    try ids.append(std.testing.allocator, "container001".*);
+
+    const callbacks = common.UpdateCallbacks{
+        .stopContainer = testStopContainer,
+        .startContainer = testStartContainer,
+        .isHealthy = testIsUnhealthy,
+    };
+
+    try std.testing.expect(!waitForHealthWithSleep(&ids, callbacks, 1, failHealthSleep));
 }

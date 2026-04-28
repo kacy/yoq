@@ -25,7 +25,7 @@
 //   defer gossip.deinit();
 //   gossip.addMember(peer_id, peer_addr);
 //   gossip.tick(); // call every ~500ms
-//   const actions = gossip.drainActions();
+//   const actions = try gossip.drainActions();
 //   // process actions: send UDP messages, update membership state
 
 const std = @import("std");
@@ -262,8 +262,9 @@ pub const Gossip = struct {
         return probe_runtime.handlePingReq(self, msg);
     }
 
-    /// drain all pending actions for the caller to process
-    pub fn drainActions(self: *Gossip) []Action {
+    /// drain all pending actions for the caller to process.
+    /// on allocation failure, queued actions remain pending for a later drain.
+    pub fn drainActions(self: *Gossip) ![]Action {
         return action_queue.drainOwned(Action, self.alloc, &self.actions);
     }
 
@@ -369,7 +370,7 @@ test "probe cycle sends ping" {
 
     try g.tick();
 
-    const actions = g.drainActions();
+    const actions = try g.drainActions();
     defer g.freeActions(actions);
 
     try std.testing.expect(actions.len >= 1);
@@ -387,7 +388,7 @@ test "ack clears probe" {
     try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
     try g.tick();
 
-    const actions = g.drainActions();
+    const actions = try g.drainActions();
     defer g.freeActions(actions);
     const seq = actions[0].send_message.message.ping.sequence;
 
@@ -408,7 +409,7 @@ test "missed ack triggers indirect ping" {
 
     try g.tick(); // sends ping
 
-    const drain = g.drainActions();
+    const drain = try g.drainActions();
     g.freeActions(drain);
 
     // wait for probe_interval ticks without ack
@@ -416,7 +417,7 @@ test "missed ack triggers indirect ping" {
         try g.tick();
     }
 
-    const actions2 = g.drainActions();
+    const actions2 = try g.drainActions();
     defer g.freeActions(actions2);
 
     var ping_req_count: usize = 0;
@@ -438,14 +439,14 @@ test "suspect after failed indirect probe" {
     try g.addMember(3, .{ .ip = .{ 10, 0, 0, 3 }, .port = 7000 });
 
     try g.tick();
-    var drain = g.drainActions();
+    var drain = try g.drainActions();
     g.freeActions(drain);
 
     // wait for direct timeout
     for (0..g.probe_interval) |_| {
         try g.tick();
     }
-    drain = g.drainActions();
+    drain = try g.drainActions();
     g.freeActions(drain);
 
     // wait for indirect timeout
@@ -453,7 +454,7 @@ test "suspect after failed indirect probe" {
         try g.tick();
     }
 
-    const actions = g.drainActions();
+    const actions = try g.drainActions();
     defer g.freeActions(actions);
 
     var found_suspect = false;
@@ -482,7 +483,7 @@ test "suspect to dead timeout" {
     // tick past suspect timeout
     for (0..6) |_| {
         try g.tick();
-        const actions = g.drainActions();
+        const actions = try g.drainActions();
         defer g.freeActions(actions);
         for (actions) |action| {
             if (action == .member_dead and action.member_dead.id == 2) {
@@ -511,7 +512,7 @@ test "incarnation conflict resolution" {
     });
     try std.testing.expectEqual(MemberState.suspect, g.members.get(2).?.state);
 
-    var drain = g.drainActions();
+    var drain = try g.drainActions();
     g.freeActions(drain);
 
     // higher incarnation with alive — should override suspect
@@ -524,7 +525,7 @@ test "incarnation conflict resolution" {
     try std.testing.expectEqual(MemberState.alive, g.members.get(2).?.state);
     try std.testing.expectEqual(@as(u64, 5), g.members.get(2).?.incarnation);
 
-    drain = g.drainActions();
+    drain = try g.drainActions();
     g.freeActions(drain);
 
     // lower incarnation — should be ignored
@@ -537,7 +538,7 @@ test "incarnation conflict resolution" {
     try std.testing.expectEqual(MemberState.alive, g.members.get(2).?.state);
     try std.testing.expectEqual(@as(u64, 5), g.members.get(2).?.incarnation);
 
-    drain = g.drainActions();
+    drain = try g.drainActions();
     g.freeActions(drain);
 }
 
@@ -566,7 +567,7 @@ test "self-refutation increments incarnation" {
     }
     try std.testing.expect(found_refutation);
 
-    const drain = g.drainActions();
+    const drain = try g.drainActions();
     g.freeActions(drain);
 }
 
@@ -662,7 +663,7 @@ test "dead member not probed" {
     try std.testing.expectEqual(@as(usize, 0), g.probe_order.items.len);
 
     try g.tick();
-    const actions = g.drainActions();
+    const actions = try g.drainActions();
     defer g.freeActions(actions);
 
     for (actions) |action| {
@@ -744,7 +745,7 @@ test "more than 64 simultaneous suspects all transition to dead" {
     }
     try std.testing.expectEqual(@as(usize, 100), dead_count);
 
-    const actions = g.drainActions();
+    const actions = try g.drainActions();
     defer g.freeActions(actions);
 }
 
@@ -768,7 +769,7 @@ test "incarnation at u64 max wraps on refutation" {
     // in practice u64 max is unreachable, but the code must not panic.
     try std.testing.expectEqual(std.math.maxInt(u64), g.incarnation);
 
-    const drain = g.drainActions();
+    const drain = try g.drainActions();
     g.freeActions(drain);
 }
 
@@ -833,20 +834,20 @@ fn findGossip(gossips: []*Gossip, id: u64) ?*Gossip {
 }
 
 /// tick all gossip instances and route messages between them for one round
-fn tickAndRouteAll(gossips: []*Gossip) void {
+fn tickAndRouteAll(gossips: []*Gossip) !void {
     // tick all nodes first
     for (gossips) |g| {
         g.tick() catch {};
     }
     // then drain and route all actions
     for (gossips) |g| {
-        const actions = g.drainActions();
+        const actions = try g.drainActions();
         defer g.freeActions(actions);
         routeGossipActions(actions, gossips);
     }
     // drain any reply actions generated by routing
     for (gossips) |g| {
-        const reply_actions = g.drainActions();
+        const reply_actions = try g.drainActions();
         defer g.freeActions(reply_actions);
         routeGossipActions(reply_actions, gossips);
     }
@@ -876,7 +877,7 @@ test "3-node gossip: membership converges to all alive" {
     // probe_interval defaults to 5, so we need enough rounds
     // for each node to probe its peers at least once
     for (0..20) |_| {
-        tickAndRouteAll(&gossips);
+        try tickAndRouteAll(&gossips);
     }
 
     // all members should be alive on all instances
@@ -922,7 +923,7 @@ test "gossip detects unresponsive member" {
 
     // first converge with all three
     for (0..15) |_| {
-        tickAndRouteAll(&all_gossips);
+        try tickAndRouteAll(&all_gossips);
     }
 
     // now stop routing to/from node 3 — only tick nodes 1 and 2
@@ -933,19 +934,19 @@ test "gossip detects unresponsive member" {
         g2.tick() catch {};
 
         // route only between g1 and g2
-        const a1 = g1.drainActions();
+        const a1 = try g1.drainActions();
         defer g1.freeActions(a1);
         routeGossipActions(a1, &live_gossips);
 
-        const a2 = g2.drainActions();
+        const a2 = try g2.drainActions();
         defer g2.freeActions(a2);
         routeGossipActions(a2, &live_gossips);
 
         // drain reply actions
-        const r1 = g1.drainActions();
+        const r1 = try g1.drainActions();
         defer g1.freeActions(r1);
         routeGossipActions(r1, &live_gossips);
-        const r2 = g2.drainActions();
+        const r2 = try g2.drainActions();
         defer g2.freeActions(r2);
         routeGossipActions(r2, &live_gossips);
     }
@@ -986,7 +987,7 @@ test "false positive suspect recovers via self-refutation" {
 
     // step 1: converge with all three
     for (0..20) |_| {
-        tickAndRouteAll(&gossips);
+        try tickAndRouteAll(&gossips);
     }
 
     const initial_incarnation = g3.incarnation;
@@ -1030,7 +1031,7 @@ test "false positive suspect recovers via self-refutation" {
     // step 3: restore connectivity — g3 receives piggybacked suspect update about itself,
     // triggers self-refutation (increments incarnation, broadcasts alive)
     for (0..50) |_| {
-        tickAndRouteAll(&gossips);
+        try tickAndRouteAll(&gossips);
     }
 
     // step 4: g3 should be alive on all nodes, incarnation incremented
@@ -1057,7 +1058,7 @@ test "rapid membership addition stays consistent" {
     // step 2: tick for 5 rounds (single node, just drain actions)
     for (0..5) |_| {
         g1.tick() catch {};
-        const actions = g1.drainActions();
+        const actions = try g1.drainActions();
         g1.freeActions(actions);
     }
 
@@ -1070,7 +1071,7 @@ test "rapid membership addition stays consistent" {
     // step 4: tick for 10 more rounds
     for (0..10) |_| {
         g1.tick() catch {};
-        const actions = g1.drainActions();
+        const actions = try g1.drainActions();
         g1.freeActions(actions);
     }
 
@@ -1121,7 +1122,7 @@ test "dead node doesn't cascade false suspicions" {
 
     // step 1: converge
     for (0..20) |_| {
-        tickAndRouteAll(&all);
+        try tickAndRouteAll(&all);
     }
 
     // step 2: remove g5 from routing (simulate crash)
@@ -1135,12 +1136,12 @@ test "dead node doesn't cascade false suspicions" {
         }
         // route only among live nodes
         for (&live) |g| {
-            const actions = g.drainActions();
+            const actions = try g.drainActions();
             defer g.freeActions(actions);
             routeGossipActions(actions, &live);
         }
         for (&live) |g| {
-            const reply_actions = g.drainActions();
+            const reply_actions = try g.drainActions();
             defer g.freeActions(reply_actions);
             routeGossipActions(reply_actions, &live);
         }
@@ -1360,7 +1361,7 @@ test "applyStateUpdate ignores lower incarnation" {
         .state = .alive,
         .incarnation = 5,
     });
-    var drain = g.drainActions();
+    var drain = try g.drainActions();
     g.freeActions(drain);
 
     // try to apply an update with incarnation 3 — should be ignored
@@ -1370,7 +1371,7 @@ test "applyStateUpdate ignores lower incarnation" {
         .state = .dead,
         .incarnation = 3,
     });
-    drain = g.drainActions();
+    drain = try g.drainActions();
     g.freeActions(drain);
 
     // state should still be alive at incarnation 5
@@ -1393,7 +1394,7 @@ test "applyStateUpdate same incarnation uses state priority" {
         .state = .alive,
         .incarnation = 5,
     });
-    var drain = g.drainActions();
+    var drain = try g.drainActions();
     g.freeActions(drain);
 
     // suspect at same incarnation — should win (suspect > alive)
@@ -1403,7 +1404,7 @@ test "applyStateUpdate same incarnation uses state priority" {
         .state = .suspect,
         .incarnation = 5,
     });
-    drain = g.drainActions();
+    drain = try g.drainActions();
     g.freeActions(drain);
 
     try std.testing.expectEqual(MemberState.suspect, g.members.get(2).?.state);
@@ -1415,7 +1416,7 @@ test "applyStateUpdate same incarnation uses state priority" {
         .state = .alive,
         .incarnation = 5,
     });
-    drain = g.drainActions();
+    drain = try g.drainActions();
     g.freeActions(drain);
 
     try std.testing.expectEqual(MemberState.suspect, g.members.get(2).?.state);
@@ -1437,7 +1438,7 @@ test "applyStateUpdate unknown member dead is ignored" {
     try std.testing.expect(g.members.get(99) == null);
     try std.testing.expectEqual(@as(usize, 0), g.members.count());
 
-    const drain = g.drainActions();
+    const drain = try g.drainActions();
     g.freeActions(drain);
 }
 
@@ -1468,7 +1469,7 @@ test "handlePing from unknown sender still processes updates" {
 
     // actions: there should be a member_suspect action (from applyStateUpdate)
     // but no ping_ack (since sender 99 is unknown, getMemberAddr returns null)
-    const actions = g.drainActions();
+    const actions = try g.drainActions();
     defer g.freeActions(actions);
 
     var found_suspect_action = false;
@@ -1495,7 +1496,7 @@ test "explicit fanout overrides default in escalateToIndirect" {
 
     // trigger probe: tick sends ping to a member
     try g.tick();
-    const drain = g.drainActions();
+    const drain = try g.drainActions();
     g.freeActions(drain);
 
     // miss the ack — wait probe_interval ticks
@@ -1504,7 +1505,7 @@ test "explicit fanout overrides default in escalateToIndirect" {
     }
 
     // actions from the last drain should contain ping_reqs
-    const actions = g.drainActions();
+    const actions = try g.drainActions();
     defer g.freeActions(actions);
 
     var ping_req_count: u32 = 0;
@@ -1591,7 +1592,7 @@ test "suspect timeout skipped when tick_count wraps below state_changed_at" {
     // tick a few times — member must NOT be marked dead since tick_count < state_changed_at
     for (0..6) |_| {
         try g.tick();
-        const actions = g.drainActions();
+        const actions = try g.drainActions();
         defer g.freeActions(actions);
         for (actions) |action| {
             if (action == .member_dead and action.member_dead.id == 2) {
@@ -1623,7 +1624,7 @@ test "applyStateUpdate discovers new alive member" {
     try std.testing.expectEqual(@as(u64, 1), member.incarnation);
 
     // should emit member_alive action
-    const actions = g.drainActions();
+    const actions = try g.drainActions();
     defer g.freeActions(actions);
     var found_alive = false;
     for (actions) |action| {
@@ -1648,7 +1649,7 @@ test "applyStateUpdate discovers new suspect member" {
     const member = g.members.get(5).?;
     try std.testing.expectEqual(MemberState.suspect, member.state);
 
-    const actions = g.drainActions();
+    const actions = try g.drainActions();
     defer g.freeActions(actions);
     var found_suspect = false;
     for (actions) |action| {
@@ -1671,7 +1672,7 @@ test "applyStateUpdate higher incarnation overrides any state" {
         .state = .dead,
         .incarnation = 5,
     });
-    var drain = g.drainActions();
+    var drain = try g.drainActions();
     g.freeActions(drain);
     try std.testing.expectEqual(MemberState.dead, g.members.get(2).?.state);
 
@@ -1682,7 +1683,7 @@ test "applyStateUpdate higher incarnation overrides any state" {
         .state = .alive,
         .incarnation = 6,
     });
-    drain = g.drainActions();
+    drain = try g.drainActions();
     g.freeActions(drain);
     try std.testing.expectEqual(MemberState.alive, g.members.get(2).?.state);
     try std.testing.expectEqual(@as(u64, 6), g.members.get(2).?.incarnation);
@@ -1703,7 +1704,7 @@ test "probe cycle skips all-dead members without hanging" {
     // tick should not hang or crash — no one to probe
     for (0..10) |_| {
         try g.tick();
-        const actions = g.drainActions();
+        const actions = try g.drainActions();
         defer g.freeActions(actions);
     }
 

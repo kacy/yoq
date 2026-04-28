@@ -7,6 +7,7 @@ test "smoke test" {
 // pull in tests from all modules
 comptime {
     _ = @import("runtime/container.zig");
+    _ = @import("runtime/container/start_support.zig");
     _ = @import("runtime/cgroups.zig");
     _ = @import("runtime/namespaces.zig");
     _ = @import("runtime/filesystem.zig");
@@ -90,6 +91,7 @@ comptime {
     _ = @import("manifest/gpu_runtime.zig");
     _ = @import("manifest/health.zig");
     _ = @import("manifest/update.zig");
+    _ = @import("manifest/update/batch_runtime.zig");
     _ = @import("manifest/commands.zig");
     _ = @import("manifest/init.zig");
     _ = @import("manifest/validate.zig");
@@ -109,6 +111,7 @@ comptime {
     _ = @import("api/server.zig");
     _ = @import("api/server/connection_runtime.zig");
     _ = @import("cluster/raft_types.zig");
+    _ = @import("cluster/action_queue.zig");
     _ = @import("cluster/log.zig");
     _ = @import("cluster/raft.zig");
     _ = @import("cluster/transport.zig");

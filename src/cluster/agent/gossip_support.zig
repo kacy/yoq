@@ -118,7 +118,10 @@ pub fn tickGossipLoop(self: anytype) void {
     const transport = self.gossip_transport orelse return;
 
     gossip.tick() catch return;
-    const actions = gossip.drainActions();
+    const actions = gossip.drainActions() catch |err| {
+        log.warn("gossip: failed to drain tick actions: {}", .{err});
+        return;
+    };
     defer gossip.freeActions(actions);
 
     for (actions) |action| {
@@ -154,7 +157,10 @@ pub fn receiveGossipLoop(self: anytype) void {
             .ping_req => |payload| gossip.handlePingReq(payload) catch {},
         }
 
-        const actions = gossip.drainActions();
+        const actions = gossip.drainActions() catch |err| {
+            log.warn("gossip: failed to drain received-message actions: {}", .{err});
+            return;
+        };
         defer gossip.freeActions(actions);
         for (actions) |action| {
             switch (action) {
