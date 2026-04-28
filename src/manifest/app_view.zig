@@ -431,10 +431,10 @@ pub fn writeStatus(writer: anytype, view: AppStatusView) !void {
     try writer.writeByte(',');
     try writeRolloutField(writer, "rollout", current, true);
     try writer.writeAll(",\"current_release\":");
-    try writeStatusReleaseObject(writer, current);
+    try writeStatusReleaseObject(writer, current, false);
     try writer.writeAll(",\"previous_successful_release\":");
     if (previous) |release| {
-        try writeStatusReleaseObject(writer, release);
+        try writeStatusReleaseObject(writer, release, true);
     } else {
         try writer.writeAll("null");
     }
@@ -614,7 +614,7 @@ fn writeRawReleaseMetadata(writer: anytype, release: ReleaseView) !void {
     try json_helpers.writeNullableJsonRawField(writer, "rollout_checkpoint", release.rollout_checkpoint_json);
 }
 
-fn writeStatusReleaseObject(writer: anytype, release: ReleaseView) !void {
+fn writeStatusReleaseObject(writer: anytype, release: ReleaseView, include_rollout_transition_ids: bool) !void {
     try writer.writeByte('{');
     try writeReleaseIdentityFields(writer, release);
     try writer.writeByte(',');
@@ -622,7 +622,7 @@ fn writeStatusReleaseObject(writer: anytype, release: ReleaseView) !void {
     try writer.writeByte(',');
     try writeRawReleaseMetadata(writer, release);
     try writer.writeByte(',');
-    try writeRolloutField(writer, "rollout", release, false);
+    try writeRolloutField(writer, "rollout", release, include_rollout_transition_ids);
     try writer.writeByte('}');
 }
 
