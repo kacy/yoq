@@ -6,6 +6,7 @@ const common = @import("../common.zig");
 const http = @import("../../http.zig");
 const app_routes = @import("app_routes.zig");
 const deploy_routes = @import("deploy_routes.zig");
+const workload_routes = @import("workload_routes.zig");
 
 pub const Response = common.Response;
 pub const RouteContext = common.RouteContext;
@@ -112,6 +113,26 @@ pub const Harness = struct {
         });
     }
 
+    pub fn seedWorkerRelease(self: *Harness, app_name: []const u8, worker_name: []const u8) !void {
+        const snapshot = try std.fmt.allocPrint(
+            self.alloc,
+            "{{\"app_name\":\"{s}\",\"services\":[],\"workers\":[{{\"name\":\"{s}\",\"image\":\"alpine:latest\",\"command\":[\"/bin/sh\",\"-c\",\"echo ok\"],\"gpu_limit\":0,\"required_labels\":[]}}],\"crons\":[],\"training_jobs\":[]}}",
+            .{ app_name, worker_name },
+        );
+        defer self.alloc.free(snapshot);
+        try self.seedLatestRelease(app_name, snapshot);
+    }
+
+    pub fn seedTrainingRelease(self: *Harness, app_name: []const u8, job_name: []const u8, gpus: u32) !void {
+        const snapshot = try std.fmt.allocPrint(
+            self.alloc,
+            "{{\"app_name\":\"{s}\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{{\"name\":\"{s}\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":{},\"cpu_limit\":2000,\"memory_limit_mb\":4096}}]}}",
+            .{ app_name, job_name, gpus },
+        );
+        defer self.alloc.free(snapshot);
+        try self.seedLatestRelease(app_name, snapshot);
+    }
+
     pub fn appApply(self: *Harness, body: []const u8) Response {
         return deploy_routes.handleAppApply(self.alloc, makeRequest(.POST, "/apps/apply", body), self.ctx());
     }
@@ -152,6 +173,58 @@ pub const Harness = struct {
         const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/rollout/{s}", .{ app_name, action });
         defer self.alloc.free(path);
         return app_routes.route(makeRequest(.POST, path, "{}"), self.alloc, self.ctx()).?;
+    }
+
+    pub fn workerRun(self: *Harness, app_name: []const u8, worker_name: []const u8) !Response {
+        const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/workers/{s}/run", .{ app_name, worker_name });
+        defer self.alloc.free(path);
+        return try self.workload(.POST, path, "", "", self.ctx());
+    }
+
+    pub fn trainingStart(self: *Harness, app_name: []const u8, job_name: []const u8) !Response {
+        return self.trainingStartWithContext(app_name, job_name, self.ctx());
+    }
+
+    pub fn trainingStartWithContext(self: *Harness, app_name: []const u8, job_name: []const u8, ctx_value: RouteContext) !Response {
+        const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/training/{s}/start", .{ app_name, job_name });
+        defer self.alloc.free(path);
+        return try self.workload(.POST, path, "", "", ctx_value);
+    }
+
+    pub fn trainingStatus(self: *Harness, app_name: []const u8, job_name: []const u8) !Response {
+        const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/training/{s}/status", .{ app_name, job_name });
+        defer self.alloc.free(path);
+        return try self.workload(.GET, path, "", "", self.ctx());
+    }
+
+    pub fn trainingPause(self: *Harness, app_name: []const u8, job_name: []const u8) !Response {
+        const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/training/{s}/pause", .{ app_name, job_name });
+        defer self.alloc.free(path);
+        return try self.workload(.POST, path, "", "", self.ctx());
+    }
+
+    pub fn trainingScale(self: *Harness, app_name: []const u8, job_name: []const u8, gpus: u32) !Response {
+        const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/training/{s}/scale", .{ app_name, job_name });
+        defer self.alloc.free(path);
+        const body = try std.fmt.allocPrint(self.alloc, "{{\"gpus\":{}}}", .{gpus});
+        defer self.alloc.free(body);
+        return try self.workload(.POST, path, body, "", self.ctx());
+    }
+
+    pub fn trainingLogsRank(self: *Harness, app_name: []const u8, job_name: []const u8, rank: []const u8) !Response {
+        return self.trainingLogsRankWithContext(app_name, job_name, rank, self.ctx());
+    }
+
+    pub fn trainingLogsRankWithContext(self: *Harness, app_name: []const u8, job_name: []const u8, rank: []const u8, ctx_value: RouteContext) !Response {
+        const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/training/{s}/logs", .{ app_name, job_name });
+        defer self.alloc.free(path);
+        const query = try std.fmt.allocPrint(self.alloc, "rank={s}", .{rank});
+        defer self.alloc.free(query);
+        return try self.workload(.GET, path, "", query, ctx_value);
+    }
+
+    fn workload(self: *Harness, method: http.Method, path: []const u8, body: []const u8, query: []const u8, ctx_value: RouteContext) !Response {
+        return workload_routes.route(makeRequestWithQuery(method, path, body, query), self.alloc, ctx_value) orelse error.RouteNotMatched;
     }
 };
 

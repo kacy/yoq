@@ -14,6 +14,7 @@ const clearTestProxyTrainingLogsResponse = workload_routes.clearTestProxyTrainin
 const RouteFlowHarness = test_support.Harness;
 const makeRequest = test_support.makeRequestWithQuery;
 const freeResponse = test_support.freeResponse;
+const expectJsonContains = test_support.expectJsonContains;
 
 fn countTrainingAssignments(db: *sqlite.Db, app_name: []const u8, job_name: []const u8) usize {
     const Row = struct { count: i64 };
@@ -69,23 +70,16 @@ test "worker run route schedules worker from latest app snapshot" {
     var harness = RouteFlowHarness.initWithRuntimeStore(alloc) catch return error.ProxyHarnessInitFailed;
     defer harness.deinit();
 
-    try harness.seedLatestRelease(
-        "demo-app",
-        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[{\"name\":\"migrate\",\"image\":\"alpine:latest\",\"command\":[\"/bin/sh\",\"-c\",\"echo ok\"],\"gpu_limit\":0,\"required_labels\":[]}],\"crons\":[],\"training_jobs\":[]}",
-    );
+    try harness.seedWorkerRelease("demo-app", "migrate");
 
-    const resp = route(
-        makeRequest(.POST, "/apps/demo-app/workers/migrate/run", "", ""),
-        alloc,
-        harness.ctx(),
-    ).?;
+    const resp = try harness.workerRun("demo-app", "migrate");
     defer freeResponse(alloc, resp);
 
     try std.testing.expectEqual(http.StatusCode.ok, resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"app_name\":\"demo-app\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"worker\":\"migrate\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"placed\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"failed\":0") != null);
+    try expectJsonContains(resp.body, "\"app_name\":\"demo-app\"");
+    try expectJsonContains(resp.body, "\"worker\":\"migrate\"");
+    try expectJsonContains(resp.body, "\"placed\":1");
+    try expectJsonContains(resp.body, "\"failed\":0");
 }
 
 test "training start and status routes persist job state from app snapshot" {
@@ -93,34 +87,23 @@ test "training start and status routes persist job state from app snapshot" {
     var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
-    try harness.seedLatestRelease(
-        "demo-app",
-        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"finetune\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":1,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
-    );
+    try harness.seedTrainingRelease("demo-app", "finetune", 1);
 
-    const start_resp = route(
-        makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
-        alloc,
-        harness.ctx(),
-    ).?;
+    const start_resp = try harness.trainingStart("demo-app", "finetune");
     defer freeResponse(alloc, start_resp);
 
     try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, start_resp.body, "\"app_name\":\"demo-app\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, start_resp.body, "\"training_job\":\"finetune\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, start_resp.body, "\"state\":\"running\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, start_resp.body, "\"gpus\":1") != null);
+    try expectJsonContains(start_resp.body, "\"app_name\":\"demo-app\"");
+    try expectJsonContains(start_resp.body, "\"training_job\":\"finetune\"");
+    try expectJsonContains(start_resp.body, "\"state\":\"running\"");
+    try expectJsonContains(start_resp.body, "\"gpus\":1");
 
-    const status_resp = route(
-        makeRequest(.GET, "/apps/demo-app/training/finetune/status", "", ""),
-        alloc,
-        harness.ctx(),
-    ).?;
+    const status_resp = try harness.trainingStatus("demo-app", "finetune");
     defer freeResponse(alloc, status_resp);
 
     try std.testing.expectEqual(http.StatusCode.ok, status_resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, status_resp.body, "\"state\":\"running\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, status_resp.body, "\"training_job\":\"finetune\"") != null);
+    try expectJsonContains(status_resp.body, "\"state\":\"running\"");
+    try expectJsonContains(status_resp.body, "\"training_job\":\"finetune\"");
 }
 
 test "training start tags assignments with workload metadata" {
@@ -128,16 +111,9 @@ test "training start tags assignments with workload metadata" {
     var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
-    try harness.seedLatestRelease(
-        "demo-app",
-        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"finetune\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":2,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
-    );
+    try harness.seedTrainingRelease("demo-app", "finetune", 2);
 
-    const start_resp = route(
-        makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
-        alloc,
-        harness.ctx(),
-    ).?;
+    const start_resp = try harness.trainingStart("demo-app", "finetune");
     defer freeResponse(alloc, start_resp);
     try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
     harness.applyCommitted();
@@ -149,29 +125,18 @@ test "training pause route clears scheduled assignments" {
     var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
-    try harness.seedLatestRelease(
-        "demo-app",
-        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"finetune\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":2,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
-    );
+    try harness.seedTrainingRelease("demo-app", "finetune", 2);
 
-    const start_resp = route(
-        makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
-        alloc,
-        harness.ctx(),
-    ).?;
+    const start_resp = try harness.trainingStart("demo-app", "finetune");
     defer freeResponse(alloc, start_resp);
     try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
 
-    const pause_resp = route(
-        makeRequest(.POST, "/apps/demo-app/training/finetune/pause", "", ""),
-        alloc,
-        harness.ctx(),
-    ).?;
+    const pause_resp = try harness.trainingPause("demo-app", "finetune");
     defer freeResponse(alloc, pause_resp);
     harness.applyCommitted();
 
     try std.testing.expectEqual(http.StatusCode.ok, pause_resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, pause_resp.body, "\"state\":\"paused\"") != null);
+    try expectJsonContains(pause_resp.body, "\"state\":\"paused\"");
     try std.testing.expectEqual(@as(usize, 0), countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
 }
 
@@ -180,30 +145,19 @@ test "training scale route replaces prior scheduled assignments" {
     var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
-    try harness.seedLatestRelease(
-        "demo-app",
-        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"finetune\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":1,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
-    );
+    try harness.seedTrainingRelease("demo-app", "finetune", 1);
 
-    const start_resp = route(
-        makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
-        alloc,
-        harness.ctx(),
-    ).?;
+    const start_resp = try harness.trainingStart("demo-app", "finetune");
     defer freeResponse(alloc, start_resp);
     try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
 
-    const scale_resp = route(
-        makeRequest(.POST, "/apps/demo-app/training/finetune/scale", "{\"gpus\":2}", ""),
-        alloc,
-        harness.ctx(),
-    ).?;
+    const scale_resp = try harness.trainingScale("demo-app", "finetune", 2);
     defer freeResponse(alloc, scale_resp);
     harness.applyCommitted();
 
     try std.testing.expectEqual(http.StatusCode.ok, scale_resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, scale_resp.body, "\"state\":\"running\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, scale_resp.body, "\"gpus\":2") != null);
+    try expectJsonContains(scale_resp.body, "\"state\":\"running\"");
+    try expectJsonContains(scale_resp.body, "\"gpus\":2");
     try std.testing.expectEqual(@as(usize, 2), countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
 }
 
@@ -212,29 +166,18 @@ test "training logs route reports remote-hosted ranks explicitly" {
     var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
-    try harness.seedLatestRelease(
-        "demo-app",
-        "{\"app_name\":\"demo-app\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"finetune\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":1,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
-    );
+    try harness.seedTrainingRelease("demo-app", "finetune", 1);
 
-    const start_resp = route(
-        makeRequest(.POST, "/apps/demo-app/training/finetune/start", "", ""),
-        alloc,
-        harness.ctx(),
-    ).?;
+    const start_resp = try harness.trainingStart("demo-app", "finetune");
     defer freeResponse(alloc, start_resp);
     try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
     harness.applyCommitted();
 
-    const logs_resp = route(
-        makeRequest(.GET, "/apps/demo-app/training/finetune/logs", "", "rank=0"),
-        alloc,
-        harness.ctx(),
-    ).?;
+    const logs_resp = try harness.trainingLogsRank("demo-app", "finetune", "0");
     defer freeResponse(alloc, logs_resp);
 
     try std.testing.expectEqual(http.StatusCode.bad_request, logs_resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, logs_resp.body, "hosting agent") != null);
+    try expectJsonContains(logs_resp.body, "hosting agent");
 }
 
 test "training logs route rejects invalid rank query" {
@@ -242,15 +185,11 @@ test "training logs route rejects invalid rank query" {
     var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
-    const logs_resp = route(
-        makeRequest(.GET, "/apps/demo-app/training/finetune/logs", "", "rank=abc"),
-        alloc,
-        harness.ctx(),
-    ).?;
+    const logs_resp = try harness.trainingLogsRank("demo-app", "finetune", "abc");
     defer freeResponse(alloc, logs_resp);
 
     try std.testing.expectEqual(http.StatusCode.bad_request, logs_resp.status);
-    try std.testing.expect(std.mem.indexOf(u8, logs_resp.body, "invalid rank") != null);
+    try expectJsonContains(logs_resp.body, "invalid rank");
 }
 
 test "training logs route prefers local logs when available" {
@@ -276,11 +215,7 @@ test "training logs route prefers local logs when available" {
     try seedTrainingAssignment(&harness, "demo-app", "finetune", 0);
     try clearHarnessAgentEndpoint(&harness);
 
-    const logs_resp = route(
-        makeRequest(.GET, "/apps/demo-app/training/finetune/logs", "", "rank=0"),
-        alloc,
-        harness.ctx(),
-    ).?;
+    const logs_resp = try harness.trainingLogsRank("demo-app", "finetune", "0");
     defer freeResponse(alloc, logs_resp);
 
     try std.testing.expectEqual(http.StatusCode.ok, logs_resp.status);
@@ -299,25 +234,15 @@ test "training logs route proxies logs from hosting agent" {
 
     try updateHarnessAgentEndpoint(&harness, "127.0.0.1", 41001);
 
-    try harness.seedLatestRelease(
-        app_name,
-        "{\"app_name\":\"" ++ app_name ++ "\",\"services\":[],\"workers\":[],\"crons\":[],\"training_jobs\":[{\"name\":\"" ++ job_name ++ "\",\"image\":\"pytorch:latest\",\"command\":[\"python\",\"train.py\"],\"gpus\":1,\"cpu_limit\":2000,\"memory_limit_mb\":4096}]}",
-    );
+    try harness.seedTrainingRelease(app_name, job_name, 1);
 
-    const start_resp = route(
-        makeRequest(.POST, "/apps/" ++ app_name ++ "/training/" ++ job_name ++ "/start", "", ""),
-        alloc,
-        .{ .cluster = harness.node, .join_token = "join-token" },
-    ).?;
+    const joined_ctx: RouteContext = .{ .cluster = harness.node, .join_token = "join-token" };
+    const start_resp = try harness.trainingStartWithContext(app_name, job_name, joined_ctx);
     defer freeResponse(alloc, start_resp);
     try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
     harness.applyCommitted();
 
-    const logs_resp = route(
-        makeRequest(.GET, "/apps/" ++ app_name ++ "/training/" ++ job_name ++ "/logs", "", "rank=0"),
-        alloc,
-        .{ .cluster = harness.node, .join_token = "join-token" },
-    ).?;
+    const logs_resp = try harness.trainingLogsRankWithContext(app_name, job_name, "0", joined_ctx);
     defer freeResponse(alloc, logs_resp);
 
     try std.testing.expectEqual(http.StatusCode.ok, logs_resp.status);
