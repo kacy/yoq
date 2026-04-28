@@ -1,113 +1,19 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 
-const cluster_node = @import("../../../cluster/node.zig");
 const store = @import("../../../state/store.zig");
-const common = @import("../common.zig");
 const http = @import("../../http.zig");
+const test_support = @import("route_test_support.zig");
 const workload_routes = @import("workload_routes.zig");
 
-const Response = common.Response;
-const RouteContext = common.RouteContext;
+const RouteContext = test_support.RouteContext;
 
 const route = workload_routes.route;
 const setTestProxyTrainingLogsResponse = workload_routes.setTestProxyTrainingLogsResponse;
 const clearTestProxyTrainingLogsResponse = workload_routes.clearTestProxyTrainingLogsResponse;
-
-const RouteFlowHarness = struct {
-    alloc: std.mem.Allocator,
-    tmp: std.testing.TmpDir,
-    node: *cluster_node.Node,
-
-    fn init(alloc: std.mem.Allocator) !RouteFlowHarness {
-        var tmp = std.testing.tmpDir(.{});
-        errdefer tmp.cleanup();
-        try store.initTestDb();
-        errdefer store.deinitTestDb();
-
-        var path_buf: [512]u8 = undefined;
-        const tmp_path_len = try tmp.dir.realPathFile(std.testing.io, ".", &path_buf);
-        const tmp_path = path_buf[0..tmp_path_len];
-
-        const node = try alloc.create(cluster_node.Node);
-        errdefer alloc.destroy(node);
-
-        node.* = try cluster_node.Node.initForTests(alloc, .{
-            .id = 1,
-            .port = 0,
-            .peers = &.{},
-            .data_dir = tmp_path,
-        });
-        errdefer node.deinit();
-        node.fixPointers();
-
-        node.raft.role = .leader;
-        node.leader_id = node.config.id;
-
-        var harness = RouteFlowHarness{
-            .alloc = alloc,
-            .tmp = tmp,
-            .node = node,
-        };
-        try harness.seedActiveAgent();
-        return harness;
-    }
-
-    fn deinit(self: *RouteFlowHarness) void {
-        self.node.deinit();
-        self.alloc.destroy(self.node);
-        store.deinitTestDb();
-        self.tmp.cleanup();
-    }
-
-    fn ctx(self: *RouteFlowHarness) RouteContext {
-        return .{ .cluster = self.node, .join_token = null };
-    }
-
-    fn applyCommitted(self: *RouteFlowHarness) void {
-        self.node.state_machine.applyUpTo(&self.node.log, self.alloc, self.node.log.lastIndex());
-        self.node.raft.role = .leader;
-        self.node.leader_id = self.node.config.id;
-    }
-
-    fn seedActiveAgent(self: *RouteFlowHarness) !void {
-        self.node.stateMachineDb().exec(
-            "INSERT INTO agents (id, address, agent_api_port, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels, gpu_count, gpu_used, gpu_model, gpu_vram_mb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-            .{},
-            .{ "abc123def456", "10.0.0.2", @as(i64, 7701), "active", @as(i64, 8), @as(i64, 16384), @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 100), @as(i64, 100), "agent", "", @as(i64, 4), @as(i64, 0), "L4", @as(i64, 24576) },
-        ) catch return error.SkipZigTest;
-    }
-
-    fn seedLatestRelease(self: *RouteFlowHarness, app_name: []const u8, snapshot: []const u8) !void {
-        try store.saveDeploymentInDb(self.node.stateMachineDb(), .{
-            .id = "dep-seed",
-            .app_name = app_name,
-            .service_name = app_name,
-            .trigger = "apply",
-            .manifest_hash = "sha256:seed",
-            .config_snapshot = snapshot,
-            .status = "completed",
-            .message = "apply completed",
-            .created_at = 100,
-        });
-    }
-};
-
-fn makeRequest(method: http.Method, path: []const u8, body: []const u8, query: []const u8) http.Request {
-    return .{
-        .method = method,
-        .path = path,
-        .path_only = path,
-        .query = query,
-        .headers_raw = "",
-        .body = body,
-        .content_length = body.len,
-    };
-}
-
-fn freeResponse(alloc: std.mem.Allocator, response: Response) void {
-    if (response.allocated) alloc.free(response.body);
-}
+const RouteFlowHarness = test_support.Harness;
+const makeRequest = test_support.makeRequestWithQuery;
+const freeResponse = test_support.freeResponse;
 
 fn countTrainingAssignments(db: *sqlite.Db, app_name: []const u8, job_name: []const u8) usize {
     const Row = struct { count: i64 };
@@ -160,7 +66,7 @@ test "route rejects training status without cluster" {
 
 test "worker run route schedules worker from latest app snapshot" {
     const alloc = std.testing.allocator;
-    var harness = RouteFlowHarness.init(alloc) catch return error.ProxyHarnessInitFailed;
+    var harness = RouteFlowHarness.initWithRuntimeStore(alloc) catch return error.ProxyHarnessInitFailed;
     defer harness.deinit();
 
     try harness.seedLatestRelease(
@@ -184,7 +90,7 @@ test "worker run route schedules worker from latest app snapshot" {
 
 test "training start and status routes persist job state from app snapshot" {
     const alloc = std.testing.allocator;
-    var harness = try RouteFlowHarness.init(alloc);
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
     try harness.seedLatestRelease(
@@ -219,7 +125,7 @@ test "training start and status routes persist job state from app snapshot" {
 
 test "training start tags assignments with workload metadata" {
     const alloc = std.testing.allocator;
-    var harness = try RouteFlowHarness.init(alloc);
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
     try harness.seedLatestRelease(
@@ -240,7 +146,7 @@ test "training start tags assignments with workload metadata" {
 
 test "training pause route clears scheduled assignments" {
     const alloc = std.testing.allocator;
-    var harness = try RouteFlowHarness.init(alloc);
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
     try harness.seedLatestRelease(
@@ -271,7 +177,7 @@ test "training pause route clears scheduled assignments" {
 
 test "training scale route replaces prior scheduled assignments" {
     const alloc = std.testing.allocator;
-    var harness = try RouteFlowHarness.init(alloc);
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
     try harness.seedLatestRelease(
@@ -303,7 +209,7 @@ test "training scale route replaces prior scheduled assignments" {
 
 test "training logs route reports remote-hosted ranks explicitly" {
     const alloc = std.testing.allocator;
-    var harness = try RouteFlowHarness.init(alloc);
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
     try harness.seedLatestRelease(
@@ -333,7 +239,7 @@ test "training logs route reports remote-hosted ranks explicitly" {
 
 test "training logs route rejects invalid rank query" {
     const alloc = std.testing.allocator;
-    var harness = try RouteFlowHarness.init(alloc);
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
     const logs_resp = route(
@@ -349,7 +255,7 @@ test "training logs route rejects invalid rank query" {
 
 test "training logs route prefers local logs when available" {
     const alloc = std.testing.allocator;
-    var harness = try RouteFlowHarness.init(alloc);
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
     try store.save(.{
@@ -383,7 +289,7 @@ test "training logs route prefers local logs when available" {
 
 test "training logs route proxies logs from hosting agent" {
     const alloc = std.testing.allocator;
-    var harness = try RouteFlowHarness.init(alloc);
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
 
     const app_name = "proxylogs-app";

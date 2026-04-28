@@ -2,27 +2,25 @@ const std = @import("std");
 const http = @import("../../http.zig");
 const sqlite = @import("sqlite");
 
-const cluster_node = @import("../../../cluster/node.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const apply_release = @import("../../../manifest/apply_release.zig");
 const app_snapshot = @import("../../../manifest/app_snapshot.zig");
 const schema = @import("../../../state/schema.zig");
 const store = @import("../../../state/store.zig");
-const common = @import("../common.zig");
 const app_route_responses = @import("app_route_responses.zig");
 const app_routes = @import("app_routes.zig");
-const deploy_routes = @import("deploy_routes.zig");
+const test_support = @import("route_test_support.zig");
 
-const Response = common.Response;
-const RouteContext = common.RouteContext;
+const RouteContext = test_support.RouteContext;
 
 const route = app_routes.route;
-const handleListApps = app_routes.handleListApps;
-const handleAppHistory = app_routes.handleAppHistory;
-const handleAppStatus = app_routes.handleAppStatus;
-const handleAppRollback = app_routes.handleAppRollback;
 const recoverActiveClusterRolloutsOnce = app_routes.recoverActiveClusterRolloutsOnce;
+const RouteFlowHarness = test_support.Harness;
+const makeRequest = test_support.makeRequest;
+const freeResponse = test_support.freeResponse;
+const expectJsonContains = test_support.expectJsonContains;
+const expectResponseOk = test_support.expectResponseOk;
 
 fn formatAppsResponse(alloc: std.mem.Allocator, db: *sqlite.Db, latest_deployments: []const store.DeploymentRecord) ![]u8 {
     return app_route_responses.formatApps(alloc, db, latest_deployments);
@@ -40,134 +38,6 @@ fn formatAppStatusResponse(
     training_summary: store.TrainingJobSummary,
 ) ![]u8 {
     return app_route_responses.formatStatus(alloc, report, previous_successful, summary, training_summary);
-}
-
-const RouteFlowHarness = struct {
-    alloc: std.mem.Allocator,
-    tmp: std.testing.TmpDir,
-    node: *cluster_node.Node,
-
-    fn init(alloc: std.mem.Allocator) !RouteFlowHarness {
-        var tmp = std.testing.tmpDir(.{});
-        errdefer tmp.cleanup();
-
-        var path_buf: [512]u8 = undefined;
-        const tmp_path_len = try tmp.dir.realPathFile(std.testing.io, ".", &path_buf);
-        const tmp_path = path_buf[0..tmp_path_len];
-
-        const node = try alloc.create(cluster_node.Node);
-        errdefer alloc.destroy(node);
-
-        node.* = try cluster_node.Node.initForTests(alloc, .{
-            .id = 1,
-            .port = 0,
-            .peers = &.{},
-            .data_dir = tmp_path,
-        });
-        errdefer node.deinit();
-        node.fixPointers();
-
-        node.raft.role = .leader;
-        node.leader_id = node.config.id;
-
-        var harness = RouteFlowHarness{
-            .alloc = alloc,
-            .tmp = tmp,
-            .node = node,
-        };
-        try harness.seedActiveAgent();
-        return harness;
-    }
-
-    fn deinit(self: *RouteFlowHarness) void {
-        self.node.deinit();
-        self.alloc.destroy(self.node);
-        self.tmp.cleanup();
-    }
-
-    fn ctx(self: *RouteFlowHarness) RouteContext {
-        return .{ .cluster = self.node, .join_token = null };
-    }
-
-    fn applyCommitted(self: *RouteFlowHarness) void {
-        self.node.state_machine.applyUpTo(&self.node.log, self.alloc, self.node.log.lastIndex());
-        self.node.raft.role = .leader;
-        self.node.leader_id = self.node.config.id;
-    }
-
-    fn seedActiveAgent(self: *RouteFlowHarness) !void {
-        try self.node.stateMachineDb().exec(
-            "INSERT INTO agents (id, address, agent_api_port, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role, labels, gpu_count, gpu_used, gpu_model, gpu_vram_mb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-            .{},
-            .{ "abc123def456", "10.0.0.2", @as(i64, 7701), "active", @as(i64, 8), @as(i64, 16384), @as(i64, 0), @as(i64, 0), @as(i64, 0), @as(i64, 100), @as(i64, 100), "agent", "", @as(i64, 4), @as(i64, 0), "L4", @as(i64, 24576) },
-        );
-    }
-
-    fn appApply(self: *RouteFlowHarness, body: []const u8) Response {
-        return deploy_routes.handleAppApply(self.alloc, makeRequest(.POST, "/apps/apply", body), self.ctx());
-    }
-
-    fn rollback(self: *RouteFlowHarness, app_name: []const u8, release_id: []const u8) !Response {
-        const body = try std.fmt.allocPrint(self.alloc, "{{\"release_id\":\"{s}\"}}", .{release_id});
-        defer self.alloc.free(body);
-        const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/rollback", .{app_name});
-        defer self.alloc.free(path);
-        return handleAppRollback(self.alloc, app_name, makeRequest(.POST, path, body), self.ctx());
-    }
-
-    fn rollbackDefault(self: *RouteFlowHarness, app_name: []const u8) !Response {
-        const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/rollback", .{app_name});
-        defer self.alloc.free(path);
-        return handleAppRollback(self.alloc, app_name, makeRequest(.POST, path, "{\"print\":false}"), self.ctx());
-    }
-
-    fn rollbackPrint(self: *RouteFlowHarness, app_name: []const u8) !Response {
-        const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/rollback", .{app_name});
-        defer self.alloc.free(path);
-        return handleAppRollback(self.alloc, app_name, makeRequest(.POST, path, "{\"print\":true}"), self.ctx());
-    }
-
-    fn status(self: *RouteFlowHarness, app_name: []const u8) Response {
-        return handleAppStatus(self.alloc, app_name, self.ctx());
-    }
-
-    fn history(self: *RouteFlowHarness, app_name: []const u8) Response {
-        return handleAppHistory(self.alloc, app_name, self.ctx());
-    }
-
-    fn listApps(self: *RouteFlowHarness) Response {
-        return handleListApps(self.alloc, self.ctx());
-    }
-
-    fn rolloutControl(self: *RouteFlowHarness, app_name: []const u8, action: []const u8) !Response {
-        const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/rollout/{s}", .{ app_name, action });
-        defer self.alloc.free(path);
-        return route(makeRequest(.POST, path, "{}"), self.alloc, self.ctx()).?;
-    }
-};
-
-fn makeRequest(method: http.Method, path: []const u8, body: []const u8) http.Request {
-    return .{
-        .method = method,
-        .path = path,
-        .path_only = path,
-        .query = "",
-        .headers_raw = "",
-        .body = body,
-        .content_length = body.len,
-    };
-}
-
-fn freeResponse(alloc: std.mem.Allocator, response: Response) void {
-    if (response.allocated) alloc.free(response.body);
-}
-
-fn expectJsonContains(json: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, json, needle) != null);
-}
-
-fn expectResponseOk(response: Response) !void {
-    try std.testing.expectEqual(http.StatusCode.ok, response.status);
 }
 
 test "formatAppHistoryResponse emits release records" {
