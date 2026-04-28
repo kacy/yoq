@@ -219,6 +219,32 @@ pub fn build(b: *std.Build) void {
     const run_network = createArtifactRunner(b, network_tests, "run network rollout smoke tests", true);
     network_test_step.dependOn(&run_network.step);
 
+    // -- golden path tests (installed binary + documented examples) --
+    //
+    // these keep the documented single-machine operator flow executable:
+    // CLI entry points, example manifest validation, and example app shapes.
+    const golden_path_test_step = b.step("test-golden-path", "Run documented golden path smoke tests");
+    const golden_path_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_golden_path.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    addLinuxImport(golden_path_test_mod, b);
+    golden_path_test_mod.addImport("helpers", b.createModule(.{
+        .root_source_file = b.path("tests/helpers.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    const golden_path_tests = b.addTest(.{
+        .root_module = golden_path_test_mod,
+        .filters = if (test_filter) |filter| &.{filter} else &.{},
+    });
+    const run_golden_path = createArtifactRunner(b, golden_path_tests, "run golden path tests", true);
+    run_golden_path.step.dependOn(b.getInstallStep());
+    golden_path_test_step.dependOn(&run_golden_path.step);
+    hardening_test_step.dependOn(golden_path_test_step);
+
     // -- gpu tests (no hardware required) --
     //
     // these focus on the src/gpu subtree plus manifest GPU env glue. they are

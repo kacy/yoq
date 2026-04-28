@@ -10,6 +10,8 @@ the path has three stages:
 
 if a stage fails, stop there and fix that layer before moving on.
 
+Before running the manual path, `make test-golden-path` checks the same local assumptions that are cheap to automate: CLI startup, example manifest validation, example app shape, and shell-script syntax.
+
 ## 1. local runtime and manifests
 
 start with the built-in checks:

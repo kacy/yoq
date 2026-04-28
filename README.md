@@ -126,6 +126,8 @@ For the app/control-plane smoke lane, use `make test-operator` or `zig build tes
 
 For the network/service-rollout smoke lane, use `make test-network` or `zig build test-network`. It keeps deterministic status/metrics, service-registry bridge, rollout-flag, and reconciler coverage together without depending on privileged proxy/runtime tests.
 
+For the documented single-machine operator path, use `make test-golden-path` or `zig build test-golden-path`. It checks the installed CLI, validates every example manifest, and locks the example app shapes used by the guide.
+
 For GPU-focused validation without running the full suite, use `zig build test-gpu`. For a real-host smoke checklist, see [docs/gpu-validation.md](docs/gpu-validation.md).
 
 Before landing runtime or parser-sensitive changes, run `make test-hardening`. It collects the non-privileged integration, contract, simulation, GPU, manifest edge, and corpus fuzz lanes that are too broad for the fastest local loop but should stay green before main.

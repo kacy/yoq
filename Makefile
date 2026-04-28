@@ -1,6 +1,6 @@
 ZIG ?= $(shell command -v zig)
 
-.PHONY: build run test test-operator test-network test-integration test-contract test-sim test-gpu test-hardening panic-audit test-runtime-core test-runtime-network test-runtime-cluster test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor release-cross
+.PHONY: build run test test-operator test-network test-golden-path test-integration test-contract test-sim test-gpu test-hardening panic-audit test-runtime-core test-runtime-network test-runtime-cluster test-privileged clean clean-all bpf install fmt loc cache-sqlite release-patch release-minor release-cross
 
 build:
 	$(ZIG) build -Doptimize=ReleaseSafe
@@ -16,6 +16,9 @@ test-operator:
 
 test-network:
 	$(ZIG) build -Doptimize=ReleaseSafe test-network
+
+test-golden-path:
+	YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -Doptimize=ReleaseSafe test-golden-path
 
 test-integration:
 	$(ZIG) build -Doptimize=ReleaseSafe test-integration
