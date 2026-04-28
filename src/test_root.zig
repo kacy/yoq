@@ -116,7 +116,10 @@ comptime {
     _ = @import("api/routes/cluster_agents/app_routes_tests.zig");
     _ = @import("api/routes/cluster_agents/deploy_routes.zig");
     _ = @import("api/routes/cluster_agents/rollout_targets.zig");
+    _ = @import("api/routes/cluster_agents/workload_placements.zig");
+    _ = @import("api/routes/cluster_agents/workload_training_jobs.zig");
     _ = @import("api/routes/cluster_agents/workload_training_logs.zig");
+    _ = @import("api/routes/cluster_agents/workload_workers.zig");
     _ = @import("api/routes/cluster_agents/workload_routes.zig");
     _ = @import("api/routes/cluster_agents/workload_routes_tests.zig");
     _ = @import("api/routes/status_metrics.zig");
