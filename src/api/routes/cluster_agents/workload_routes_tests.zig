@@ -16,14 +16,14 @@ const makeRequest = test_support.makeRequestWithQuery;
 const freeResponse = test_support.freeResponse;
 const expectJsonContains = test_support.expectJsonContains;
 
-fn countTrainingAssignments(db: *sqlite.Db, app_name: []const u8, job_name: []const u8) usize {
+fn countTrainingAssignments(db: *sqlite.Db, app_name: []const u8, job_name: []const u8) !usize {
     const Row = struct { count: i64 };
-    const row = (db.one(
+    const row = try db.one(
         Row,
         "SELECT COUNT(*) AS count FROM assignments WHERE app_name = ? AND workload_kind = 'training' AND workload_name = ?;",
         .{},
         .{ app_name, job_name },
-    ) catch unreachable) orelse unreachable;
+    ) orelse return error.TrainingAssignmentCountMissing;
     return @intCast(row.count);
 }
 
@@ -117,7 +117,7 @@ test "training start tags assignments with workload metadata" {
     defer freeResponse(alloc, start_resp);
     try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
     harness.applyCommitted();
-    try std.testing.expectEqual(@as(usize, 2), countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
+    try std.testing.expectEqual(@as(usize, 2), try countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
 }
 
 test "training pause route clears scheduled assignments" {
@@ -137,7 +137,7 @@ test "training pause route clears scheduled assignments" {
 
     try std.testing.expectEqual(http.StatusCode.ok, pause_resp.status);
     try expectJsonContains(pause_resp.body, "\"state\":\"paused\"");
-    try std.testing.expectEqual(@as(usize, 0), countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
+    try std.testing.expectEqual(@as(usize, 0), try countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
 }
 
 test "training scale route replaces prior scheduled assignments" {
@@ -158,7 +158,7 @@ test "training scale route replaces prior scheduled assignments" {
     try std.testing.expectEqual(http.StatusCode.ok, scale_resp.status);
     try expectJsonContains(scale_resp.body, "\"state\":\"running\"");
     try expectJsonContains(scale_resp.body, "\"gpus\":2");
-    try std.testing.expectEqual(@as(usize, 2), countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
+    try std.testing.expectEqual(@as(usize, 2), try countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
 }
 
 test "training logs route reports remote-hosted ranks explicitly" {

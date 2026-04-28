@@ -663,14 +663,14 @@ test "queryTargetReadiness returns ready when all assignments are running" {
     defer db.deinit();
     try @import("../../../state/schema.zig").init(&db);
 
-    db.exec(
+    try db.exec(
         "INSERT INTO assignments (id, agent_id, image, status, created_at) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);",
         .{},
         .{
             "a1", "agent1", "nginx:1", "running", @as(i64, 1),
             "a2", "agent1", "nginx:1", "running", @as(i64, 1),
         },
-    ) catch unreachable;
+    );
 
     try std.testing.expectEqual(
         TargetReadiness.ready,
@@ -683,11 +683,11 @@ test "queryTargetReadiness returns pending when assignments are not ready yet" {
     defer db.deinit();
     try @import("../../../state/schema.zig").init(&db);
 
-    db.exec(
+    try db.exec(
         "INSERT INTO assignments (id, agent_id, image, status, created_at) VALUES (?, ?, ?, ?, ?);",
         .{},
         .{ "a1", "agent1", "nginx:1", "pending", @as(i64, 1) },
-    ) catch unreachable;
+    );
 
     try std.testing.expectEqual(
         TargetReadiness.pending,
@@ -700,14 +700,14 @@ test "queryTargetReadiness returns failed when any assignment is terminal" {
     defer db.deinit();
     try @import("../../../state/schema.zig").init(&db);
 
-    db.exec(
+    try db.exec(
         "INSERT INTO assignments (id, agent_id, image, status, created_at) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);",
         .{},
         .{
             "a1", "agent1", "nginx:1", "running", @as(i64, 1),
             "a2", "agent1", "nginx:1", "failed",  @as(i64, 1),
         },
-    ) catch unreachable;
+    );
 
     try std.testing.expectEqual(
         TargetReadiness.failed,
@@ -720,11 +720,11 @@ test "queryTargetReadiness uses explicit status reason from agent" {
     defer db.deinit();
     try @import("../../../state/schema.zig").init(&db);
 
-    db.exec(
+    try db.exec(
         "INSERT INTO assignments (id, agent_id, image, status, status_reason, created_at) VALUES (?, ?, ?, ?, ?, ?);",
         .{},
         .{ "a1", "agent1", "nginx:1", "failed", "readiness_failed", @as(i64, 1) },
-    ) catch unreachable;
+    );
 
     try std.testing.expectEqual(
         TargetReadiness.readiness_failed,
@@ -737,11 +737,11 @@ test "queryTargetReadiness preserves exact startup failure reason from agent" {
     defer db.deinit();
     try @import("../../../state/schema.zig").init(&db);
 
-    db.exec(
+    try db.exec(
         "INSERT INTO assignments (id, agent_id, image, status, status_reason, created_at) VALUES (?, ?, ?, ?, ?, ?);",
         .{},
         .{ "a1", "agent1", "nginx:1", "failed", "image_pull_failed", @as(i64, 1) },
-    ) catch unreachable;
+    );
 
     try std.testing.expectEqual(
         TargetReadiness.image_pull_failed,
@@ -754,11 +754,11 @@ test "queryTargetReadiness preserves process failure reason from agent" {
     defer db.deinit();
     try @import("../../../state/schema.zig").init(&db);
 
-    db.exec(
+    try db.exec(
         "INSERT INTO assignments (id, agent_id, image, status, status_reason, created_at) VALUES (?, ?, ?, ?, ?, ?);",
         .{},
         .{ "a1", "agent1", "nginx:1", "failed", "process_failed", @as(i64, 1) },
-    ) catch unreachable;
+    );
 
     try std.testing.expectEqual(
         TargetReadiness.process_failed,
@@ -782,11 +782,11 @@ test "resolveTargetReadinessStates leaves pending targets pending when timeout e
     defer db.deinit();
     try @import("../../../state/schema.zig").init(&db);
 
-    db.exec(
+    try db.exec(
         "INSERT INTO assignments (id, agent_id, image, status, created_at) VALUES (?, ?, ?, ?, ?);",
         .{},
         .{ "a1", "agent1", "nginx:1", "pending", @as(i64, 1) },
-    ) catch unreachable;
+    );
 
     const ids = [_][]const u8{"a1"};
     const targets = [_]ScheduledTarget{
@@ -831,11 +831,11 @@ test "resolveTargetReadinessStates waits for paused rollout control to resume" {
     defer db.deinit();
     try @import("../../../state/schema.zig").init(&db);
 
-    db.exec(
+    try db.exec(
         "INSERT INTO assignments (id, agent_id, image, status, created_at) VALUES (?, ?, ?, ?, ?);",
         .{},
         .{ "a1", "agent1", "nginx:1", "running", @as(i64, 1) },
-    ) catch unreachable;
+    );
 
     const ids = [_][]const u8{"a1"};
     const targets = [_]ScheduledTarget{
@@ -872,7 +872,7 @@ test "resolveTargetReadinessStates waits for paused rollout control to resume" {
 
     const Resumer = struct {
         fn run() void {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch unreachable;
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch return;
             store.updateDeploymentRolloutControlState("dep-pause", "active") catch {};
         }
     };
@@ -909,11 +909,11 @@ test "resolveTargetReadinessStates exits when paused rollout is canceled" {
     defer db.deinit();
     try @import("../../../state/schema.zig").init(&db);
 
-    db.exec(
+    try db.exec(
         "INSERT INTO assignments (id, agent_id, image, status, created_at) VALUES (?, ?, ?, ?, ?);",
         .{},
         .{ "a1", "agent1", "nginx:1", "pending", @as(i64, 1) },
-    ) catch unreachable;
+    );
 
     const ids = [_][]const u8{"a1"};
     const targets = [_]ScheduledTarget{
@@ -950,7 +950,7 @@ test "resolveTargetReadinessStates exits when paused rollout is canceled" {
 
     const Canceler = struct {
         fn run() void {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch unreachable;
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch return;
             store.updateDeploymentRolloutControlState("dep-cancel", "cancel_requested") catch {};
         }
     };
@@ -1034,7 +1034,7 @@ test "finalizeBatchTargets honors paused rollout resume before cutover" {
 
     const Resumer = struct {
         fn run(db: *sqlite.Db) void {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch unreachable;
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch return;
             db.exec("UPDATE assignments SET status = 'running' WHERE id = 'new-web';", .{}, .{}) catch {};
             store.updateDeploymentRolloutControlState("dep-resume", "active") catch {};
         }
@@ -1145,7 +1145,7 @@ test "finalizeBatchTargets discards scheduled targets when paused rollout is can
 
     const Canceler = struct {
         fn run() void {
-            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch unreachable;
+            std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(150), .awake) catch return;
             store.updateDeploymentRolloutControlState("dep-cancel-finalize", "cancel_requested") catch {};
         }
     };
