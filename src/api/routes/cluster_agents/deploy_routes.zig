@@ -6,6 +6,7 @@ const cluster_node = @import("../../../cluster/node.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const apply_release = @import("../../../manifest/apply_release.zig");
 const app_snapshot = @import("../../../manifest/app_snapshot.zig");
+const apply_response = @import("apply_response.zig");
 const apply_request = @import("apply_request.zig");
 const volumes_mod = @import("../../../state/volumes.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
@@ -1357,7 +1358,7 @@ pub fn handleAppRollbackApplyWithContext(
 }
 
 fn formatLegacyApplyResponse(alloc: std.mem.Allocator, placed: usize, failed: usize) ![]u8 {
-    return std.fmt.allocPrint(alloc, "{{\"placed\":{d},\"failed\":{d}}}", .{ placed, failed });
+    return apply_response.formatLegacy(alloc, placed, failed);
 }
 
 fn formatAppApplyResponse(
@@ -1365,71 +1366,7 @@ fn formatAppApplyResponse(
     report: apply_release.ApplyReport,
     summary: app_snapshot.Summary,
 ) ![]u8 {
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
-
-    const writer = &json_buf_writer.writer;
-
-    try writer.writeByte('{');
-    try json_helpers.writeJsonStringField(writer, "app_name", report.app_name);
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "trigger", report.trigger.toString());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "release_id", report.release_id orelse "");
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "status", report.status.toString());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "rollout_control_state", report.rollout_control_state.toString());
-    try writer.print(",\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"placed\":{d},\"failed\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
-        summary.service_count,
-        summary.worker_count,
-        summary.cron_count,
-        summary.training_job_count,
-        report.placed,
-        report.failed,
-        report.completed_targets,
-        report.failed_targets,
-        report.remainingTargets(),
-    });
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "source_release_id", report.source_release_id);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
-
-    const resolved_message = try report.resolvedMessage(alloc);
-    defer if (resolved_message) |message| alloc.free(message);
-
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "message", resolved_message);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "rollout_targets", report.rollout_targets_json);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "rollout_checkpoint", report.rollout_checkpoint_json);
-    try writer.writeAll(",\"rollout\":{");
-    try json_helpers.writeJsonStringField(writer, "state", report.rolloutState());
-    try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "control_state", report.rollout_control_state.toString());
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonStringField(writer, "resumed_from_release_id", report.resumed_from_release_id);
-    try writer.print(",\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
-        report.completed_targets,
-        report.failed_targets,
-        report.remainingTargets(),
-    });
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "failure_details", report.failure_details_json);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "targets", report.rollout_targets_json);
-    try writer.writeByte(',');
-    try json_helpers.writeNullableJsonRawField(writer, "checkpoint", report.rollout_checkpoint_json);
-    try writer.writeByte('}');
-    try writer.writeByte('}');
-
-    return json_buf_writer.toOwnedSlice();
+    return apply_response.formatApp(alloc, report, summary);
 }
 
 const RolloutNodeHarness = struct {

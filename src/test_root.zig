@@ -105,6 +105,7 @@ comptime {
     _ = @import("api/http.zig");
     _ = @import("api/routes.zig");
     _ = @import("api/routes/cluster_agents.zig");
+    _ = @import("api/routes/cluster_agents/apply_response.zig");
     _ = @import("api/routes/cluster_agents/apply_request.zig");
     _ = @import("api/routes/cluster_agents/app_routes.zig");
     _ = @import("api/routes/cluster_agents/deploy_routes.zig");
