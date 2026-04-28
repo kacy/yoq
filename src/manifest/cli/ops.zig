@@ -3,7 +3,7 @@ const cli = @import("../../lib/cli.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const json_out = @import("../../lib/json_output.zig");
 const apply_release = @import("../apply_release.zig");
-const app_snapshot = @import("../app_snapshot.zig");
+const app_view = @import("../app_view.zig");
 const rollback_snapshot = @import("../rollback_snapshot.zig");
 const local_apply_backend = @import("../local_apply_backend.zig");
 const manifest_loader = @import("../loader.zig");
@@ -296,17 +296,12 @@ pub fn history(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allo
     }
 
     if (cli.output_mode == .json) {
-        var w = json_out.JsonWriter{};
-        w.beginArray();
-        const previous_successful_id = previousSuccessfulReleaseId(deployments.items);
-        for (deployments.items, 0..) |dep, i| {
-            var entry = historyEntryFromDeployment(dep);
-            entry.is_current = i == 0;
-            entry.is_previous_successful = previous_successful_id != null and std.mem.eql(u8, entry.id, previous_successful_id.?);
-            writeHistoryJsonObject(&w, entry);
-        }
-        w.endArray();
-        w.flush();
+        var entries = try app_view.releaseViewsFromDeployments(alloc, deployments.items);
+        defer app_view.deinitReleaseViews(alloc, &entries);
+
+        const json = app_view.renderHistory(alloc, entries.items) catch return OpsError.StoreError;
+        defer alloc.free(json);
+        write("{s}\n", .{json});
         return;
     }
 
@@ -321,11 +316,10 @@ pub fn history(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allo
 
     writeHistoryHeader();
 
-    const previous_successful_id = previousSuccessfulReleaseId(deployments.items);
-    for (deployments.items, 0..) |dep, i| {
-        var entry = historyEntryFromDeployment(dep);
-        entry.is_current = i == 0;
-        entry.is_previous_successful = previous_successful_id != null and std.mem.eql(u8, entry.id, previous_successful_id.?);
+    var entries = try app_view.releaseViewsFromDeployments(alloc, deployments.items);
+    defer app_view.deinitReleaseViews(alloc, &entries);
+
+    for (entries.items) |entry| {
         writeHistoryRow(entry);
     }
 }
@@ -367,7 +361,7 @@ fn printRemoteAppHistory(io: std.Io, alloc: std.mem.Allocator, addr_str: []const
 
     var iter = json_helpers.extractJsonObjects(resp.body);
     while (iter.next()) |obj| {
-        entries.append(alloc, parseHistoryObject(obj)) catch return OpsError.StoreError;
+        entries.append(alloc, app_view.parseRelease(obj)) catch return OpsError.StoreError;
     }
 
     if (entries.items.len == 0) {
@@ -381,102 +375,18 @@ fn printRemoteAppHistory(io: std.Io, alloc: std.mem.Allocator, addr_str: []const
     }
 }
 
+const HistoryEntryView = app_view.ReleaseView;
+
 fn previousSuccessfulReleaseId(deployments: []const store.DeploymentRecord) ?[]const u8 {
-    if (deployments.len == 0) return null;
-    for (deployments[1..]) |dep| {
-        if (std.mem.eql(u8, dep.status, "completed")) return dep.id;
-    }
-    return null;
+    return app_view.previousSuccessfulReleaseId(deployments);
 }
 
-const HistoryEntryView = struct {
-    id: []const u8,
-    app: ?[]const u8,
-    service: []const u8,
-    trigger: []const u8,
-    status: []const u8,
-    rollout_state: []const u8 = "unknown",
-    rollout_control_state: []const u8 = "active",
-    manifest_hash: []const u8,
-    created_at: i64,
-    service_count: usize = 0,
-    worker_count: usize = 0,
-    cron_count: usize = 0,
-    training_job_count: usize = 0,
-    completed_targets: usize,
-    failed_targets: usize,
-    remaining_targets: usize,
-    source_release_id: ?[]const u8,
-    resumed_from_release_id: ?[]const u8 = null,
-    superseded_by_release_id: ?[]const u8 = null,
-    message: ?[]const u8,
-    failure_details_json: ?[]const u8 = null,
-    rollout_targets_json: ?[]const u8 = null,
-    rollout_checkpoint_json: ?[]const u8 = null,
-    is_current: bool = false,
-    is_previous_successful: bool = false,
-};
-
 fn historyEntryFromDeployment(dep: store.DeploymentRecord) HistoryEntryView {
-    const report = apply_release.reportFromDeployment(dep);
-    const summary = app_snapshot.summarize(dep.config_snapshot);
-    return .{
-        .id = report.release_id orelse dep.id,
-        .app = dep.app_name,
-        .service = dep.service_name,
-        .trigger = report.trigger.toString(),
-        .status = report.status.toString(),
-        .rollout_state = report.rolloutState(),
-        .rollout_control_state = report.rollout_control_state.toString(),
-        .manifest_hash = report.manifest_hash,
-        .created_at = report.created_at,
-        .service_count = summary.service_count,
-        .worker_count = summary.worker_count,
-        .cron_count = summary.cron_count,
-        .training_job_count = summary.training_job_count,
-        .completed_targets = report.completed_targets,
-        .failed_targets = report.failed_targets,
-        .remaining_targets = report.remainingTargets(),
-        .source_release_id = report.source_release_id,
-        .resumed_from_release_id = report.resumed_from_release_id,
-        .superseded_by_release_id = report.superseded_by_release_id,
-        .message = report.message,
-        .failure_details_json = report.failure_details_json,
-        .rollout_targets_json = report.rollout_targets_json,
-        .rollout_checkpoint_json = report.rollout_checkpoint_json,
-        .is_current = false,
-        .is_previous_successful = false,
-    };
+    return app_view.releaseViewFromDeployment(dep, false, false);
 }
 
 fn parseHistoryObject(obj: []const u8) HistoryEntryView {
-    return .{
-        .id = json_helpers.extractJsonString(obj, "id") orelse "?",
-        .app = json_helpers.extractJsonString(obj, "app"),
-        .service = json_helpers.extractJsonString(obj, "service") orelse "?",
-        .trigger = json_helpers.extractJsonString(obj, "trigger") orelse "apply",
-        .status = json_helpers.extractJsonString(obj, "status") orelse "?",
-        .rollout_state = json_helpers.extractJsonString(obj, "rollout_state") orelse "unknown",
-        .rollout_control_state = json_helpers.extractJsonString(obj, "rollout_control_state") orelse "active",
-        .manifest_hash = json_helpers.extractJsonString(obj, "manifest_hash") orelse "?",
-        .created_at = json_helpers.extractJsonInt(obj, "created_at") orelse 0,
-        .service_count = @intCast(@max(0, json_helpers.extractJsonInt(obj, "service_count") orelse 0)),
-        .worker_count = @intCast(@max(0, json_helpers.extractJsonInt(obj, "worker_count") orelse 0)),
-        .cron_count = @intCast(@max(0, json_helpers.extractJsonInt(obj, "cron_count") orelse 0)),
-        .training_job_count = @intCast(@max(0, json_helpers.extractJsonInt(obj, "training_job_count") orelse 0)),
-        .completed_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "completed_targets") orelse 0)),
-        .failed_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "failed_targets") orelse 0)),
-        .remaining_targets = @intCast(@max(0, json_helpers.extractJsonInt(obj, "remaining_targets") orelse 0)),
-        .source_release_id = json_helpers.extractJsonString(obj, "source_release_id"),
-        .resumed_from_release_id = json_helpers.extractJsonString(obj, "resumed_from_release_id"),
-        .superseded_by_release_id = json_helpers.extractJsonString(obj, "superseded_by_release_id"),
-        .message = json_helpers.extractJsonString(obj, "message"),
-        .failure_details_json = json_helpers.extractJsonArray(obj, "failure_details"),
-        .rollout_targets_json = json_helpers.extractJsonArray(obj, "rollout_targets"),
-        .rollout_checkpoint_json = json_helpers.extractJsonObject(obj, "rollout_checkpoint"),
-        .is_current = json_helpers.extractJsonBool(obj, "is_current") orelse false,
-        .is_previous_successful = json_helpers.extractJsonBool(obj, "is_previous_successful") orelse false,
-    };
+    return app_view.parseRelease(obj);
 }
 
 fn writeHistoryHeader() void {
@@ -487,7 +397,7 @@ fn writeHistoryHeader() void {
 
 fn writeHistoryRow(entry: HistoryEntryView) void {
     var message_buf: [160]u8 = undefined;
-    const message = formatHistoryMessage(&message_buf, entry.message, entry.failure_details_json);
+    const message = app_view.formatMessage(&message_buf, entry.message, entry.failure_details_json);
     const mark = if (entry.is_current)
         "current"
     else if (entry.is_previous_successful)
@@ -496,7 +406,7 @@ fn writeHistoryRow(entry: HistoryEntryView) void {
         "";
     var progress_buf: [64]u8 = undefined;
     const progress = formatProgressCounts(&progress_buf, entry.completed_targets, entry.failed_targets, entry.remaining_targets);
-    const control = formatRolloutControlState(entry.rollout_control_state);
+    const control = app_view.formatRolloutControlState(entry.rollout_control_state);
 
     write("{s:<8} {s:<14} {s:<14} {s:<11} {s:<8} {s:<10} {s:<14} {s:<16} {s}\n", .{
         mark,
@@ -512,16 +422,7 @@ fn writeHistoryRow(entry: HistoryEntryView) void {
 }
 
 fn formatHistoryMessage(buf: []u8, message: ?[]const u8, failure_details_json: ?[]const u8) []const u8 {
-    if (message == null or message.?.len == 0) {
-        return json_helpers.summarizeFailureDetails(buf, failure_details_json) orelse "";
-    }
-
-    const prefix = std.fmt.bufPrint(buf, "{s}", .{message.?}) catch return message.?;
-    if (failure_details_json == null) return prefix;
-
-    const sep = std.fmt.bufPrint(buf[prefix.len..], " | ", .{}) catch return prefix;
-    const summary = json_helpers.summarizeFailureDetails(buf[prefix.len + sep.len ..], failure_details_json) orelse return prefix;
-    return buf[0 .. prefix.len + sep.len + summary.len];
+    return app_view.formatMessage(buf, message, failure_details_json);
 }
 
 fn writeHistoryJsonObject(w: *json_out.JsonWriter, entry: HistoryEntryView) void {
@@ -776,9 +677,7 @@ fn formatProgressCounts(buf: []u8, completed_targets: usize, failed_targets: usi
 }
 
 fn formatRolloutControlState(control_state: []const u8) []const u8 {
-    if (std.mem.eql(u8, control_state, "active")) return "-";
-    if (std.mem.eql(u8, control_state, "cancel_requested")) return "cancel";
-    return control_state;
+    return app_view.formatRolloutControlState(control_state);
 }
 
 test "parseHistoryObject extracts app release fields" {
