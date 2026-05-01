@@ -51,6 +51,13 @@ pub fn currentClusterDb() ?*sqlite.Db {
     return registry_support.currentClusterDb();
 }
 
+pub fn withClusterDb(
+    context: anytype,
+    comptime callback: fn (@TypeOf(context), *sqlite.Db) anyerror!void,
+) !bool {
+    return registry_support.withClusterDb(context, callback);
+}
+
 /// look up a service name in the replicated cluster database.
 /// queries the service_names table for the IP address.
 /// returns null if the name isn't found or the DB isn't available.
@@ -584,6 +591,33 @@ test "setClusterDb sets and clears the db reference" {
     // schema module, but we can verify the setter works with null
     setClusterDb(null);
     try std.testing.expect(registry_support.currentClusterDb() == null);
+}
+
+test "withClusterDb keeps db access behind the cluster lock" {
+    const Context = struct {
+        called: bool = false,
+
+        fn mark(self: *@This(), db: *sqlite.Db) !void {
+            _ = db;
+            self.called = true;
+        }
+    };
+
+    const prev = registry_support.currentClusterDb();
+    defer setClusterDb(prev);
+
+    setClusterDb(null);
+    var missing_context = Context{};
+    try std.testing.expectEqual(false, try withClusterDb(&missing_context, Context.mark));
+    try std.testing.expect(!missing_context.called);
+
+    var db = sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } }) catch return;
+    defer db.deinit();
+    setClusterDb(&db);
+
+    var context = Context{};
+    try std.testing.expectEqual(true, try withClusterDb(&context, Context.mark));
+    try std.testing.expect(context.called);
 }
 
 test "lookupClusterService resolves service VIP from services table" {

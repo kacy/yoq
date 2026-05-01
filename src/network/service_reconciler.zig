@@ -2,6 +2,7 @@ const std = @import("std");
 const cluster_registry = @import("../cluster/registry.zig");
 const dns = @import("dns.zig");
 const dns_registry_support = @import("dns/registry_support.zig");
+const sqlite = @import("sqlite");
 const ip_mod = @import("ip.zig");
 const log = @import("../lib/log.zig");
 const bridge = @import("bridge.zig");
@@ -671,11 +672,12 @@ fn quarantineStaleEndpointsLocked() void {
     const alloc = std.heap.page_allocator;
 
     const agents = blk: {
-        const cluster_db = dns.currentClusterDb() orelse break :blk null;
-        break :blk cluster_registry.listAgents(alloc, cluster_db) catch |err| {
+        var context = LoadClusterAgentsContext{ .alloc = alloc };
+        if (!(dns.withClusterDb(&context, loadClusterAgents) catch |err| {
             log.warn("service reconciler: failed to load cluster agents for stale endpoint scan: {}", .{err});
             break :blk null;
-        };
+        })) break :blk null;
+        break :blk context.agents;
     };
     defer {
         if (agents) |records| {
@@ -775,6 +777,15 @@ fn quarantineStaleEndpointsLocked() void {
         service_registry_runtime.syncServiceFromStore(service_name);
     }
     proxy_control_plane.refreshIfEnabled();
+}
+
+const LoadClusterAgentsContext = struct {
+    alloc: std.mem.Allocator,
+    agents: ?[]cluster_registry.AgentRecord = null,
+};
+
+fn loadClusterAgents(context: *LoadClusterAgentsContext, db: *sqlite.Db) !void {
+    context.agents = try cluster_registry.listAgents(context.alloc, db);
 }
 
 fn computeAuditMismatch(
@@ -1822,7 +1833,6 @@ test "component state change triggers full resync" {
 }
 
 test "bootstrap quarantines stale endpoint rows for missing nodes" {
-    const sqlite = @import("sqlite");
     const cluster_registry_test_support = @import("../cluster/registry/test_support.zig");
     const dns_registry = @import("dns/registry_support.zig");
 

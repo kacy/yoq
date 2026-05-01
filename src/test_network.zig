@@ -6,6 +6,7 @@ test "network smoke root" {
 
 comptime {
     _ = @import("api/routes/status_metrics.zig");
+    _ = @import("network/dns.zig");
     _ = @import("network/service_registry_bridge.zig");
     _ = @import("network/service_reconciler.zig");
     _ = @import("network/service_rollout.zig");

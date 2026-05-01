@@ -172,6 +172,18 @@ pub fn currentClusterDb() ?*sqlite.Db {
     return cluster_db;
 }
 
+pub fn withClusterDb(
+    context: anytype,
+    comptime callback: fn (@TypeOf(context), *sqlite.Db) anyerror!void,
+) !bool {
+    cluster_db_mutex.lockUncancelable(std.Options.debug_io);
+    defer cluster_db_mutex.unlock(std.Options.debug_io);
+
+    const db = cluster_db orelse return false;
+    try callback(context, db);
+    return true;
+}
+
 pub fn lookupClusterService(name: []const u8) ?[4]u8 {
     if (name.len == 0 or name.len > max_name_len) return null;
 
