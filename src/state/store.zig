@@ -6,6 +6,7 @@
 const common = @import("store/common.zig");
 
 pub const StoreError = common.StoreError;
+pub const withDb = common.withDb;
 
 pub const ContainerRecord = @import("store/containers.zig").ContainerRecord;
 pub const ImageRecord = @import("store/images.zig").ImageRecord;
@@ -30,7 +31,6 @@ pub const CheckpointRecord = @import("store/training.zig").CheckpointRecord;
 
 pub const initTestDb = common.initTestDb;
 pub const deinitTestDb = common.deinitTestDb;
-pub const getDb = common.getDb;
 pub const closeDb = common.closeDb;
 pub const openDb = common.openDb;
 

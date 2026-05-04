@@ -72,7 +72,19 @@ fn rowToRecord(row: ContainerRow) ContainerRecord {
 }
 
 pub fn save(record: ContainerRecord) StoreError!void {
-    const db = try common.getDb();
+    const Context = struct {
+        record: ContainerRecord,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            return saveInDb(db, ctx.record);
+        }
+    };
+
+    var ctx = Context{ .record = record };
+    return common.withDb(void, &ctx, Context.run);
+}
+
+fn saveInDb(db: *sqlite.Db, record: ContainerRecord) StoreError!void {
     const pid: ?i64 = if (record.pid) |value| @intCast(value) else null;
     const exit_code: ?i64 = if (record.exit_code) |value| @intCast(value) else null;
 
@@ -97,7 +109,20 @@ pub fn save(record: ContainerRecord) StoreError!void {
 }
 
 pub fn load(alloc: Allocator, id: []const u8) StoreError!ContainerRecord {
-    const db = try common.getDb();
+    const Context = struct {
+        alloc: Allocator,
+        id: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!ContainerRecord {
+            return loadInDb(db, ctx.alloc, ctx.id);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .id = id };
+    return common.withDb(ContainerRecord, &ctx, Context.run);
+}
+
+fn loadInDb(db: *sqlite.Db, alloc: Allocator, id: []const u8) StoreError!ContainerRecord {
     const row = (db.oneAlloc(
         ContainerRow,
         alloc,
@@ -109,7 +134,20 @@ pub fn load(alloc: Allocator, id: []const u8) StoreError!ContainerRecord {
 }
 
 pub fn findByHostname(alloc: Allocator, hostname: []const u8) StoreError!?ContainerRecord {
-    const db = try common.getDb();
+    const Context = struct {
+        alloc: Allocator,
+        hostname: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!?ContainerRecord {
+            return findByHostnameInDb(db, ctx.alloc, ctx.hostname);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .hostname = hostname };
+    return common.withDb(?ContainerRecord, &ctx, Context.run);
+}
+
+fn findByHostnameInDb(db: *sqlite.Db, alloc: Allocator, hostname: []const u8) StoreError!?ContainerRecord {
     const row = (db.oneAlloc(
         ContainerRow,
         alloc,
@@ -121,12 +159,34 @@ pub fn findByHostname(alloc: Allocator, hostname: []const u8) StoreError!?Contai
 }
 
 pub fn remove(id: []const u8) StoreError!void {
-    const db = try common.getDb();
-    db.exec("DELETE FROM containers WHERE id = ?;", .{}, .{id}) catch return StoreError.WriteFailed;
+    const Context = struct {
+        id: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            db.exec("DELETE FROM containers WHERE id = ?;", .{}, .{ctx.id}) catch return StoreError.WriteFailed;
+        }
+    };
+
+    var ctx = Context{ .id = id };
+    return common.withDb(void, &ctx, Context.run);
 }
 
 fn listIdQuery(alloc: Allocator, comptime query: []const u8, args: anytype) StoreError!std.ArrayList([]const u8) {
-    const db = try common.getDb();
+    const Args = @TypeOf(args);
+    const Context = struct {
+        alloc: Allocator,
+        args: Args,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList([]const u8) {
+            return listIdQueryInDb(db, ctx.alloc, query, ctx.args);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .args = args };
+    return common.withDb(std.ArrayList([]const u8), &ctx, Context.run);
+}
+
+fn listIdQueryInDb(db: *sqlite.Db, alloc: Allocator, comptime query: []const u8, args: anytype) StoreError!std.ArrayList([]const u8) {
     var ids: std.ArrayList([]const u8) = .empty;
     var stmt = db.prepare(query) catch return StoreError.ReadFailed;
     defer stmt.deinit();
@@ -142,7 +202,22 @@ pub fn listIds(alloc: Allocator) StoreError!std.ArrayList([]const u8) {
 }
 
 pub fn updateStatus(id: []const u8, status: []const u8, pid: ?i32, exit_code: ?u8) StoreError!void {
-    const db = try common.getDb();
+    const Context = struct {
+        id: []const u8,
+        status: []const u8,
+        pid: ?i32,
+        exit_code: ?u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            return updateStatusInDb(db, ctx.id, ctx.status, ctx.pid, ctx.exit_code);
+        }
+    };
+
+    var ctx = Context{ .id = id, .status = status, .pid = pid, .exit_code = exit_code };
+    return common.withDb(void, &ctx, Context.run);
+}
+
+fn updateStatusInDb(db: *sqlite.Db, id: []const u8, status: []const u8, pid: ?i32, exit_code: ?u8) StoreError!void {
     const pid_val: ?i64 = if (pid) |value| @intCast(value) else null;
     const exit_val: ?i64 = if (exit_code) |value| @intCast(value) else null;
     db.exec(
@@ -153,12 +228,22 @@ pub fn updateStatus(id: []const u8, status: []const u8, pid: ?i32, exit_code: ?u
 }
 
 pub fn updateNetwork(id: []const u8, ip_address: ?[]const u8, veth_host: ?[]const u8) StoreError!void {
-    const db = try common.getDb();
-    db.exec(
-        "UPDATE containers SET ip_address = ?, veth_host = ? WHERE id = ?;",
-        .{},
-        .{ ip_address, veth_host, id },
-    ) catch return StoreError.WriteFailed;
+    const Context = struct {
+        id: []const u8,
+        ip_address: ?[]const u8,
+        veth_host: ?[]const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            db.exec(
+                "UPDATE containers SET ip_address = ?, veth_host = ? WHERE id = ?;",
+                .{},
+                .{ ctx.ip_address, ctx.veth_host, ctx.id },
+            ) catch return StoreError.WriteFailed;
+        }
+    };
+
+    var ctx = Context{ .id = id, .ip_address = ip_address, .veth_host = veth_host };
+    return common.withDb(void, &ctx, Context.run);
 }
 
 pub fn listAppContainerIds(alloc: Allocator, app_name: []const u8) StoreError!std.ArrayList([]const u8) {
@@ -170,7 +255,21 @@ pub fn listAppContainerIds(alloc: Allocator, app_name: []const u8) StoreError!st
 }
 
 pub fn findAppContainer(alloc: Allocator, app_name: []const u8, hostname: []const u8) StoreError!?ContainerRecord {
-    const db = try common.getDb();
+    const Context = struct {
+        alloc: Allocator,
+        app_name: []const u8,
+        hostname: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!?ContainerRecord {
+            return findAppContainerInDb(db, ctx.alloc, ctx.app_name, ctx.hostname);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .app_name = app_name, .hostname = hostname };
+    return common.withDb(?ContainerRecord, &ctx, Context.run);
+}
+
+fn findAppContainerInDb(db: *sqlite.Db, alloc: Allocator, app_name: []const u8, hostname: []const u8) StoreError!?ContainerRecord {
     const row = (db.oneAlloc(
         ContainerRow,
         alloc,
@@ -182,7 +281,19 @@ pub fn findAppContainer(alloc: Allocator, app_name: []const u8, hostname: []cons
 }
 
 pub fn listAll(alloc: Allocator) StoreError!std.ArrayList(ContainerRecord) {
-    const db = try common.getDb();
+    const Context = struct {
+        alloc: Allocator,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(ContainerRecord) {
+            return listAllInDb(db, ctx.alloc);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc };
+    return common.withDb(std.ArrayList(ContainerRecord), &ctx, Context.run);
+}
+
+fn listAllInDb(db: *sqlite.Db, alloc: Allocator) StoreError!std.ArrayList(ContainerRecord) {
     var records: std.ArrayList(ContainerRecord) = .empty;
     var stmt = db.prepare(
         "SELECT " ++ container_columns ++ " FROM containers WHERE status != 'stopped' ORDER BY hostname, created_at DESC;",

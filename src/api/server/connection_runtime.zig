@@ -7,6 +7,9 @@ const log = @import("../../lib/log.zig");
 const rate_limit = @import("rate_limit.zig");
 
 pub const max_connections: u32 = 128;
+pub const drain_timeout_ms: u64 = 5000;
+const drain_poll_interval_ms: u64 = 10;
+
 pub var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
 pub const OwnedRequest = struct {
@@ -35,6 +38,19 @@ pub fn tryAcquireConnectionSlot() bool {
 
 pub fn releaseConnectionSlot() void {
     _ = active_connections.fetchSub(1, .acq_rel);
+}
+
+pub fn activeConnectionCount() u32 {
+    return active_connections.load(.acquire);
+}
+
+pub fn waitForConnectionsToDrain(timeout_ms: u64) bool {
+    var waited_ms: u64 = 0;
+    while (activeConnectionCount() != 0 and waited_ms < timeout_ms) {
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(drain_poll_interval_ms), .awake) catch return false;
+        waited_ms += drain_poll_interval_ms;
+    }
+    return activeConnectionCount() == 0;
 }
 
 fn getPeerIp(fd: posix.fd_t) u32 {

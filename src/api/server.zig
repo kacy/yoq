@@ -91,12 +91,11 @@ pub const Server = struct {
             self.port,
         });
 
-        // try io_uring first
-        if (self.runIoUring()) return;
-
-        // fallback to blocking accept
-        log.warn("io_uring unavailable, using blocking accept", .{});
-        self.runBlocking();
+        if (!self.runIoUring()) {
+            log.warn("io_uring unavailable, using blocking accept", .{});
+            self.runBlocking();
+        }
+        self.drainWorkers();
     }
 
     /// io_uring-based accept loop using multishot accept.
@@ -177,6 +176,15 @@ pub const Server = struct {
         };
         thread.detach();
     }
+
+    fn drainWorkers(self: *Server) void {
+        _ = self;
+        if (!connection_runtime.waitForConnectionsToDrain(connection_runtime.drain_timeout_ms)) {
+            log.warn("api server shutdown timed out with {d} active connection(s)", .{
+                connection_runtime.activeConnectionCount(),
+            });
+        }
+    }
 };
 
 // -- tests --
@@ -206,6 +214,15 @@ test "connection slot limit enforcement" {
     while (acquired > 0) : (acquired -= 1) {
         releaseConnectionSlot();
     }
+}
+
+test "connection drain waits for active slots" {
+    connection_runtime.active_connections.store(1, .release);
+    defer connection_runtime.active_connections.store(0, .release);
+
+    try std.testing.expect(!connection_runtime.waitForConnectionsToDrain(0));
+    releaseConnectionSlot();
+    try std.testing.expect(connection_runtime.waitForConnectionsToDrain(0));
 }
 
 // -- rate limiter tests --

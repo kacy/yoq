@@ -49,8 +49,19 @@ pub fn replaceCronSchedulesForApp(
     schedules: []const @import("../../manifest/app_snapshot.zig").CronScheduleSpec,
     now: i64,
 ) StoreError!void {
-    const db = try common.getDb();
-    return replaceCronSchedulesForAppInDb(db, alloc, app_name, schedules, now);
+    const Context = struct {
+        alloc: Allocator,
+        app_name: []const u8,
+        schedules: []const @import("../../manifest/app_snapshot.zig").CronScheduleSpec,
+        now: i64,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            return replaceCronSchedulesForAppInDb(db, ctx.alloc, ctx.app_name, ctx.schedules, ctx.now);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .app_name = app_name, .schedules = schedules, .now = now };
+    return common.withDb(void, &ctx, Context.run);
 }
 
 pub fn replaceCronSchedulesForAppInDb(
@@ -81,8 +92,17 @@ pub fn replaceCronSchedulesForAppInDb(
 }
 
 pub fn listCronSchedulesByApp(alloc: Allocator, app_name: []const u8) StoreError!std.ArrayList(CronScheduleRecord) {
-    const db = try common.getDb();
-    return listCronSchedulesByAppInDb(db, alloc, app_name);
+    const Context = struct {
+        alloc: Allocator,
+        app_name: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(CronScheduleRecord) {
+            return listCronSchedulesByAppInDb(db, ctx.alloc, ctx.app_name);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .app_name = app_name };
+    return common.withDb(std.ArrayList(CronScheduleRecord), &ctx, Context.run);
 }
 
 pub fn listCronSchedulesByAppInDb(

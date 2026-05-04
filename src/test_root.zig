@@ -20,6 +20,7 @@ comptime {
     _ = @import("runtime/container_commands.zig");
     _ = @import("runtime/run_state.zig");
     _ = @import("state/store.zig");
+    _ = @import("state/store/common.zig");
     _ = @import("state/store/crons.zig");
     _ = @import("state/store/deployments.zig");
     _ = @import("state/store/training.zig");

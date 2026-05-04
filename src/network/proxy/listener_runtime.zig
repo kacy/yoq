@@ -10,6 +10,8 @@ const service_registry_runtime = @import("../service_registry_runtime.zig");
 pub const default_listen_port: u16 = 17080;
 pub const default_bind_addr: [4]u8 = .{ 127, 0, 0, 1 };
 pub const StateChangeHook = *const fn () void;
+pub const drain_timeout_ms: u64 = 5000;
+const drain_poll_interval_ms: u64 = 10;
 
 pub const Snapshot = struct {
     enabled: bool,
@@ -136,6 +138,7 @@ pub fn stop() void {
     if (port_to_wake) |port| wakeAccept(port);
     if (fd_to_close) |fd| linux_platform.posix.close(fd);
     if (thread_to_join) |thread| thread.join();
+    _ = waitForConnectionsToDrain(drain_timeout_ms);
     if (hook_to_call) |hook| hook();
 }
 
@@ -174,6 +177,22 @@ pub fn connectTargetIfRunning() ?ConnectTarget {
             listen_bind_addr,
         .port = listen_port,
     };
+}
+
+pub fn activeConnectionCount() u32 {
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
+
+    return active_connections;
+}
+
+pub fn waitForConnectionsToDrain(timeout_ms: u64) bool {
+    var waited_ms: u64 = 0;
+    while (activeConnectionCount() != 0 and waited_ms < timeout_ms) {
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(drain_poll_interval_ms), .awake) catch return false;
+        waited_ms += drain_poll_interval_ms;
+    }
+    return activeConnectionCount() == 0;
 }
 
 fn start(alloc: std.mem.Allocator) void {
@@ -395,4 +414,21 @@ test "listener runtime starts and stops on loopback" {
     try std.testing.expect(state.running);
     try std.testing.expect(state.port != 0);
     try std.testing.expectEqual(@as(u64, 0), state.accepted_connections_total);
+}
+
+test "listener drain observes active connection count" {
+    resetForTest();
+    defer resetForTest();
+
+    mutex.lockUncancelable(std.Options.debug_io);
+    active_connections = 1;
+    mutex.unlock(std.Options.debug_io);
+
+    try std.testing.expect(!waitForConnectionsToDrain(0));
+
+    mutex.lockUncancelable(std.Options.debug_io);
+    active_connections = 0;
+    mutex.unlock(std.Options.debug_io);
+
+    try std.testing.expect(waitForConnectionsToDrain(0));
 }

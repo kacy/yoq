@@ -679,7 +679,19 @@ fn rowToServiceNameRecord(row: ServiceNameRow) ServiceNameRecord {
 }
 
 pub fn createService(record: ServiceRecord) StoreError!void {
-    const db = try common.getDb();
+    const Context = struct {
+        record: ServiceRecord,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            return createServiceInDb(db, ctx.record);
+        }
+    };
+
+    var ctx = Context{ .record = record };
+    return common.withDb(void, &ctx, Context.run);
+}
+
+fn createServiceInDb(db: *sqlite.Db, record: ServiceRecord) StoreError!void {
     db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return StoreError.WriteFailed;
     var committed = false;
     errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
@@ -770,7 +782,21 @@ pub fn createService(record: ServiceRecord) StoreError!void {
 }
 
 pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []const u8) StoreError!ServiceRecord {
-    const db = try common.getDb();
+    const Context = struct {
+        alloc: Allocator,
+        service_name: []const u8,
+        lb_policy: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!ServiceRecord {
+            return ensureServiceInDb(db, ctx.alloc, ctx.service_name, ctx.lb_policy);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .service_name = service_name, .lb_policy = lb_policy };
+    return common.withDb(ServiceRecord, &ctx, Context.run);
+}
+
+fn ensureServiceInDb(db: *sqlite.Db, alloc: Allocator, service_name: []const u8, lb_policy: []const u8) StoreError!ServiceRecord {
     db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return StoreError.WriteFailed;
 
     var committed = false;
@@ -844,30 +870,38 @@ pub fn syncServiceConfig(
     var existing = try ensureService(alloc, service_name, lb_policy);
     defer existing.deinit(alloc);
 
-    const db = try common.getDb();
-    const now = nowRealSeconds();
-    db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return StoreError.WriteFailed;
-    var committed = false;
-    errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
-    db.exec(
-        "UPDATE services SET lb_policy = ?, updated_at = ? WHERE service_name = ?;",
-        .{},
-        .{
-            lb_policy,
-            now,
-            service_name,
-        },
-    ) catch return StoreError.WriteFailed;
-    try replaceServiceHttpRoutes(db, service_name, now, routes);
-    try syncDerivedServiceProxyFields(db, service_name, now, routes);
-    db.exec("COMMIT;", .{}, .{}) catch return StoreError.WriteFailed;
-    committed = true;
+    const Context = struct {
+        service_name: []const u8,
+        lb_policy: []const u8,
+        routes: []const ServiceHttpRouteInput,
 
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            const now = nowRealSeconds();
+            db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return StoreError.WriteFailed;
+            var committed = false;
+            errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
+            db.exec(
+                "UPDATE services SET lb_policy = ?, updated_at = ? WHERE service_name = ?;",
+                .{},
+                .{
+                    ctx.lb_policy,
+                    now,
+                    ctx.service_name,
+                },
+            ) catch return StoreError.WriteFailed;
+            try replaceServiceHttpRoutes(db, ctx.service_name, now, ctx.routes);
+            try syncDerivedServiceProxyFields(db, ctx.service_name, now, ctx.routes);
+            db.exec("COMMIT;", .{}, .{}) catch return StoreError.WriteFailed;
+            committed = true;
+        }
+    };
+
+    var ctx = Context{ .service_name = service_name, .lb_policy = lb_policy, .routes = routes };
+    try common.withDb(void, &ctx, Context.run);
     return getService(alloc, service_name);
 }
 
-pub fn getService(alloc: Allocator, service_name: []const u8) StoreError!ServiceRecord {
-    const db = try common.getDb();
+fn getServiceInDb(db: *sqlite.Db, alloc: Allocator, service_name: []const u8) StoreError!ServiceRecord {
     const row = (db.oneAlloc(
         ServiceRow,
         alloc,
@@ -879,8 +913,21 @@ pub fn getService(alloc: Allocator, service_name: []const u8) StoreError!Service
     return rowToServiceRecord(row, routes);
 }
 
-pub fn listServices(alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
-    const db = try common.getDb();
+pub fn getService(alloc: Allocator, service_name: []const u8) StoreError!ServiceRecord {
+    const Context = struct {
+        alloc: Allocator,
+        service_name: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!ServiceRecord {
+            return getServiceInDb(db, ctx.alloc, ctx.service_name);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .service_name = service_name };
+    return common.withDb(ServiceRecord, &ctx, Context.run);
+}
+
+fn listServicesInDb(db: *sqlite.Db, alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
     var services: std.ArrayList(ServiceRecord) = .empty;
     var stmt = db.prepare(
         "SELECT " ++ service_columns ++ " FROM services ORDER BY service_name;",
@@ -894,65 +941,115 @@ pub fn listServices(alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
     return services;
 }
 
+pub fn listServices(alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
+    const Context = struct {
+        alloc: Allocator,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(ServiceRecord) {
+            return listServicesInDb(db, ctx.alloc);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc };
+    return common.withDb(std.ArrayList(ServiceRecord), &ctx, Context.run);
+}
+
 pub fn getServiceEndpoint(alloc: Allocator, service_name: []const u8, endpoint_id: []const u8) StoreError!ServiceEndpointRecord {
-    const db = try common.getDb();
-    const row = (db.oneAlloc(
-        ServiceEndpointRow,
-        alloc,
-        "SELECT " ++ endpoint_columns ++ " FROM service_endpoints WHERE service_name = ? AND endpoint_id = ?;",
-        .{},
-        .{ service_name, endpoint_id },
-    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
-    return rowToServiceEndpointRecord(row);
+    const Context = struct {
+        alloc: Allocator,
+        service_name: []const u8,
+        endpoint_id: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!ServiceEndpointRecord {
+            const row = (db.oneAlloc(
+                ServiceEndpointRow,
+                ctx.alloc,
+                "SELECT " ++ endpoint_columns ++ " FROM service_endpoints WHERE service_name = ? AND endpoint_id = ?;",
+                .{},
+                .{ ctx.service_name, ctx.endpoint_id },
+            ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
+            return rowToServiceEndpointRecord(row);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .service_name = service_name, .endpoint_id = endpoint_id };
+    return common.withDb(ServiceEndpointRecord, &ctx, Context.run);
 }
 
 pub fn upsertServiceEndpoint(record: ServiceEndpointRecord) StoreError!void {
-    const db = try common.getDb();
-    db.exec(
-        "INSERT INTO service_endpoints (" ++ endpoint_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" ++
-            " ON CONFLICT(service_name, endpoint_id) DO UPDATE SET" ++
-            " container_id = excluded.container_id," ++
-            " node_id = excluded.node_id," ++
-            " ip_address = excluded.ip_address," ++
-            " port = excluded.port," ++
-            " weight = excluded.weight," ++
-            " admin_state = excluded.admin_state," ++
-            " generation = excluded.generation," ++
-            " registered_at = excluded.registered_at," ++
-            " last_seen_at = excluded.last_seen_at;",
-        .{},
-        .{
-            record.service_name,
-            record.endpoint_id,
-            record.container_id,
-            record.node_id,
-            record.ip_address,
-            record.port,
-            record.weight,
-            record.admin_state,
-            record.generation,
-            record.registered_at,
-            record.last_seen_at,
-        },
-    ) catch return StoreError.WriteFailed;
+    const Context = struct {
+        record: ServiceEndpointRecord,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            db.exec(
+                "INSERT INTO service_endpoints (" ++ endpoint_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" ++
+                    " ON CONFLICT(service_name, endpoint_id) DO UPDATE SET" ++
+                    " container_id = excluded.container_id," ++
+                    " node_id = excluded.node_id," ++
+                    " ip_address = excluded.ip_address," ++
+                    " port = excluded.port," ++
+                    " weight = excluded.weight," ++
+                    " admin_state = excluded.admin_state," ++
+                    " generation = excluded.generation," ++
+                    " registered_at = excluded.registered_at," ++
+                    " last_seen_at = excluded.last_seen_at;",
+                .{},
+                .{
+                    ctx.record.service_name,
+                    ctx.record.endpoint_id,
+                    ctx.record.container_id,
+                    ctx.record.node_id,
+                    ctx.record.ip_address,
+                    ctx.record.port,
+                    ctx.record.weight,
+                    ctx.record.admin_state,
+                    ctx.record.generation,
+                    ctx.record.registered_at,
+                    ctx.record.last_seen_at,
+                },
+            ) catch return StoreError.WriteFailed;
+        }
+    };
+
+    var ctx = Context{ .record = record };
+    return common.withDb(void, &ctx, Context.run);
 }
 
 pub fn removeServiceEndpoint(service_name: []const u8, endpoint_id: []const u8) StoreError!void {
-    const db = try common.getDb();
-    db.exec(
-        "DELETE FROM service_endpoints WHERE service_name = ? AND endpoint_id = ?;",
-        .{},
-        .{ service_name, endpoint_id },
-    ) catch return StoreError.WriteFailed;
+    const Context = struct {
+        service_name: []const u8,
+        endpoint_id: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            db.exec(
+                "DELETE FROM service_endpoints WHERE service_name = ? AND endpoint_id = ?;",
+                .{},
+                .{ ctx.service_name, ctx.endpoint_id },
+            ) catch return StoreError.WriteFailed;
+        }
+    };
+
+    var ctx = Context{ .service_name = service_name, .endpoint_id = endpoint_id };
+    return common.withDb(void, &ctx, Context.run);
 }
 
 pub fn markServiceEndpointAdminState(service_name: []const u8, endpoint_id: []const u8, admin_state: []const u8) StoreError!void {
-    const db = try common.getDb();
-    db.exec(
-        "UPDATE service_endpoints SET admin_state = ? WHERE service_name = ? AND endpoint_id = ?;",
-        .{},
-        .{ admin_state, service_name, endpoint_id },
-    ) catch return StoreError.WriteFailed;
+    const Context = struct {
+        service_name: []const u8,
+        endpoint_id: []const u8,
+        admin_state: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            db.exec(
+                "UPDATE service_endpoints SET admin_state = ? WHERE service_name = ? AND endpoint_id = ?;",
+                .{},
+                .{ ctx.admin_state, ctx.service_name, ctx.endpoint_id },
+            ) catch return StoreError.WriteFailed;
+        }
+    };
+
+    var ctx = Context{ .service_name = service_name, .endpoint_id = endpoint_id, .admin_state = admin_state };
+    return common.withDb(void, &ctx, Context.run);
 }
 
 pub fn listServiceEndpoints(alloc: Allocator, service_name: []const u8) StoreError!std.ArrayList(ServiceEndpointRecord) {
@@ -972,64 +1069,115 @@ pub fn listServiceEndpointsByNode(alloc: Allocator, node_id: i64) StoreError!std
 }
 
 pub fn removeServiceEndpointsByContainer(container_id: []const u8) StoreError!void {
-    const db = try common.getDb();
-    db.exec(
-        "DELETE FROM service_endpoints WHERE container_id = ?;",
-        .{},
-        .{container_id},
-    ) catch return StoreError.WriteFailed;
+    const Context = struct {
+        container_id: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            db.exec(
+                "DELETE FROM service_endpoints WHERE container_id = ?;",
+                .{},
+                .{ctx.container_id},
+            ) catch return StoreError.WriteFailed;
+        }
+    };
+
+    var ctx = Context{ .container_id = container_id };
+    return common.withDb(void, &ctx, Context.run);
 }
 
 pub fn removeServiceEndpointsByNode(node_id: i64) StoreError!void {
-    const db = try common.getDb();
-    db.exec(
-        "DELETE FROM service_endpoints WHERE node_id = ?;",
-        .{},
-        .{node_id},
-    ) catch return StoreError.WriteFailed;
+    const Context = struct {
+        node_id: i64,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            db.exec(
+                "DELETE FROM service_endpoints WHERE node_id = ?;",
+                .{},
+                .{ctx.node_id},
+            ) catch return StoreError.WriteFailed;
+        }
+    };
+
+    var ctx = Context{ .node_id = node_id };
+    return common.withDb(void, &ctx, Context.run);
 }
 
 fn queryServiceEndpoints(alloc: Allocator, comptime query: []const u8, args: anytype) StoreError!std.ArrayList(ServiceEndpointRecord) {
-    const db = try common.getDb();
-    var endpoints: std.ArrayList(ServiceEndpointRecord) = .empty;
-    var stmt = db.prepare(query) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-    var iter = stmt.iterator(ServiceEndpointRow, args) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        endpoints.append(alloc, rowToServiceEndpointRecord(row)) catch return StoreError.ReadFailed;
-    }
-    return endpoints;
+    const Args = @TypeOf(args);
+    const Context = struct {
+        alloc: Allocator,
+        args: Args,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(ServiceEndpointRecord) {
+            var endpoints: std.ArrayList(ServiceEndpointRecord) = .empty;
+            var stmt = db.prepare(query) catch return StoreError.ReadFailed;
+            defer stmt.deinit();
+            var iter = stmt.iterator(ServiceEndpointRow, ctx.args) catch return StoreError.ReadFailed;
+            while (iter.nextAlloc(ctx.alloc, .{}) catch return StoreError.ReadFailed) |row| {
+                endpoints.append(ctx.alloc, rowToServiceEndpointRecord(row)) catch return StoreError.ReadFailed;
+            }
+            return endpoints;
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .args = args };
+    return common.withDb(std.ArrayList(ServiceEndpointRecord), &ctx, Context.run);
 }
 
 pub fn registerServiceName(name: []const u8, container_id: []const u8, ip_address: []const u8) StoreError!void {
-    const db = try common.getDb();
-    db.exec(
-        "INSERT OR REPLACE INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
-        .{},
-        .{ name, container_id, ip_address, nowRealSeconds() },
-    ) catch return StoreError.WriteFailed;
+    const Context = struct {
+        name: []const u8,
+        container_id: []const u8,
+        ip_address: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            db.exec(
+                "INSERT OR REPLACE INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
+                .{},
+                .{ ctx.name, ctx.container_id, ctx.ip_address, nowRealSeconds() },
+            ) catch return StoreError.WriteFailed;
+        }
+    };
+
+    var ctx = Context{ .name = name, .container_id = container_id, .ip_address = ip_address };
+    return common.withDb(void, &ctx, Context.run);
 }
 
 pub fn unregisterServiceName(container_id: []const u8) StoreError!void {
-    const db = try common.getDb();
-    db.exec(
-        "DELETE FROM service_names WHERE container_id = ?;",
-        .{},
-        .{container_id},
-    ) catch return StoreError.WriteFailed;
+    const Context = struct {
+        container_id: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            db.exec(
+                "DELETE FROM service_names WHERE container_id = ?;",
+                .{},
+                .{ctx.container_id},
+            ) catch return StoreError.WriteFailed;
+        }
+    };
+
+    var ctx = Context{ .container_id = container_id };
+    return common.withDb(void, &ctx, Context.run);
 }
 
 pub fn removeServiceNamesByName(name: []const u8) StoreError!void {
-    const db = try common.getDb();
-    db.exec(
-        "DELETE FROM service_names WHERE name = ?;",
-        .{},
-        .{name},
-    ) catch return StoreError.WriteFailed;
+    const Context = struct {
+        name: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            db.exec(
+                "DELETE FROM service_names WHERE name = ?;",
+                .{},
+                .{ctx.name},
+            ) catch return StoreError.WriteFailed;
+        }
+    };
+
+    var ctx = Context{ .name = name };
+    return common.withDb(void, &ctx, Context.run);
 }
 
-pub fn lookupServiceNames(alloc: Allocator, name: []const u8) StoreError!std.ArrayList([]const u8) {
-    const db = try common.getDb();
+fn lookupServiceNamesInDb(db: *sqlite.Db, alloc: Allocator, name: []const u8) StoreError!std.ArrayList([]const u8) {
     var ips: std.ArrayList([]const u8) = .empty;
     var stmt = db.prepare(
         "SELECT ip_address FROM service_names WHERE name = ? ORDER BY registered_at DESC;",
@@ -1042,53 +1190,103 @@ pub fn lookupServiceNames(alloc: Allocator, name: []const u8) StoreError!std.Arr
     return ips;
 }
 
+pub fn lookupServiceNames(alloc: Allocator, name: []const u8) StoreError!std.ArrayList([]const u8) {
+    const Context = struct {
+        alloc: Allocator,
+        name: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList([]const u8) {
+            return lookupServiceNamesInDb(db, ctx.alloc, ctx.name);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .name = name };
+    return common.withDb(std.ArrayList([]const u8), &ctx, Context.run);
+}
+
 pub fn lookupServiceAddresses(alloc: Allocator, name: []const u8) StoreError!std.ArrayList([]const u8) {
-    const db = try common.getDb();
-    var ips: std.ArrayList([]const u8) = .empty;
+    const Context = struct {
+        alloc: Allocator,
+        name: []const u8,
 
-    var stmt = db.prepare(
-        "SELECT vip_address FROM services WHERE service_name = ? LIMIT 1;",
-    ) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-    var iter = stmt.iterator(struct { vip_address: sqlite.Text }, .{name}) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        ips.append(alloc, row.vip_address.data) catch return StoreError.ReadFailed;
-    }
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList([]const u8) {
+            var ips: std.ArrayList([]const u8) = .empty;
 
-    if (ips.items.len > 0) return ips;
-    return lookupServiceNames(alloc, name);
+            var stmt = db.prepare(
+                "SELECT vip_address FROM services WHERE service_name = ? LIMIT 1;",
+            ) catch return StoreError.ReadFailed;
+            defer stmt.deinit();
+            var iter = stmt.iterator(struct { vip_address: sqlite.Text }, .{ctx.name}) catch return StoreError.ReadFailed;
+            while (iter.nextAlloc(ctx.alloc, .{}) catch return StoreError.ReadFailed) |row| {
+                ips.append(ctx.alloc, row.vip_address.data) catch return StoreError.ReadFailed;
+            }
+
+            if (ips.items.len > 0) return ips;
+            return lookupServiceNamesInDb(db, ctx.alloc, ctx.name);
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .name = name };
+    return common.withDb(std.ArrayList([]const u8), &ctx, Context.run);
 }
 
 pub fn listServiceNames(alloc: Allocator) StoreError!std.ArrayList(ServiceNameRecord) {
-    const db = try common.getDb();
-    var names: std.ArrayList(ServiceNameRecord) = .empty;
-    var stmt = db.prepare(
-        "SELECT name, container_id, ip_address, registered_at FROM service_names ORDER BY name, registered_at DESC;",
-    ) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-    var iter = stmt.iterator(ServiceNameRow, .{}) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        names.append(alloc, rowToServiceNameRecord(row)) catch return StoreError.ReadFailed;
-    }
-    return names;
+    const Context = struct {
+        alloc: Allocator,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(ServiceNameRecord) {
+            var names: std.ArrayList(ServiceNameRecord) = .empty;
+            var stmt = db.prepare(
+                "SELECT name, container_id, ip_address, registered_at FROM service_names ORDER BY name, registered_at DESC;",
+            ) catch return StoreError.ReadFailed;
+            defer stmt.deinit();
+            var iter = stmt.iterator(ServiceNameRow, .{}) catch return StoreError.ReadFailed;
+            while (iter.nextAlloc(ctx.alloc, .{}) catch return StoreError.ReadFailed) |row| {
+                names.append(ctx.alloc, rowToServiceNameRecord(row)) catch return StoreError.ReadFailed;
+            }
+            return names;
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc };
+    return common.withDb(std.ArrayList(ServiceNameRecord), &ctx, Context.run);
 }
 
 pub fn addNetworkPolicy(source: []const u8, target: []const u8, action: []const u8) StoreError!void {
-    const db = try common.getDb();
-    db.exec(
-        "INSERT OR REPLACE INTO network_policies (source_service, target_service, action, created_at) VALUES (?, ?, ?, ?);",
-        .{},
-        .{ source, target, action, nowRealSeconds() },
-    ) catch return StoreError.WriteFailed;
+    const Context = struct {
+        source: []const u8,
+        target: []const u8,
+        action: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            db.exec(
+                "INSERT OR REPLACE INTO network_policies (source_service, target_service, action, created_at) VALUES (?, ?, ?, ?);",
+                .{},
+                .{ ctx.source, ctx.target, ctx.action, nowRealSeconds() },
+            ) catch return StoreError.WriteFailed;
+        }
+    };
+
+    var ctx = Context{ .source = source, .target = target, .action = action };
+    return common.withDb(void, &ctx, Context.run);
 }
 
 pub fn removeNetworkPolicy(source: []const u8, target: []const u8) StoreError!void {
-    const db = try common.getDb();
-    db.exec(
-        "DELETE FROM network_policies WHERE source_service = ? AND target_service = ?;",
-        .{},
-        .{ source, target },
-    ) catch return StoreError.WriteFailed;
+    const Context = struct {
+        source: []const u8,
+        target: []const u8,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
+            db.exec(
+                "DELETE FROM network_policies WHERE source_service = ? AND target_service = ?;",
+                .{},
+                .{ ctx.source, ctx.target },
+            ) catch return StoreError.WriteFailed;
+        }
+    };
+
+    var ctx = Context{ .source = source, .target = target };
+    return common.withDb(void, &ctx, Context.run);
 }
 
 pub fn listNetworkPolicies(alloc: Allocator) StoreError!std.ArrayList(NetworkPolicyRecord) {
@@ -1108,20 +1306,30 @@ pub fn getServicePolicies(alloc: Allocator, source: []const u8) StoreError!std.A
 }
 
 fn queryNetworkPolicies(alloc: Allocator, comptime query: []const u8, args: anytype) StoreError!std.ArrayList(NetworkPolicyRecord) {
-    const db = try common.getDb();
-    var policies: std.ArrayList(NetworkPolicyRecord) = .empty;
-    var stmt = db.prepare(query) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-    var iter = stmt.iterator(NetworkPolicyRow, args) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        policies.append(alloc, .{
-            .source_service = row.source_service.data,
-            .target_service = row.target_service.data,
-            .action = row.action.data,
-            .created_at = row.created_at,
-        }) catch return StoreError.ReadFailed;
-    }
-    return policies;
+    const Args = @TypeOf(args);
+    const Context = struct {
+        alloc: Allocator,
+        args: Args,
+
+        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(NetworkPolicyRecord) {
+            var policies: std.ArrayList(NetworkPolicyRecord) = .empty;
+            var stmt = db.prepare(query) catch return StoreError.ReadFailed;
+            defer stmt.deinit();
+            var iter = stmt.iterator(NetworkPolicyRow, ctx.args) catch return StoreError.ReadFailed;
+            while (iter.nextAlloc(ctx.alloc, .{}) catch return StoreError.ReadFailed) |row| {
+                policies.append(ctx.alloc, .{
+                    .source_service = row.source_service.data,
+                    .target_service = row.target_service.data,
+                    .action = row.action.data,
+                    .created_at = row.created_at,
+                }) catch return StoreError.ReadFailed;
+            }
+            return policies;
+        }
+    };
+
+    var ctx = Context{ .alloc = alloc, .args = args };
+    return common.withDb(std.ArrayList(NetworkPolicyRecord), &ctx, Context.run);
 }
 
 test "createService and getService round-trip" {

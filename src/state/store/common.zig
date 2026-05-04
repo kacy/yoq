@@ -53,12 +53,19 @@ pub fn deinitTestDb() void {
     test_db_lifetime_mutex.unlock(std.Options.debug_io);
 }
 
-pub fn getDb() StoreError!*sqlite.Db {
-    if (global_db != null) return &global_db.?;
-
+pub fn withDb(
+    comptime Result: type,
+    context: anytype,
+    comptime callback: fn (@TypeOf(context), *sqlite.Db) StoreError!Result,
+) StoreError!Result {
     db_mutex.lockUncancelable(std.Options.debug_io);
     defer db_mutex.unlock(std.Options.debug_io);
 
+    const db = try getDbLocked();
+    return callback(context, db);
+}
+
+fn getDbLocked() StoreError!*sqlite.Db {
     if (global_db != null) return &global_db.?;
 
     var path_buf: [paths.max_path]u8 = undefined;
@@ -100,4 +107,48 @@ pub fn openDb() StoreError!sqlite.Db {
         return StoreError.DbOpenFailed;
     };
     return db;
+}
+
+test "withDb holds database lifetime until callback returns" {
+    try initTestDb();
+    defer deinitTestDb();
+
+    const State = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        close_returned: std.atomic.Value(bool) = .init(false),
+
+        fn hold(self: *@This(), db: *sqlite.Db) StoreError!void {
+            _ = db;
+            self.entered.store(true, .release);
+            while (!self.release.load(.acquire)) {
+                std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(1), .awake) catch unreachable;
+            }
+        }
+
+        fn runHold(self: *@This()) void {
+            withDb(void, self, @This().hold) catch unreachable;
+        }
+
+        fn runClose(self: *@This()) void {
+            closeDb();
+            self.close_returned.store(true, .release);
+        }
+    };
+
+    var state: State = .{};
+    const holder = try std.Thread.spawn(.{}, State.runHold, .{&state});
+
+    while (!state.entered.load(.acquire)) {
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(1), .awake) catch unreachable;
+    }
+
+    const closer = try std.Thread.spawn(.{}, State.runClose, .{&state});
+    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(25), .awake) catch unreachable;
+    try std.testing.expect(!state.close_returned.load(.acquire));
+
+    state.release.store(true, .release);
+    holder.join();
+    closer.join();
+    try std.testing.expect(state.close_returned.load(.acquire));
 }

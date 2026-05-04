@@ -1301,8 +1301,7 @@ test "collectLocalAppSnapshots applies filters across stored app summaries" {
     try store.initTestDb();
     defer store.deinitTestDb();
 
-    const db = try store.getDb();
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-a1",
         .app_name = "app-a",
         .service_name = "app-a",
@@ -1316,7 +1315,7 @@ test "collectLocalAppSnapshots applies filters across stored app summaries" {
         .failed_targets = 0,
         .rollout_control_state = "active",
     });
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-b1",
         .app_name = "app-b",
         .service_name = "app-b",
@@ -1330,7 +1329,7 @@ test "collectLocalAppSnapshots applies filters across stored app summaries" {
         .failed_targets = 1,
         .rollout_control_state = "active",
     });
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-c1",
         .app_name = "app-c",
         .service_name = "app-c",
@@ -1439,8 +1438,7 @@ test "collectLocalAppSnapshots preserves rollback current and previous successfu
     try store.initTestDb();
     defer store.deinitTestDb();
 
-    const db = try store.getDb();
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-1",
         .app_name = "demo-app",
         .service_name = "demo-app",
@@ -1456,7 +1454,7 @@ test "collectLocalAppSnapshots preserves rollback current and previous successfu
         .message = "apply completed",
         .created_at = 100,
     });
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-2",
         .app_name = "demo-app",
         .service_name = "demo-app",
@@ -1470,7 +1468,7 @@ test "collectLocalAppSnapshots preserves rollback current and previous successfu
         .message = "apply completed",
         .created_at = 200,
     });
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-3",
         .app_name = "demo-app",
         .service_name = "demo-app",
@@ -1510,8 +1508,7 @@ test "collectLocalAppSnapshots preserves paused rollout control and checkpoint" 
     try store.initTestDb();
     defer store.deinitTestDb();
 
-    const db = try store.getDb();
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-paused",
         .app_name = "demo-app",
         .service_name = "demo-app",
@@ -1548,8 +1545,7 @@ test "collectLocalAppSnapshots preserves exact partial failure details and rollo
     try store.initTestDb();
     defer store.deinitTestDb();
 
-    const db = try store.getDb();
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-fail",
         .app_name = "demo-app",
         .service_name = "demo-app",
@@ -1587,8 +1583,7 @@ test "collectLocalAppSnapshots keeps latest release per app across mixed rollout
     try store.initTestDb();
     defer store.deinitTestDb();
 
-    const db = try store.getDb();
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-a1",
         .app_name = "app-a",
         .service_name = "app-a",
@@ -1602,7 +1597,7 @@ test "collectLocalAppSnapshots keeps latest release per app across mixed rollout
         .message = "apply completed",
         .created_at = 100,
     });
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-a2",
         .app_name = "app-a",
         .service_name = "app-a",
@@ -1617,7 +1612,7 @@ test "collectLocalAppSnapshots keeps latest release per app across mixed rollout
         .failure_details_json = "[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"reason\":\"placement_failed\"}]",
         .created_at = 200,
     });
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-b1",
         .app_name = "app-b",
         .service_name = "app-b",
@@ -1631,7 +1626,7 @@ test "collectLocalAppSnapshots keeps latest release per app across mixed rollout
         .message = "apply completed",
         .created_at = 110,
     });
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-b2",
         .app_name = "app-b",
         .service_name = "app-b",
@@ -1646,7 +1641,7 @@ test "collectLocalAppSnapshots keeps latest release per app across mixed rollout
         .rollout_checkpoint_json = "{\"engine\":\"local\",\"phase\":\"batch\",\"batch_start\":1,\"batch_end\":2,\"total_targets\":2,\"completed_targets\":1,\"failed_targets\":0,\"remaining_targets\":1,\"control_state\":\"paused\"}",
         .created_at = 210,
     });
-    try store.saveDeploymentInDb(db, .{
+    try store.saveDeployment(.{
         .id = "dep-c1",
         .app_name = "app-c",
         .service_name = "app-c",
