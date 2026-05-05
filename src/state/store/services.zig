@@ -4,6 +4,7 @@ const common = @import("common.zig");
 const network_ip = @import("../../network/ip.zig");
 const service_endpoints = @import("services_endpoints.zig");
 const service_names = @import("services_names.zig");
+const service_policies = @import("services_policies.zig");
 const service_routes = @import("services_routes.zig");
 const service_types = @import("services_types.zig");
 const service_observability = @import("../../network/service_observability.zig");
@@ -31,7 +32,6 @@ pub const NetworkPolicyRecord = service_types.NetworkPolicyRecord;
 
 const service_columns = service_types.service_columns;
 const ServiceRow = service_types.ServiceRow;
-const NetworkPolicyRow = service_types.NetworkPolicyRow;
 const rowToServiceRecord = service_types.rowToServiceRecord;
 
 pub fn createService(record: ServiceRecord) StoreError!void {
@@ -274,60 +274,19 @@ pub fn listServiceNames(alloc: Allocator) StoreError!std.ArrayList(ServiceNameRe
 }
 
 pub fn addNetworkPolicy(source: []const u8, target: []const u8, action: []const u8) StoreError!void {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    lease.db.exec(
-        "INSERT OR REPLACE INTO network_policies (source_service, target_service, action, created_at) VALUES (?, ?, ?, ?);",
-        .{},
-        .{ source, target, action, nowRealSeconds() },
-    ) catch return StoreError.WriteFailed;
+    return service_policies.add(source, target, action);
 }
 
 pub fn removeNetworkPolicy(source: []const u8, target: []const u8) StoreError!void {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    lease.db.exec(
-        "DELETE FROM network_policies WHERE source_service = ? AND target_service = ?;",
-        .{},
-        .{ source, target },
-    ) catch return StoreError.WriteFailed;
+    return service_policies.remove(source, target);
 }
 
 pub fn listNetworkPolicies(alloc: Allocator) StoreError!std.ArrayList(NetworkPolicyRecord) {
-    return queryNetworkPolicies(
-        alloc,
-        "SELECT source_service, target_service, action, created_at FROM network_policies ORDER BY created_at;",
-        .{},
-    );
+    return service_policies.list(alloc);
 }
 
 pub fn getServicePolicies(alloc: Allocator, source: []const u8) StoreError!std.ArrayList(NetworkPolicyRecord) {
-    return queryNetworkPolicies(
-        alloc,
-        "SELECT source_service, target_service, action, created_at FROM network_policies WHERE source_service = ? ORDER BY created_at;",
-        .{source},
-    );
-}
-
-fn queryNetworkPolicies(alloc: Allocator, comptime query: []const u8, args: anytype) StoreError!std.ArrayList(NetworkPolicyRecord) {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    var policies: std.ArrayList(NetworkPolicyRecord) = .empty;
-    var stmt = lease.db.prepare(query) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-    var iter = stmt.iterator(NetworkPolicyRow, args) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        policies.append(alloc, .{
-            .source_service = row.source_service.data,
-            .target_service = row.target_service.data,
-            .action = row.action.data,
-            .created_at = row.created_at,
-        }) catch return StoreError.ReadFailed;
-    }
-    return policies;
+    return service_policies.listForSource(alloc, source);
 }
 
 test "createService and getService round-trip" {
@@ -659,4 +618,43 @@ test "service name lookup returns empty for unknown" {
     defer ips.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 0), ips.items.len);
+}
+
+test "network policy add list get and remove" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    try addNetworkPolicy("api", "db", "allow");
+    try addNetworkPolicy("web", "db", "deny");
+
+    const alloc = std.testing.allocator;
+    var all = try listNetworkPolicies(alloc);
+    defer {
+        for (all.items) |policy| policy.deinit(alloc);
+        all.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), all.items.len);
+
+    var api_policies = try getServicePolicies(alloc, "api");
+    defer {
+        for (api_policies.items) |policy| policy.deinit(alloc);
+        api_policies.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), api_policies.items.len);
+    try std.testing.expectEqualStrings("api", api_policies.items[0].source_service);
+    try std.testing.expectEqualStrings("db", api_policies.items[0].target_service);
+    try std.testing.expectEqualStrings("allow", api_policies.items[0].action);
+
+    try removeNetworkPolicy("api", "db");
+
+    var remaining = try listNetworkPolicies(alloc);
+    defer {
+        for (remaining.items) |policy| policy.deinit(alloc);
+        remaining.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), remaining.items.len);
+    try std.testing.expectEqualStrings("web", remaining.items[0].source_service);
 }

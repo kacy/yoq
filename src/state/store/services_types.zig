@@ -436,3 +436,12 @@ pub fn rowToServiceNameRecord(row: ServiceNameRow) ServiceNameRecord {
         .registered_at = row.registered_at,
     };
 }
+
+pub fn rowToNetworkPolicyRecord(row: NetworkPolicyRow) NetworkPolicyRecord {
+    return .{
+        .source_service = row.source_service.data,
+        .target_service = row.target_service.data,
+        .action = row.action.data,
+        .created_at = row.created_at,
+    };
+}
