@@ -307,26 +307,6 @@ pub const ServiceEndpointRow = struct {
     last_seen_at: i64,
 };
 
-pub const NetworkPolicyRecord = struct {
-    source_service: []const u8,
-    target_service: []const u8,
-    action: []const u8,
-    created_at: i64,
-
-    pub fn deinit(self: NetworkPolicyRecord, alloc: Allocator) void {
-        alloc.free(self.source_service);
-        alloc.free(self.target_service);
-        alloc.free(self.action);
-    }
-};
-
-pub const NetworkPolicyRow = struct {
-    source_service: sqlite.Text,
-    target_service: sqlite.Text,
-    action: sqlite.Text,
-    created_at: i64,
-};
-
 pub fn rowToServiceRecord(row: ServiceRow, http_routes: []const ServiceHttpRouteRecord) ServiceRecord {
     return .{
         .service_name = row.service_name.data,
@@ -434,14 +414,5 @@ pub fn rowToServiceNameRecord(row: ServiceNameRow) ServiceNameRecord {
         .container_id = row.container_id.data,
         .ip_address = row.ip_address.data,
         .registered_at = row.registered_at,
-    };
-}
-
-pub fn rowToNetworkPolicyRecord(row: NetworkPolicyRow) NetworkPolicyRecord {
-    return .{
-        .source_service = row.source_service.data,
-        .target_service = row.target_service.data,
-        .action = row.action.data,
-        .created_at = row.created_at,
     };
 }

@@ -26,6 +26,7 @@ comptime {
     _ = @import("state/store/services_core.zig");
     _ = @import("state/store/services_endpoints.zig");
     _ = @import("state/store/services_names.zig");
+    _ = @import("state/store/services_policy_types.zig");
     _ = @import("state/store/services_policies.zig");
     _ = @import("state/store/services_routes.zig");
     _ = @import("state/store/services_types.zig");

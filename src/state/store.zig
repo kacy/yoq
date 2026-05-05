@@ -8,6 +8,7 @@ const service_core = @import("store/services_core.zig");
 const service_endpoints = @import("store/services_endpoints.zig");
 const service_names = @import("store/services_names.zig");
 const service_policies = @import("store/services_policies.zig");
+const service_policy_types = @import("store/services_policy_types.zig");
 const service_types = @import("store/services_types.zig");
 
 pub const StoreError = common.StoreError;
@@ -26,7 +27,7 @@ pub const ServiceHttpRouteBackendRecord = service_types.ServiceHttpRouteBackendR
 pub const ServiceHttpRouteBackendInput = service_types.ServiceHttpRouteBackendInput;
 pub const ServiceEndpointRecord = service_types.ServiceEndpointRecord;
 pub const ServiceNameRecord = service_types.ServiceNameRecord;
-pub const NetworkPolicyRecord = service_types.NetworkPolicyRecord;
+pub const NetworkPolicyRecord = service_policy_types.NetworkPolicyRecord;
 pub const DeploymentRecord = @import("store/deployments.zig").DeploymentRecord;
 pub const CronScheduleRecord = @import("store/crons.zig").CronScheduleRecord;
 pub const TrainingJobRecord = @import("store/training.zig").TrainingJobRecord;

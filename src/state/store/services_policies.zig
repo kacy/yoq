@@ -1,13 +1,13 @@
 const std = @import("std");
 const common = @import("common.zig");
-const service_types = @import("services_types.zig");
+const policy_types = @import("services_policy_types.zig");
 
 const Allocator = std.mem.Allocator;
 const StoreError = common.StoreError;
 
-const NetworkPolicyRecord = service_types.NetworkPolicyRecord;
-const NetworkPolicyRow = service_types.NetworkPolicyRow;
-const rowToNetworkPolicyRecord = service_types.rowToNetworkPolicyRecord;
+const NetworkPolicyRecord = policy_types.NetworkPolicyRecord;
+const NetworkPolicyRow = policy_types.NetworkPolicyRow;
+const rowToNetworkPolicyRecord = policy_types.rowToNetworkPolicyRecord;
 
 fn nowRealSeconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
