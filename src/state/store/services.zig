@@ -1,9 +1,9 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
-const schema = @import("../schema.zig");
 const network_ip = @import("../../network/ip.zig");
 const service_endpoints = @import("services_endpoints.zig");
+const service_names = @import("services_names.zig");
 const service_routes = @import("services_routes.zig");
 const service_types = @import("services_types.zig");
 const service_observability = @import("../../network/service_observability.zig");
@@ -31,11 +31,8 @@ pub const NetworkPolicyRecord = service_types.NetworkPolicyRecord;
 
 const service_columns = service_types.service_columns;
 const ServiceRow = service_types.ServiceRow;
-const ServiceNameIpRow = service_types.ServiceNameIpRow;
-const ServiceNameRow = service_types.ServiceNameRow;
 const NetworkPolicyRow = service_types.NetworkPolicyRow;
 const rowToServiceRecord = service_types.rowToServiceRecord;
-const rowToServiceNameRecord = service_types.rowToServiceNameRecord;
 
 pub fn createService(record: ServiceRecord) StoreError!void {
     var lease = try common.leaseDb();
@@ -253,91 +250,27 @@ pub fn removeServiceEndpointsByNode(node_id: i64) StoreError!void {
 }
 
 pub fn registerServiceName(name: []const u8, container_id: []const u8, ip_address: []const u8) StoreError!void {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    lease.db.exec(
-        "INSERT OR REPLACE INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
-        .{},
-        .{ name, container_id, ip_address, nowRealSeconds() },
-    ) catch return StoreError.WriteFailed;
+    return service_names.register(name, container_id, ip_address);
 }
 
 pub fn unregisterServiceName(container_id: []const u8) StoreError!void {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    lease.db.exec(
-        "DELETE FROM service_names WHERE container_id = ?;",
-        .{},
-        .{container_id},
-    ) catch return StoreError.WriteFailed;
+    return service_names.unregister(container_id);
 }
 
 pub fn removeServiceNamesByName(name: []const u8) StoreError!void {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    lease.db.exec(
-        "DELETE FROM service_names WHERE name = ?;",
-        .{},
-        .{name},
-    ) catch return StoreError.WriteFailed;
-}
-
-fn lookupServiceNamesInDb(db: *sqlite.Db, alloc: Allocator, name: []const u8) StoreError!std.ArrayList([]const u8) {
-    var ips: std.ArrayList([]const u8) = .empty;
-    var stmt = db.prepare(
-        "SELECT ip_address FROM service_names WHERE name = ? ORDER BY registered_at DESC;",
-    ) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-    var iter = stmt.iterator(ServiceNameIpRow, .{name}) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        ips.append(alloc, row.ip_address.data) catch return StoreError.ReadFailed;
-    }
-    return ips;
+    return service_names.removeByName(name);
 }
 
 pub fn lookupServiceNames(alloc: Allocator, name: []const u8) StoreError!std.ArrayList([]const u8) {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    return lookupServiceNamesInDb(lease.db, alloc, name);
+    return service_names.lookupNames(alloc, name);
 }
 
 pub fn lookupServiceAddresses(alloc: Allocator, name: []const u8) StoreError!std.ArrayList([]const u8) {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    var ips: std.ArrayList([]const u8) = .empty;
-
-    var stmt = lease.db.prepare(
-        "SELECT vip_address FROM services WHERE service_name = ? LIMIT 1;",
-    ) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-    var iter = stmt.iterator(struct { vip_address: sqlite.Text }, .{name}) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        ips.append(alloc, row.vip_address.data) catch return StoreError.ReadFailed;
-    }
-
-    if (ips.items.len > 0) return ips;
-    return lookupServiceNamesInDb(lease.db, alloc, name);
+    return service_names.lookupAddresses(alloc, name);
 }
 
 pub fn listServiceNames(alloc: Allocator) StoreError!std.ArrayList(ServiceNameRecord) {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    var names: std.ArrayList(ServiceNameRecord) = .empty;
-    var stmt = lease.db.prepare(
-        "SELECT name, container_id, ip_address, registered_at FROM service_names ORDER BY name, registered_at DESC;",
-    ) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-    var iter = stmt.iterator(ServiceNameRow, .{}) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        names.append(alloc, rowToServiceNameRecord(row)) catch return StoreError.ReadFailed;
-    }
-    return names;
+    return service_names.list(alloc);
 }
 
 pub fn addNetworkPolicy(source: []const u8, target: []const u8, action: []const u8) StoreError!void {
@@ -687,46 +620,43 @@ test "lookupServiceAddresses prefers service VIPs over legacy name rows" {
 }
 
 test "service name register and lookup" {
-    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
-    defer db.deinit();
-    try schema.init(&db);
+    try common.initTestDb();
+    defer common.deinitTestDb();
 
-    db.exec(
-        "INSERT INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
-        .{},
-        .{ "web", "abc123", "10.42.0.2", @as(i64, 100) },
-    ) catch unreachable;
+    try registerServiceName("web", "abc123", "10.42.0.2");
 
     const alloc = std.testing.allocator;
-    const row = (db.oneAlloc(ServiceNameIpRow, alloc, "SELECT ip_address FROM service_names WHERE name = ?;", .{}, .{"web"}) catch unreachable).?;
-    defer alloc.free(row.ip_address.data);
+    var ips = try lookupServiceNames(alloc, "web");
+    defer {
+        for (ips.items) |ip| alloc.free(ip);
+        ips.deinit(alloc);
+    }
 
-    try std.testing.expectEqualStrings("10.42.0.2", row.ip_address.data);
+    try std.testing.expectEqual(@as(usize, 1), ips.items.len);
+    try std.testing.expectEqualStrings("10.42.0.2", ips.items[0]);
 }
 
 test "service name unregister removes entries" {
-    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
-    defer db.deinit();
-    try schema.init(&db);
+    try common.initTestDb();
+    defer common.deinitTestDb();
 
-    db.exec(
-        "INSERT INTO service_names (name, container_id, ip_address, registered_at) VALUES (?, ?, ?, ?);",
-        .{},
-        .{ "db", "xyz789", "10.42.0.3", @as(i64, 100) },
-    ) catch unreachable;
-    db.exec("DELETE FROM service_names WHERE container_id = ?;", .{}, .{"xyz789"}) catch unreachable;
+    try registerServiceName("db", "xyz789", "10.42.0.3");
+    try unregisterServiceName("xyz789");
 
-    const CountRow = struct { count: i64 };
-    const result = (db.one(CountRow, "SELECT COUNT(*) AS count FROM service_names;", .{}, .{}) catch unreachable).?;
-    try std.testing.expectEqual(@as(i64, 0), result.count);
+    const alloc = std.testing.allocator;
+    var ips = try lookupServiceNames(alloc, "db");
+    defer ips.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 0), ips.items.len);
 }
 
 test "service name lookup returns empty for unknown" {
-    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
-    defer db.deinit();
-    try schema.init(&db);
+    try common.initTestDb();
+    defer common.deinitTestDb();
 
     const alloc = std.testing.allocator;
-    const row = db.oneAlloc(ServiceNameIpRow, alloc, "SELECT ip_address FROM service_names WHERE name = ?;", .{}, .{"nonexistent"}) catch unreachable;
-    try std.testing.expect(row == null);
+    var ips = try lookupServiceNames(alloc, "nonexistent");
+    defer ips.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 0), ips.items.len);
 }
