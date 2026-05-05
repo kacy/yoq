@@ -50,46 +50,32 @@ fn rowToRecord(row: ImageRow) ImageRecord {
 }
 
 pub fn saveImage(record: ImageRecord) StoreError!void {
-    const Context = struct {
-        record: ImageRecord,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            db.exec(
-                "INSERT OR REPLACE INTO images (" ++ image_columns ++ ")" ++
-                    " VALUES (?, ?, ?, ?, ?, ?, ?);",
-                .{},
-                .{
-                    ctx.record.id,
-                    ctx.record.repository,
-                    ctx.record.tag,
-                    ctx.record.manifest_digest,
-                    ctx.record.config_digest,
-                    ctx.record.total_size,
-                    ctx.record.created_at,
-                },
-            ) catch return StoreError.WriteFailed;
-        }
-    };
-
-    var ctx = Context{ .record = record };
-    return common.withDb(void, &ctx, Context.run);
+    lease.db.exec(
+        "INSERT OR REPLACE INTO images (" ++ image_columns ++ ")" ++
+            " VALUES (?, ?, ?, ?, ?, ?, ?);",
+        .{},
+        .{
+            record.id,
+            record.repository,
+            record.tag,
+            record.manifest_digest,
+            record.config_digest,
+            record.total_size,
+            record.created_at,
+        },
+    ) catch return StoreError.WriteFailed;
 }
 
 fn loadOne(alloc: Allocator, comptime query: []const u8, args: anytype) StoreError!ImageRecord {
-    const Args = @TypeOf(args);
-    const Context = struct {
-        alloc: Allocator,
-        args: Args,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!ImageRecord {
-            const row = (db.oneAlloc(ImageRow, ctx.alloc, query, .{}, ctx.args) catch return StoreError.ReadFailed) orelse
-                return StoreError.NotFound;
-            return rowToRecord(row);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .args = args };
-    return common.withDb(ImageRecord, &ctx, Context.run);
+    const row = (lease.db.oneAlloc(ImageRow, alloc, query, .{}, args) catch return StoreError.ReadFailed) orelse
+        return StoreError.NotFound;
+    return rowToRecord(row);
 }
 
 pub fn loadImage(alloc: Allocator, id: []const u8) StoreError!ImageRecord {
@@ -105,45 +91,33 @@ pub fn findImage(alloc: Allocator, repository: []const u8, tag: []const u8) Stor
 }
 
 pub fn listImages(alloc: Allocator) StoreError!std.ArrayList(ImageRecord) {
-    const Context = struct {
-        alloc: Allocator,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(ImageRecord) {
-            var images: std.ArrayList(ImageRecord) = .empty;
-            var stmt = db.prepare(
-                "SELECT " ++ image_columns ++ " FROM images ORDER BY created_at DESC;",
-            ) catch return StoreError.ReadFailed;
-            defer stmt.deinit();
-            var iter = stmt.iterator(ImageRow, .{}) catch return StoreError.ReadFailed;
-            while (iter.nextAlloc(ctx.alloc, .{}) catch return StoreError.ReadFailed) |row| {
-                images.append(ctx.alloc, rowToRecord(row)) catch return StoreError.ReadFailed;
-            }
-            return images;
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc };
-    return common.withDb(std.ArrayList(ImageRecord), &ctx, Context.run);
+    var images: std.ArrayList(ImageRecord) = .empty;
+    var stmt = lease.db.prepare(
+        "SELECT " ++ image_columns ++ " FROM images ORDER BY created_at DESC;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(ImageRow, .{}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        images.append(alloc, rowToRecord(row)) catch return StoreError.ReadFailed;
+    }
+    return images;
 }
 
 pub fn removeImage(id: []const u8) StoreError!void {
-    const Context = struct {
-        id: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            const exists = db.one(
-                struct { exists: i32 },
-                "SELECT 1 AS exists FROM images WHERE id = ?;",
-                .{},
-                .{ctx.id},
-            ) catch return StoreError.ReadFailed;
-            if (exists == null) return StoreError.NotFound;
-            db.exec("DELETE FROM images WHERE id = ?;", .{}, .{ctx.id}) catch return StoreError.WriteFailed;
-        }
-    };
-
-    var ctx = Context{ .id = id };
-    return common.withDb(void, &ctx, Context.run);
+    const exists = lease.db.one(
+        struct { exists: i32 },
+        "SELECT 1 AS exists FROM images WHERE id = ?;",
+        .{},
+        .{id},
+    ) catch return StoreError.ReadFailed;
+    if (exists == null) return StoreError.NotFound;
+    lease.db.exec("DELETE FROM images WHERE id = ?;", .{}, .{id}) catch return StoreError.WriteFailed;
 }
 
 test "image record round-trip via sqlite" {

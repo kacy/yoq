@@ -17,6 +17,7 @@ pub const VolumeRecord = common.VolumeRecord;
 pub const VolumeConstraint = common.VolumeConstraint;
 pub const resolveVolumePath = common.resolveVolumePath;
 pub const create = storage_runtime.create;
+pub const createManaged = storage_runtime.createManaged;
 pub const getVolumePath = storage_runtime.getVolumePath;
 pub const destroy = storage_runtime.destroy;
 pub const list = storage_runtime.list;

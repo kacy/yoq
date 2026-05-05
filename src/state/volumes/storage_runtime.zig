@@ -1,8 +1,10 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
+const paths = @import("../../lib/paths.zig");
 const spec = @import("../../manifest/spec.zig");
 const common = @import("common.zig");
 const mount_support = @import("mount_support.zig");
+const store_common = @import("../store/common.zig");
 
 pub fn create(
     db: *sqlite.Db,
@@ -11,7 +13,7 @@ pub fn create(
     timestamp: i64,
     node_id: ?[]const u8,
 ) common.VolumeError!void {
-    var buf: [@import("../../lib/paths.zig").max_path]u8 = undefined;
+    var buf: [paths.max_path]u8 = undefined;
     const vol_path = try common.resolveVolumePath(&buf, app_name, vol.name, vol.driver);
 
     const prepared = try mount_support.prepareVolumePath(vol_path, vol.driver);
@@ -31,6 +33,18 @@ pub fn create(
             timestamp,
         },
     ) catch return common.VolumeError.DbError;
+}
+
+pub fn createManaged(
+    app_name: []const u8,
+    vol: spec.Volume,
+    timestamp: i64,
+    node_id: ?[]const u8,
+) common.VolumeError!void {
+    var lease = store_common.leaseDb() catch return common.VolumeError.DbError;
+    defer lease.deinit();
+
+    return create(lease.db, app_name, vol, timestamp, node_id);
 }
 
 pub fn getVolumePath(

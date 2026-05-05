@@ -93,16 +93,10 @@ fn rowToRecord(row: DeploymentRow) DeploymentRecord {
 }
 
 pub fn saveDeployment(record: DeploymentRecord) StoreError!void {
-    const Context = struct {
-        record: DeploymentRecord,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            return saveDeploymentInDb(db, ctx.record);
-        }
-    };
-
-    var ctx = Context{ .record = record };
-    return common.withDb(void, &ctx, Context.run);
+    return saveDeploymentInDb(lease.db, record);
 }
 
 pub fn saveDeploymentInDb(db: *sqlite.Db, record: DeploymentRecord) StoreError!void {
@@ -145,18 +139,10 @@ fn queryOneInDb(
 }
 
 fn queryOne(alloc: Allocator, comptime query: []const u8, args: anytype) StoreError!DeploymentRecord {
-    const Args = @TypeOf(args);
-    const Context = struct {
-        alloc: Allocator,
-        args: Args,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!DeploymentRecord {
-            return queryOneInDb(db, ctx.alloc, query, ctx.args);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .args = args };
-    return common.withDb(DeploymentRecord, &ctx, Context.run);
+    return queryOneInDb(lease.db, alloc, query, args);
 }
 
 fn listQueryInDb(
@@ -184,36 +170,22 @@ pub fn getDeploymentInDb(db: *sqlite.Db, alloc: Allocator, id: []const u8) Store
 }
 
 pub fn listDeployments(alloc: Allocator, service_name: []const u8) StoreError!std.ArrayList(DeploymentRecord) {
-    const Context = struct {
-        alloc: Allocator,
-        service_name: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(DeploymentRecord) {
-            return listQueryInDb(
-                db,
-                ctx.alloc,
-                "SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? ORDER BY created_at DESC, rowid DESC;",
-                .{ctx.service_name},
-            );
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .service_name = service_name };
-    return common.withDb(std.ArrayList(DeploymentRecord), &ctx, Context.run);
+    return listQueryInDb(
+        lease.db,
+        alloc,
+        "SELECT " ++ deployment_columns ++ " FROM deployments WHERE service_name = ? ORDER BY created_at DESC, rowid DESC;",
+        .{service_name},
+    );
 }
 
 pub fn listDeploymentsByApp(alloc: Allocator, app_name: []const u8) StoreError!std.ArrayList(DeploymentRecord) {
-    const Context = struct {
-        alloc: Allocator,
-        app_name: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(DeploymentRecord) {
-            return listDeploymentsByAppInDb(db, ctx.alloc, ctx.app_name);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .app_name = app_name };
-    return common.withDb(std.ArrayList(DeploymentRecord), &ctx, Context.run);
+    return listDeploymentsByAppInDb(lease.db, alloc, app_name);
 }
 
 pub fn listDeploymentsByAppInDb(
@@ -230,16 +202,10 @@ pub fn listDeploymentsByAppInDb(
 }
 
 pub fn listLatestDeploymentsByApp(alloc: Allocator) StoreError!std.ArrayList(DeploymentRecord) {
-    const Context = struct {
-        alloc: Allocator,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(DeploymentRecord) {
-            return listLatestDeploymentsByAppInDb(db, ctx.alloc);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc };
-    return common.withDb(std.ArrayList(DeploymentRecord), &ctx, Context.run);
+    return listLatestDeploymentsByAppInDb(lease.db, alloc);
 }
 
 pub fn listLatestDeploymentsByAppInDb(
@@ -285,16 +251,10 @@ pub fn listLatestDeploymentsByAppInDb(
 }
 
 pub fn listRecoverableActiveDeploymentsByApp(alloc: Allocator) StoreError!std.ArrayList(DeploymentRecord) {
-    const Context = struct {
-        alloc: Allocator,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(DeploymentRecord) {
-            return listRecoverableActiveDeploymentsByAppInDb(db, ctx.alloc);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc };
-    return common.withDb(std.ArrayList(DeploymentRecord), &ctx, Context.run);
+    return listRecoverableActiveDeploymentsByAppInDb(lease.db, alloc);
 }
 
 pub fn listRecoverableActiveDeploymentsByAppInDb(
@@ -312,18 +272,10 @@ pub fn listRecoverableActiveDeploymentsByAppInDb(
 }
 
 pub fn updateDeploymentStatus(id: []const u8, status: []const u8, message: ?[]const u8) StoreError!void {
-    const Context = struct {
-        id: []const u8,
-        status: []const u8,
-        message: ?[]const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            return updateDeploymentStatusInDb(db, ctx.id, ctx.status, ctx.message, null, null, null);
-        }
-    };
-
-    var ctx = Context{ .id = id, .status = status, .message = message };
-    return common.withDb(void, &ctx, Context.run);
+    return updateDeploymentStatusInDb(lease.db, id, status, message, null, null, null);
 }
 
 pub fn updateDeploymentStatusInDb(
@@ -348,42 +300,20 @@ pub fn updateDeploymentProgress(
     rollout_targets_json: ?[]const u8,
     rollout_checkpoint_json: ?[]const u8,
 ) StoreError!void {
-    const Context = struct {
-        id: []const u8,
-        status: []const u8,
-        message: ?[]const u8,
-        completed_targets: usize,
-        failed_targets: usize,
-        failure_details_json: ?[]const u8,
-        rollout_targets_json: ?[]const u8,
-        rollout_checkpoint_json: ?[]const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            return updateDeploymentProgressInDb(
-                db,
-                ctx.id,
-                ctx.status,
-                ctx.message,
-                ctx.completed_targets,
-                ctx.failed_targets,
-                ctx.failure_details_json,
-                ctx.rollout_targets_json,
-                ctx.rollout_checkpoint_json,
-            );
-        }
-    };
-
-    var ctx = Context{
-        .id = id,
-        .status = status,
-        .message = message,
-        .completed_targets = completed_targets,
-        .failed_targets = failed_targets,
-        .failure_details_json = failure_details_json,
-        .rollout_targets_json = rollout_targets_json,
-        .rollout_checkpoint_json = rollout_checkpoint_json,
-    };
-    return common.withDb(void, &ctx, Context.run);
+    return updateDeploymentProgressInDb(
+        lease.db,
+        id,
+        status,
+        message,
+        completed_targets,
+        failed_targets,
+        failure_details_json,
+        rollout_targets_json,
+        rollout_checkpoint_json,
+    );
 }
 
 pub fn updateDeploymentProgressInDb(
@@ -409,17 +339,10 @@ pub fn updateDeploymentProgressInDb(
 }
 
 pub fn updateDeploymentRolloutControlState(id: []const u8, control_state: []const u8) StoreError!void {
-    const Context = struct {
-        id: []const u8,
-        control_state: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            return updateDeploymentRolloutControlStateInDb(db, ctx.id, ctx.control_state);
-        }
-    };
-
-    var ctx = Context{ .id = id, .control_state = control_state };
-    return common.withDb(void, &ctx, Context.run);
+    return updateDeploymentRolloutControlStateInDb(lease.db, id, control_state);
 }
 
 pub fn updateDeploymentRolloutControlStateInDb(
@@ -435,17 +358,10 @@ pub fn updateDeploymentRolloutControlStateInDb(
 }
 
 pub fn updateDeploymentSupersededByReleaseId(id: []const u8, superseded_by_release_id: []const u8) StoreError!void {
-    const Context = struct {
-        id: []const u8,
-        superseded_by_release_id: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            return updateDeploymentSupersededByReleaseIdInDb(db, ctx.id, ctx.superseded_by_release_id);
-        }
-    };
-
-    var ctx = Context{ .id = id, .superseded_by_release_id = superseded_by_release_id };
-    return common.withDb(void, &ctx, Context.run);
+    return updateDeploymentSupersededByReleaseIdInDb(lease.db, id, superseded_by_release_id);
 }
 
 pub fn updateDeploymentSupersededByReleaseIdInDb(
@@ -461,17 +377,10 @@ pub fn updateDeploymentSupersededByReleaseIdInDb(
 }
 
 pub fn getActiveDeploymentByApp(alloc: Allocator, app_name: []const u8) StoreError!DeploymentRecord {
-    const Context = struct {
-        alloc: Allocator,
-        app_name: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!DeploymentRecord {
-            return getActiveDeploymentByAppInDb(db, ctx.alloc, ctx.app_name);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .app_name = app_name };
-    return common.withDb(DeploymentRecord, &ctx, Context.run);
+    return getActiveDeploymentByAppInDb(lease.db, alloc, app_name);
 }
 
 pub fn getActiveDeploymentByAppInDb(
@@ -496,17 +405,10 @@ pub fn getLatestDeployment(alloc: Allocator, service_name: []const u8) StoreErro
 }
 
 pub fn getLatestDeploymentByApp(alloc: Allocator, app_name: []const u8) StoreError!DeploymentRecord {
-    const Context = struct {
-        alloc: Allocator,
-        app_name: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!DeploymentRecord {
-            return getLatestDeploymentByAppInDb(db, ctx.alloc, ctx.app_name);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .app_name = app_name };
-    return common.withDb(DeploymentRecord, &ctx, Context.run);
+    return getLatestDeploymentByAppInDb(lease.db, alloc, app_name);
 }
 
 pub fn getLatestDeploymentByAppInDb(
@@ -543,18 +445,10 @@ pub fn getPreviousSuccessfulDeploymentByApp(
     app_name: []const u8,
     exclude_id: []const u8,
 ) StoreError!DeploymentRecord {
-    const Context = struct {
-        alloc: Allocator,
-        app_name: []const u8,
-        exclude_id: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!DeploymentRecord {
-            return getPreviousSuccessfulDeploymentByAppInDb(db, ctx.alloc, ctx.app_name, ctx.exclude_id);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .app_name = app_name, .exclude_id = exclude_id };
-    return common.withDb(DeploymentRecord, &ctx, Context.run);
+    return getPreviousSuccessfulDeploymentByAppInDb(lease.db, alloc, app_name, exclude_id);
 }
 
 pub fn getPreviousSuccessfulDeploymentByAppInDb(
@@ -576,18 +470,10 @@ pub fn getRollbackTargetDeploymentByApp(
     app_name: []const u8,
     explicit_release_id: ?[]const u8,
 ) StoreError!DeploymentRecord {
-    const Context = struct {
-        alloc: Allocator,
-        app_name: []const u8,
-        explicit_release_id: ?[]const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!DeploymentRecord {
-            return getRollbackTargetDeploymentByAppInDb(db, ctx.alloc, ctx.app_name, ctx.explicit_release_id);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .app_name = app_name, .explicit_release_id = explicit_release_id };
-    return common.withDb(DeploymentRecord, &ctx, Context.run);
+    return getRollbackTargetDeploymentByAppInDb(lease.db, alloc, app_name, explicit_release_id);
 }
 
 pub fn getRollbackTargetDeploymentByAppInDb(

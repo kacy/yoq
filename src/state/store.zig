@@ -6,7 +6,6 @@
 const common = @import("store/common.zig");
 
 pub const StoreError = common.StoreError;
-pub const withDb = common.withDb;
 
 pub const ContainerRecord = @import("store/containers.zig").ContainerRecord;
 pub const ImageRecord = @import("store/images.zig").ImageRecord;
