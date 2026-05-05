@@ -3,6 +3,7 @@ const sqlite = @import("sqlite");
 const common = @import("common.zig");
 const schema = @import("../schema.zig");
 const network_ip = @import("../../network/ip.zig");
+const service_endpoints = @import("services_endpoints.zig");
 const service_routes = @import("services_routes.zig");
 const service_types = @import("services_types.zig");
 const service_observability = @import("../../network/service_observability.zig");
@@ -30,13 +31,10 @@ pub const NetworkPolicyRecord = service_types.NetworkPolicyRecord;
 
 const service_columns = service_types.service_columns;
 const ServiceRow = service_types.ServiceRow;
-const endpoint_columns = service_types.endpoint_columns;
-const ServiceEndpointRow = service_types.ServiceEndpointRow;
 const ServiceNameIpRow = service_types.ServiceNameIpRow;
 const ServiceNameRow = service_types.ServiceNameRow;
 const NetworkPolicyRow = service_types.NetworkPolicyRow;
 const rowToServiceRecord = service_types.rowToServiceRecord;
-const rowToServiceEndpointRecord = service_types.rowToServiceEndpointRecord;
 const rowToServiceNameRecord = service_types.rowToServiceNameRecord;
 
 pub fn createService(record: ServiceRecord) StoreError!void {
@@ -223,124 +221,35 @@ pub fn listServices(alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
 }
 
 pub fn getServiceEndpoint(alloc: Allocator, service_name: []const u8, endpoint_id: []const u8) StoreError!ServiceEndpointRecord {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    const row = (lease.db.oneAlloc(
-        ServiceEndpointRow,
-        alloc,
-        "SELECT " ++ endpoint_columns ++ " FROM service_endpoints WHERE service_name = ? AND endpoint_id = ?;",
-        .{},
-        .{ service_name, endpoint_id },
-    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
-    return rowToServiceEndpointRecord(row);
+    return service_endpoints.get(alloc, service_name, endpoint_id);
 }
 
 pub fn upsertServiceEndpoint(record: ServiceEndpointRecord) StoreError!void {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    lease.db.exec(
-        "INSERT INTO service_endpoints (" ++ endpoint_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" ++
-            " ON CONFLICT(service_name, endpoint_id) DO UPDATE SET" ++
-            " container_id = excluded.container_id," ++
-            " node_id = excluded.node_id," ++
-            " ip_address = excluded.ip_address," ++
-            " port = excluded.port," ++
-            " weight = excluded.weight," ++
-            " admin_state = excluded.admin_state," ++
-            " generation = excluded.generation," ++
-            " registered_at = excluded.registered_at," ++
-            " last_seen_at = excluded.last_seen_at;",
-        .{},
-        .{
-            record.service_name,
-            record.endpoint_id,
-            record.container_id,
-            record.node_id,
-            record.ip_address,
-            record.port,
-            record.weight,
-            record.admin_state,
-            record.generation,
-            record.registered_at,
-            record.last_seen_at,
-        },
-    ) catch return StoreError.WriteFailed;
+    return service_endpoints.upsert(record);
 }
 
 pub fn removeServiceEndpoint(service_name: []const u8, endpoint_id: []const u8) StoreError!void {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    lease.db.exec(
-        "DELETE FROM service_endpoints WHERE service_name = ? AND endpoint_id = ?;",
-        .{},
-        .{ service_name, endpoint_id },
-    ) catch return StoreError.WriteFailed;
+    return service_endpoints.remove(service_name, endpoint_id);
 }
 
 pub fn markServiceEndpointAdminState(service_name: []const u8, endpoint_id: []const u8, admin_state: []const u8) StoreError!void {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    lease.db.exec(
-        "UPDATE service_endpoints SET admin_state = ? WHERE service_name = ? AND endpoint_id = ?;",
-        .{},
-        .{ admin_state, service_name, endpoint_id },
-    ) catch return StoreError.WriteFailed;
+    return service_endpoints.markAdminState(service_name, endpoint_id, admin_state);
 }
 
 pub fn listServiceEndpoints(alloc: Allocator, service_name: []const u8) StoreError!std.ArrayList(ServiceEndpointRecord) {
-    return queryServiceEndpoints(
-        alloc,
-        "SELECT " ++ endpoint_columns ++ " FROM service_endpoints WHERE service_name = ? ORDER BY registered_at DESC;",
-        .{service_name},
-    );
+    return service_endpoints.list(alloc, service_name);
 }
 
 pub fn listServiceEndpointsByNode(alloc: Allocator, node_id: i64) StoreError!std.ArrayList(ServiceEndpointRecord) {
-    return queryServiceEndpoints(
-        alloc,
-        "SELECT " ++ endpoint_columns ++ " FROM service_endpoints WHERE node_id = ? ORDER BY service_name, endpoint_id;",
-        .{node_id},
-    );
+    return service_endpoints.listByNode(alloc, node_id);
 }
 
 pub fn removeServiceEndpointsByContainer(container_id: []const u8) StoreError!void {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    lease.db.exec(
-        "DELETE FROM service_endpoints WHERE container_id = ?;",
-        .{},
-        .{container_id},
-    ) catch return StoreError.WriteFailed;
+    return service_endpoints.removeByContainer(container_id);
 }
 
 pub fn removeServiceEndpointsByNode(node_id: i64) StoreError!void {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    lease.db.exec(
-        "DELETE FROM service_endpoints WHERE node_id = ?;",
-        .{},
-        .{node_id},
-    ) catch return StoreError.WriteFailed;
-}
-
-fn queryServiceEndpoints(alloc: Allocator, comptime query: []const u8, args: anytype) StoreError!std.ArrayList(ServiceEndpointRecord) {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    var endpoints: std.ArrayList(ServiceEndpointRecord) = .empty;
-    var stmt = lease.db.prepare(query) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-    var iter = stmt.iterator(ServiceEndpointRow, args) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        endpoints.append(alloc, rowToServiceEndpointRecord(row)) catch return StoreError.ReadFailed;
-    }
-    return endpoints;
+    return service_endpoints.removeByNode(node_id);
 }
 
 pub fn registerServiceName(name: []const u8, container_id: []const u8, ip_address: []const u8) StoreError!void {
