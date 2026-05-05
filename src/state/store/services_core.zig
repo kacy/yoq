@@ -205,3 +205,135 @@ fn listInDb(db: *sqlite.Db, alloc: Allocator) StoreError!std.ArrayList(ServiceRe
     }
     return services;
 }
+
+test "create and get round-trip" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    try create(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.10",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .http_proxy_retries = 2,
+        .http_proxy_connect_timeout_ms = 1500,
+        .http_proxy_request_timeout_ms = 5000,
+        .http_proxy_http2_idle_timeout_ms = 30000,
+        .http_proxy_target_port = 8080,
+        .http_proxy_preserve_host = true,
+        .http_proxy_mirror_service = "api-shadow",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+
+    const alloc = std.testing.allocator;
+    const service = try get(alloc, "api");
+    defer service.deinit(alloc);
+
+    try std.testing.expectEqualStrings("api", service.service_name);
+    try std.testing.expectEqualStrings("10.43.0.10", service.vip_address);
+    try std.testing.expectEqualStrings("consistent_hash", service.lb_policy);
+    try std.testing.expectEqualStrings("api.internal", service.http_proxy_host.?);
+    try std.testing.expectEqualStrings("/v1", service.http_proxy_path_prefix.?);
+    try std.testing.expectEqual(@as(?i64, 2), service.http_proxy_retries);
+    try std.testing.expectEqual(@as(?i64, 1500), service.http_proxy_connect_timeout_ms);
+    try std.testing.expectEqual(@as(?i64, 5000), service.http_proxy_request_timeout_ms);
+    try std.testing.expectEqual(@as(?i64, 30000), service.http_proxy_http2_idle_timeout_ms);
+    try std.testing.expectEqual(@as(?i64, 8080), service.http_proxy_target_port);
+    try std.testing.expectEqual(@as(?bool, true), service.http_proxy_preserve_host);
+    try std.testing.expectEqualStrings("api-shadow", service.http_proxy_mirror_service.?);
+    try std.testing.expectEqual(@as(i64, 1000), service.created_at);
+}
+
+test "list returns services ordered by name" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    try create(.{
+        .service_name = "web",
+        .vip_address = "10.43.0.20",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try create(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.10",
+        .lb_policy = "consistent_hash",
+        .created_at = 1001,
+        .updated_at = 1001,
+    });
+
+    const alloc = std.testing.allocator;
+    var services = try list(alloc);
+    defer {
+        for (services.items) |service| service.deinit(alloc);
+        services.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), services.items.len);
+    try std.testing.expectEqualStrings("api", services.items[0].service_name);
+    try std.testing.expectEqualStrings("web", services.items[1].service_name);
+}
+
+test "ensure allocates once and returns the existing VIP thereafter" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    const alloc = std.testing.allocator;
+
+    const first = try ensure(alloc, "api", "consistent_hash");
+    defer first.deinit(alloc);
+    try std.testing.expectEqualStrings("10.43.0.2", first.vip_address);
+
+    const second = try ensure(alloc, "api", "consistent_hash");
+    defer second.deinit(alloc);
+    try std.testing.expectEqualStrings("10.43.0.2", second.vip_address);
+
+    var services = try list(alloc);
+    defer {
+        for (services.items) |service| service.deinit(alloc);
+        services.deinit(alloc);
+    }
+    try std.testing.expectEqual(@as(usize, 1), services.items.len);
+}
+
+test "syncConfig updates proxy policy without changing vip" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    const alloc = std.testing.allocator;
+
+    const first = try ensure(alloc, "api", "consistent_hash");
+    defer first.deinit(alloc);
+
+    const updated = try syncConfig(
+        alloc,
+        "api",
+        "consistent_hash",
+        &.{
+            .{
+                .route_name = "default",
+                .host = "api.internal",
+                .path_prefix = "/v1",
+                .mirror_service = "api-shadow",
+                .retries = 2,
+                .connect_timeout_ms = 1500,
+                .request_timeout_ms = 5000,
+                .http2_idle_timeout_ms = 45000,
+                .target_port = 8080,
+                .preserve_host = false,
+            },
+        },
+    );
+    defer updated.deinit(alloc);
+
+    try std.testing.expectEqualStrings(first.vip_address, updated.vip_address);
+    try std.testing.expectEqualStrings("api.internal", updated.http_proxy_host.?);
+    try std.testing.expectEqualStrings("/v1", updated.http_proxy_path_prefix.?);
+    try std.testing.expectEqual(@as(?i64, 45000), updated.http_proxy_http2_idle_timeout_ms);
+    try std.testing.expectEqual(@as(?i64, 8080), updated.http_proxy_target_port);
+    try std.testing.expectEqual(@as(?bool, false), updated.http_proxy_preserve_host);
+    try std.testing.expectEqualStrings("api-shadow", updated.http_proxy_mirror_service.?);
+}
