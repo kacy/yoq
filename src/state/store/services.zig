@@ -1,21 +1,13 @@
 const std = @import("std");
-const sqlite = @import("sqlite");
 const common = @import("common.zig");
-const network_ip = @import("../../network/ip.zig");
+const service_core = @import("services_core.zig");
 const service_endpoints = @import("services_endpoints.zig");
 const service_names = @import("services_names.zig");
 const service_policies = @import("services_policies.zig");
-const service_routes = @import("services_routes.zig");
 const service_types = @import("services_types.zig");
-const service_observability = @import("../../network/service_observability.zig");
-const vip_allocator = @import("../../network/vip_allocator.zig");
 
 const Allocator = std.mem.Allocator;
 const StoreError = common.StoreError;
-
-fn nowRealSeconds() i64 {
-    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
-}
 
 pub const ServiceNameRecord = service_types.ServiceNameRecord;
 pub const ServiceRecord = service_types.ServiceRecord;
@@ -30,120 +22,12 @@ pub const ServiceHttpRouteBackendInput = service_types.ServiceHttpRouteBackendIn
 pub const ServiceEndpointRecord = service_types.ServiceEndpointRecord;
 pub const NetworkPolicyRecord = service_types.NetworkPolicyRecord;
 
-const service_columns = service_types.service_columns;
-const ServiceRow = service_types.ServiceRow;
-const rowToServiceRecord = service_types.rowToServiceRecord;
-
 pub fn createService(record: ServiceRecord) StoreError!void {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    return createServiceInDb(lease.db, record);
-}
-
-fn createServiceInDb(db: *sqlite.Db, record: ServiceRecord) StoreError!void {
-    db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return StoreError.WriteFailed;
-    var committed = false;
-    errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
-    db.exec(
-        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-        .{},
-        .{
-            record.service_name,
-            record.vip_address,
-            record.lb_policy,
-            record.http_proxy_host,
-            record.http_proxy_path_prefix,
-            record.http_proxy_rewrite_prefix,
-            record.http_proxy_retries,
-            record.http_proxy_connect_timeout_ms,
-            record.http_proxy_request_timeout_ms,
-            record.http_proxy_http2_idle_timeout_ms,
-            record.http_proxy_target_port,
-            if (record.http_proxy_preserve_host) |preserve_host| @as(?i64, @intFromBool(preserve_host)) else null,
-            if (record.http_proxy_retry_on_5xx) |retry_on_5xx| @as(?i64, @intFromBool(retry_on_5xx)) else null,
-            record.http_proxy_circuit_breaker_threshold,
-            record.http_proxy_circuit_breaker_timeout_ms,
-            record.http_proxy_mirror_service,
-            record.created_at,
-            record.updated_at,
-        },
-    ) catch return StoreError.WriteFailed;
-    try service_routes.syncFromRecords(db, record.service_name, record.updated_at, record.http_routes);
-    db.exec("COMMIT;", .{}, .{}) catch return StoreError.WriteFailed;
-    committed = true;
+    return service_core.create(record);
 }
 
 pub fn ensureService(alloc: Allocator, service_name: []const u8, lb_policy: []const u8) StoreError!ServiceRecord {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    return ensureServiceInDb(lease.db, alloc, service_name, lb_policy);
-}
-
-fn ensureServiceInDb(db: *sqlite.Db, alloc: Allocator, service_name: []const u8, lb_policy: []const u8) StoreError!ServiceRecord {
-    db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return StoreError.WriteFailed;
-
-    var committed = false;
-    errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
-
-    if (db.oneAlloc(
-        ServiceRow,
-        alloc,
-        "SELECT " ++ service_columns ++ " FROM services WHERE service_name = ?;",
-        .{},
-        .{service_name},
-    ) catch return StoreError.ReadFailed) |row| {
-        const routes = try service_routes.listForDb(alloc, db, service_name);
-        const record = rowToServiceRecord(row, routes);
-        db.exec("COMMIT;", .{}, .{}) catch {
-            record.deinit(alloc);
-            return StoreError.WriteFailed;
-        };
-        committed = true;
-        return record;
-    }
-
-    const vip = vip_allocator.allocate(db) catch {
-        service_observability.noteVipAllocFailure();
-        return StoreError.WriteFailed;
-    };
-    var vip_buf: [16]u8 = undefined;
-    const vip_address = network_ip.formatIp(vip, &vip_buf);
-    const now = nowRealSeconds();
-
-    db.exec(
-        "INSERT INTO services (service_name, vip_address, lb_policy, created_at, updated_at) VALUES (?, ?, ?, ?, ?);",
-        .{},
-        .{ service_name, vip_address, lb_policy, now, now },
-    ) catch return StoreError.WriteFailed;
-
-    db.exec("COMMIT;", .{}, .{}) catch return StoreError.WriteFailed;
-    committed = true;
-
-    const service_name_copy = alloc.dupe(u8, service_name) catch return StoreError.ReadFailed;
-    errdefer alloc.free(service_name_copy);
-    const vip_copy = alloc.dupe(u8, vip_address) catch return StoreError.ReadFailed;
-    errdefer alloc.free(vip_copy);
-    const lb_policy_copy = alloc.dupe(u8, lb_policy) catch return StoreError.ReadFailed;
-
-    return .{
-        .service_name = service_name_copy,
-        .vip_address = vip_copy,
-        .lb_policy = lb_policy_copy,
-        .http_routes = alloc.alloc(ServiceHttpRouteRecord, 0) catch return StoreError.ReadFailed,
-        .http_proxy_host = null,
-        .http_proxy_path_prefix = null,
-        .http_proxy_rewrite_prefix = null,
-        .http_proxy_retries = null,
-        .http_proxy_connect_timeout_ms = null,
-        .http_proxy_request_timeout_ms = null,
-        .http_proxy_http2_idle_timeout_ms = null,
-        .http_proxy_target_port = null,
-        .http_proxy_preserve_host = null,
-        .created_at = now,
-        .updated_at = now,
-    };
+    return service_core.ensure(alloc, service_name, lb_policy);
 }
 
 pub fn syncServiceConfig(
@@ -152,69 +36,15 @@ pub fn syncServiceConfig(
     lb_policy: []const u8,
     routes: []const ServiceHttpRouteInput,
 ) StoreError!ServiceRecord {
-    var existing = try ensureService(alloc, service_name, lb_policy);
-    defer existing.deinit(alloc);
-
-    {
-        var lease = try common.leaseDb();
-        defer lease.deinit();
-
-        const now = nowRealSeconds();
-        lease.db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return StoreError.WriteFailed;
-        var committed = false;
-        errdefer if (!committed) lease.db.exec("ROLLBACK;", .{}, .{}) catch {};
-        lease.db.exec(
-            "UPDATE services SET lb_policy = ?, updated_at = ? WHERE service_name = ?;",
-            .{},
-            .{ lb_policy, now, service_name },
-        ) catch return StoreError.WriteFailed;
-        try service_routes.replaceInDb(lease.db, service_name, now, routes);
-        try service_routes.syncDerivedFields(lease.db, service_name, now, routes);
-        lease.db.exec("COMMIT;", .{}, .{}) catch return StoreError.WriteFailed;
-        committed = true;
-    }
-
-    return getService(alloc, service_name);
-}
-
-fn getServiceInDb(db: *sqlite.Db, alloc: Allocator, service_name: []const u8) StoreError!ServiceRecord {
-    const row = (db.oneAlloc(
-        ServiceRow,
-        alloc,
-        "SELECT " ++ service_columns ++ " FROM services WHERE service_name = ?;",
-        .{},
-        .{service_name},
-    ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
-    const routes = try service_routes.listForDb(alloc, db, service_name);
-    return rowToServiceRecord(row, routes);
+    return service_core.syncConfig(alloc, service_name, lb_policy, routes);
 }
 
 pub fn getService(alloc: Allocator, service_name: []const u8) StoreError!ServiceRecord {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    return getServiceInDb(lease.db, alloc, service_name);
-}
-
-fn listServicesInDb(db: *sqlite.Db, alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
-    var services: std.ArrayList(ServiceRecord) = .empty;
-    var stmt = db.prepare(
-        "SELECT " ++ service_columns ++ " FROM services ORDER BY service_name;",
-    ) catch return StoreError.ReadFailed;
-    defer stmt.deinit();
-    var iter = stmt.iterator(ServiceRow, .{}) catch return StoreError.ReadFailed;
-    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        const routes = try service_routes.listForDb(alloc, db, row.service_name.data);
-        services.append(alloc, rowToServiceRecord(row, routes)) catch return StoreError.ReadFailed;
-    }
-    return services;
+    return service_core.get(alloc, service_name);
 }
 
 pub fn listServices(alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
-    var lease = try common.leaseDb();
-    defer lease.deinit();
-
-    return listServicesInDb(lease.db, alloc);
+    return service_core.list(alloc);
 }
 
 pub fn getServiceEndpoint(alloc: Allocator, service_name: []const u8, endpoint_id: []const u8) StoreError!ServiceEndpointRecord {
