@@ -1,6 +1,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
+const service_core = @import("services_core.zig");
 const service_types = @import("services_types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -101,4 +102,70 @@ pub fn list(alloc: Allocator) StoreError!std.ArrayList(ServiceNameRecord) {
         names.append(alloc, rowToServiceNameRecord(row)) catch return StoreError.ReadFailed;
     }
     return names;
+}
+
+test "lookupAddresses prefers service VIPs over legacy name rows" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    try service_core.create(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.10",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try register("api", "ctr-1", "10.42.0.11");
+
+    const alloc = std.testing.allocator;
+    var addresses = try lookupAddresses(alloc, "api");
+    defer {
+        for (addresses.items) |ip| alloc.free(ip);
+        addresses.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), addresses.items.len);
+    try std.testing.expectEqualStrings("10.43.0.10", addresses.items[0]);
+}
+
+test "register and lookup" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    try register("web", "abc123", "10.42.0.2");
+
+    const alloc = std.testing.allocator;
+    var ips = try lookupNames(alloc, "web");
+    defer {
+        for (ips.items) |ip| alloc.free(ip);
+        ips.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), ips.items.len);
+    try std.testing.expectEqualStrings("10.42.0.2", ips.items[0]);
+}
+
+test "unregister removes entries" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    try register("db", "xyz789", "10.42.0.3");
+    try unregister("xyz789");
+
+    const alloc = std.testing.allocator;
+    var ips = try lookupNames(alloc, "db");
+    defer ips.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 0), ips.items.len);
+}
+
+test "lookup returns empty for unknown" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    const alloc = std.testing.allocator;
+    var ips = try lookupNames(alloc, "nonexistent");
+    defer ips.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 0), ips.items.len);
 }

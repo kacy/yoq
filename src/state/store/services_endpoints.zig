@@ -1,5 +1,6 @@
 const std = @import("std");
 const common = @import("common.zig");
+const service_core = @import("services_core.zig");
 const types = @import("services_types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -125,4 +126,137 @@ fn query(alloc: Allocator, comptime sql: []const u8, args: anytype) StoreError!s
         endpoints.append(alloc, types.rowToServiceEndpointRecord(row)) catch return StoreError.ReadFailed;
     }
     return endpoints;
+}
+
+test "upsert updates an existing endpoint" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    try service_core.create(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.10",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+
+    try upsert(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:8080",
+        .container_id = "ctr-1",
+        .node_id = 7,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    try upsert(.{
+        .service_name = "api",
+        .endpoint_id = "ctr-1:8080",
+        .container_id = "ctr-1b",
+        .node_id = 8,
+        .ip_address = "10.42.0.19",
+        .port = 8080,
+        .weight = 2,
+        .admin_state = "draining",
+        .generation = 2,
+        .registered_at = 1001,
+        .last_seen_at = 1002,
+    });
+
+    const alloc = std.testing.allocator;
+    var endpoints = try list(alloc, "api");
+    defer {
+        for (endpoints.items) |endpoint| endpoint.deinit(alloc);
+        endpoints.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), endpoints.items.len);
+    try std.testing.expectEqualStrings("ctr-1b", endpoints.items[0].container_id);
+    try std.testing.expectEqual(@as(?i64, 8), endpoints.items[0].node_id);
+    try std.testing.expectEqualStrings("10.42.0.19", endpoints.items[0].ip_address);
+    try std.testing.expectEqual(@as(i64, 2), endpoints.items[0].weight);
+    try std.testing.expectEqualStrings("draining", endpoints.items[0].admin_state);
+    try std.testing.expectEqual(@as(i64, 2), endpoints.items[0].generation);
+}
+
+test "queries support service and node cleanup flows" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    try service_core.create(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.10",
+        .lb_policy = "consistent_hash",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try service_core.create(.{
+        .service_name = "web",
+        .vip_address = "10.43.0.20",
+        .lb_policy = "consistent_hash",
+        .created_at = 1001,
+        .updated_at = 1001,
+    });
+
+    try upsert(.{
+        .service_name = "api",
+        .endpoint_id = "api-1:8080",
+        .container_id = "api-1",
+        .node_id = 3,
+        .ip_address = "10.42.0.11",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    try upsert(.{
+        .service_name = "web",
+        .endpoint_id = "web-1:8080",
+        .container_id = "web-1",
+        .node_id = 3,
+        .ip_address = "10.42.0.12",
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1001,
+        .last_seen_at = 1001,
+    });
+
+    try markAdminState("api", "api-1:8080", "removed");
+
+    const alloc = std.testing.allocator;
+    var node_endpoints = try listByNode(alloc, 3);
+    defer {
+        for (node_endpoints.items) |endpoint| endpoint.deinit(alloc);
+        node_endpoints.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), node_endpoints.items.len);
+    try std.testing.expectEqualStrings("removed", node_endpoints.items[0].admin_state);
+    try std.testing.expectEqualStrings("active", node_endpoints.items[1].admin_state);
+
+    try removeByContainer("api-1");
+
+    var api_endpoints = try list(alloc, "api");
+    defer {
+        for (api_endpoints.items) |endpoint| endpoint.deinit(alloc);
+        api_endpoints.deinit(alloc);
+    }
+    try std.testing.expectEqual(@as(usize, 0), api_endpoints.items.len);
+
+    try removeByNode(3);
+
+    var remaining = try listByNode(alloc, 3);
+    defer {
+        for (remaining.items) |endpoint| endpoint.deinit(alloc);
+        remaining.deinit(alloc);
+    }
+    try std.testing.expectEqual(@as(usize, 0), remaining.items.len);
 }

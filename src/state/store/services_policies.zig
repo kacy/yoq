@@ -64,3 +64,42 @@ fn query(alloc: Allocator, comptime sql: []const u8, args: anytype) StoreError!s
     }
     return policies;
 }
+
+test "add list get and remove" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    try add("api", "db", "allow");
+    try add("web", "db", "deny");
+
+    const alloc = std.testing.allocator;
+    var all = try list(alloc);
+    defer {
+        for (all.items) |policy| policy.deinit(alloc);
+        all.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), all.items.len);
+
+    var api_policies = try listForSource(alloc, "api");
+    defer {
+        for (api_policies.items) |policy| policy.deinit(alloc);
+        api_policies.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), api_policies.items.len);
+    try std.testing.expectEqualStrings("api", api_policies.items[0].source_service);
+    try std.testing.expectEqualStrings("db", api_policies.items[0].target_service);
+    try std.testing.expectEqualStrings("allow", api_policies.items[0].action);
+
+    try remove("api", "db");
+
+    var remaining = try list(alloc);
+    defer {
+        for (remaining.items) |policy| policy.deinit(alloc);
+        remaining.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), remaining.items.len);
+    try std.testing.expectEqualStrings("web", remaining.items[0].source_service);
+}
