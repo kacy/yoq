@@ -28,13 +28,7 @@ pub fn listForDb(alloc: Allocator, db: *sqlite.Db, service_name: []const u8) Sto
     var iter = stmt.iterator(route_types.ServiceHttpRouteRow, .{service_name}) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
         var route = route_types.rowToServiceHttpRouteRecord(row);
-        route.match_methods = alloc.alloc(ServiceHttpRouteMethodRecord, 0) catch return StoreError.ReadFailed;
-        route.match_headers = alloc.alloc(ServiceHttpRouteHeaderRecord, 0) catch return StoreError.ReadFailed;
-        route.backend_services = alloc.alloc(ServiceHttpRouteBackendRecord, 0) catch return StoreError.ReadFailed;
         errdefer route.deinit(alloc);
-        alloc.free(route.match_methods);
-        alloc.free(route.match_headers);
-        alloc.free(route.backend_services);
         route.match_methods = try listMethodsForDb(alloc, db, route.service_name, route.route_name);
         route.match_headers = try listHeadersForDb(alloc, db, route.service_name, route.route_name);
         route.backend_services = try listBackendsForDb(alloc, db, route.service_name, route.route_name);
