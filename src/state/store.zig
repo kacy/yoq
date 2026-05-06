@@ -5,6 +5,7 @@
 
 const common = @import("store/common.zig");
 const service_core = @import("store/services_core.zig");
+const service_endpoint_types = @import("store/services_endpoint_types.zig");
 const service_endpoints = @import("store/services_endpoints.zig");
 const service_names = @import("store/services_names.zig");
 const service_policies = @import("store/services_policies.zig");
@@ -25,7 +26,7 @@ pub const ServiceHttpRouteHeaderRecord = service_types.ServiceHttpRouteHeaderRec
 pub const ServiceHttpRouteHeaderInput = service_types.ServiceHttpRouteHeaderInput;
 pub const ServiceHttpRouteBackendRecord = service_types.ServiceHttpRouteBackendRecord;
 pub const ServiceHttpRouteBackendInput = service_types.ServiceHttpRouteBackendInput;
-pub const ServiceEndpointRecord = service_types.ServiceEndpointRecord;
+pub const ServiceEndpointRecord = service_endpoint_types.ServiceEndpointRecord;
 pub const ServiceNameRecord = service_types.ServiceNameRecord;
 pub const NetworkPolicyRecord = service_policy_types.NetworkPolicyRecord;
 pub const DeploymentRecord = @import("store/deployments.zig").DeploymentRecord;

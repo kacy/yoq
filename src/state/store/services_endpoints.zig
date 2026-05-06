@@ -1,24 +1,24 @@
 const std = @import("std");
 const common = @import("common.zig");
 const service_core = @import("services_core.zig");
-const types = @import("services_types.zig");
+const endpoint_types = @import("services_endpoint_types.zig");
 
 const Allocator = std.mem.Allocator;
 const StoreError = common.StoreError;
-const ServiceEndpointRecord = types.ServiceEndpointRecord;
+const ServiceEndpointRecord = endpoint_types.ServiceEndpointRecord;
 
 pub fn get(alloc: Allocator, service_name: []const u8, endpoint_id: []const u8) StoreError!ServiceEndpointRecord {
     var lease = try common.leaseDb();
     defer lease.deinit();
 
     const row = (lease.db.oneAlloc(
-        types.ServiceEndpointRow,
+        endpoint_types.ServiceEndpointRow,
         alloc,
-        "SELECT " ++ types.endpoint_columns ++ " FROM service_endpoints WHERE service_name = ? AND endpoint_id = ?;",
+        "SELECT " ++ endpoint_types.endpoint_columns ++ " FROM service_endpoints WHERE service_name = ? AND endpoint_id = ?;",
         .{},
         .{ service_name, endpoint_id },
     ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
-    return types.rowToServiceEndpointRecord(row);
+    return endpoint_types.rowToServiceEndpointRecord(row);
 }
 
 pub fn upsert(record: ServiceEndpointRecord) StoreError!void {
@@ -26,7 +26,7 @@ pub fn upsert(record: ServiceEndpointRecord) StoreError!void {
     defer lease.deinit();
 
     lease.db.exec(
-        "INSERT INTO service_endpoints (" ++ types.endpoint_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" ++
+        "INSERT INTO service_endpoints (" ++ endpoint_types.endpoint_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" ++
             " ON CONFLICT(service_name, endpoint_id) DO UPDATE SET" ++
             " container_id = excluded.container_id," ++
             " node_id = excluded.node_id," ++
@@ -79,7 +79,7 @@ pub fn markAdminState(service_name: []const u8, endpoint_id: []const u8, admin_s
 pub fn list(alloc: Allocator, service_name: []const u8) StoreError!std.ArrayList(ServiceEndpointRecord) {
     return query(
         alloc,
-        "SELECT " ++ types.endpoint_columns ++ " FROM service_endpoints WHERE service_name = ? ORDER BY registered_at DESC;",
+        "SELECT " ++ endpoint_types.endpoint_columns ++ " FROM service_endpoints WHERE service_name = ? ORDER BY registered_at DESC;",
         .{service_name},
     );
 }
@@ -87,7 +87,7 @@ pub fn list(alloc: Allocator, service_name: []const u8) StoreError!std.ArrayList
 pub fn listByNode(alloc: Allocator, node_id: i64) StoreError!std.ArrayList(ServiceEndpointRecord) {
     return query(
         alloc,
-        "SELECT " ++ types.endpoint_columns ++ " FROM service_endpoints WHERE node_id = ? ORDER BY service_name, endpoint_id;",
+        "SELECT " ++ endpoint_types.endpoint_columns ++ " FROM service_endpoints WHERE node_id = ? ORDER BY service_name, endpoint_id;",
         .{node_id},
     );
 }
@@ -121,9 +121,9 @@ fn query(alloc: Allocator, comptime sql: []const u8, args: anytype) StoreError!s
     var endpoints: std.ArrayList(ServiceEndpointRecord) = .empty;
     var stmt = lease.db.prepare(sql) catch return StoreError.ReadFailed;
     defer stmt.deinit();
-    var iter = stmt.iterator(types.ServiceEndpointRow, args) catch return StoreError.ReadFailed;
+    var iter = stmt.iterator(endpoint_types.ServiceEndpointRow, args) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        endpoints.append(alloc, types.rowToServiceEndpointRecord(row)) catch return StoreError.ReadFailed;
+        endpoints.append(alloc, endpoint_types.rowToServiceEndpointRecord(row)) catch return StoreError.ReadFailed;
     }
     return endpoints;
 }
