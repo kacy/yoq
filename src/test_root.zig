@@ -23,6 +23,16 @@ comptime {
     _ = @import("state/store/common.zig");
     _ = @import("state/store/crons.zig");
     _ = @import("state/store/deployments.zig");
+    _ = @import("state/store/services_core.zig");
+    _ = @import("state/store/services_endpoint_types.zig");
+    _ = @import("state/store/services_endpoints.zig");
+    _ = @import("state/store/services_name_types.zig");
+    _ = @import("state/store/services_names.zig");
+    _ = @import("state/store/services_policy_types.zig");
+    _ = @import("state/store/services_policies.zig");
+    _ = @import("state/store/services_route_types.zig");
+    _ = @import("state/store/services_routes.zig");
+    _ = @import("state/store/services_types.zig");
     _ = @import("state/store/training.zig");
     _ = @import("state/schema.zig");
     _ = @import("state/commands.zig");

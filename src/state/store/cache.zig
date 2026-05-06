@@ -42,80 +42,61 @@ fn rowToEntry(row: BuildCacheRow) BuildCacheEntry {
 }
 
 pub fn lookupBuildCache(alloc: Allocator, cache_key: []const u8) StoreError!?BuildCacheEntry {
-    const Context = struct {
-        alloc: Allocator,
-        cache_key: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!?BuildCacheEntry {
-            const row = (db.oneAlloc(
-                BuildCacheRow,
-                ctx.alloc,
-                "SELECT " ++ build_cache_columns ++ " FROM build_cache WHERE cache_key = ?;",
-                .{},
-                .{ctx.cache_key},
-            ) catch return StoreError.ReadFailed) orelse return null;
-            return rowToEntry(row);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .cache_key = cache_key };
-    return common.withDb(?BuildCacheEntry, &ctx, Context.run);
+    const row = (lease.db.oneAlloc(
+        BuildCacheRow,
+        alloc,
+        "SELECT " ++ build_cache_columns ++ " FROM build_cache WHERE cache_key = ?;",
+        .{},
+        .{cache_key},
+    ) catch return StoreError.ReadFailed) orelse return null;
+    return rowToEntry(row);
 }
 
 pub fn storeBuildCache(entry: BuildCacheEntry) StoreError!void {
-    const Context = struct {
-        entry: BuildCacheEntry,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            db.exec(
-                "INSERT OR REPLACE INTO build_cache (" ++ build_cache_columns ++ ")" ++
-                    " VALUES (?, ?, ?, ?, ?);",
-                .{},
-                .{
-                    ctx.entry.cache_key,
-                    ctx.entry.layer_digest,
-                    ctx.entry.diff_id,
-                    ctx.entry.layer_size,
-                    ctx.entry.created_at,
-                },
-            ) catch return StoreError.WriteFailed;
-        }
-    };
-
-    var ctx = Context{ .entry = entry };
-    return common.withDb(void, &ctx, Context.run);
+    lease.db.exec(
+        "INSERT OR REPLACE INTO build_cache (" ++ build_cache_columns ++ ")" ++
+            " VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{
+            entry.cache_key,
+            entry.layer_digest,
+            entry.diff_id,
+            entry.layer_size,
+            entry.created_at,
+        },
+    ) catch return StoreError.WriteFailed;
 }
 
 pub fn listBuildCacheDigests(alloc: Allocator) StoreError!std.ArrayList([]const u8) {
-    const Context = struct {
-        alloc: Allocator,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList([]const u8) {
-            var digests = std.ArrayList([]const u8).empty;
-            errdefer {
-                for (digests.items) |digest| ctx.alloc.free(digest);
-                digests.deinit(ctx.alloc);
-            }
+    var digests = std.ArrayList([]const u8).empty;
+    errdefer {
+        for (digests.items) |digest| alloc.free(digest);
+        digests.deinit(alloc);
+    }
 
-            inline for ([_][]const u8{
-                "SELECT layer_digest AS value FROM build_cache;",
-                "SELECT diff_id AS value FROM build_cache;",
-            }) |query| {
-                const Row = struct { value: sqlite.Text };
-                var stmt = db.prepare(query) catch return StoreError.ReadFailed;
-                defer stmt.deinit();
-                var iter = stmt.iterator(Row, .{}) catch return StoreError.ReadFailed;
-                while (iter.nextAlloc(ctx.alloc, .{}) catch return StoreError.ReadFailed) |row| {
-                    digests.append(ctx.alloc, row.value.data) catch return StoreError.ReadFailed;
-                }
-            }
-
-            return digests;
+    inline for ([_][]const u8{
+        "SELECT layer_digest AS value FROM build_cache;",
+        "SELECT diff_id AS value FROM build_cache;",
+    }) |query| {
+        const Row = struct { value: sqlite.Text };
+        var stmt = lease.db.prepare(query) catch return StoreError.ReadFailed;
+        defer stmt.deinit();
+        var iter = stmt.iterator(Row, .{}) catch return StoreError.ReadFailed;
+        while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+            digests.append(alloc, row.value.data) catch return StoreError.ReadFailed;
         }
-    };
+    }
 
-    var ctx = Context{ .alloc = alloc };
-    return common.withDb(std.ArrayList([]const u8), &ctx, Context.run);
+    return digests;
 }
 
 test "build cache store and lookup" {
@@ -189,14 +170,36 @@ test "build cache replace on conflict" {
 }
 
 test "listBuildCacheDigests returns empty when no entries" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
     const alloc = std.testing.allocator;
-    const result = listBuildCacheDigests(alloc);
-    if (result) |owned_digests| {
-        var digests = owned_digests;
-        defer {
-            for (digests.items) |digest| alloc.free(digest);
-            digests.deinit(alloc);
-        }
-        try std.testing.expect(digests.items.len >= 0);
-    } else |_| {}
+    var digests = try listBuildCacheDigests(alloc);
+    defer digests.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 0), digests.items.len);
+}
+
+test "listBuildCacheDigests returns layer and diff digests" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    try storeBuildCache(.{
+        .cache_key = "sha256:key1",
+        .layer_digest = "sha256:layer1",
+        .diff_id = "sha256:diff1",
+        .layer_size = 4096,
+        .created_at = 1700000000,
+    });
+
+    const alloc = std.testing.allocator;
+    var digests = try listBuildCacheDigests(alloc);
+    defer {
+        for (digests.items) |digest| alloc.free(digest);
+        digests.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), digests.items.len);
+    try std.testing.expectEqualStrings("sha256:layer1", digests.items[0]);
+    try std.testing.expectEqualStrings("sha256:diff1", digests.items[1]);
 }

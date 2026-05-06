@@ -1,0 +1,312 @@
+const std = @import("std");
+const sqlite = @import("sqlite");
+const common = @import("common.zig");
+const route_types = @import("services_route_types.zig");
+
+const Allocator = std.mem.Allocator;
+const StoreError = common.StoreError;
+
+const ServiceHttpRouteRecord = route_types.ServiceHttpRouteRecord;
+const ServiceHttpRouteMethodRecord = route_types.ServiceHttpRouteMethodRecord;
+const ServiceHttpRouteHeaderRecord = route_types.ServiceHttpRouteHeaderRecord;
+const ServiceHttpRouteBackendRecord = route_types.ServiceHttpRouteBackendRecord;
+const ServiceHttpRouteInput = route_types.ServiceHttpRouteInput;
+const ServiceHttpRouteMethodInput = route_types.ServiceHttpRouteMethodInput;
+const ServiceHttpRouteHeaderInput = route_types.ServiceHttpRouteHeaderInput;
+const ServiceHttpRouteBackendInput = route_types.ServiceHttpRouteBackendInput;
+
+pub fn listForDb(alloc: Allocator, db: *sqlite.Db, service_name: []const u8) StoreError![]const ServiceHttpRouteRecord {
+    var routes: std.ArrayList(ServiceHttpRouteRecord) = .empty;
+    errdefer {
+        for (routes.items) |route| route.deinit(alloc);
+        routes.deinit(alloc);
+    }
+    var stmt = db.prepare(
+        "SELECT " ++ route_types.service_http_route_columns ++ " FROM service_http_routes WHERE service_name = ? ORDER BY route_order, route_name;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(route_types.ServiceHttpRouteRow, .{service_name}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        var route = route_types.rowToServiceHttpRouteRecord(row);
+        errdefer route.deinit(alloc);
+        route.match_methods = try listMethodsForDb(alloc, db, route.service_name, route.route_name);
+        route.match_headers = try listHeadersForDb(alloc, db, route.service_name, route.route_name);
+        route.backend_services = try listBackendsForDb(alloc, db, route.service_name, route.route_name);
+        routes.append(alloc, route) catch return StoreError.ReadFailed;
+    }
+    return routes.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
+}
+
+pub fn syncFromRecords(
+    db: *sqlite.Db,
+    service_name: []const u8,
+    now: i64,
+    routes: []const ServiceHttpRouteRecord,
+) StoreError!void {
+    if (routes.len == 0) return;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var route_inputs: std.ArrayListUnmanaged(ServiceHttpRouteInput) = .empty;
+    defer route_inputs.deinit(alloc);
+    for (routes) |route| {
+        route_inputs.append(alloc, .{
+            .route_name = route.route_name,
+            .host = route.host,
+            .path_prefix = route.path_prefix,
+            .rewrite_prefix = route.rewrite_prefix,
+            .match_methods = try methodInputs(alloc, route),
+            .match_headers = try headerInputs(alloc, route),
+            .backend_services = try backendInputs(alloc, route),
+            .mirror_service = route.mirror_service,
+            .retries = route.retries,
+            .connect_timeout_ms = route.connect_timeout_ms,
+            .request_timeout_ms = route.request_timeout_ms,
+            .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
+            .target_port = route.target_port,
+            .preserve_host = route.preserve_host,
+            .retry_on_5xx = route.retry_on_5xx,
+            .circuit_breaker_threshold = route.circuit_breaker_threshold,
+            .circuit_breaker_timeout_ms = route.circuit_breaker_timeout_ms,
+        }) catch return StoreError.WriteFailed;
+    }
+
+    try replaceInDb(db, service_name, now, route_inputs.items);
+    try syncDerivedFields(db, service_name, now, route_inputs.items);
+}
+
+pub fn replaceInDb(
+    db: *sqlite.Db,
+    service_name: []const u8,
+    now: i64,
+    routes: []const ServiceHttpRouteInput,
+) StoreError!void {
+    db.exec(
+        "DELETE FROM service_http_route_methods WHERE service_name = ?;",
+        .{},
+        .{service_name},
+    ) catch return StoreError.WriteFailed;
+    db.exec(
+        "DELETE FROM service_http_route_backends WHERE service_name = ?;",
+        .{},
+        .{service_name},
+    ) catch return StoreError.WriteFailed;
+    db.exec(
+        "DELETE FROM service_http_route_headers WHERE service_name = ?;",
+        .{},
+        .{service_name},
+    ) catch return StoreError.WriteFailed;
+    db.exec(
+        "DELETE FROM service_http_routes WHERE service_name = ?;",
+        .{},
+        .{service_name},
+    ) catch return StoreError.WriteFailed;
+
+    for (routes, 0..) |route, idx| {
+        db.exec(
+            "INSERT INTO service_http_routes (" ++ route_types.service_http_route_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            .{},
+            .{
+                service_name,
+                route.route_name,
+                route.host,
+                route.path_prefix,
+                route.rewrite_prefix,
+                route.mirror_service,
+                route.retries,
+                route.connect_timeout_ms,
+                route.request_timeout_ms,
+                route.http2_idle_timeout_ms,
+                route.target_port,
+                @as(i64, @intFromBool(route.preserve_host)),
+                @as(i64, @intFromBool(route.retry_on_5xx)),
+                route.circuit_breaker_threshold,
+                route.circuit_breaker_timeout_ms,
+                @as(i64, @intCast(idx)),
+                now,
+                now,
+            },
+        ) catch return StoreError.WriteFailed;
+
+        for (route.match_methods, 0..) |method_match, method_idx| {
+            db.exec(
+                "INSERT INTO service_http_route_methods (" ++ route_types.service_http_route_method_columns ++ ") VALUES (?, ?, ?, ?, ?, ?);",
+                .{},
+                .{
+                    service_name,
+                    route.route_name,
+                    method_match.method,
+                    @as(i64, @intCast(method_idx)),
+                    now,
+                    now,
+                },
+            ) catch return StoreError.WriteFailed;
+        }
+
+        for (route.match_headers, 0..) |header_match, header_idx| {
+            db.exec(
+                "INSERT INTO service_http_route_headers (" ++ route_types.service_http_route_header_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?);",
+                .{},
+                .{
+                    service_name,
+                    route.route_name,
+                    header_match.header_name,
+                    header_match.header_value,
+                    @as(i64, @intCast(header_idx)),
+                    now,
+                    now,
+                },
+            ) catch return StoreError.WriteFailed;
+        }
+
+        for (route.backend_services, 0..) |backend, backend_idx| {
+            db.exec(
+                "INSERT INTO service_http_route_backends (" ++ route_types.service_http_route_backend_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?);",
+                .{},
+                .{
+                    service_name,
+                    route.route_name,
+                    backend.backend_service,
+                    backend.weight,
+                    @as(i64, @intCast(backend_idx)),
+                    now,
+                    now,
+                },
+            ) catch return StoreError.WriteFailed;
+        }
+    }
+}
+
+pub fn syncDerivedFields(
+    db: *sqlite.Db,
+    service_name: []const u8,
+    now: i64,
+    routes: []const ServiceHttpRouteInput,
+) StoreError!void {
+    const primary = if (routes.len > 0) routes[0] else null;
+    db.exec(
+        "UPDATE services SET lb_policy = lb_policy, http_proxy_host = ?, http_proxy_path_prefix = ?, http_proxy_rewrite_prefix = ?, http_proxy_retries = ?, http_proxy_connect_timeout_ms = ?, http_proxy_request_timeout_ms = ?, http_proxy_http2_idle_timeout_ms = ?, http_proxy_target_port = ?, http_proxy_preserve_host = ?, http_proxy_retry_on_5xx = ?, http_proxy_circuit_breaker_threshold = ?, http_proxy_circuit_breaker_timeout_ms = ?, http_proxy_mirror_service = ?, updated_at = ? WHERE service_name = ?;",
+        .{},
+        .{
+            if (primary) |route| route.host else null,
+            if (primary) |route| route.path_prefix else null,
+            if (primary) |route| route.rewrite_prefix else null,
+            if (primary) |route| route.retries else null,
+            if (primary) |route| route.connect_timeout_ms else null,
+            if (primary) |route| route.request_timeout_ms else null,
+            if (primary) |route| route.http2_idle_timeout_ms else null,
+            if (primary) |route| route.target_port else null,
+            if (primary) |route| @as(i64, @intFromBool(route.preserve_host)) else null,
+            if (primary) |route| @as(i64, @intFromBool(route.retry_on_5xx)) else null,
+            if (primary) |route| route.circuit_breaker_threshold else null,
+            if (primary) |route| route.circuit_breaker_timeout_ms else null,
+            if (primary) |route| route.mirror_service else null,
+            now,
+            service_name,
+        },
+    ) catch return StoreError.WriteFailed;
+}
+
+fn listMethodsForDb(
+    alloc: Allocator,
+    db: *sqlite.Db,
+    service_name: []const u8,
+    route_name: []const u8,
+) StoreError![]const ServiceHttpRouteMethodRecord {
+    var methods: std.ArrayList(ServiceHttpRouteMethodRecord) = .empty;
+    errdefer {
+        for (methods.items) |method_match| method_match.deinit(alloc);
+        methods.deinit(alloc);
+    }
+
+    var stmt = db.prepare(
+        "SELECT " ++ route_types.service_http_route_method_columns ++
+            " FROM service_http_route_methods WHERE service_name = ? AND route_name = ? ORDER BY match_order, method;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(route_types.ServiceHttpRouteMethodRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        methods.append(alloc, route_types.rowToServiceHttpRouteMethodRecord(row)) catch return StoreError.ReadFailed;
+    }
+    return methods.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
+}
+
+fn listHeadersForDb(
+    alloc: Allocator,
+    db: *sqlite.Db,
+    service_name: []const u8,
+    route_name: []const u8,
+) StoreError![]const ServiceHttpRouteHeaderRecord {
+    var headers: std.ArrayList(ServiceHttpRouteHeaderRecord) = .empty;
+    errdefer {
+        for (headers.items) |header| header.deinit(alloc);
+        headers.deinit(alloc);
+    }
+
+    var stmt = db.prepare(
+        "SELECT " ++ route_types.service_http_route_header_columns ++
+            " FROM service_http_route_headers WHERE service_name = ? AND route_name = ? ORDER BY match_order, header_name;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(route_types.ServiceHttpRouteHeaderRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        headers.append(alloc, route_types.rowToServiceHttpRouteHeaderRecord(row)) catch return StoreError.ReadFailed;
+    }
+    return headers.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
+}
+
+fn listBackendsForDb(
+    alloc: Allocator,
+    db: *sqlite.Db,
+    service_name: []const u8,
+    route_name: []const u8,
+) StoreError![]const ServiceHttpRouteBackendRecord {
+    var backends: std.ArrayList(ServiceHttpRouteBackendRecord) = .empty;
+    errdefer {
+        for (backends.items) |backend| backend.deinit(alloc);
+        backends.deinit(alloc);
+    }
+
+    var stmt = db.prepare(
+        "SELECT " ++ route_types.service_http_route_backend_columns ++
+            " FROM service_http_route_backends WHERE service_name = ? AND route_name = ? ORDER BY backend_order, backend_service;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(route_types.ServiceHttpRouteBackendRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        backends.append(alloc, route_types.rowToServiceHttpRouteBackendRecord(row)) catch return StoreError.ReadFailed;
+    }
+    return backends.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
+}
+
+fn methodInputs(alloc: Allocator, route: ServiceHttpRouteRecord) StoreError![]const ServiceHttpRouteMethodInput {
+    var methods: std.ArrayListUnmanaged(ServiceHttpRouteMethodInput) = .empty;
+    for (route.match_methods) |method_match| {
+        methods.append(alloc, .{ .method = method_match.method }) catch return StoreError.WriteFailed;
+    }
+    return methods.toOwnedSlice(alloc) catch return StoreError.WriteFailed;
+}
+
+fn headerInputs(alloc: Allocator, route: ServiceHttpRouteRecord) StoreError![]const ServiceHttpRouteHeaderInput {
+    var headers: std.ArrayListUnmanaged(ServiceHttpRouteHeaderInput) = .empty;
+    for (route.match_headers) |header_match| {
+        headers.append(alloc, .{
+            .header_name = header_match.header_name,
+            .header_value = header_match.header_value,
+        }) catch return StoreError.WriteFailed;
+    }
+    return headers.toOwnedSlice(alloc) catch return StoreError.WriteFailed;
+}
+
+fn backendInputs(alloc: Allocator, route: ServiceHttpRouteRecord) StoreError![]const ServiceHttpRouteBackendInput {
+    var backends: std.ArrayListUnmanaged(ServiceHttpRouteBackendInput) = .empty;
+    for (route.backend_services) |backend| {
+        backends.append(alloc, .{
+            .backend_service = backend.backend_service,
+            .weight = backend.weight,
+        }) catch return StoreError.WriteFailed;
+    }
+    return backends.toOwnedSlice(alloc) catch return StoreError.WriteFailed;
+}
