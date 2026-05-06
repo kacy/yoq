@@ -1,19 +1,19 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
-const types = @import("services_types.zig");
+const route_types = @import("services_route_types.zig");
 
 const Allocator = std.mem.Allocator;
 const StoreError = common.StoreError;
 
-const ServiceHttpRouteRecord = types.ServiceHttpRouteRecord;
-const ServiceHttpRouteMethodRecord = types.ServiceHttpRouteMethodRecord;
-const ServiceHttpRouteHeaderRecord = types.ServiceHttpRouteHeaderRecord;
-const ServiceHttpRouteBackendRecord = types.ServiceHttpRouteBackendRecord;
-const ServiceHttpRouteInput = types.ServiceHttpRouteInput;
-const ServiceHttpRouteMethodInput = types.ServiceHttpRouteMethodInput;
-const ServiceHttpRouteHeaderInput = types.ServiceHttpRouteHeaderInput;
-const ServiceHttpRouteBackendInput = types.ServiceHttpRouteBackendInput;
+const ServiceHttpRouteRecord = route_types.ServiceHttpRouteRecord;
+const ServiceHttpRouteMethodRecord = route_types.ServiceHttpRouteMethodRecord;
+const ServiceHttpRouteHeaderRecord = route_types.ServiceHttpRouteHeaderRecord;
+const ServiceHttpRouteBackendRecord = route_types.ServiceHttpRouteBackendRecord;
+const ServiceHttpRouteInput = route_types.ServiceHttpRouteInput;
+const ServiceHttpRouteMethodInput = route_types.ServiceHttpRouteMethodInput;
+const ServiceHttpRouteHeaderInput = route_types.ServiceHttpRouteHeaderInput;
+const ServiceHttpRouteBackendInput = route_types.ServiceHttpRouteBackendInput;
 
 pub fn listForDb(alloc: Allocator, db: *sqlite.Db, service_name: []const u8) StoreError![]const ServiceHttpRouteRecord {
     var routes: std.ArrayList(ServiceHttpRouteRecord) = .empty;
@@ -22,12 +22,12 @@ pub fn listForDb(alloc: Allocator, db: *sqlite.Db, service_name: []const u8) Sto
         routes.deinit(alloc);
     }
     var stmt = db.prepare(
-        "SELECT " ++ types.service_http_route_columns ++ " FROM service_http_routes WHERE service_name = ? ORDER BY route_order, route_name;",
+        "SELECT " ++ route_types.service_http_route_columns ++ " FROM service_http_routes WHERE service_name = ? ORDER BY route_order, route_name;",
     ) catch return StoreError.ReadFailed;
     defer stmt.deinit();
-    var iter = stmt.iterator(types.ServiceHttpRouteRow, .{service_name}) catch return StoreError.ReadFailed;
+    var iter = stmt.iterator(route_types.ServiceHttpRouteRow, .{service_name}) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        var route = types.rowToServiceHttpRouteRecord(row);
+        var route = route_types.rowToServiceHttpRouteRecord(row);
         route.match_methods = alloc.alloc(ServiceHttpRouteMethodRecord, 0) catch return StoreError.ReadFailed;
         route.match_headers = alloc.alloc(ServiceHttpRouteHeaderRecord, 0) catch return StoreError.ReadFailed;
         route.backend_services = alloc.alloc(ServiceHttpRouteBackendRecord, 0) catch return StoreError.ReadFailed;
@@ -115,7 +115,7 @@ pub fn replaceInDb(
 
     for (routes, 0..) |route, idx| {
         db.exec(
-            "INSERT INTO service_http_routes (" ++ types.service_http_route_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            "INSERT INTO service_http_routes (" ++ route_types.service_http_route_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             .{},
             .{
                 service_name,
@@ -141,7 +141,7 @@ pub fn replaceInDb(
 
         for (route.match_methods, 0..) |method_match, method_idx| {
             db.exec(
-                "INSERT INTO service_http_route_methods (" ++ types.service_http_route_method_columns ++ ") VALUES (?, ?, ?, ?, ?, ?);",
+                "INSERT INTO service_http_route_methods (" ++ route_types.service_http_route_method_columns ++ ") VALUES (?, ?, ?, ?, ?, ?);",
                 .{},
                 .{
                     service_name,
@@ -156,7 +156,7 @@ pub fn replaceInDb(
 
         for (route.match_headers, 0..) |header_match, header_idx| {
             db.exec(
-                "INSERT INTO service_http_route_headers (" ++ types.service_http_route_header_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?);",
+                "INSERT INTO service_http_route_headers (" ++ route_types.service_http_route_header_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?);",
                 .{},
                 .{
                     service_name,
@@ -172,7 +172,7 @@ pub fn replaceInDb(
 
         for (route.backend_services, 0..) |backend, backend_idx| {
             db.exec(
-                "INSERT INTO service_http_route_backends (" ++ types.service_http_route_backend_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?);",
+                "INSERT INTO service_http_route_backends (" ++ route_types.service_http_route_backend_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?);",
                 .{},
                 .{
                     service_name,
@@ -231,13 +231,13 @@ fn listMethodsForDb(
     }
 
     var stmt = db.prepare(
-        "SELECT " ++ types.service_http_route_method_columns ++
+        "SELECT " ++ route_types.service_http_route_method_columns ++
             " FROM service_http_route_methods WHERE service_name = ? AND route_name = ? ORDER BY match_order, method;",
     ) catch return StoreError.ReadFailed;
     defer stmt.deinit();
-    var iter = stmt.iterator(types.ServiceHttpRouteMethodRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
+    var iter = stmt.iterator(route_types.ServiceHttpRouteMethodRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        methods.append(alloc, types.rowToServiceHttpRouteMethodRecord(row)) catch return StoreError.ReadFailed;
+        methods.append(alloc, route_types.rowToServiceHttpRouteMethodRecord(row)) catch return StoreError.ReadFailed;
     }
     return methods.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
 }
@@ -255,13 +255,13 @@ fn listHeadersForDb(
     }
 
     var stmt = db.prepare(
-        "SELECT " ++ types.service_http_route_header_columns ++
+        "SELECT " ++ route_types.service_http_route_header_columns ++
             " FROM service_http_route_headers WHERE service_name = ? AND route_name = ? ORDER BY match_order, header_name;",
     ) catch return StoreError.ReadFailed;
     defer stmt.deinit();
-    var iter = stmt.iterator(types.ServiceHttpRouteHeaderRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
+    var iter = stmt.iterator(route_types.ServiceHttpRouteHeaderRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        headers.append(alloc, types.rowToServiceHttpRouteHeaderRecord(row)) catch return StoreError.ReadFailed;
+        headers.append(alloc, route_types.rowToServiceHttpRouteHeaderRecord(row)) catch return StoreError.ReadFailed;
     }
     return headers.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
 }
@@ -279,13 +279,13 @@ fn listBackendsForDb(
     }
 
     var stmt = db.prepare(
-        "SELECT " ++ types.service_http_route_backend_columns ++
+        "SELECT " ++ route_types.service_http_route_backend_columns ++
             " FROM service_http_route_backends WHERE service_name = ? AND route_name = ? ORDER BY backend_order, backend_service;",
     ) catch return StoreError.ReadFailed;
     defer stmt.deinit();
-    var iter = stmt.iterator(types.ServiceHttpRouteBackendRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
+    var iter = stmt.iterator(route_types.ServiceHttpRouteBackendRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        backends.append(alloc, types.rowToServiceHttpRouteBackendRecord(row)) catch return StoreError.ReadFailed;
+        backends.append(alloc, route_types.rowToServiceHttpRouteBackendRecord(row)) catch return StoreError.ReadFailed;
     }
     return backends.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
 }
