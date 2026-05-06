@@ -2,15 +2,15 @@ const std = @import("std");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
 const service_core = @import("services_core.zig");
-const service_types = @import("services_types.zig");
+const name_types = @import("services_name_types.zig");
 
 const Allocator = std.mem.Allocator;
 const StoreError = common.StoreError;
 
-const ServiceNameIpRow = service_types.ServiceNameIpRow;
-const ServiceNameRecord = service_types.ServiceNameRecord;
-const ServiceNameRow = service_types.ServiceNameRow;
-const rowToServiceNameRecord = service_types.rowToServiceNameRecord;
+const ServiceNameIpRow = name_types.ServiceNameIpRow;
+const ServiceNameRecord = name_types.ServiceNameRecord;
+const ServiceNameRow = name_types.ServiceNameRow;
+const rowToServiceNameRecord = name_types.rowToServiceNameRecord;
 
 fn nowRealSeconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
