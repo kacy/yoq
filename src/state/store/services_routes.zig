@@ -51,17 +51,21 @@ pub fn syncFromRecords(
 ) StoreError!void {
     if (routes.len == 0) return;
 
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
     var route_inputs: std.ArrayListUnmanaged(ServiceHttpRouteInput) = .empty;
-    defer route_inputs.deinit(std.heap.page_allocator);
+    defer route_inputs.deinit(alloc);
     for (routes) |route| {
-        route_inputs.append(std.heap.page_allocator, .{
+        route_inputs.append(alloc, .{
             .route_name = route.route_name,
             .host = route.host,
             .path_prefix = route.path_prefix,
             .rewrite_prefix = route.rewrite_prefix,
-            .match_methods = try methodInputs(route),
-            .match_headers = try headerInputs(route),
-            .backend_services = try backendInputs(route),
+            .match_methods = try methodInputs(alloc, route),
+            .match_headers = try headerInputs(alloc, route),
+            .backend_services = try backendInputs(alloc, route),
             .mirror_service = route.mirror_service,
             .retries = route.retries,
             .connect_timeout_ms = route.connect_timeout_ms,
@@ -73,13 +77,6 @@ pub fn syncFromRecords(
             .circuit_breaker_threshold = route.circuit_breaker_threshold,
             .circuit_breaker_timeout_ms = route.circuit_breaker_timeout_ms,
         }) catch return StoreError.WriteFailed;
-    }
-    defer {
-        for (route_inputs.items) |route_input| {
-            if (route_input.match_methods.len > 0) std.heap.page_allocator.free(route_input.match_methods);
-            if (route_input.match_headers.len > 0) std.heap.page_allocator.free(route_input.match_headers);
-            if (route_input.backend_services.len > 0) std.heap.page_allocator.free(route_input.backend_services);
-        }
     }
 
     try replaceInDb(db, service_name, now, route_inputs.items);
@@ -290,32 +287,32 @@ fn listBackendsForDb(
     return backends.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
 }
 
-fn methodInputs(route: ServiceHttpRouteRecord) StoreError![]const ServiceHttpRouteMethodInput {
+fn methodInputs(alloc: Allocator, route: ServiceHttpRouteRecord) StoreError![]const ServiceHttpRouteMethodInput {
     var methods: std.ArrayListUnmanaged(ServiceHttpRouteMethodInput) = .empty;
     for (route.match_methods) |method_match| {
-        methods.append(std.heap.page_allocator, .{ .method = method_match.method }) catch return StoreError.WriteFailed;
+        methods.append(alloc, .{ .method = method_match.method }) catch return StoreError.WriteFailed;
     }
-    return methods.toOwnedSlice(std.heap.page_allocator) catch return StoreError.WriteFailed;
+    return methods.toOwnedSlice(alloc) catch return StoreError.WriteFailed;
 }
 
-fn headerInputs(route: ServiceHttpRouteRecord) StoreError![]const ServiceHttpRouteHeaderInput {
+fn headerInputs(alloc: Allocator, route: ServiceHttpRouteRecord) StoreError![]const ServiceHttpRouteHeaderInput {
     var headers: std.ArrayListUnmanaged(ServiceHttpRouteHeaderInput) = .empty;
     for (route.match_headers) |header_match| {
-        headers.append(std.heap.page_allocator, .{
+        headers.append(alloc, .{
             .header_name = header_match.header_name,
             .header_value = header_match.header_value,
         }) catch return StoreError.WriteFailed;
     }
-    return headers.toOwnedSlice(std.heap.page_allocator) catch return StoreError.WriteFailed;
+    return headers.toOwnedSlice(alloc) catch return StoreError.WriteFailed;
 }
 
-fn backendInputs(route: ServiceHttpRouteRecord) StoreError![]const ServiceHttpRouteBackendInput {
+fn backendInputs(alloc: Allocator, route: ServiceHttpRouteRecord) StoreError![]const ServiceHttpRouteBackendInput {
     var backends: std.ArrayListUnmanaged(ServiceHttpRouteBackendInput) = .empty;
     for (route.backend_services) |backend| {
-        backends.append(std.heap.page_allocator, .{
+        backends.append(alloc, .{
             .backend_service = backend.backend_service,
             .weight = backend.weight,
         }) catch return StoreError.WriteFailed;
     }
-    return backends.toOwnedSlice(std.heap.page_allocator) catch return StoreError.WriteFailed;
+    return backends.toOwnedSlice(alloc) catch return StoreError.WriteFailed;
 }
