@@ -1,9 +1,12 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
+const schema = @import("../schema.zig");
+const app_snapshot = @import("../../manifest/app_snapshot.zig");
 
 const Allocator = std.mem.Allocator;
 const StoreError = common.StoreError;
+const CronScheduleSpec = app_snapshot.CronScheduleSpec;
 
 pub const CronScheduleRecord = struct {
     app_name: []const u8,
@@ -46,29 +49,20 @@ fn rowToRecord(row: CronScheduleRow) CronScheduleRecord {
 pub fn replaceCronSchedulesForApp(
     alloc: Allocator,
     app_name: []const u8,
-    schedules: []const @import("../../manifest/app_snapshot.zig").CronScheduleSpec,
+    schedules: []const CronScheduleSpec,
     now: i64,
 ) StoreError!void {
-    const Context = struct {
-        alloc: Allocator,
-        app_name: []const u8,
-        schedules: []const @import("../../manifest/app_snapshot.zig").CronScheduleSpec,
-        now: i64,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            return replaceCronSchedulesForAppInDb(db, ctx.alloc, ctx.app_name, ctx.schedules, ctx.now);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .app_name = app_name, .schedules = schedules, .now = now };
-    return common.withDb(void, &ctx, Context.run);
+    return replaceCronSchedulesForAppInDb(lease.db, alloc, app_name, schedules, now);
 }
 
 pub fn replaceCronSchedulesForAppInDb(
     db: *sqlite.Db,
     alloc: Allocator,
     app_name: []const u8,
-    schedules: []const @import("../../manifest/app_snapshot.zig").CronScheduleSpec,
+    schedules: []const CronScheduleSpec,
     now: i64,
 ) StoreError!void {
     db.exec("DELETE FROM cron_schedules WHERE app_name = ?;", .{}, .{app_name}) catch return StoreError.WriteFailed;
@@ -92,17 +86,10 @@ pub fn replaceCronSchedulesForAppInDb(
 }
 
 pub fn listCronSchedulesByApp(alloc: Allocator, app_name: []const u8) StoreError!std.ArrayList(CronScheduleRecord) {
-    const Context = struct {
-        alloc: Allocator,
-        app_name: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(CronScheduleRecord) {
-            return listCronSchedulesByAppInDb(db, ctx.alloc, ctx.app_name);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .app_name = app_name };
-    return common.withDb(std.ArrayList(CronScheduleRecord), &ctx, Context.run);
+    return listCronSchedulesByAppInDb(lease.db, alloc, app_name);
 }
 
 pub fn listCronSchedulesByAppInDb(
@@ -126,9 +113,8 @@ test "replaceCronSchedulesForAppInDb swaps active schedules for app" {
     const alloc = std.testing.allocator;
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
-    try @import("../schema.zig").init(&db);
+    try schema.init(&db);
 
-    const app_snapshot = @import("../../manifest/app_snapshot.zig");
     const first = [_]app_snapshot.CronScheduleSpec{
         .{ .name = "cleanup", .every = 60, .spec_json = "{\"name\":\"cleanup\",\"every\":60}" },
     };

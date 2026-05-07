@@ -1,6 +1,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
+const schema = @import("../schema.zig");
 
 const Allocator = std.mem.Allocator;
 const StoreError = common.StoreError;
@@ -105,16 +106,10 @@ fn checkpointRowToRecord(row: CheckpointRow) CheckpointRecord {
 }
 
 pub fn saveTrainingJob(record: TrainingJobRecord) StoreError!void {
-    const Context = struct {
-        record: TrainingJobRecord,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            return saveTrainingJobInDb(db, ctx.record);
-        }
-    };
-
-    var ctx = Context{ .record = record };
-    return common.withDb(void, &ctx, Context.run);
+    return saveTrainingJobInDb(lease.db, record);
 }
 
 pub fn saveTrainingJobInDb(db: *sqlite.Db, record: TrainingJobRecord) StoreError!void {
@@ -140,18 +135,10 @@ pub fn saveTrainingJobInDb(db: *sqlite.Db, record: TrainingJobRecord) StoreError
 }
 
 pub fn updateTrainingJobState(id: []const u8, state: []const u8, now: i64) StoreError!void {
-    const Context = struct {
-        id: []const u8,
-        state: []const u8,
-        now: i64,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            return updateTrainingJobStateInDb(db, ctx.id, ctx.state, ctx.now);
-        }
-    };
-
-    var ctx = Context{ .id = id, .state = state, .now = now };
-    return common.withDb(void, &ctx, Context.run);
+    return updateTrainingJobStateInDb(lease.db, id, state, now);
 }
 
 pub fn updateTrainingJobStateInDb(db: *sqlite.Db, id: []const u8, state: []const u8, now: i64) StoreError!void {
@@ -163,17 +150,10 @@ pub fn updateTrainingJobStateInDb(db: *sqlite.Db, id: []const u8, state: []const
 }
 
 pub fn incrementTrainingJobRestarts(id: []const u8, now: i64) StoreError!void {
-    const Context = struct {
-        id: []const u8,
-        now: i64,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            return incrementTrainingJobRestartsInDb(db, ctx.id, ctx.now);
-        }
-    };
-
-    var ctx = Context{ .id = id, .now = now };
-    return common.withDb(void, &ctx, Context.run);
+    return incrementTrainingJobRestartsInDb(lease.db, id, now);
 }
 
 pub fn incrementTrainingJobRestartsInDb(db: *sqlite.Db, id: []const u8, now: i64) StoreError!void {
@@ -185,18 +165,10 @@ pub fn incrementTrainingJobRestartsInDb(db: *sqlite.Db, id: []const u8, now: i64
 }
 
 pub fn updateTrainingJobGpus(id: []const u8, gpus: u32, now: i64) StoreError!void {
-    const Context = struct {
-        id: []const u8,
-        gpus: u32,
-        now: i64,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            return updateTrainingJobGpusInDb(db, ctx.id, ctx.gpus, ctx.now);
-        }
-    };
-
-    var ctx = Context{ .id = id, .gpus = gpus, .now = now };
-    return common.withDb(void, &ctx, Context.run);
+    return updateTrainingJobGpusInDb(lease.db, id, gpus, now);
 }
 
 pub fn updateTrainingJobGpusInDb(db: *sqlite.Db, id: []const u8, gpus: u32, now: i64) StoreError!void {
@@ -208,18 +180,10 @@ pub fn updateTrainingJobGpusInDb(db: *sqlite.Db, id: []const u8, gpus: u32, now:
 }
 
 pub fn findTrainingJob(alloc: Allocator, app_name: []const u8, name: []const u8) StoreError!?TrainingJobRecord {
-    const Context = struct {
-        alloc: Allocator,
-        app_name: []const u8,
-        name: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!?TrainingJobRecord {
-            return findTrainingJobInDb(db, ctx.alloc, ctx.app_name, ctx.name);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .app_name = app_name, .name = name };
-    return common.withDb(?TrainingJobRecord, &ctx, Context.run);
+    return findTrainingJobInDb(lease.db, alloc, app_name, name);
 }
 
 pub fn findTrainingJobInDb(db: *sqlite.Db, alloc: Allocator, app_name: []const u8, name: []const u8) StoreError!?TrainingJobRecord {
@@ -234,17 +198,10 @@ pub fn findTrainingJobInDb(db: *sqlite.Db, alloc: Allocator, app_name: []const u
 }
 
 pub fn getTrainingJob(alloc: Allocator, id: []const u8) StoreError!TrainingJobRecord {
-    const Context = struct {
-        alloc: Allocator,
-        id: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!TrainingJobRecord {
-            return getTrainingJobInDb(db, ctx.alloc, ctx.id);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .id = id };
-    return common.withDb(TrainingJobRecord, &ctx, Context.run);
+    return getTrainingJobInDb(lease.db, alloc, id);
 }
 
 pub fn getTrainingJobInDb(db: *sqlite.Db, alloc: Allocator, id: []const u8) StoreError!TrainingJobRecord {
@@ -259,17 +216,10 @@ pub fn getTrainingJobInDb(db: *sqlite.Db, alloc: Allocator, id: []const u8) Stor
 }
 
 pub fn listTrainingJobsByApp(alloc: Allocator, app_name: []const u8) StoreError!std.ArrayList(TrainingJobRecord) {
-    const Context = struct {
-        alloc: Allocator,
-        app_name: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(TrainingJobRecord) {
-            return listTrainingJobsByAppInDb(db, ctx.alloc, ctx.app_name);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .app_name = app_name };
-    return common.withDb(std.ArrayList(TrainingJobRecord), &ctx, Context.run);
+    return listTrainingJobsByAppInDb(lease.db, alloc, app_name);
 }
 
 pub fn listTrainingJobsByAppInDb(
@@ -290,17 +240,10 @@ pub fn listTrainingJobsByAppInDb(
 }
 
 pub fn summarizeTrainingJobsByApp(alloc: Allocator, app_name: []const u8) StoreError!TrainingJobSummary {
-    const Context = struct {
-        alloc: Allocator,
-        app_name: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!TrainingJobSummary {
-            return summarizeTrainingJobsByAppInDb(db, ctx.alloc, ctx.app_name);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .app_name = app_name };
-    return common.withDb(TrainingJobSummary, &ctx, Context.run);
+    return summarizeTrainingJobsByAppInDb(lease.db, alloc, app_name);
 }
 
 pub fn summarizeTrainingJobsByAppInDb(
@@ -335,92 +278,62 @@ pub fn summarizeTrainingJobsByAppInDb(
 }
 
 pub fn saveCheckpoint(job_id: []const u8, step: i64, path: []const u8, size_bytes: i64, now: i64) StoreError!void {
-    const Context = struct {
-        job_id: []const u8,
-        step: i64,
-        path: []const u8,
-        size_bytes: i64,
-        now: i64,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            db.exec(
-                "INSERT INTO training_checkpoints (job_id, step, path, size_bytes, created_at) VALUES (?, ?, ?, ?, ?);",
-                .{},
-                .{ ctx.job_id, ctx.step, ctx.path, ctx.size_bytes, ctx.now },
-            ) catch return StoreError.WriteFailed;
-        }
-    };
-
-    var ctx = Context{ .job_id = job_id, .step = step, .path = path, .size_bytes = size_bytes, .now = now };
-    return common.withDb(void, &ctx, Context.run);
+    lease.db.exec(
+        "INSERT INTO training_checkpoints (job_id, step, path, size_bytes, created_at) VALUES (?, ?, ?, ?, ?);",
+        .{},
+        .{ job_id, step, path, size_bytes, now },
+    ) catch return StoreError.WriteFailed;
 }
 
 pub fn getLatestCheckpoint(alloc: Allocator, job_id: []const u8) StoreError!?CheckpointRecord {
-    const Context = struct {
-        alloc: Allocator,
-        job_id: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!?CheckpointRecord {
-            const row = (db.oneAlloc(
-                CheckpointRow,
-                ctx.alloc,
-                "SELECT id, job_id, step, path, size_bytes, created_at FROM training_checkpoints WHERE job_id = ? ORDER BY created_at DESC LIMIT 1;",
-                .{},
-                .{ctx.job_id},
-            ) catch return StoreError.ReadFailed) orelse return null;
-            return checkpointRowToRecord(row);
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .job_id = job_id };
-    return common.withDb(?CheckpointRecord, &ctx, Context.run);
+    const row = (lease.db.oneAlloc(
+        CheckpointRow,
+        alloc,
+        "SELECT id, job_id, step, path, size_bytes, created_at FROM training_checkpoints WHERE job_id = ? ORDER BY created_at DESC LIMIT 1;",
+        .{},
+        .{job_id},
+    ) catch return StoreError.ReadFailed) orelse return null;
+    return checkpointRowToRecord(row);
 }
 
 pub fn listCheckpoints(alloc: Allocator, job_id: []const u8) StoreError!std.ArrayList(CheckpointRecord) {
-    const Context = struct {
-        alloc: Allocator,
-        job_id: []const u8,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!std.ArrayList(CheckpointRecord) {
-            var records: std.ArrayList(CheckpointRecord) = .empty;
-            var stmt = db.prepare(
-                "SELECT id, job_id, step, path, size_bytes, created_at FROM training_checkpoints WHERE job_id = ? ORDER BY created_at DESC;",
-            ) catch return StoreError.ReadFailed;
-            defer stmt.deinit();
-            var iter = stmt.iterator(CheckpointRow, .{ctx.job_id}) catch return StoreError.ReadFailed;
-            while (iter.nextAlloc(ctx.alloc, .{}) catch return StoreError.ReadFailed) |row| {
-                records.append(ctx.alloc, checkpointRowToRecord(row)) catch return StoreError.ReadFailed;
-            }
-            return records;
-        }
-    };
-
-    var ctx = Context{ .alloc = alloc, .job_id = job_id };
-    return common.withDb(std.ArrayList(CheckpointRecord), &ctx, Context.run);
+    var records: std.ArrayList(CheckpointRecord) = .empty;
+    var stmt = lease.db.prepare(
+        "SELECT id, job_id, step, path, size_bytes, created_at FROM training_checkpoints WHERE job_id = ? ORDER BY created_at DESC;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(CheckpointRow, .{job_id}) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        records.append(alloc, checkpointRowToRecord(row)) catch return StoreError.ReadFailed;
+    }
+    return records;
 }
 
 pub fn deleteCheckpoint(id: i64) StoreError!void {
-    const Context = struct {
-        id: i64,
+    var lease = try common.leaseDb();
+    defer lease.deinit();
 
-        fn run(ctx: *@This(), db: *sqlite.Db) StoreError!void {
-            db.exec(
-                "DELETE FROM training_checkpoints WHERE id = ?;",
-                .{},
-                .{ctx.id},
-            ) catch return StoreError.WriteFailed;
-        }
-    };
-
-    var ctx = Context{ .id = id };
-    return common.withDb(void, &ctx, Context.run);
+    lease.db.exec(
+        "DELETE FROM training_checkpoints WHERE id = ?;",
+        .{},
+        .{id},
+    ) catch return StoreError.WriteFailed;
 }
 
 test "summarizeTrainingJobsByAppInDb groups active paused and failed states" {
     const alloc = std.testing.allocator;
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
-    try @import("../schema.zig").init(&db);
+    try schema.init(&db);
 
     try saveTrainingJobInDb(&db, .{
         .id = "job-1",
@@ -489,7 +402,7 @@ test "summarizeTrainingJobsByAppInDb keeps only the latest row per job name" {
     const alloc = std.testing.allocator;
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
-    try @import("../schema.zig").init(&db);
+    try schema.init(&db);
 
     try saveTrainingJobInDb(&db, .{
         .id = "job-old",

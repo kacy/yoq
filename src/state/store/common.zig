@@ -53,16 +53,20 @@ pub fn deinitTestDb() void {
     test_db_lifetime_mutex.unlock(std.Options.debug_io);
 }
 
-pub fn withDb(
-    comptime Result: type,
-    context: anytype,
-    comptime callback: fn (@TypeOf(context), *sqlite.Db) StoreError!Result,
-) StoreError!Result {
-    db_mutex.lockUncancelable(std.Options.debug_io);
-    defer db_mutex.unlock(std.Options.debug_io);
+pub const DbLease = struct {
+    db: *sqlite.Db,
 
-    const db = try getDbLocked();
-    return callback(context, db);
+    pub fn deinit(self: *DbLease) void {
+        _ = self;
+        db_mutex.unlock(std.Options.debug_io);
+    }
+};
+
+pub fn leaseDb() StoreError!DbLease {
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    errdefer db_mutex.unlock(std.Options.debug_io);
+
+    return .{ .db = try getDbLocked() };
 }
 
 fn getDbLocked() StoreError!*sqlite.Db {
@@ -109,7 +113,7 @@ pub fn openDb() StoreError!sqlite.Db {
     return db;
 }
 
-test "withDb holds database lifetime until callback returns" {
+test "DbLease holds database lifetime until deinit" {
     try initTestDb();
     defer deinitTestDb();
 
@@ -118,16 +122,15 @@ test "withDb holds database lifetime until callback returns" {
         release: std.atomic.Value(bool) = .init(false),
         close_returned: std.atomic.Value(bool) = .init(false),
 
-        fn hold(self: *@This(), db: *sqlite.Db) StoreError!void {
-            _ = db;
+        fn runHold(self: *@This()) void {
+            var lease = leaseDb() catch unreachable;
+            defer lease.deinit();
+
+            _ = lease.db;
             self.entered.store(true, .release);
             while (!self.release.load(.acquire)) {
                 std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(1), .awake) catch unreachable;
             }
-        }
-
-        fn runHold(self: *@This()) void {
-            withDb(void, self, @This().hold) catch unreachable;
         }
 
         fn runClose(self: *@This()) void {

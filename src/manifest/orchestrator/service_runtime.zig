@@ -1,5 +1,4 @@
 const std = @import("std");
-const sqlite = @import("sqlite");
 
 const cli = @import("../../lib/cli.zig");
 const spec = @import("../spec.zig");
@@ -195,21 +194,7 @@ pub fn resolveServiceVolumes(
                 };
 
                 const timestamp = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
-                const VolumeContext = struct {
-                    app_name: []const u8,
-                    volume: spec.Volume,
-                    timestamp: i64,
-
-                    fn create(ctx: *@This(), db: *sqlite.Db) store.StoreError!void {
-                        volumes_mod.create(db, ctx.app_name, ctx.volume, ctx.timestamp, null) catch return store.StoreError.WriteFailed;
-                    }
-                };
-                var volume_context = VolumeContext{
-                    .app_name = app_name,
-                    .volume = vol_def,
-                    .timestamp = timestamp,
-                };
-                store.withDb(void, &volume_context, VolumeContext.create) catch |err| {
+                volumes_mod.createManaged(app_name, vol_def, timestamp, null) catch |err| {
                     log.err("failed to create volume '{s}': {}", .{ vol.source, err });
                     return error.VolumeFailed;
                 };
