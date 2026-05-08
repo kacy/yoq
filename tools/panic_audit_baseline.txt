@@ -2,8 +2,6 @@
 # Counts may go down as files are hardened. New files and increased counts fail tools/panic_audit.sh.
 src/api/http.zig:4
 src/api/routes/cluster_agents.zig:5
-src/api/routes/cluster_agents/deploy_routes.zig:13
-src/api/routes/cluster_agents/workload_routes.zig:1
 src/api/routes/containers_images.zig:1
 src/api/routes/status_metrics.zig:3
 src/cluster/node.zig:1
@@ -36,7 +34,6 @@ src/state/store/cache.zig:6
 src/state/store/containers.zig:26
 src/state/store/deployments.zig:24
 src/state/store/images.zig:2
-src/state/store/services.zig:6
 src/test_cluster_sim.zig:3
 src/tls/acme/dns_provider.zig:1
 src/tls/handshake.zig:2

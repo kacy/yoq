@@ -121,15 +121,23 @@ test "DbLease holds database lifetime until deinit" {
         entered: std.atomic.Value(bool) = .init(false),
         release: std.atomic.Value(bool) = .init(false),
         close_returned: std.atomic.Value(bool) = .init(false),
+        failed: std.atomic.Value(bool) = .init(false),
 
         fn runHold(self: *@This()) void {
-            var lease = leaseDb() catch unreachable;
+            var lease = leaseDb() catch {
+                self.failed.store(true, .release);
+                self.entered.store(true, .release);
+                return;
+            };
             defer lease.deinit();
 
             _ = lease.db;
             self.entered.store(true, .release);
             while (!self.release.load(.acquire)) {
-                std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(1), .awake) catch unreachable;
+                std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(1), .awake) catch {
+                    self.failed.store(true, .release);
+                    return;
+                };
             }
         }
 
@@ -143,15 +151,17 @@ test "DbLease holds database lifetime until deinit" {
     const holder = try std.Thread.spawn(.{}, State.runHold, .{&state});
 
     while (!state.entered.load(.acquire)) {
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(1), .awake) catch unreachable;
+        try std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(1), .awake);
     }
+    try std.testing.expect(!state.failed.load(.acquire));
 
     const closer = try std.Thread.spawn(.{}, State.runClose, .{&state});
-    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(25), .awake) catch unreachable;
+    try std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(25), .awake);
     try std.testing.expect(!state.close_returned.load(.acquire));
 
     state.release.store(true, .release);
     holder.join();
     closer.join();
+    try std.testing.expect(!state.failed.load(.acquire));
     try std.testing.expect(state.close_returned.load(.acquire));
 }

@@ -1,7 +1,6 @@
 # Existing panic-shaped constructs in production-shaped src code.
 # Inline Zig test blocks and src/test_*.zig files are excluded by tools/panic_audit.sh.
 # Counts may go down as files are hardened. New files and increased counts fail the production audit.
-src/api/routes/cluster_agents/workload_routes.zig:1
 src/cluster/node.zig:1
 src/cluster/transport.zig:2
 src/gpu/detect/fallback_runtime.zig:2
