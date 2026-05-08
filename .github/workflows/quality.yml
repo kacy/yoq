@@ -1,6 +1,7 @@
 name: quality
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -64,7 +65,7 @@ jobs:
 
   dependency-drift:
     name: dependency-drift
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -79,10 +80,28 @@ jobs:
       - name: rebuild from a clean workspace cache
         shell: bash
         run: |
-          rm -rf .zig-cache zig-out
-          zig build
-          rm -rf .zig-cache zig-out
-          zig build -Doptimize=ReleaseSafe
+          set -euo pipefail
+          log="$RUNNER_TEMP/dependency-drift.log"
+          {
+            export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zig-global-cache-drift"
+            export ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zig-local-cache-drift"
+            echo "zig path: $(command -v zig)"
+            zig version
+            rm -rf "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR" .zig-cache zig-out
+            mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp" "$ZIG_LOCAL_CACHE_DIR/tmp"
+            zig build
+            rm -rf "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR" .zig-cache zig-out
+            mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp" "$ZIG_LOCAL_CACHE_DIR/tmp"
+            zig build -Doptimize=ReleaseSafe
+          } 2>&1 | tee "$log"
+
+      - name: upload dependency drift log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-drift-log
+          path: ${{ runner.temp }}/dependency-drift.log
+          retention-days: 7
 
   docs-packaging-smoke:
     name: docs-packaging-smoke

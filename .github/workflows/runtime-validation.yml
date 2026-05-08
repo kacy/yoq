@@ -113,9 +113,19 @@ jobs:
       - name: run privileged runtime lane
         shell: bash
         run: |
+          zig_bin="$(command -v zig)"
+          zig_global_cache="$RUNNER_TEMP/zig-global-cache-root"
+          zig_local_cache="$RUNNER_TEMP/zig-local-cache-root-${{ matrix.lane }}"
           mkdir -p "$RUNNER_TEMP/runtime-logs"
+          mkdir -p "$zig_global_cache/tmp" "$zig_local_cache/tmp"
+          echo "zig path: $zig_bin"
+          "$zig_bin" version
           set +e
-          sudo env YOQ_SKIP_SLOW_TESTS=1 zig build -Doptimize=ReleaseSafe -Drun-privileged-tests=true "${{ matrix.command }}" 2>&1 \
+          sudo env \
+            YOQ_SKIP_SLOW_TESTS=1 \
+            ZIG_GLOBAL_CACHE_DIR="$zig_global_cache" \
+            ZIG_LOCAL_CACHE_DIR="$zig_local_cache" \
+            "$zig_bin" build -Doptimize=ReleaseSafe -Drun-privileged-tests=true "${{ matrix.command }}" 2>&1 \
             | tee "$RUNNER_TEMP/runtime-logs/${{ matrix.command }}.log"
           status=${PIPESTATUS[0]}
           set -e
