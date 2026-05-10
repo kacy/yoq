@@ -43,6 +43,15 @@ jobs:
       timeout-minutes: 30
       failure-artifact-name: quality-network-smoke-log
 
+  perf-smoke:
+    name: perf-smoke
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: perf-smoke
+      command: YOQ_SKIP_SLOW_TESTS=1 zig build test-perf-smoke -Doptimize=ReleaseSafe
+      timeout-minutes: 20
+      failure-artifact-name: quality-perf-smoke-log
+
   hardening-smoke:
     name: hardening-smoke
     uses: ./.github/workflows/_build-test.yml

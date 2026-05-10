@@ -219,6 +219,26 @@ pub fn build(b: *std.Build) void {
     const run_network = createArtifactRunner(b, network_tests, "run network rollout smoke tests", true);
     network_test_step.dependOn(&run_network.step);
 
+    // -- performance smoke tests (sqlite required, no root) --
+    //
+    // these are loose regression guardrails for hot paths that should stay fast:
+    // manifest loading, HTTP route planning, and status serialization.
+    const perf_smoke_step = b.step("test-perf-smoke", "Run deterministic performance smoke tests");
+    const perf_smoke_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_perf_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    addSqlite(perf_smoke_mod, b);
+
+    const perf_smoke_tests = b.addTest(.{
+        .root_module = perf_smoke_mod,
+        .filters = if (test_filter) |filter| &.{filter} else &.{"perf smoke:"},
+    });
+    const run_perf_smoke = createArtifactRunner(b, perf_smoke_tests, "run performance smoke tests", true);
+    perf_smoke_step.dependOn(&run_perf_smoke.step);
+
     // -- golden path tests (installed binary + documented examples) --
     //
     // these keep the documented single-machine operator flow executable:
