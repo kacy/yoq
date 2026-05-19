@@ -136,7 +136,7 @@ port = 3000
 yoq up --server
 ```
 
-the `--server` flag tells yoq to submit the manifest to the cluster API instead of running locally. under the hood the CLI sends a single app snapshot to `POST /apps/apply`; that snapshot carries services, workers, crons, and training jobs together. the older `/deploy` route remains only for compatibility. the scheduler places containers on agents using bin-packing (scores by free CPU + memory). service discovery and load balancing work transparently across nodes via the WireGuard overlay and eBPF.
+the `--server` flag tells yoq to submit the manifest to the cluster API instead of running locally. under the hood the CLI sends a single app snapshot to `POST /apps/apply`; `yoq up --server --dry-run` sends the same snapshot to `POST /apps/dry-run` for a non-mutating diff. that snapshot carries services, workers, crons, and training jobs together. the older `/deploy` route remains only for compatibility. the scheduler places containers on agents using bin-packing (scores by free CPU + memory). service discovery and load balancing work transparently across nodes via the WireGuard overlay and eBPF.
 
 after deploy, use the app-first day-2 commands:
 

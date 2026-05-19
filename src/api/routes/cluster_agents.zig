@@ -30,6 +30,7 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
         if (std.mem.eql(u8, path, "/cluster/step-down")) return cluster_routes.handleLeaderStepDown(alloc, ctx);
         if (std.mem.eql(u8, path, "/agents/register")) return agent_routes.handleAgentRegister(alloc, request, ctx);
         if (std.mem.eql(u8, path, "/apps/apply")) return deploy_routes.handleAppApply(alloc, request, ctx);
+        if (std.mem.eql(u8, path, "/apps/dry-run")) return deploy_routes.handleAppDryRun(alloc, request, ctx);
         if (std.mem.eql(u8, path, "/deploy")) return deploy_routes.handleDeploy(alloc, request, ctx);
     }
 

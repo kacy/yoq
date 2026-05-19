@@ -5,6 +5,7 @@ const sqlite = @import("sqlite");
 const agent_registry = @import("../../../cluster/registry.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const apply_release = @import("../../../manifest/apply_release.zig");
+const apply_lock = @import("../../../manifest/apply_lock.zig");
 const app_snapshot = @import("../../../manifest/app_snapshot.zig");
 const schema = @import("../../../state/schema.zig");
 const store = @import("../../../state/store.zig");
@@ -1204,6 +1205,56 @@ test "app apply rejects invalid rollout config" {
 
     try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
     try expectJsonContains(response.body, "\"error\":\"invalid rollout config\"");
+}
+
+test "app dry run returns diff without creating deployment rows" {
+    const alloc = std.testing.allocator;
+    const old_snapshot =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:1"}],"workers":[{"name":"migrate","image":"alpine"}],"crons":[],"training_jobs":[]}
+    ;
+    const apply_body =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx:2"},{"name":"api","image":"alpine"}],"workers":[],"crons":[],"training_jobs":[]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+    try harness.seedLatestRelease("demo-app", old_snapshot);
+
+    const response = harness.appDryRun(apply_body);
+    defer freeResponse(alloc, response);
+
+    try expectResponseOk(response);
+    try expectJsonContains(response.body, "\"app_name\":\"demo-app\"");
+    try expectJsonContains(response.body, "\"change\":\"update\"");
+    try expectJsonContains(response.body, "\"change\":\"create\"");
+    try expectJsonContains(response.body, "\"change\":\"delete\"");
+
+    const CountRow = struct { count: i64 };
+    const row = (try harness.node.stateMachineDb().oneAlloc(
+        CountRow,
+        alloc,
+        "SELECT COUNT(*) AS count FROM deployments WHERE app_name = ?;",
+        .{},
+        .{"demo-app"},
+    )).?;
+    try std.testing.expectEqual(@as(i64, 1), row.count);
+}
+
+test "app apply returns conflict while app lock is held" {
+    const alloc = std.testing.allocator;
+    const apply_body =
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"alpine","command":["echo","hello"]}]}
+    ;
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    var lock = try apply_lock.acquire(alloc, "demo-app");
+    defer lock.release();
+
+    const response = harness.appApply(apply_body);
+    try std.testing.expectEqual(http.StatusCode.conflict, response.status);
+    try expectJsonContains(response.body, "\"error\":\"apply already in progress\"");
 }
 
 test "route rejects app rollback without cluster" {

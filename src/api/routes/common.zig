@@ -42,6 +42,10 @@ pub fn badRequest(comptime message: []const u8) Response {
     return .{ .status = .bad_request, .body = "{\"error\":\"" ++ message ++ "\"}", .allocated = false };
 }
 
+pub fn conflict(comptime message: []const u8) Response {
+    return .{ .status = .conflict, .body = "{\"error\":\"" ++ message ++ "\"}", .allocated = false };
+}
+
 pub fn notLeader(alloc: std.mem.Allocator, node: *cluster_node.Node) Response {
     var buf: [64]u8 = undefined;
     if (node.leaderAddrBuf(&buf)) |addr| {

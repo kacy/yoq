@@ -165,7 +165,7 @@ before yoq sends an ACME request, it checks the local challenge config. it repor
 
 deployment history is tracked in SQLite. updates proceed as app releases, not as ad hoc service mutations.
 
-for manifest-driven app deploys, yoq now normalizes the manifest into one app snapshot before execution. local `yoq up` first runs manifest readiness checks, then records the release in SQLite with the full config snapshot and manifest hash. use `yoq up --skip-preflight` only to bypass a known local preflight failure. remote `yoq up --server` uses the same app snapshot model, but does not run local host preflight checks for the cluster.
+for manifest-driven app deploys, yoq now normalizes the manifest into one app snapshot before execution. local `yoq up` first runs manifest readiness checks, then records the release in SQLite with the full config snapshot and manifest hash. use `yoq up --dry-run` to preview the app diff without writing state or starting services. use `yoq up --skip-preflight` only to bypass a known local preflight failure. remote `yoq up --server` uses the same app snapshot model, but does not run local host preflight checks for the cluster.
 
 this gives you a single app-first day-2 model:
 
@@ -290,7 +290,7 @@ if the leader changes, agents follow automatically — heartbeat responses inclu
 
 ### app-first control plane
 
-cluster manifest deploys now use `POST /apps/apply` as the canonical write path. the app snapshot includes services, workers, crons, and training jobs. the older `POST /deploy` route is still accepted as a compatibility shim, but new CLI work targets the app-first route.
+cluster manifest deploys now use `POST /apps/apply` as the canonical write path. `POST /apps/dry-run` accepts the same app snapshot and returns the proposed diff without writing release state. the app snapshot includes services, workers, crons, and training jobs. the older `POST /deploy` route is still accepted as a compatibility shim, but new CLI work targets the app-first route.
 
 the cluster API also exposes app-scoped day-2 reads and rollback:
 

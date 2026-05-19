@@ -90,6 +90,8 @@ comptime {
     _ = @import("build/manifest.zig");
     _ = @import("build/commands.zig");
     _ = @import("manifest/spec.zig");
+    _ = @import("manifest/app_diff.zig");
+    _ = @import("manifest/apply_lock.zig");
     _ = @import("manifest/app_spec.zig");
     _ = @import("manifest/app_snapshot.zig");
     _ = @import("manifest/app_view.zig");

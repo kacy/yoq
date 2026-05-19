@@ -137,6 +137,10 @@ pub const Harness = struct {
         return deploy_routes.handleAppApply(self.alloc, makeRequest(.POST, "/apps/apply", body), self.ctx());
     }
 
+    pub fn appDryRun(self: *Harness, body: []const u8) Response {
+        return deploy_routes.handleAppDryRun(self.alloc, makeRequest(.POST, "/apps/dry-run", body), self.ctx());
+    }
+
     pub fn rollback(self: *Harness, app_name: []const u8, release_id: []const u8) !Response {
         const body = try std.fmt.allocPrint(self.alloc, "{{\"release_id\":\"{s}\"}}", .{release_id});
         defer self.alloc.free(body);
