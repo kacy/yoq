@@ -736,6 +736,7 @@ this is intended for local development, not production.
 | `yoq init` | create a manifest.toml interactively |
 | `yoq validate` | validate manifest syntax and semantics |
 | `yoq up` | start all services |
+| `yoq up --dry-run` | preview the app diff without applying it |
 | `yoq up --dev` | start in dev mode with hot reload |
 | `yoq up --skip-preflight` | bypass local manifest readiness checks |
 | `yoq up <service>` | start a specific service |

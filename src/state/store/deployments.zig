@@ -1,6 +1,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
+const paths = @import("../../lib/paths.zig");
 const schema = @import("../schema.zig");
 
 const Allocator = std.mem.Allocator;
@@ -409,6 +410,31 @@ pub fn getLatestDeploymentByApp(alloc: Allocator, app_name: []const u8) StoreErr
     defer lease.deinit();
 
     return getLatestDeploymentByAppInDb(lease.db, alloc, app_name);
+}
+
+pub fn getLatestDeploymentByAppIfDbExists(alloc: Allocator, app_name: []const u8) StoreError!?DeploymentRecord {
+    var path_buf: [paths.max_path]u8 = undefined;
+    const path = paths.dataPath(&path_buf, "yoq.db") catch return StoreError.DbOpenFailed;
+
+    std.Io.Dir.cwd().access(std.Options.debug_io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return StoreError.DbOpenFailed,
+    };
+
+    if (path.len >= path_buf.len) return StoreError.DbOpenFailed;
+    path_buf[path.len] = 0;
+    const zpath = path_buf[0..path.len :0];
+
+    var db = sqlite.Db.init(.{
+        .mode = .{ .File = zpath },
+        .open_flags = .{},
+    }) catch return StoreError.DbOpenFailed;
+    defer db.deinit();
+
+    return getLatestDeploymentByAppInDb(&db, alloc, app_name) catch |err| switch (err) {
+        error.NotFound => null,
+        else => return err,
+    };
 }
 
 pub fn getLatestDeploymentByAppInDb(

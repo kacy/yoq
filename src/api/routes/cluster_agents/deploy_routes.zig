@@ -1,7 +1,9 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const apply_release = @import("../../../manifest/apply_release.zig");
+const app_diff = @import("../../../manifest/app_diff.zig");
 const app_snapshot = @import("../../../manifest/app_snapshot.zig");
+const apply_lock = @import("../../../manifest/apply_lock.zig");
 const apply_backend = @import("apply_backend.zig");
 const apply_response = @import("apply_response.zig");
 const apply_request = @import("apply_request.zig");
@@ -177,6 +179,15 @@ fn handleApply(
 
     const db = node.stateMachineDb();
 
+    var app_lock: ?apply_lock.ApplyLock = null;
+    if (parsed.app_name) |app_name| {
+        app_lock = apply_lock.acquire(alloc, app_name) catch |err| switch (err) {
+            apply_lock.ApplyLockError.AlreadyLocked => return common.conflict("apply already in progress"),
+            else => return common.internalError(),
+        };
+    }
+    defer if (app_lock) |*lock| lock.release();
+
     const vol_constraints = if (parsed.app_name) |name|
         volumes_mod.getVolumesByApp(alloc, db, name) catch &[_]volumes_mod.VolumeConstraint{}
     else
@@ -249,6 +260,46 @@ fn reconcileCronSchedules(db: *sqlite.Db, alloc: std.mem.Allocator, app_name: []
 
 pub fn handleAppApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
     return handleApply(alloc, request, ctx, .app, .{});
+}
+
+pub fn handleAppDryRun(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
+    const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+    if (request.body.len == 0) return common.badRequest("missing request body");
+
+    var parsed = apply_request.parse(alloc, request.body, true) catch |err| return switch (err) {
+        apply_request.ParseError.MissingAppName => common.badRequest("missing app_name"),
+        apply_request.ParseError.MissingServicesArray => common.badRequest("missing services array"),
+        apply_request.ParseError.NoServices => common.badRequest("no services to deploy"),
+        apply_request.ParseError.OutOfMemory => common.internalError(),
+        apply_request.ParseError.InvalidRequest => common.badRequest("invalid request body"),
+        apply_request.ParseError.InvalidRolloutConfig => common.badRequest("invalid rollout config"),
+    };
+    defer parsed.deinit(alloc);
+
+    const app_name = parsed.app_name.?;
+    const db = node.stateMachineDb();
+    const manifest_hash = deployment_store.computeManifestHash(alloc, request.body) catch return common.internalError();
+    defer alloc.free(manifest_hash);
+
+    const current = store.getLatestDeploymentByAppInDb(db, alloc, app_name) catch |err| switch (err) {
+        error.NotFound => null,
+        else => return common.internalError(),
+    };
+    defer if (current) |dep| dep.deinit(alloc);
+
+    var diff = app_diff.compute(
+        alloc,
+        app_name,
+        manifest_hash,
+        if (current) |dep| dep.id else null,
+        if (current) |dep| dep.manifest_hash else null,
+        if (current) |dep| dep.config_snapshot else null,
+        request.body,
+    ) catch return common.internalError();
+    defer diff.deinit();
+
+    const body = diff.renderJson(alloc) catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
 }
 
 pub fn handleAppApplyWithContext(

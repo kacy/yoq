@@ -108,6 +108,7 @@ pub const updateDeploymentSupersededByReleaseId = @import("store/deployments.zig
 pub const updateDeploymentSupersededByReleaseIdInDb = @import("store/deployments.zig").updateDeploymentSupersededByReleaseIdInDb;
 pub const getLatestDeployment = @import("store/deployments.zig").getLatestDeployment;
 pub const getLatestDeploymentByApp = @import("store/deployments.zig").getLatestDeploymentByApp;
+pub const getLatestDeploymentByAppIfDbExists = @import("store/deployments.zig").getLatestDeploymentByAppIfDbExists;
 pub const getLatestDeploymentByAppInDb = @import("store/deployments.zig").getLatestDeploymentByAppInDb;
 pub const getActiveDeploymentByApp = @import("store/deployments.zig").getActiveDeploymentByApp;
 pub const getActiveDeploymentByAppInDb = @import("store/deployments.zig").getActiveDeploymentByAppInDb;

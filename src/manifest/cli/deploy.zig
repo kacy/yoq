@@ -1,6 +1,8 @@
 const std = @import("std");
 const cli = @import("../../lib/cli.zig");
 const app_spec = @import("../app_spec.zig");
+const app_diff = @import("../app_diff.zig");
+const apply_lock = @import("../apply_lock.zig");
 const local_apply_backend = @import("../local_apply_backend.zig");
 const release_plan = @import("../release_plan.zig");
 const manifest_loader = @import("../loader.zig");
@@ -25,6 +27,7 @@ const DeployError = error{
     OutOfMemory,
     UnknownService,
     PreflightFailed,
+    ApplyLocked,
 };
 
 pub fn up(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
@@ -34,6 +37,7 @@ pub fn up(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator
 const UpOptions = struct {
     manifest_path: []const u8 = manifest_loader.default_filename,
     dev_mode: bool = false,
+    dry_run: bool = false,
     skip_preflight: bool = false,
     server_addr: ?[]const u8 = null,
     service_names: std.ArrayList([]const u8) = .empty,
@@ -48,6 +52,7 @@ const UpDeps = struct {
     preflight_fn: *const fn (*anyopaque, std.mem.Allocator, *const manifest_spec.Manifest) anyerror!doctor_manifest.ManifestCheckResult = runHostPreflight,
     local_start_fn: *const fn (*anyopaque, std.Io, std.mem.Allocator, *manifest_spec.Manifest, *const release_plan.ReleasePlan, bool) DeployError!void = startLocalRelease,
     cluster_deploy_fn: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, *const release_plan.ReleasePlan) DeployError!void = deployToCluster,
+    cluster_dry_run_fn: *const fn (*anyopaque, std.Io, std.mem.Allocator, []const u8, *const release_plan.ReleasePlan) DeployError!void = dryRunCluster,
 };
 
 var noop_context: u8 = 0;
@@ -82,6 +87,8 @@ fn parseUpTokens(alloc: std.mem.Allocator, tokens: []const []const u8) DeployErr
             options.manifest_path = tokens[i];
         } else if (std.mem.eql(u8, arg, "--dev")) {
             options.dev_mode = true;
+        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+            options.dry_run = true;
         } else if (std.mem.eql(u8, arg, "--skip-preflight")) {
             options.skip_preflight = true;
         } else if (std.mem.eql(u8, arg, "--server")) {
@@ -94,6 +101,11 @@ fn parseUpTokens(alloc: std.mem.Allocator, tokens: []const []const u8) DeployErr
         } else {
             options.service_names.append(alloc, arg) catch return DeployError.OutOfMemory;
         }
+    }
+
+    if (options.dry_run and options.dev_mode) {
+        writeErr("--dry-run cannot be combined with --dev\n", .{});
+        return DeployError.InvalidArgument;
     }
 
     return options;
@@ -131,6 +143,15 @@ fn runUpOptions(io: std.Io, alloc: std.mem.Allocator, options: *const UpOptions,
 
     var release = release_plan.ReleasePlan.fromAppSpec(alloc, &app, options.service_names.items) catch return DeployError.OutOfMemory;
     defer release.deinit();
+
+    if (options.dry_run) {
+        if (options.server_addr) |addr| {
+            try deps.cluster_dry_run_fn(deps.ctx, io, alloc, addr, &release);
+        } else {
+            try printLocalDryRun(alloc, &release);
+        }
+        return;
+    }
 
     if (options.server_addr) |addr| {
         try deps.cluster_deploy_fn(deps.ctx, io, alloc, addr, &release);
@@ -199,6 +220,18 @@ fn startLocalRelease(
     release: *const release_plan.ReleasePlan,
     dev_mode: bool,
 ) DeployError!void {
+    var app_lock = apply_lock.acquire(alloc, release.app.app_name) catch |err| switch (err) {
+        apply_lock.ApplyLockError.AlreadyLocked => {
+            writeErr("apply already in progress for app {s}\n", .{release.app.app_name});
+            return DeployError.ApplyLocked;
+        },
+        else => {
+            writeErr("failed to acquire apply lock for app {s}: {}\n", .{ release.app.app_name, err });
+            return DeployError.DeploymentFailed;
+        },
+    };
+    defer app_lock.release();
+
     var prepared = local_apply_backend.PreparedLocalApply.init(alloc, manifest, release, dev_mode) catch |err| {
         writeErr("failed to initialize orchestrator: {}\n", .{err});
         return DeployError.DeploymentFailed;
@@ -235,6 +268,26 @@ fn startLocalRelease(
     writeErr("stopped\n", .{});
 }
 
+fn printLocalDryRun(alloc: std.mem.Allocator, release: *const release_plan.ReleasePlan) DeployError!void {
+    const current = store.getLatestDeploymentByAppIfDbExists(alloc, release.app.app_name) catch return DeployError.StoreError;
+    defer if (current) |dep| dep.deinit(alloc);
+
+    var diff = app_diff.compute(
+        alloc,
+        release.app.app_name,
+        release.manifest_hash,
+        if (current) |dep| dep.id else null,
+        if (current) |dep| dep.manifest_hash else null,
+        if (current) |dep| dep.config_snapshot else null,
+        release.config_snapshot,
+    ) catch return DeployError.OutOfMemory;
+    defer diff.deinit();
+
+    const text = diff.renderText(alloc) catch return DeployError.OutOfMemory;
+    defer alloc.free(text);
+    write("{s}", .{text});
+}
+
 fn deployToCluster(
     _: *anyopaque,
     io: std.Io,
@@ -259,6 +312,34 @@ fn deployToCluster(
         write("{s}\n", .{resp.body});
     } else {
         writeErr("deploy failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
+        return DeployError.DeploymentFailed;
+    }
+}
+
+fn dryRunCluster(
+    _: *anyopaque,
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    addr_str: []const u8,
+    release: *const release_plan.ReleasePlan,
+) DeployError!void {
+    const server = cli.parseServerAddr(addr_str);
+    writeErr("dry-running {d} services against cluster {s}...\n", .{ release.resolvedServiceCount(), addr_str });
+
+    var token_buf: [64]u8 = undefined;
+    const token = cli.readApiTokenWithIo(io, &token_buf);
+
+    var resp = http_client.postWithAuth(alloc, server.ip, server.port, "/apps/dry-run", release.config_snapshot, token) catch |err| {
+        writeErr("failed to connect to cluster server: {}\n", .{err});
+        writeErr("hint: is the server running? try 'yoq serve' or 'yoq init-server'\n", .{});
+        return DeployError.ConnectionFailed;
+    };
+    defer resp.deinit(alloc);
+
+    if (resp.status_code == 200) {
+        write("{s}\n", .{resp.body});
+    } else {
+        writeErr("dry-run failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
         return DeployError.DeploymentFailed;
     }
 }
@@ -354,6 +435,21 @@ test "up parser accepts skip preflight" {
     try std.testing.expectEqualStrings("web", options.service_names.items[0]);
 }
 
+test "up parser accepts dry run" {
+    const alloc = std.testing.allocator;
+    var options = try parseUpTokens(alloc, &.{ "--dry-run", "--skip-preflight", "-f", "demo.toml", "web" });
+    defer options.deinit(alloc);
+
+    try std.testing.expect(options.dry_run);
+    try std.testing.expect(options.skip_preflight);
+    try std.testing.expectEqualStrings("demo.toml", options.manifest_path);
+    try std.testing.expectEqual(@as(usize, 1), options.service_names.items.len);
+}
+
+test "up parser rejects dry run with dev mode" {
+    try std.testing.expectError(DeployError.InvalidArgument, parseUpTokens(std.testing.allocator, &.{ "--dry-run", "--dev" }));
+}
+
 test "up preflight failure aborts before local apply" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -424,11 +520,64 @@ test "up server path skips local preflight" {
     try std.testing.expectEqualStrings("127.0.0.1:7700", harness.cluster_addr.?);
 }
 
+test "up local dry run runs preflight and skips local apply" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const manifest_path = try writeTestManifest(alloc, &tmp);
+    defer alloc.free(manifest_path);
+
+    var options = try parseUpTokens(alloc, &.{ "-f", manifest_path, "--dry-run" });
+    defer options.deinit(alloc);
+    var harness = UpHarness{};
+
+    try runUpOptions(std.testing.io, alloc, &options, harness.deps());
+    try std.testing.expectEqual(@as(u32, 1), harness.preflight_calls);
+    try std.testing.expectEqual(@as(u32, 0), harness.local_calls);
+    try std.testing.expectEqual(@as(u32, 0), harness.cluster_calls);
+    try std.testing.expectEqual(@as(u32, 0), harness.cluster_dry_run_calls);
+}
+
+test "up local dry run skip preflight bypasses checks" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const manifest_path = try writeTestManifest(alloc, &tmp);
+    defer alloc.free(manifest_path);
+
+    var options = try parseUpTokens(alloc, &.{ "-f", manifest_path, "--dry-run", "--skip-preflight" });
+    defer options.deinit(alloc);
+    var harness = UpHarness{ .preflight_status = .fail };
+
+    try runUpOptions(std.testing.io, alloc, &options, harness.deps());
+    try std.testing.expectEqual(@as(u32, 0), harness.preflight_calls);
+    try std.testing.expectEqual(@as(u32, 0), harness.local_calls);
+}
+
+test "up remote dry run skips cluster apply" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const manifest_path = try writeTestManifest(alloc, &tmp);
+    defer alloc.free(manifest_path);
+
+    var options = try parseUpTokens(alloc, &.{ "-f", manifest_path, "--dry-run", "--server", "127.0.0.1:7700" });
+    defer options.deinit(alloc);
+    var harness = UpHarness{ .preflight_status = .fail };
+
+    try runUpOptions(std.testing.io, alloc, &options, harness.deps());
+    try std.testing.expectEqual(@as(u32, 0), harness.preflight_calls);
+    try std.testing.expectEqual(@as(u32, 0), harness.cluster_calls);
+    try std.testing.expectEqual(@as(u32, 1), harness.cluster_dry_run_calls);
+    try std.testing.expectEqualStrings("127.0.0.1:7700", harness.cluster_addr.?);
+}
+
 const UpHarness = struct {
     preflight_status: doctor.CheckStatus = .pass,
     preflight_calls: u32 = 0,
     local_calls: u32 = 0,
     cluster_calls: u32 = 0,
+    cluster_dry_run_calls: u32 = 0,
     saw_dev_mode: bool = false,
     cluster_addr: ?[]const u8 = null,
 
@@ -438,6 +587,7 @@ const UpHarness = struct {
             .preflight_fn = preflight,
             .local_start_fn = localStart,
             .cluster_deploy_fn = clusterDeploy,
+            .cluster_dry_run_fn = clusterDryRun,
         };
     }
 
@@ -475,6 +625,18 @@ const UpHarness = struct {
     ) DeployError!void {
         const self: *UpHarness = @ptrCast(@alignCast(ctx));
         self.cluster_calls += 1;
+        self.cluster_addr = addr;
+    }
+
+    fn clusterDryRun(
+        ctx: *anyopaque,
+        _: std.Io,
+        _: std.mem.Allocator,
+        addr: []const u8,
+        _: *const release_plan.ReleasePlan,
+    ) DeployError!void {
+        const self: *UpHarness = @ptrCast(@alignCast(ctx));
+        self.cluster_dry_run_calls += 1;
         self.cluster_addr = addr;
     }
 };
