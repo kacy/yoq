@@ -132,8 +132,8 @@ const command_meta = [_]CommandMeta{
         .{ .name = "list", .flags = &.{"--json"} },
         .{ .name = "rm" },
     } },
-    .{ .name = "backup", .flags = &.{"--output"} },
-    .{ .name = "restore", .flags = &.{"--input"} },
+    .{ .name = "backup", .flags = &.{ "--output", "--plain" } },
+    .{ .name = "restore", .flags = &.{ "--input", "--verify" } },
 
     // misc
     .{ .name = "doctor", .flags = &.{ "-f", "--cluster", "--server", "--json" } },

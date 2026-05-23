@@ -19,6 +19,8 @@ pub const EncryptResult = common.EncryptResult;
 pub const SecretsStore = storage_runtime.SecretsStore;
 pub const encrypt = crypto_runtime.encrypt;
 pub const decrypt = crypto_runtime.decrypt;
+pub const loadOrCreateKey = key_support.loadOrCreateKey;
+pub const KeyError = key_support.KeyError;
 
 const readKeyFile = key_support.readKeyFile;
 const secureZero = key_support.secureZero;

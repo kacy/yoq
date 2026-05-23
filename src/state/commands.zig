@@ -226,8 +226,8 @@ const BackupCommandsError = error{
 };
 
 pub fn backupCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    _ = ctx;
     var output_path: ?[]const u8 = null;
+    var plain = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--output")) {
@@ -235,13 +235,16 @@ pub fn backupCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
                 writeErr("--output requires a file path\n", .{});
                 return BackupCommandsError.InvalidArgument;
             };
+        } else if (std.mem.eql(u8, arg, "--plain")) {
+            plain = true;
         }
     }
 
-    // default output path with timestamp
+    // default extension reflects whether the artifact is encrypted.
+    const default_ext = if (plain) "db" else "yoqbackup";
     var default_buf: [256]u8 = undefined;
     const ts = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
-    const path = output_path orelse std.fmt.bufPrint(&default_buf, "yoq-backup-{d}.db", .{ts}) catch {
+    const path = output_path orelse std.fmt.bufPrint(&default_buf, "yoq-backup-{d}.{s}", .{ ts, default_ext }) catch {
         writeErr("failed to generate backup filename\n", .{});
         return BackupCommandsError.BackupFailed;
     };
@@ -256,17 +259,21 @@ pub fn backupCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     path_z_buf[path.len] = 0;
     const path_z: [:0]const u8 = path_z_buf[0..path.len :0];
 
-    backup_mod.backup(path_z) catch |err| {
+    backup_mod.backup(ctx.alloc, path_z, !plain) catch |err| {
         writeErr("backup failed: {}\n", .{err});
         return BackupCommandsError.BackupFailed;
     };
 
-    write("backup saved to {s}\n", .{path});
+    if (plain) {
+        write("backup saved to {s} (unencrypted)\n", .{path});
+    } else {
+        write("encrypted backup saved to {s}\n", .{path});
+    }
 }
 
 pub fn restoreCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    _ = ctx;
     var input_path: ?[]const u8 = null;
+    var verify_only = false;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--input")) {
@@ -274,6 +281,8 @@ pub fn restoreCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
                 writeErr("--input requires a file path\n", .{});
                 return BackupCommandsError.InvalidArgument;
             };
+        } else if (std.mem.eql(u8, arg, "--verify")) {
+            verify_only = true;
         } else if (input_path == null) {
             input_path = arg;
         }
@@ -300,13 +309,19 @@ pub fn restoreCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
         return BackupCommandsError.RestoreFailed;
     };
 
-    backup_mod.restore(path_z) catch |err| {
+    backup_mod.restore(ctx.alloc, path_z, verify_only) catch |err| {
         switch (err) {
-            backup_mod.BackupError.SchemaValidationFailed => writeErr("restore failed: backup has invalid schema\n", .{}),
-            else => writeErr("restore failed: {}\n", .{err}),
+            backup_mod.BackupError.SchemaValidationFailed => writeErr("{s} failed: backup has invalid schema\n", .{if (verify_only) "verify" else "restore"}),
+            backup_mod.BackupError.IntegrityCheckFailed => writeErr("{s} failed: backup is corrupt or tampered (checksum/decrypt mismatch)\n", .{if (verify_only) "verify" else "restore"}),
+            backup_mod.BackupError.KeyUnavailable => writeErr("{s} failed: could not load the secrets key to decrypt the backup\n", .{if (verify_only) "verify" else "restore"}),
+            else => writeErr("{s} failed: {}\n", .{ if (verify_only) "verify" else "restore", err }),
         }
         return BackupCommandsError.RestoreFailed;
     };
 
-    write("database restored from {s}\n", .{path});
+    if (verify_only) {
+        write("backup verified ok: {s}\n", .{path});
+    } else {
+        write("database restored from {s}\n", .{path});
+    }
 }
