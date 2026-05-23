@@ -376,6 +376,7 @@ pub const ReverseProxy = struct {
             .outbound_path = plan.outbound_path,
             .host = plan.host,
             .outbound_host = plan.outbound_host,
+            .keep_alive = true,
         }, client_ip);
     }
 
@@ -409,6 +410,9 @@ pub const ReverseProxy = struct {
         outbound_path: []const u8,
         host: []const u8,
         outbound_host: []const u8,
+        /// request a kept-alive upstream connection so it can be pooled. set
+        /// false for fire-and-forget paths (e.g. mirror traffic) we never reuse.
+        keep_alive: bool = false,
     };
 
     fn buildForwardRequestBytes(
@@ -480,7 +484,11 @@ pub const ReverseProxy = struct {
         try writeTraceHeaders(writer, inbound_traceparent, inbound_tracestate);
         try writer.print("Content-Length: {d}\r\n", .{parsed.body.len});
         try writer.writeAll(proxy_loop_header ++ ": 1\r\n");
-        try writer.writeAll("Connection: close\r\n\r\n");
+        if (spec.keep_alive) {
+            try writer.writeAll("Connection: keep-alive\r\n\r\n");
+        } else {
+            try writer.writeAll("Connection: close\r\n\r\n");
+        }
         try writer.writeAll(parsed.body);
 
         return buf_writer.toOwnedSlice();
@@ -1855,8 +1863,11 @@ test "buildForwardRequest rewrites Host when preserve_host is false" {
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "Host: api\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Test: 1\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Yoq-Proxy: 1\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: close\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: keep-alive\r\n") == null);
+    // the client's hop-by-hop Connection header is stripped and replaced by
+    // the proxy's own keep-alive request (so the connection can be pooled).
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: keep-alive\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: close\r\n") == null);
+    try std.testing.expect(std.mem.count(u8, forwarded, "Connection: ") == 1);
 }
 
 test "buildForwardRequest rewrites request path with preserved query" {
@@ -2594,7 +2605,7 @@ test "forwardRequest proxies upstream response bytes" {
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "GET /v1/users HTTP/1.1\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Host: api\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Test: 1\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Connection: close\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Connection: keep-alive\r\n") != null);
 }
 
 test "forwardRequest mirrors shadow traffic without affecting the primary response" {
