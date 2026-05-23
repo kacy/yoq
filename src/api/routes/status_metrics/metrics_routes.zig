@@ -24,6 +24,7 @@ const proxy_runtime = @import("../../../network/proxy/runtime.zig");
 const listener_runtime = @import("../../../network/proxy/listener_runtime.zig");
 const proxy_control_plane = @import("../../../network/proxy/control_plane.zig");
 const steering_runtime = @import("../../../network/proxy/steering_runtime.zig");
+const upstream_pool = @import("../../../network/proxy/upstream_pool.zig");
 
 const Response = common.Response;
 const MetricsResponseContext = struct {
@@ -406,6 +407,26 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# TYPE yoq_service_l7_proxy_circuit_endpoints gauge\n");
     try writer.print("yoq_service_l7_proxy_circuit_endpoints{{state=\"open\"}} {d}\n", .{l7_proxy.circuit_open_endpoints});
     try writer.print("yoq_service_l7_proxy_circuit_endpoints{{state=\"half_open\"}} {d}\n", .{l7_proxy.circuit_half_open_endpoints});
+
+    const l7_pool = upstream_pool.snapshot();
+    try writer.writeAll("# HELP yoq_service_l7_proxy_upstream_pool_connections L7 proxy upstream connections by pool state\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_upstream_pool_connections gauge\n");
+    try writer.print("yoq_service_l7_proxy_upstream_pool_connections{{state=\"active\"}} {d}\n", .{l7_pool.active});
+    try writer.print("yoq_service_l7_proxy_upstream_pool_connections{{state=\"idle\"}} {d}\n", .{l7_pool.idle});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_upstream_pool_reuse_total L7 proxy upstream connections reused from the pool\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_upstream_pool_reuse_total counter\n");
+    try writer.print("yoq_service_l7_proxy_upstream_pool_reuse_total {d}\n", .{l7_pool.reuse_total});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_upstream_pool_created_total L7 proxy upstream connections dialed fresh\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_upstream_pool_created_total counter\n");
+    try writer.print("yoq_service_l7_proxy_upstream_pool_created_total {d}\n", .{l7_pool.created_total});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_upstream_pool_evicted_total L7 proxy upstream connections evicted from the pool by reason\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_upstream_pool_evicted_total counter\n");
+    try writer.print("yoq_service_l7_proxy_upstream_pool_evicted_total{{reason=\"idle_timeout\"}} {d}\n", .{l7_pool.evicted_idle_total});
+    try writer.print("yoq_service_l7_proxy_upstream_pool_evicted_total{{reason=\"broken\"}} {d}\n", .{l7_pool.evicted_broken_total});
+    try writer.print("yoq_service_l7_proxy_upstream_pool_evicted_total{{reason=\"overflow\"}} {d}\n", .{l7_pool.evicted_overflow_total});
 
     try writer.writeAll("# HELP yoq_service_l7_proxy_listener_enabled Whether the L7 proxy listener is enabled\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_listener_enabled gauge\n");
