@@ -57,6 +57,7 @@ pub const sendAndCheck = socket_ops.sendAndCheck;
 pub const sendOnly = socket_ops.sendOnly;
 
 pub const getIfIndex = link_ops.getIfIndex;
+pub const getMtu = link_ops.getMtu;
 pub const setLinkUp = link_ops.setLinkUp;
 pub const deleteLink = link_ops.deleteLink;
 
