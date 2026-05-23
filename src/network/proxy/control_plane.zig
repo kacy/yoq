@@ -5,6 +5,7 @@ const proxy_runtime = @import("runtime.zig");
 const service_registry_runtime_mod = @import("../service_registry_runtime.zig");
 const listener_runtime_mod = @import("listener_runtime.zig");
 const steering_runtime = @import("steering_runtime.zig");
+const upstream_pool = @import("upstream_pool.zig");
 const posix = std.posix;
 const socket_helpers = @import("socket_helpers.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
@@ -126,6 +127,8 @@ fn runSyncPass(trigger: SyncTrigger, ensure_listener: bool) void {
         proxy_runtime.bootstrapIfEnabled();
     }
     steering_runtime.syncIfEnabled();
+    // evict idle upstream connections so they do not linger when traffic is quiet.
+    upstream_pool.sweepIdle(std.Io.Clock.real.now(std.Options.debug_io).toMilliseconds());
     mutex.lockUncancelable(std.Options.debug_io);
     defer mutex.unlock(std.Options.debug_io);
     sync_passes_total += 1;
