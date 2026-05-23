@@ -57,6 +57,7 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
     const ctx: common.RouteContext = .{
         .cluster = cluster,
         .join_token = join_token,
+        .api_token = api_token,
     };
 
     if (cluster_agents.route(request, alloc, ctx)) |resp| return resp;
