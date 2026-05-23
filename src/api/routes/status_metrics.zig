@@ -18,6 +18,10 @@ const handleGpuMetrics = metrics_routes.handleGpuMetrics;
 pub fn route(request: http.Request, alloc: std.mem.Allocator) ?Response {
     const path = request.path_only;
 
+    if (request.method == .GET and std.mem.eql(u8, path, "/v1/status/bpf")) {
+        return status_routes.handleBpfMapStatus(alloc);
+    }
+
     if (request.method == .GET and std.mem.eql(u8, path, "/v1/status")) {
         const mode = common.extractQueryParam(request.path, "mode");
         if (mode) |value| {
@@ -72,6 +76,25 @@ test "route handles /v1/status GET" {
     defer if (response.allocated) testing.allocator.free(response.body);
 
     try testing.expectEqual(http.StatusCode.ok, response.status);
+    try testing.expectEqualStrings("[]", response.body);
+}
+
+test "route handles /v1/status/bpf GET" {
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/status/bpf",
+        .path_only = "/v1/status/bpf",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    };
+
+    const response = route(req, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+
+    try testing.expectEqual(http.StatusCode.ok, response.status);
+    // no eBPF maps are loaded in the unit test process, so the array is empty.
     try testing.expectEqualStrings("[]", response.body);
 }
 

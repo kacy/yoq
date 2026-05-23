@@ -69,6 +69,50 @@ pub fn mapGetNextKey(map_fd: posix.fd_t, key: []const u8, next_key: []u8) bool {
     return map_support.mapGetNextKey(map_fd, key, next_key);
 }
 
+/// occupancy of a single bounded BPF map.
+pub const MapStat = struct {
+    name: []const u8,
+    used: usize,
+    max: u32,
+};
+
+/// snapshot occupancy of the bounded hash maps whose fill is a real headroom
+/// signal. LRU maps (conntrack, network metrics) self-evict, so they are not a
+/// headroom concern and are skipped. fills `out` and returns the count written.
+///
+/// counting walks each map's keys, so this is an on-demand status call, not a
+/// hot-path metric. callers cap cost via each map's max_entries.
+pub fn collectMapStats(out: []MapStat) usize {
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
+
+    var n: usize = 0;
+    const append = struct {
+        fn add(buf: []MapStat, idx: *usize, def: anytype, fd: posix.fd_t) void {
+            if (idx.* >= buf.len) return;
+            buf[idx.*] = .{
+                .name = def.name,
+                .used = map_support.mapEntryCount(fd, def.key_size, def.max_entries),
+                .max = def.max_entries,
+            };
+            idx.* += 1;
+        }
+    }.add;
+
+    if (dns_interceptor) |d| append(out, &n, dns_intercept.maps[0], d.map_fd);
+    if (load_balancer) |lb| append(out, &n, lb_prog.maps[0], lb.backends_fd);
+    if (policy_enforcer) |p| {
+        append(out, &n, policy_prog.maps[0], p.policy_fd);
+        append(out, &n, policy_prog.maps[1], p.isolation_fd);
+    }
+    if (port_mapper) |pm| append(out, &n, port_map_prog.maps[0], pm.map_fd);
+
+    return n;
+}
+
+/// upper bound on the number of maps `collectMapStats` can report.
+pub const max_map_stats = 5;
+
 /// insert or update a key/value pair in a BPF map.
 /// validates key and value buffer sizes before attempting update.
 /// uses circuit breaker pattern to prevent cascading failures.
@@ -538,6 +582,22 @@ test "lb_prog bytecode has expected maps" {
     try std.testing.expectEqualStrings("backends_map", lb_prog.maps[0].name);
     try std.testing.expectEqualStrings("conntrack_map", lb_prog.maps[1].name);
     try std.testing.expectEqualStrings("rev_conntrack_map", lb_prog.maps[2].name);
+}
+
+test "mapEntryCount counts inserted keys and respects the bound" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    // map creation needs BPF privileges; skip when unavailable (e.g. CI).
+    const fd = createMap(.hash, 4, 4, 16) catch return error.SkipZigTest;
+    defer linux_platform.posix.close(fd);
+
+    var i: u32 = 0;
+    while (i < 5) : (i += 1) {
+        mapUpdate(fd, std.mem.asBytes(&i), std.mem.asBytes(&i)) catch return error.SkipZigTest;
+    }
+
+    try std.testing.expectEqual(@as(usize, 5), map_support.mapEntryCount(fd, 4, 16));
+    // iteration stops at the bound even when more keys exist.
+    try std.testing.expectEqual(@as(usize, 3), map_support.mapEntryCount(fd, 4, 3));
 }
 
 test "IpMetrics struct size matches BPF map value" {

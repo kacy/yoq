@@ -79,6 +79,24 @@ pub fn mapGetNextKey(map_fd: posix.fd_t, key: []const u8, next_key: []u8) bool {
     return found;
 }
 
+/// count the entries currently in a map by walking its keys. iteration is
+/// bounded by `max_entries` so a churning or corrupt map cannot spin. `key_size`
+/// must match the map's key size. returns 0 on non-linux or an invalid key size.
+pub fn mapEntryCount(map_fd: posix.fd_t, key_size: usize, max_entries: u32) usize {
+    if (comptime builtin.os.tag != .linux) return 0;
+    if (key_size == 0 or key_size > resource_support.max_key_size) return 0;
+
+    var key: [resource_support.max_key_size]u8 = std.mem.zeroes([resource_support.max_key_size]u8);
+    var next: [resource_support.max_key_size]u8 = undefined;
+    var count: usize = 0;
+    while (count < max_entries) {
+        if (!mapGetNextKey(map_fd, key[0..key_size], next[0..key_size])) break;
+        count += 1;
+        @memcpy(key[0..key_size], next[0..key_size]);
+    }
+    return count;
+}
+
 pub fn mapUpdate(map_fd: posix.fd_t, key: []const u8, value: []const u8) common.EbpfError!void {
     if (comptime builtin.os.tag != .linux) return common.EbpfError.NotSupported;
 
