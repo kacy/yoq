@@ -15,6 +15,9 @@ pub const Response = struct {
 pub const RouteContext = struct {
     cluster: ?*cluster_node.Node,
     join_token: ?[]const u8,
+    /// the configured api bearer token, if any. used when a handler needs to
+    /// call peers' authenticated endpoints (e.g. cluster preflight aggregation).
+    api_token: ?[]const u8 = null,
 };
 
 pub const AssignmentIds = struct {

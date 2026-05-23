@@ -36,6 +36,8 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
 
     if (request.method == .GET) {
         if (std.mem.eql(u8, path, "/cluster/version")) return cluster_routes.handleClusterVersion();
+        if (std.mem.eql(u8, path, "/cluster/node-info")) return cluster_routes.handleClusterNodeInfo(alloc, ctx);
+        if (std.mem.eql(u8, path, "/cluster/peers/info")) return cluster_routes.handleClusterPeersInfo(alloc, ctx);
     }
 
     if (app_routes.route(request, alloc, ctx)) |resp| return resp;

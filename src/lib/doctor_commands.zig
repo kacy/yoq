@@ -9,6 +9,7 @@ const cli = @import("cli.zig");
 const json_out = @import("json_output.zig");
 const doctor = @import("doctor.zig");
 const doctor_manifest = @import("doctor_manifest.zig");
+const doctor_cluster = @import("doctor_cluster.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -21,10 +22,20 @@ const DoctorCommandError = error{
 
 pub fn doctorCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     var manifest_path: ?[]const u8 = null;
+    var cluster = false;
+    var server = cli.ServerAddr{};
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
             cli.output_mode = .json;
+        } else if (std.mem.eql(u8, arg, "--cluster")) {
+            cluster = true;
+        } else if (std.mem.eql(u8, arg, "--server")) {
+            const addr = args.next() orelse {
+                writeErr("--server requires an address\n", .{});
+                return DoctorCommandError.InvalidArgument;
+            };
+            server = cli.parseServerAddr(addr);
         } else if (std.mem.eql(u8, arg, "-f")) {
             manifest_path = args.next() orelse {
                 writeErr("-f requires a manifest path\n", .{});
@@ -43,16 +54,32 @@ pub fn doctorCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
         null;
     defer if (manifest_result) |*result| result.deinit();
 
+    var cluster_result: ?doctor_cluster.ClusterCheckResult = null;
+    if (cluster) {
+        var token_buf: [64]u8 = undefined;
+        const token = cli.readApiTokenWithIo(ctx.io, &token_buf);
+        cluster_result = doctor_cluster.run(ctx.alloc, server.ip, server.port, token);
+    }
+
+    const has_sections = manifest_result != null or cluster_result != null;
+
     if (cli.output_mode == .json) {
         var w = json_out.JsonWriter{};
-        if (manifest_result) |result| {
+        if (has_sections) {
             w.beginObject();
             w.beginArrayField("system");
             writeSystemChecksJson(&w, &system_result);
             w.endArray();
-            w.beginArrayField("manifest");
-            writeCheckSliceJson(&w, result.checks);
-            w.endArray();
+            if (manifest_result) |result| {
+                w.beginArrayField("manifest");
+                writeCheckSliceJson(&w, result.checks);
+                w.endArray();
+            }
+            if (cluster_result) |*result| {
+                w.beginArrayField("cluster");
+                writeCheckSliceJson(&w, result.slice());
+                w.endArray();
+            }
             w.endObject();
         } else {
             w.beginArray();
@@ -66,20 +93,37 @@ pub fn doctorCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
             write("\n", .{});
             writeCheckTable("manifest checks", result.checks);
         }
+        if (cluster_result) |*result| {
+            write("\n", .{});
+            writeCheckTable("cluster checks", result.slice());
+        }
 
-        if (doctor.resultHasFailures(&system_result) or (manifest_result != null and manifest_result.?.hasFailures())) {
+        if (anyFailures(&system_result, manifest_result, cluster_result)) {
             write("\nsome checks failed — see messages above\n", .{});
         } else {
             write("\nall checks passed\n", .{});
         }
     }
 
-    if (doctor.resultHasFailures(&system_result) or (manifest_result != null and manifest_result.?.hasFailures())) {
+    if (anyFailures(&system_result, manifest_result, cluster_result)) {
         return DoctorCommandError.ValidationFailed;
     }
 }
 
-fn writeCheckTable(title: []const u8, checks: []const doctor.Check) void {
+fn anyFailures(
+    system_result: *const doctor.CheckResult,
+    manifest_result: ?doctor_manifest.ManifestCheckResult,
+    cluster_result: ?doctor_cluster.ClusterCheckResult,
+) bool {
+    if (doctor.resultHasFailures(system_result)) return true;
+    if (manifest_result != null and manifest_result.?.hasFailures()) return true;
+    if (cluster_result) |*result| {
+        if (result.hasFailures()) return true;
+    }
+    return false;
+}
+
+pub fn writeCheckTable(title: []const u8, checks: []const doctor.Check) void {
     write("{s}\n", .{title});
     write("{s:<16} {s:<6} {s}\n", .{ "CHECK", "STATUS", "MESSAGE" });
     write("{s:->16} {s:->6} {s:->40}\n", .{ "", "", "" });
@@ -95,7 +139,7 @@ fn writeSystemChecksJson(w: *json_out.JsonWriter, result: *const doctor.CheckRes
     }
 }
 
-fn writeCheckSliceJson(w: *json_out.JsonWriter, checks: []const doctor.Check) void {
+pub fn writeCheckSliceJson(w: *json_out.JsonWriter, checks: []const doctor.Check) void {
     for (checks) |*check| {
         writeCheckJson(w, check);
     }
