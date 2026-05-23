@@ -350,13 +350,23 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
 
     try writer.writeAll("# HELP yoq_service_l7_proxy_responses_total L7 proxy responses by class\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_responses_total counter\n");
+    try writer.print("yoq_service_l7_proxy_responses_total{{class=\"1xx\"}} {d}\n", .{l7_proxy.responses_1xx_total});
     try writer.print("yoq_service_l7_proxy_responses_total{{class=\"2xx\"}} {d}\n", .{l7_proxy.responses_2xx_total});
+    try writer.print("yoq_service_l7_proxy_responses_total{{class=\"3xx\"}} {d}\n", .{l7_proxy.responses_3xx_total});
     try writer.print("yoq_service_l7_proxy_responses_total{{class=\"4xx\"}} {d}\n", .{l7_proxy.responses_4xx_total});
     try writer.print("yoq_service_l7_proxy_responses_total{{class=\"5xx\"}} {d}\n", .{l7_proxy.responses_5xx_total});
     for (l7_proxy_route_traffic.items) |entry| {
         try writer.print(
+            "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",traffic_role=\"{s}\",class=\"1xx\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.traffic_role.label(), entry.responses_1xx_total },
+        );
+        try writer.print(
             "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",traffic_role=\"{s}\",class=\"2xx\"}} {d}\n",
             .{ entry.route_name, entry.service_name, entry.backend_service, entry.traffic_role.label(), entry.responses_2xx_total },
+        );
+        try writer.print(
+            "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",traffic_role=\"{s}\",class=\"3xx\"}} {d}\n",
+            .{ entry.route_name, entry.service_name, entry.backend_service, entry.traffic_role.label(), entry.responses_3xx_total },
         );
         try writer.print(
             "yoq_service_l7_proxy_route_responses_total{{route=\"{s}\",service=\"{s}\",backend_service=\"{s}\",traffic_role=\"{s}\",class=\"4xx\"}} {d}\n",
@@ -402,6 +412,13 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
     try writer.writeAll("# HELP yoq_service_l7_proxy_circuit_trips_total L7 proxy endpoint circuit breaker trips\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_circuit_trips_total counter\n");
     try writer.print("yoq_service_l7_proxy_circuit_trips_total {d}\n", .{l7_proxy.circuit_trips_total});
+
+    try writer.writeAll("# HELP yoq_service_l7_proxy_circuit_transitions_total L7 proxy endpoint circuit breaker transitions by edge\n");
+    try writer.writeAll("# TYPE yoq_service_l7_proxy_circuit_transitions_total counter\n");
+    try writer.print("yoq_service_l7_proxy_circuit_transitions_total{{transition=\"closed_to_open\"}} {d}\n", .{l7_proxy.circuit_transitions_closed_to_open});
+    try writer.print("yoq_service_l7_proxy_circuit_transitions_total{{transition=\"half_open_to_open\"}} {d}\n", .{l7_proxy.circuit_transitions_half_open_to_open});
+    try writer.print("yoq_service_l7_proxy_circuit_transitions_total{{transition=\"open_to_half_open\"}} {d}\n", .{l7_proxy.circuit_transitions_open_to_half_open});
+    try writer.print("yoq_service_l7_proxy_circuit_transitions_total{{transition=\"to_closed\"}} {d}\n", .{l7_proxy.circuit_transitions_to_closed});
 
     try writer.writeAll("# HELP yoq_service_l7_proxy_circuit_endpoints L7 proxy endpoints currently gated by circuit state\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_circuit_endpoints gauge\n");
