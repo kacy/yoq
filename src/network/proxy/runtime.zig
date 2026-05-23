@@ -130,7 +130,9 @@ pub const Snapshot = struct {
     configured_services: u32,
     routes: u32,
     requests_total: u64,
+    responses_1xx_total: u64,
     responses_2xx_total: u64,
+    responses_3xx_total: u64,
     responses_4xx_total: u64,
     responses_5xx_total: u64,
     retries_total: u64,
@@ -140,6 +142,10 @@ pub const Snapshot = struct {
     upstream_receive_failures_total: u64,
     upstream_other_failures_total: u64,
     circuit_trips_total: u64,
+    circuit_transitions_closed_to_open: u64,
+    circuit_transitions_half_open_to_open: u64,
+    circuit_transitions_open_to_half_open: u64,
+    circuit_transitions_to_closed: u64,
     circuit_open_endpoints: u32,
     circuit_half_open_endpoints: u32,
     last_sync_at: ?i64,
@@ -156,7 +162,9 @@ pub const RouteTrafficSnapshot = struct {
     service_name: []const u8,
     backend_service: []const u8,
     requests_total: u64,
+    responses_1xx_total: u64,
     responses_2xx_total: u64,
+    responses_3xx_total: u64,
     responses_4xx_total: u64,
     responses_5xx_total: u64,
     retries_total: u64,
@@ -187,7 +195,9 @@ var running: bool = false;
 var configured_services: u32 = 0;
 var routes: u32 = 0;
 var requests_total: u64 = 0;
+var responses_1xx_total: u64 = 0;
 var responses_2xx_total: u64 = 0;
+var responses_3xx_total: u64 = 0;
 var responses_4xx_total: u64 = 0;
 var responses_5xx_total: u64 = 0;
 var retries_total: u64 = 0;
@@ -197,6 +207,12 @@ var upstream_send_failures_total: u64 = 0;
 var upstream_receive_failures_total: u64 = 0;
 var upstream_other_failures_total: u64 = 0;
 var circuit_trips_total: u64 = 0;
+// circuit-breaker state transitions, counted by edge. circuit_trips_total stays
+// for backward compatibility and equals closed_to_open + half_open_to_open.
+var circuit_transitions_closed_to_open: u64 = 0;
+var circuit_transitions_half_open_to_open: u64 = 0;
+var circuit_transitions_open_to_half_open: u64 = 0;
+var circuit_transitions_to_closed: u64 = 0;
 var last_sync_at: ?i64 = null;
 var last_error: ?[]u8 = null;
 var endpoint_circuits: std.StringHashMapUnmanaged(EndpointCircuit) = .{};
@@ -231,7 +247,9 @@ const RouteTrafficState = struct {
     service_name: []const u8,
     backend_service: []const u8,
     requests_total: u64 = 0,
+    responses_1xx_total: u64 = 0,
     responses_2xx_total: u64 = 0,
+    responses_3xx_total: u64 = 0,
     responses_4xx_total: u64 = 0,
     responses_5xx_total: u64 = 0,
     retries_total: u64 = 0,
@@ -246,7 +264,9 @@ pub fn resetForTest() void {
     configured_services = 0;
     routes = 0;
     requests_total = 0;
+    responses_1xx_total = 0;
     responses_2xx_total = 0;
+    responses_3xx_total = 0;
     responses_4xx_total = 0;
     responses_5xx_total = 0;
     retries_total = 0;
@@ -256,6 +276,10 @@ pub fn resetForTest() void {
     upstream_receive_failures_total = 0;
     upstream_other_failures_total = 0;
     circuit_trips_total = 0;
+    circuit_transitions_closed_to_open = 0;
+    circuit_transitions_half_open_to_open = 0;
+    circuit_transitions_open_to_half_open = 0;
+    circuit_transitions_to_closed = 0;
     last_sync_at = null;
     deinitRoutesLocked();
     deinitCircuitsLocked();
@@ -295,7 +319,9 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
         .configured_services = configured_services,
         .routes = routes,
         .requests_total = requests_total,
+        .responses_1xx_total = responses_1xx_total,
         .responses_2xx_total = responses_2xx_total,
+        .responses_3xx_total = responses_3xx_total,
         .responses_4xx_total = responses_4xx_total,
         .responses_5xx_total = responses_5xx_total,
         .retries_total = retries_total,
@@ -305,6 +331,10 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
         .upstream_receive_failures_total = upstream_receive_failures_total,
         .upstream_other_failures_total = upstream_other_failures_total,
         .circuit_trips_total = circuit_trips_total,
+        .circuit_transitions_closed_to_open = circuit_transitions_closed_to_open,
+        .circuit_transitions_half_open_to_open = circuit_transitions_half_open_to_open,
+        .circuit_transitions_open_to_half_open = circuit_transitions_open_to_half_open,
+        .circuit_transitions_to_closed = circuit_transitions_to_closed,
         .circuit_open_endpoints = circuit_open_endpoints,
         .circuit_half_open_endpoints = circuit_half_open_endpoints,
         .last_sync_at = last_sync_at,
@@ -349,7 +379,9 @@ pub fn recordResponseCode(status_code: u16) void {
     defer mutex.unlock(std.Options.debug_io);
 
     switch (status_code) {
+        100...199 => responses_1xx_total += 1,
         200...299 => responses_2xx_total += 1,
+        300...399 => responses_3xx_total += 1,
         400...499 => responses_4xx_total += 1,
         500...599 => responses_5xx_total += 1,
         else => {},
@@ -370,7 +402,9 @@ fn recordRouteResponseCodeWithRole(role: RouteTrafficRole, route_name: []const u
 
     const state = ensureRouteTrafficLocked(role, route_name, service_name, backend_service) orelse return;
     switch (status_code) {
+        100...199 => state.responses_1xx_total += 1,
         200...299 => state.responses_2xx_total += 1,
+        300...399 => state.responses_3xx_total += 1,
         400...499 => state.responses_4xx_total += 1,
         500...599 => state.responses_5xx_total += 1,
         else => {},
@@ -438,6 +472,9 @@ pub fn recordEndpointSuccess(endpoint_id: []const u8) void {
     defer mutex.unlock(std.Options.debug_io);
 
     const circuit = endpoint_circuits.getPtr(endpoint_id) orelse return;
+    // only count a transition when the circuit was actually open or half-open;
+    // resetting an already-closed circuit is a no-op, not an edge.
+    if (circuit.state != .closed) circuit_transitions_to_closed += 1;
     circuit.* = .{};
 }
 
@@ -465,6 +502,7 @@ pub fn recordEndpointFailure(endpoint_id: []const u8, cb_policy: proxy_policy.Ci
                 circuit.opened_at_ms = nowRealMilliseconds();
                 circuit.half_open_in_flight = false;
                 circuit_trips_total += 1;
+                circuit_transitions_closed_to_open += 1;
             }
         },
         .half_open => {
@@ -473,6 +511,7 @@ pub fn recordEndpointFailure(endpoint_id: []const u8, cb_policy: proxy_policy.Ci
             circuit.half_open_in_flight = false;
             circuit.consecutive_failures = cb_policy.failure_threshold;
             circuit_trips_total += 1;
+            circuit_transitions_half_open_to_open += 1;
         },
         .open => {
             circuit.opened_at_ms = nowRealMilliseconds();
@@ -536,7 +575,9 @@ pub fn snapshotRouteTraffic(alloc: std.mem.Allocator) !std.ArrayList(RouteTraffi
             .service_name = try alloc.dupe(u8, entry.value_ptr.service_name),
             .backend_service = try alloc.dupe(u8, entry.value_ptr.backend_service),
             .requests_total = entry.value_ptr.requests_total,
+            .responses_1xx_total = entry.value_ptr.responses_1xx_total,
             .responses_2xx_total = entry.value_ptr.responses_2xx_total,
+            .responses_3xx_total = entry.value_ptr.responses_3xx_total,
             .responses_4xx_total = entry.value_ptr.responses_4xx_total,
             .responses_5xx_total = entry.value_ptr.responses_5xx_total,
             .retries_total = entry.value_ptr.retries_total,
@@ -698,6 +739,7 @@ fn endpointAllowsRequestLocked(endpoint_id: []const u8, now_ms: i64, cb_policy: 
 
             circuit.state = .half_open;
             circuit.half_open_in_flight = true;
+            circuit_transitions_open_to_half_open += 1;
             return true;
         },
         .half_open => {
@@ -1604,6 +1646,68 @@ test "resolveUpstream skips endpoints with open circuits" {
     try std.testing.expectEqual(@as(u64, 1), state.circuit_trips_total);
     try std.testing.expectEqual(@as(u32, 1), state.circuit_open_endpoints);
     try std.testing.expectEqual(@as(u32, 0), state.circuit_half_open_endpoints);
+}
+
+test "circuit transition counters track closed-to-open and recovery edges" {
+    resetForTest();
+    defer resetForTest();
+
+    // a single failure with threshold=1 trips the circuit closed -> open.
+    recordEndpointFailure("api-1", .{ .failure_threshold = 1 });
+    {
+        const state = try snapshot(std.testing.allocator);
+        defer state.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u64, 1), state.circuit_transitions_closed_to_open);
+        try std.testing.expectEqual(@as(u64, 1), state.circuit_trips_total);
+        try std.testing.expectEqual(@as(u64, 0), state.circuit_transitions_to_closed);
+    }
+
+    // a success on an open circuit recovers it (open -> closed).
+    recordEndpointSuccess("api-1");
+    // a second success on an already-closed circuit must not count as an edge.
+    recordEndpointSuccess("api-1");
+    {
+        const state = try snapshot(std.testing.allocator);
+        defer state.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u64, 1), state.circuit_transitions_to_closed);
+    }
+}
+
+test "response code buckets count every status class" {
+    resetForTest();
+    defer resetForTest();
+
+    recordResponseCode(100);
+    recordResponseCode(204);
+    recordResponseCode(302);
+    recordResponseCode(404);
+    recordResponseCode(503);
+
+    const state = try snapshot(std.testing.allocator);
+    defer state.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), state.responses_1xx_total);
+    try std.testing.expectEqual(@as(u64, 1), state.responses_2xx_total);
+    try std.testing.expectEqual(@as(u64, 1), state.responses_3xx_total);
+    try std.testing.expectEqual(@as(u64, 1), state.responses_4xx_total);
+    try std.testing.expectEqual(@as(u64, 1), state.responses_5xx_total);
+}
+
+test "per-route response buckets count 1xx and 3xx classes" {
+    resetForTest();
+    defer resetForTest();
+
+    recordRouteResponseCode("api:/", "api", "api", 100);
+    recordRouteResponseCode("api:/", "api", "api", 304);
+
+    var traffic = try snapshotRouteTraffic(std.testing.allocator);
+    defer {
+        for (traffic.items) |entry| entry.deinit(std.testing.allocator);
+        traffic.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), traffic.items.len);
+    try std.testing.expectEqual(@as(u64, 1), traffic.items[0].responses_1xx_total);
+    try std.testing.expectEqual(@as(u64, 1), traffic.items[0].responses_3xx_total);
 }
 
 test "per-route circuit breaker threshold controls trip point" {
