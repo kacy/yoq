@@ -9,6 +9,8 @@
 const std = @import("std");
 const linux_platform = @import("linux_platform");
 const mesh = @import("../gpu/mesh.zig");
+const netlink = @import("../network/netlink.zig");
+const bridge = @import("../network/bridge.zig");
 
 pub const CheckStatus = enum {
     pass,
@@ -40,7 +42,7 @@ pub const Check = struct {
     }
 };
 
-pub const max_checks = 8;
+pub const max_checks = 10;
 
 pub const CheckResult = struct {
     checks: [max_checks]Check,
@@ -98,6 +100,15 @@ pub fn runAllChecks() CheckResult {
     result.count += 1;
 
     result.checks[result.count] = checkDiskSpace();
+    result.count += 1;
+
+    result.checks[result.count] = checkIoUring();
+    result.count += 1;
+
+    result.checks[result.count] = checkBpfJit();
+    result.count += 1;
+
+    result.checks[result.count] = checkMtu();
     result.count += 1;
 
     return result;
@@ -212,6 +223,59 @@ pub fn checkDiskSpace() Check {
     }
 }
 
+pub fn checkIoUring() Check {
+    // a minimal ring is enough to tell whether io_uring is available; the api
+    // server uses it for accept and falls back to blocking i/o without it.
+    var ring = std.os.linux.IoUring.init(1, 0) catch {
+        return makeCheck("io-uring", .warn, "io_uring unavailable (api server uses blocking i/o)");
+    };
+    ring.deinit();
+    return makeCheck("io-uring", .pass, "io_uring available");
+}
+
+pub fn checkBpfJit() Check {
+    const file = linux_platform.openFileAbsolute("/proc/sys/net/core/bpf_jit_enable", .{}) catch {
+        return makeCheck("bpf-jit", .warn, "bpf_jit_enable not readable");
+    };
+    defer file.close();
+
+    var buf: [16]u8 = undefined;
+    const n = file.read(&buf) catch return makeCheck("bpf-jit", .warn, "bpf_jit_enable not readable");
+    const value = std.mem.trim(u8, buf[0..n], " \t\r\n");
+    if (value.len == 0) return makeCheck("bpf-jit", .warn, "bpf_jit_enable empty");
+
+    // 1 = enabled, 2 = enabled with debug; 0 = interpreted (works, but slower).
+    return switch (value[0]) {
+        '1', '2' => makeCheck("bpf-jit", .pass, "eBPF JIT enabled"),
+        '0' => makeCheck("bpf-jit", .warn, "eBPF JIT disabled (programs run interpreted)"),
+        else => makeCheck("bpf-jit", .warn, "bpf_jit_enable has unexpected value"),
+    };
+}
+
+pub fn checkMtu() Check {
+    const fd = netlink.openSocket() catch {
+        return makeCheck("mtu", .warn, "could not open netlink socket");
+    };
+    defer linux_platform.posix.close(fd);
+
+    const mtu = netlink.getMtu(fd, bridge.default_bridge) catch |err| switch (err) {
+        // bridge is created on first use; absence is not a failure on a fresh host.
+        error.NotFound => return makeCheck("mtu", .warn, "yoq0 bridge not present yet"),
+        else => return makeCheck("mtu", .warn, "could not read yoq0 mtu"),
+    };
+
+    var msg_buf: [128]u8 = undefined;
+    if (mtu < 1280) {
+        const msg = std.fmt.bufPrint(&msg_buf, "yoq0 mtu {d} < 1280 (too small)", .{mtu}) catch "mtu too small";
+        return makeCheck("mtu", .fail, msg);
+    } else if (mtu < 1500) {
+        const msg = std.fmt.bufPrint(&msg_buf, "yoq0 mtu {d} (< 1500)", .{mtu}) catch "low mtu";
+        return makeCheck("mtu", .warn, msg);
+    }
+    const msg = std.fmt.bufPrint(&msg_buf, "yoq0 mtu {d}", .{mtu}) catch "ok";
+    return makeCheck("mtu", .pass, msg);
+}
+
 // -- tests --
 
 test "makeCheck sets fields correctly" {
@@ -265,9 +329,25 @@ test "checkDiskSpace runs without crash" {
     try std.testing.expect(c.status == .pass or c.status == .warn or c.status == .fail);
 }
 
+test "checkIoUring runs without crash" {
+    const c = checkIoUring();
+    try std.testing.expect(c.status == .pass or c.status == .warn);
+}
+
+test "checkBpfJit runs without crash" {
+    const c = checkBpfJit();
+    try std.testing.expect(c.status == .pass or c.status == .warn);
+}
+
+test "checkMtu runs without crash" {
+    const c = checkMtu();
+    // pass/warn on a normal host; fail only on a pathologically small mtu.
+    try std.testing.expect(c.status == .pass or c.status == .warn or c.status == .fail);
+}
+
 test "runAllChecks returns all checks" {
     const result = runAllChecks();
-    try std.testing.expectEqual(@as(u8, 7), result.count);
+    try std.testing.expectEqual(@as(u8, 10), result.count);
 }
 
 test "statusLabel returns correct strings" {
