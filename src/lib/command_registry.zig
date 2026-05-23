@@ -13,6 +13,7 @@ const build_cmds = @import("../build/commands.zig");
 const manifest_cmds = @import("../manifest/commands.zig");
 const gpu_cmds = @import("../gpu/commands.zig");
 const doctor_cmds = @import("doctor_commands.zig");
+const upgrade_cmds = @import("upgrade_commands.zig");
 const completion = @import("completion.zig");
 
 const write = cli.write;
@@ -81,7 +82,8 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "backup", .group = .state_security, .usage = "backup [--output path]", .description = "backup database state", .handler = state_cmds.backupCmd },
     .{ .name = "restore", .group = .state_security, .usage = "restore <path>", .description = "restore database from backup", .handler = state_cmds.restoreCmd },
 
-    .{ .name = "doctor", .group = .misc, .usage = "doctor [-f manifest.toml] [--json]", .description = "check system and manifest readiness", .handler = doctor_cmds.doctorCmd },
+    .{ .name = "doctor", .group = .misc, .usage = "doctor [-f manifest.toml] [--cluster] [--json]", .description = "check system, manifest, and cluster readiness", .handler = doctor_cmds.doctorCmd },
+    .{ .name = "upgrade", .group = .misc, .usage = "upgrade preflight [--server addr] [--json]", .description = "pre-upgrade cluster readiness checks", .handler = upgrade_cmds.upgradeCmd },
     .{ .name = "version", .group = .misc, .usage = "version", .description = "print version", .handler = versionHandler },
     .{ .name = "help", .group = .misc, .usage = "help", .description = "show this help", .handler = helpHandler },
     .{ .name = "completion", .group = .misc, .usage = "completion <bash|zsh|fish>", .description = "output shell completion script", .handler = completion.handler },

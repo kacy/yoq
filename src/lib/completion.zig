@@ -136,7 +136,10 @@ const command_meta = [_]CommandMeta{
     .{ .name = "restore", .flags = &.{"--input"} },
 
     // misc
-    .{ .name = "doctor", .flags = &.{ "-f", "--json" } },
+    .{ .name = "doctor", .flags = &.{ "-f", "--cluster", "--server", "--json" } },
+    .{ .name = "upgrade", .subcommands = &.{
+        .{ .name = "preflight", .flags = &.{ "--server", "--json" } },
+    } },
     .{ .name = "version" },
     .{ .name = "help" },
     .{ .name = "completion" },
