@@ -610,7 +610,8 @@ pub const ReverseProxy = struct {
         defer self.allocator.free(request);
 
         socket_helpers.writeAll(fd, request) catch return error.SendFailed;
-        return readResponse(self.allocator, fd, self.max_response_bytes);
+        const result = try readResponse(self.allocator, fd, self.max_response_bytes, plan.method == .HEAD);
+        return result.bytes;
     }
 };
 
@@ -681,13 +682,13 @@ fn runMirrorTask(task: MirrorTask) void {
         return;
     };
 
-    const response = readResponse(task.allocator, fd, task.max_response_bytes) catch {
+    const result = readResponse(task.allocator, fd, task.max_response_bytes, task.method == .HEAD) catch {
         proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
         return;
     };
-    defer task.allocator.free(response);
+    defer task.allocator.free(result.bytes);
 
-    const status_code = parseForwardedStatusCode(task.allocator, task.protocol, response) catch {
+    const status_code = parseForwardedStatusCode(task.allocator, task.protocol, result.bytes) catch {
         proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
         return;
     };
@@ -1041,28 +1042,281 @@ fn parseForwardedStatusCode(alloc: std.mem.Allocator, protocol: Protocol, respon
     };
 }
 
-fn readResponse(alloc: std.mem.Allocator, fd: linux_platform.posix.socket_t, max_bytes: usize) ![]u8 {
+/// an upstream response plus whether its connection can be returned to the pool.
+const UpstreamResponse = struct {
+    bytes: []u8,
+    /// true only when the response body was fully delimited by Content-Length
+    /// or chunked framing and the upstream did not ask to close the connection.
+    /// connection-close-delimited (read-to-EOF) responses are never reusable.
+    reusable: bool,
+};
+
+/// how the upstream response body is delimited.
+const BodyFraming = union(enum) {
+    /// no body at all (HEAD, 1xx, 204, 304).
+    empty,
+    /// exactly `len` bytes of body.
+    fixed: usize,
+    /// chunked transfer-encoding, terminated by the zero-length chunk.
+    chunked,
+    /// delimited by connection close — read until EOF, not reusable.
+    eof,
+};
+
+/// read a full upstream response. unlike a naive read-until-EOF, this honors
+/// HTTP/1.1 framing so a kept-alive connection can be returned promptly without
+/// waiting for the peer to close. responses we cannot frame (HTTP/2 byte
+/// streams, HTTP/1.0, missing length) fall back to read-until-EOF and are
+/// reported as non-reusable.
+fn readResponse(
+    alloc: std.mem.Allocator,
+    fd: linux_platform.posix.socket_t,
+    max_bytes: usize,
+    head_request: bool,
+) !UpstreamResponse {
     var response = try alloc.alloc(u8, max_bytes);
     errdefer alloc.free(response);
 
     var total: usize = 0;
-    while (total < response.len) {
+
+    // phase 1: read until the response headers are complete.
+    var header_end: ?usize = null;
+    while (header_end == null and total < response.len) {
         const bytes_read = posix.read(fd, response[total..]) catch return error.ReceiveFailed;
         if (bytes_read == 0) break;
         total += bytes_read;
-    }
-
-    if (total == response.len) {
-        var extra_buf: [1]u8 = undefined;
-        const extra = posix.read(fd, &extra_buf) catch 0;
-        if (extra > 0) return error.ResponseTooLarge;
+        if (std.mem.indexOf(u8, response[0..total], "\r\n\r\n")) |idx| {
+            header_end = idx + 4;
+        }
     }
     if (total == 0) return error.ReceiveFailed;
+    const headers_end = header_end orelse {
+        // peer closed (or the buffer filled) before we saw a full header block.
+        // hand back whatever we have; it cannot be reused.
+        return try shrinkResponse(alloc, response, total, false);
+    };
 
-    if (total < response.len) {
-        response = try alloc.realloc(response, total);
+    // phase 2: decide how the body is framed, then read exactly that much.
+    const headers = response[0..headers_end];
+    const status = parseUpstreamStatusCode(response[0..total]) catch 0;
+    const wants_close = http1ResponseWantsClose(response[0..total], headers);
+    const framing = responseBodyFraming(headers, status, head_request);
+
+    switch (framing) {
+        .empty => {
+            // any bytes past the headers are unexpected for a bodiless response.
+            const reusable = !wants_close and total == headers_end;
+            return try shrinkResponse(alloc, response, headers_end, reusable);
+        },
+        .fixed => |body_len| {
+            const target = std.math.add(usize, headers_end, body_len) catch return error.ResponseTooLarge;
+            if (target > response.len) return error.ResponseTooLarge;
+            while (total < target) {
+                const bytes_read = posix.read(fd, response[total..]) catch return error.ReceiveFailed;
+                if (bytes_read == 0) {
+                    // upstream closed mid-body: incomplete, not reusable.
+                    return try shrinkResponse(alloc, response, total, false);
+                }
+                total += bytes_read;
+            }
+            const reusable = !wants_close and total == target;
+            return try shrinkResponse(alloc, response, target, reusable);
+        },
+        .chunked => {
+            while (true) {
+                if (chunkedBodyEnd(response[headers_end..total])) |body_len| {
+                    const target = headers_end + body_len;
+                    const reusable = !wants_close and total == target;
+                    return try shrinkResponse(alloc, response, target, reusable);
+                }
+                if (total == response.len) return error.ResponseTooLarge;
+                const bytes_read = posix.read(fd, response[total..]) catch return error.ReceiveFailed;
+                if (bytes_read == 0) {
+                    // closed before the terminating chunk arrived.
+                    return try shrinkResponse(alloc, response, total, false);
+                }
+                total += bytes_read;
+            }
+        },
+        .eof => {
+            while (total < response.len) {
+                const bytes_read = posix.read(fd, response[total..]) catch return error.ReceiveFailed;
+                if (bytes_read == 0) break;
+                total += bytes_read;
+            }
+            if (total == response.len) {
+                var extra_buf: [1]u8 = undefined;
+                const extra = posix.read(fd, &extra_buf) catch 0;
+                if (extra > 0) return error.ResponseTooLarge;
+            }
+            return try shrinkResponse(alloc, response, total, false);
+        },
     }
-    return response;
+}
+
+/// shrink the over-allocated read buffer down to the bytes actually used and
+/// package it with its reusability verdict.
+fn shrinkResponse(alloc: std.mem.Allocator, response: []u8, len: usize, reusable: bool) !UpstreamResponse {
+    var bytes = response;
+    if (len < bytes.len) bytes = try alloc.realloc(bytes, len);
+    return .{ .bytes = bytes, .reusable = reusable };
+}
+
+/// pick the body framing from the response headers. mirrors RFC 9112 message
+/// body rules for the cases we care about; anything we cannot classify becomes
+/// connection-close (EOF) delimited so we never misframe.
+fn responseBodyFraming(headers: []const u8, status: u16, head_request: bool) BodyFraming {
+    // 1xx are interim and may be followed by another response — never pool them.
+    if (status >= 100 and status < 200) return .eof;
+    if (head_request or status == 204 or status == 304) return .empty;
+
+    if (http.findHeaderValue(headers, "Transfer-Encoding")) |te| {
+        if (headerListContains(te, "chunked")) return .chunked;
+    }
+    if (http.findHeaderValue(headers, "Content-Length") != null) {
+        const len = http.findContentLength(headers) catch return .eof;
+        return .{ .fixed = len };
+    }
+    return .eof;
+}
+
+/// true when the upstream signalled the connection should close (explicit
+/// `Connection: close`, or an HTTP/1.0 response which defaults to close).
+fn http1ResponseWantsClose(response: []const u8, headers: []const u8) bool {
+    if (std.mem.startsWith(u8, response, "HTTP/1.0")) return true;
+    if (http.findHeaderValue(headers, "Connection")) |conn| {
+        return headerListContains(conn, "close");
+    }
+    return false;
+}
+
+/// case-insensitive membership test over a comma-separated header value.
+fn headerListContains(value: []const u8, token: []const u8) bool {
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |raw| {
+        const trimmed = std.mem.trim(u8, raw, " \t");
+        if (std.ascii.eqlIgnoreCase(trimmed, token)) return true;
+    }
+    return false;
+}
+
+/// given the bytes received after the header block, return the offset at which
+/// a complete chunked body ends, or null if more data is still needed. handles
+/// chunk extensions and trailer fields. a malformed length stalls (returns
+/// null) and is eventually surfaced as ResponseTooLarge by the caller.
+fn chunkedBodyEnd(body: []const u8) ?usize {
+    var pos: usize = 0;
+    while (true) {
+        const line_end = std.mem.indexOfPos(u8, body, pos, "\r\n") orelse return null;
+        var size_field = body[pos..line_end];
+        if (std.mem.indexOfScalar(u8, size_field, ';')) |semi| size_field = size_field[0..semi];
+        size_field = std.mem.trim(u8, size_field, " \t");
+        const size = std.fmt.parseInt(usize, size_field, 16) catch return null;
+
+        const data_start = line_end + 2;
+        if (size == 0) {
+            // last chunk: skip any trailer lines up to the terminating blank line.
+            var trailer_pos = data_start;
+            while (true) {
+                const trailer_end = std.mem.indexOfPos(u8, body, trailer_pos, "\r\n") orelse return null;
+                if (trailer_end == trailer_pos) return trailer_pos + 2;
+                trailer_pos = trailer_end + 2;
+            }
+        }
+
+        const next = std.math.add(usize, data_start, size + 2) catch return null;
+        if (next > body.len) return null;
+        pos = next;
+    }
+}
+
+test "headerListContains matches tokens case-insensitively" {
+    try std.testing.expect(headerListContains("close", "close"));
+    try std.testing.expect(headerListContains("keep-alive, Close", "close"));
+    try std.testing.expect(headerListContains("chunked", "chunked"));
+    try std.testing.expect(!headerListContains("keep-alive", "close"));
+}
+
+test "responseBodyFraming reads Content-Length, chunked, and close-delimited bodies" {
+    const cl = responseBodyFraming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", 200, false);
+    try std.testing.expectEqual(@as(usize, 5), cl.fixed);
+
+    const chunked = responseBodyFraming("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", 200, false);
+    try std.testing.expect(chunked == .chunked);
+
+    const none = responseBodyFraming("HTTP/1.1 200 OK\r\n\r\n", 200, false);
+    try std.testing.expect(none == .eof);
+}
+
+test "responseBodyFraming treats HEAD, 204, 304, and 1xx specially" {
+    try std.testing.expect(responseBodyFraming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", 200, true) == .empty);
+    try std.testing.expect(responseBodyFraming("HTTP/1.1 204 No Content\r\n\r\n", 204, false) == .empty);
+    try std.testing.expect(responseBodyFraming("HTTP/1.1 304 Not Modified\r\n\r\n", 304, false) == .empty);
+    try std.testing.expect(responseBodyFraming("HTTP/1.1 100 Continue\r\n\r\n", 100, false) == .eof);
+}
+
+test "http1ResponseWantsClose honors Connection header and HTTP/1.0" {
+    try std.testing.expect(http1ResponseWantsClose("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"));
+    try std.testing.expect(http1ResponseWantsClose("HTTP/1.0 200 OK\r\n\r\n", "HTTP/1.0 200 OK\r\n\r\n"));
+    try std.testing.expect(!http1ResponseWantsClose("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n\r\n", "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n\r\n"));
+}
+
+test "chunkedBodyEnd finds the end of a complete chunked body" {
+    const body = "5\r\nhello\r\n0\r\n\r\n";
+    try std.testing.expectEqual(@as(?usize, body.len), chunkedBodyEnd(body));
+
+    // incomplete: terminating chunk not yet received.
+    try std.testing.expectEqual(@as(?usize, null), chunkedBodyEnd("5\r\nhello\r\n"));
+
+    // trailers before the final blank line.
+    const with_trailers = "0\r\nX-Trace: abc\r\n\r\n";
+    try std.testing.expectEqual(@as(?usize, with_trailers.len), chunkedBodyEnd(with_trailers));
+}
+
+fn readResponseTestPair() ![2]i32 {
+    var fds: [2]i32 = undefined;
+    const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds);
+    if (rc != 0) return error.SkipZigTest;
+    return fds;
+}
+
+test "readResponse returns a Content-Length body without waiting for EOF" {
+    const fds = try readResponseTestPair();
+    defer linux_platform.posix.close(fds[0]);
+    defer linux_platform.posix.close(fds[1]);
+
+    // peer stays open after writing — a framed read must not block on it.
+    try socket_helpers.writeAll(fds[1], "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello");
+
+    const result = try readResponse(std.testing.allocator, fds[0], 64 * 1024, false);
+    defer std.testing.allocator.free(result.bytes);
+    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", result.bytes);
+    try std.testing.expect(result.reusable);
+}
+
+test "readResponse marks Connection: close responses as not reusable" {
+    const fds = try readResponseTestPair();
+    defer linux_platform.posix.close(fds[0]);
+    defer linux_platform.posix.close(fds[1]);
+
+    try socket_helpers.writeAll(fds[1], "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+
+    const result = try readResponse(std.testing.allocator, fds[0], 64 * 1024, false);
+    defer std.testing.allocator.free(result.bytes);
+    try std.testing.expect(!result.reusable);
+}
+
+test "readResponse reads a chunked body to completion" {
+    const fds = try readResponseTestPair();
+    defer linux_platform.posix.close(fds[0]);
+    defer linux_platform.posix.close(fds[1]);
+
+    try socket_helpers.writeAll(fds[1], "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+
+    const result = try readResponse(std.testing.allocator, fds[0], 64 * 1024, false);
+    defer std.testing.allocator.free(result.bytes);
+    try std.testing.expect(std.mem.endsWith(u8, result.bytes, "0\r\n\r\n"));
+    try std.testing.expect(result.reusable);
 }
 
 const ReadRequestError = error{
