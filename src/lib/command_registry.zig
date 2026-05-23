@@ -1,6 +1,7 @@
 const std = @import("std");
 const AppContext = @import("app_context.zig").AppContext;
 const cli = @import("cli.zig");
+const version = @import("version.zig");
 const image_cmds = @import("../image/commands.zig");
 const cluster_cmds = @import("../cluster/commands.zig");
 const state_cmds = @import("../state/commands.zig");
@@ -179,11 +180,11 @@ fn versionHandler(args: *std.process.Args.Iterator, ctx: AppContext) !void {
         const json_out = @import("json_output.zig");
         var w = json_out.JsonWriter{};
         w.beginObject();
-        w.stringField("version", "0.2.0");
+        w.stringField("version", version.string);
         w.endObject();
         w.flush();
     } else {
-        write("yoq 0.2.0\n", .{});
+        write("yoq {s}\n", .{version.string});
     }
 }
 
