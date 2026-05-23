@@ -60,6 +60,7 @@ comptime {
     _ = @import("network/netlink/link_ops.zig");
     _ = @import("network/bridge.zig");
     _ = @import("lib/doctor.zig");
+    _ = @import("lib/doctor_cluster.zig");
     _ = @import("network/ip.zig");
     _ = @import("network/nat.zig");
     _ = @import("network/wireguard.zig");
