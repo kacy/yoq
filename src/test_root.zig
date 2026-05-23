@@ -38,6 +38,7 @@ comptime {
     _ = @import("state/commands.zig");
     _ = @import("state/volumes.zig");
     _ = @import("state/secrets.zig");
+    _ = @import("state/backup.zig");
     _ = @import("lib/cli.zig");
     _ = @import("lib/cmd.zig");
     _ = @import("lib/command_registry.zig");
