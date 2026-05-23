@@ -7,6 +7,7 @@ const writers = @import("writers.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const dns_registry = @import("../../../network/dns/registry_support.zig");
 const dns_prog = @import("../../../network/bpf/dns_intercept.zig");
+const ebpf = @import("../../../network/ebpf.zig");
 const ebpf_map_support = @import("../../../network/ebpf/map_support.zig");
 const lb_prog = @import("../../../network/bpf/lb.zig");
 const lb_runtime = @import("../../../network/ebpf/lb_runtime.zig");
@@ -48,6 +49,31 @@ pub fn handleStatus(alloc: std.mem.Allocator) Response {
         writers.writeSnapshotJson(writer, snap) catch return common.internalError();
     }
 
+    writer.writeByte(']') catch return common.internalError();
+
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
+
+/// report live occupancy of the bounded eBPF hash maps. returns an empty array
+/// when no maps are loaded (e.g. queried before the data plane comes up).
+pub fn handleBpfMapStatus(alloc: std.mem.Allocator) Response {
+    var stats: [ebpf.max_map_stats]ebpf.MapStat = undefined;
+    const n = ebpf.collectMapStats(&stats);
+
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+    const writer = &json_buf_writer.writer;
+
+    writer.writeByte('[') catch return common.internalError();
+    for (stats[0..n], 0..) |stat, idx| {
+        if (idx > 0) writer.writeByte(',') catch return common.internalError();
+        const pct: u64 = if (stat.max == 0) 0 else @min(@as(u64, stat.used) * 100 / stat.max, 100);
+        writer.print(
+            "{{\"name\":\"{s}\",\"used\":{d},\"max\":{d},\"pct\":{d}}}",
+            .{ stat.name, stat.used, stat.max, pct },
+        ) catch return common.internalError();
+    }
     writer.writeByte(']') catch return common.internalError();
 
     const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
