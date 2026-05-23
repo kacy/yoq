@@ -79,8 +79,8 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "secret", .group = .state_security, .usage = "secret <set|get|rm|list|rotate> ...", .description = "manage encrypted secrets", .handler = state_cmds.secret },
     .{ .name = "policy", .group = .state_security, .usage = "policy <deny|allow|rm|list> ...", .description = "manage network policy rules", .handler = net_cmds.policy },
     .{ .name = "cert", .group = .state_security, .usage = "cert <install|list|rm|provision|renew> ...", .description = "manage TLS certificates", .handler = tls_cmds.cert },
-    .{ .name = "backup", .group = .state_security, .usage = "backup [--output path]", .description = "backup database state", .handler = state_cmds.backupCmd },
-    .{ .name = "restore", .group = .state_security, .usage = "restore <path>", .description = "restore database from backup", .handler = state_cmds.restoreCmd },
+    .{ .name = "backup", .group = .state_security, .usage = "backup [--output path] [--plain]", .description = "backup database state (encrypted by default)", .handler = state_cmds.backupCmd },
+    .{ .name = "restore", .group = .state_security, .usage = "restore <path> [--verify]", .description = "restore database from backup (or verify with --verify)", .handler = state_cmds.restoreCmd },
 
     .{ .name = "doctor", .group = .misc, .usage = "doctor [-f manifest.toml] [--cluster] [--json]", .description = "check system, manifest, and cluster readiness", .handler = doctor_cmds.doctorCmd },
     .{ .name = "upgrade", .group = .misc, .usage = "upgrade preflight [--server addr] [--json]", .description = "pre-upgrade cluster readiness checks", .handler = upgrade_cmds.upgradeCmd },
