@@ -17,6 +17,7 @@ const request_plan = @import("request_plan.zig");
 const proxy_runtime = @import("runtime.zig");
 const router = @import("router.zig");
 const upstream_mod = @import("upstream.zig");
+const upstream_pool = @import("upstream_pool.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const proxy_loop_header = "X-Yoq-Proxy";
@@ -376,6 +377,7 @@ pub const ReverseProxy = struct {
             .outbound_path = plan.outbound_path,
             .host = plan.host,
             .outbound_host = plan.outbound_host,
+            .keep_alive = true,
         }, client_ip);
     }
 
@@ -409,6 +411,9 @@ pub const ReverseProxy = struct {
         outbound_path: []const u8,
         host: []const u8,
         outbound_host: []const u8,
+        /// request a kept-alive upstream connection so it can be pooled. set
+        /// false for fire-and-forget paths (e.g. mirror traffic) we never reuse.
+        keep_alive: bool = false,
     };
 
     fn buildForwardRequestBytes(
@@ -480,7 +485,11 @@ pub const ReverseProxy = struct {
         try writeTraceHeaders(writer, inbound_traceparent, inbound_tracestate);
         try writer.print("Content-Length: {d}\r\n", .{parsed.body.len});
         try writer.writeAll(proxy_loop_header ++ ": 1\r\n");
-        try writer.writeAll("Connection: close\r\n\r\n");
+        if (spec.keep_alive) {
+            try writer.writeAll("Connection: keep-alive\r\n\r\n");
+        } else {
+            try writer.writeAll("Connection: close\r\n\r\n");
+        }
         try writer.writeAll(parsed.body);
 
         return buf_writer.toOwnedSlice();
@@ -604,13 +613,45 @@ pub const ReverseProxy = struct {
         upstream: *const upstream_mod.Upstream,
         client_ip: ?[4]u8,
     ) ![]u8 {
-        const fd = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
-        defer linux_platform.posix.close(fd);
         const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
         defer self.allocator.free(request);
 
-        socket_helpers.writeAll(fd, request) catch return error.SendFailed;
-        return readResponse(self.allocator, fd, self.max_response_bytes);
+        // prefer a pooled, kept-alive connection; dial a fresh one on a miss.
+        var from_pool = true;
+        var fd = upstream_pool.checkout(upstream.endpoint_id, upstream.address, upstream.port) orelse blk: {
+            from_pool = false;
+            const dialed = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
+            upstream_pool.noteDialed();
+            break :blk dialed;
+        };
+
+        socket_helpers.writeAll(fd, request) catch {
+            upstream_pool.discard(fd);
+            // a reused connection can race a peer close between our liveness
+            // check and the write. no request bytes were delivered, so it is
+            // safe to fall back to a fresh connection even for non-idempotent
+            // methods. a fresh-dialed connection failing is a real send error.
+            if (!from_pool) return error.SendFailed;
+            from_pool = false;
+            fd = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
+            upstream_pool.noteDialed();
+            socket_helpers.writeAll(fd, request) catch {
+                upstream_pool.discard(fd);
+                return error.SendFailed;
+            };
+        };
+
+        const result = readResponse(self.allocator, fd, self.max_response_bytes, plan.method == .HEAD) catch |err| {
+            upstream_pool.discard(fd);
+            return err;
+        };
+
+        if (result.reusable) {
+            upstream_pool.release(upstream.endpoint_id, upstream.address, upstream.port, fd);
+        } else {
+            upstream_pool.discard(fd);
+        }
+        return result.bytes;
     }
 };
 
@@ -681,13 +722,13 @@ fn runMirrorTask(task: MirrorTask) void {
         return;
     };
 
-    const response = readResponse(task.allocator, fd, task.max_response_bytes) catch {
+    const result = readResponse(task.allocator, fd, task.max_response_bytes, task.method == .HEAD) catch {
         proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
         return;
     };
-    defer task.allocator.free(response);
+    defer task.allocator.free(result.bytes);
 
-    const status_code = parseForwardedStatusCode(task.allocator, task.protocol, response) catch {
+    const status_code = parseForwardedStatusCode(task.allocator, task.protocol, result.bytes) catch {
         proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
         return;
     };
@@ -1041,28 +1082,281 @@ fn parseForwardedStatusCode(alloc: std.mem.Allocator, protocol: Protocol, respon
     };
 }
 
-fn readResponse(alloc: std.mem.Allocator, fd: linux_platform.posix.socket_t, max_bytes: usize) ![]u8 {
+/// an upstream response plus whether its connection can be returned to the pool.
+const UpstreamResponse = struct {
+    bytes: []u8,
+    /// true only when the response body was fully delimited by Content-Length
+    /// or chunked framing and the upstream did not ask to close the connection.
+    /// connection-close-delimited (read-to-EOF) responses are never reusable.
+    reusable: bool,
+};
+
+/// how the upstream response body is delimited.
+const BodyFraming = union(enum) {
+    /// no body at all (HEAD, 1xx, 204, 304).
+    empty,
+    /// exactly `len` bytes of body.
+    fixed: usize,
+    /// chunked transfer-encoding, terminated by the zero-length chunk.
+    chunked,
+    /// delimited by connection close — read until EOF, not reusable.
+    eof,
+};
+
+/// read a full upstream response. unlike a naive read-until-EOF, this honors
+/// HTTP/1.1 framing so a kept-alive connection can be returned promptly without
+/// waiting for the peer to close. responses we cannot frame (HTTP/2 byte
+/// streams, HTTP/1.0, missing length) fall back to read-until-EOF and are
+/// reported as non-reusable.
+fn readResponse(
+    alloc: std.mem.Allocator,
+    fd: linux_platform.posix.socket_t,
+    max_bytes: usize,
+    head_request: bool,
+) !UpstreamResponse {
     var response = try alloc.alloc(u8, max_bytes);
     errdefer alloc.free(response);
 
     var total: usize = 0;
-    while (total < response.len) {
+
+    // phase 1: read until the response headers are complete.
+    var header_end: ?usize = null;
+    while (header_end == null and total < response.len) {
         const bytes_read = posix.read(fd, response[total..]) catch return error.ReceiveFailed;
         if (bytes_read == 0) break;
         total += bytes_read;
-    }
-
-    if (total == response.len) {
-        var extra_buf: [1]u8 = undefined;
-        const extra = posix.read(fd, &extra_buf) catch 0;
-        if (extra > 0) return error.ResponseTooLarge;
+        if (std.mem.indexOf(u8, response[0..total], "\r\n\r\n")) |idx| {
+            header_end = idx + 4;
+        }
     }
     if (total == 0) return error.ReceiveFailed;
+    const headers_end = header_end orelse {
+        // peer closed (or the buffer filled) before we saw a full header block.
+        // hand back whatever we have; it cannot be reused.
+        return try shrinkResponse(alloc, response, total, false);
+    };
 
-    if (total < response.len) {
-        response = try alloc.realloc(response, total);
+    // phase 2: decide how the body is framed, then read exactly that much.
+    const headers = response[0..headers_end];
+    const status = parseUpstreamStatusCode(response[0..total]) catch 0;
+    const wants_close = http1ResponseWantsClose(response[0..total], headers);
+    const framing = responseBodyFraming(headers, status, head_request);
+
+    switch (framing) {
+        .empty => {
+            // any bytes past the headers are unexpected for a bodiless response.
+            const reusable = !wants_close and total == headers_end;
+            return try shrinkResponse(alloc, response, headers_end, reusable);
+        },
+        .fixed => |body_len| {
+            const target = std.math.add(usize, headers_end, body_len) catch return error.ResponseTooLarge;
+            if (target > response.len) return error.ResponseTooLarge;
+            while (total < target) {
+                const bytes_read = posix.read(fd, response[total..]) catch return error.ReceiveFailed;
+                if (bytes_read == 0) {
+                    // upstream closed mid-body: incomplete, not reusable.
+                    return try shrinkResponse(alloc, response, total, false);
+                }
+                total += bytes_read;
+            }
+            const reusable = !wants_close and total == target;
+            return try shrinkResponse(alloc, response, target, reusable);
+        },
+        .chunked => {
+            while (true) {
+                if (chunkedBodyEnd(response[headers_end..total])) |body_len| {
+                    const target = headers_end + body_len;
+                    const reusable = !wants_close and total == target;
+                    return try shrinkResponse(alloc, response, target, reusable);
+                }
+                if (total == response.len) return error.ResponseTooLarge;
+                const bytes_read = posix.read(fd, response[total..]) catch return error.ReceiveFailed;
+                if (bytes_read == 0) {
+                    // closed before the terminating chunk arrived.
+                    return try shrinkResponse(alloc, response, total, false);
+                }
+                total += bytes_read;
+            }
+        },
+        .eof => {
+            while (total < response.len) {
+                const bytes_read = posix.read(fd, response[total..]) catch return error.ReceiveFailed;
+                if (bytes_read == 0) break;
+                total += bytes_read;
+            }
+            if (total == response.len) {
+                var extra_buf: [1]u8 = undefined;
+                const extra = posix.read(fd, &extra_buf) catch 0;
+                if (extra > 0) return error.ResponseTooLarge;
+            }
+            return try shrinkResponse(alloc, response, total, false);
+        },
     }
-    return response;
+}
+
+/// shrink the over-allocated read buffer down to the bytes actually used and
+/// package it with its reusability verdict.
+fn shrinkResponse(alloc: std.mem.Allocator, response: []u8, len: usize, reusable: bool) !UpstreamResponse {
+    var bytes = response;
+    if (len < bytes.len) bytes = try alloc.realloc(bytes, len);
+    return .{ .bytes = bytes, .reusable = reusable };
+}
+
+/// pick the body framing from the response headers. mirrors RFC 9112 message
+/// body rules for the cases we care about; anything we cannot classify becomes
+/// connection-close (EOF) delimited so we never misframe.
+fn responseBodyFraming(headers: []const u8, status: u16, head_request: bool) BodyFraming {
+    // 1xx are interim and may be followed by another response — never pool them.
+    if (status >= 100 and status < 200) return .eof;
+    if (head_request or status == 204 or status == 304) return .empty;
+
+    if (http.findHeaderValue(headers, "Transfer-Encoding")) |te| {
+        if (headerListContains(te, "chunked")) return .chunked;
+    }
+    if (http.findHeaderValue(headers, "Content-Length") != null) {
+        const len = http.findContentLength(headers) catch return .eof;
+        return .{ .fixed = len };
+    }
+    return .eof;
+}
+
+/// true when the upstream signalled the connection should close (explicit
+/// `Connection: close`, or an HTTP/1.0 response which defaults to close).
+fn http1ResponseWantsClose(response: []const u8, headers: []const u8) bool {
+    if (std.mem.startsWith(u8, response, "HTTP/1.0")) return true;
+    if (http.findHeaderValue(headers, "Connection")) |conn| {
+        return headerListContains(conn, "close");
+    }
+    return false;
+}
+
+/// case-insensitive membership test over a comma-separated header value.
+fn headerListContains(value: []const u8, token: []const u8) bool {
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |raw| {
+        const trimmed = std.mem.trim(u8, raw, " \t");
+        if (std.ascii.eqlIgnoreCase(trimmed, token)) return true;
+    }
+    return false;
+}
+
+/// given the bytes received after the header block, return the offset at which
+/// a complete chunked body ends, or null if more data is still needed. handles
+/// chunk extensions and trailer fields. a malformed length stalls (returns
+/// null) and is eventually surfaced as ResponseTooLarge by the caller.
+fn chunkedBodyEnd(body: []const u8) ?usize {
+    var pos: usize = 0;
+    while (true) {
+        const line_end = std.mem.indexOfPos(u8, body, pos, "\r\n") orelse return null;
+        var size_field = body[pos..line_end];
+        if (std.mem.indexOfScalar(u8, size_field, ';')) |semi| size_field = size_field[0..semi];
+        size_field = std.mem.trim(u8, size_field, " \t");
+        const size = std.fmt.parseInt(usize, size_field, 16) catch return null;
+
+        const data_start = line_end + 2;
+        if (size == 0) {
+            // last chunk: skip any trailer lines up to the terminating blank line.
+            var trailer_pos = data_start;
+            while (true) {
+                const trailer_end = std.mem.indexOfPos(u8, body, trailer_pos, "\r\n") orelse return null;
+                if (trailer_end == trailer_pos) return trailer_pos + 2;
+                trailer_pos = trailer_end + 2;
+            }
+        }
+
+        const next = std.math.add(usize, data_start, size + 2) catch return null;
+        if (next > body.len) return null;
+        pos = next;
+    }
+}
+
+test "headerListContains matches tokens case-insensitively" {
+    try std.testing.expect(headerListContains("close", "close"));
+    try std.testing.expect(headerListContains("keep-alive, Close", "close"));
+    try std.testing.expect(headerListContains("chunked", "chunked"));
+    try std.testing.expect(!headerListContains("keep-alive", "close"));
+}
+
+test "responseBodyFraming reads Content-Length, chunked, and close-delimited bodies" {
+    const cl = responseBodyFraming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", 200, false);
+    try std.testing.expectEqual(@as(usize, 5), cl.fixed);
+
+    const chunked = responseBodyFraming("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", 200, false);
+    try std.testing.expect(chunked == .chunked);
+
+    const none = responseBodyFraming("HTTP/1.1 200 OK\r\n\r\n", 200, false);
+    try std.testing.expect(none == .eof);
+}
+
+test "responseBodyFraming treats HEAD, 204, 304, and 1xx specially" {
+    try std.testing.expect(responseBodyFraming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", 200, true) == .empty);
+    try std.testing.expect(responseBodyFraming("HTTP/1.1 204 No Content\r\n\r\n", 204, false) == .empty);
+    try std.testing.expect(responseBodyFraming("HTTP/1.1 304 Not Modified\r\n\r\n", 304, false) == .empty);
+    try std.testing.expect(responseBodyFraming("HTTP/1.1 100 Continue\r\n\r\n", 100, false) == .eof);
+}
+
+test "http1ResponseWantsClose honors Connection header and HTTP/1.0" {
+    try std.testing.expect(http1ResponseWantsClose("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"));
+    try std.testing.expect(http1ResponseWantsClose("HTTP/1.0 200 OK\r\n\r\n", "HTTP/1.0 200 OK\r\n\r\n"));
+    try std.testing.expect(!http1ResponseWantsClose("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n\r\n", "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n\r\n"));
+}
+
+test "chunkedBodyEnd finds the end of a complete chunked body" {
+    const body = "5\r\nhello\r\n0\r\n\r\n";
+    try std.testing.expectEqual(@as(?usize, body.len), chunkedBodyEnd(body));
+
+    // incomplete: terminating chunk not yet received.
+    try std.testing.expectEqual(@as(?usize, null), chunkedBodyEnd("5\r\nhello\r\n"));
+
+    // trailers before the final blank line.
+    const with_trailers = "0\r\nX-Trace: abc\r\n\r\n";
+    try std.testing.expectEqual(@as(?usize, with_trailers.len), chunkedBodyEnd(with_trailers));
+}
+
+fn readResponseTestPair() ![2]i32 {
+    var fds: [2]i32 = undefined;
+    const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds);
+    if (rc != 0) return error.SkipZigTest;
+    return fds;
+}
+
+test "readResponse returns a Content-Length body without waiting for EOF" {
+    const fds = try readResponseTestPair();
+    defer linux_platform.posix.close(fds[0]);
+    defer linux_platform.posix.close(fds[1]);
+
+    // peer stays open after writing — a framed read must not block on it.
+    try socket_helpers.writeAll(fds[1], "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello");
+
+    const result = try readResponse(std.testing.allocator, fds[0], 64 * 1024, false);
+    defer std.testing.allocator.free(result.bytes);
+    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", result.bytes);
+    try std.testing.expect(result.reusable);
+}
+
+test "readResponse marks Connection: close responses as not reusable" {
+    const fds = try readResponseTestPair();
+    defer linux_platform.posix.close(fds[0]);
+    defer linux_platform.posix.close(fds[1]);
+
+    try socket_helpers.writeAll(fds[1], "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+
+    const result = try readResponse(std.testing.allocator, fds[0], 64 * 1024, false);
+    defer std.testing.allocator.free(result.bytes);
+    try std.testing.expect(!result.reusable);
+}
+
+test "readResponse reads a chunked body to completion" {
+    const fds = try readResponseTestPair();
+    defer linux_platform.posix.close(fds[0]);
+    defer linux_platform.posix.close(fds[1]);
+
+    try socket_helpers.writeAll(fds[1], "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+
+    const result = try readResponse(std.testing.allocator, fds[0], 64 * 1024, false);
+    defer std.testing.allocator.free(result.bytes);
+    try std.testing.expect(std.mem.endsWith(u8, result.bytes, "0\r\n\r\n"));
+    try std.testing.expect(result.reusable);
 }
 
 const ReadRequestError = error{
@@ -1601,8 +1895,11 @@ test "buildForwardRequest rewrites Host when preserve_host is false" {
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "Host: api\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Test: 1\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Yoq-Proxy: 1\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: close\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: keep-alive\r\n") == null);
+    // the client's hop-by-hop Connection header is stripped and replaced by
+    // the proxy's own keep-alive request (so the connection can be pooled).
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: keep-alive\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, forwarded, "Connection: close\r\n") == null);
+    try std.testing.expect(std.mem.count(u8, forwarded, "Connection: ") == 1);
 }
 
 test "buildForwardRequest rewrites request path with preserved query" {
@@ -2340,7 +2637,127 @@ test "forwardRequest proxies upstream response bytes" {
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "GET /v1/users HTTP/1.1\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Host: api\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Test: 1\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Connection: close\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Connection: keep-alive\r\n") != null);
+}
+
+/// a minimal upstream that accepts a single connection and serves two
+/// keep-alive responses on it, so a test can prove the proxy reuses the
+/// connection instead of dialing twice.
+const KeepAliveUpstream = struct {
+    listen_fd: linux_platform.posix.socket_t,
+    port: u16,
+    thread: ?std.Thread = null,
+    accepts: usize = 0,
+
+    fn init() !KeepAliveUpstream {
+        const bound = try initTestListenerSocket();
+        return .{ .listen_fd = bound.fd, .port = bound.port };
+    }
+
+    fn deinit(self: *KeepAliveUpstream) void {
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+        linux_platform.posix.close(self.listen_fd);
+    }
+
+    fn serve(self: *KeepAliveUpstream) void {
+        const client_fd = linux_platform.posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+        defer linux_platform.posix.close(client_fd);
+        socket_helpers.setSocketTimeoutMs(client_fd, 2000);
+        self.accepts += 1;
+
+        var served: usize = 0;
+        while (served < 2) : (served += 1) {
+            var buf: [16 * 1024]u8 = undefined;
+            const len = captureRequestBytes(client_fd, &buf);
+            if (len == 0) return;
+            // a keep-alive response: framed by Content-Length, no close.
+            _ = socket_helpers.writeAll(client_fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch return;
+        }
+    }
+
+    fn start(self: *KeepAliveUpstream) !void {
+        self.thread = try std.Thread.spawn(.{}, serve, .{self});
+    }
+};
+
+test "forwardRequest reuses a pooled upstream connection across requests" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    var upstream = try KeepAliveUpstream.init();
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    upstream_pool.resetForTest();
+    defer upstream_pool.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .http_proxy_preserve_host = false,
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/v1",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/v1" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+            .preserve_host = false,
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const first = try proxy.forwardRequest("GET /v1/a HTTP/1.1\r\nHost: api.internal\r\n\r\n");
+    std.testing.allocator.free(first);
+    // the first response was framed and kept-alive, so it should be pooled.
+    try std.testing.expectEqual(@as(u64, 1), upstream_pool.snapshot().idle);
+
+    const second = try proxy.forwardRequest("GET /v1/b HTTP/1.1\r\nHost: api.internal\r\n\r\n");
+    std.testing.allocator.free(second);
+
+    const snap = upstream_pool.snapshot();
+    try std.testing.expectEqual(@as(u64, 1), snap.created_total);
+    try std.testing.expectEqual(@as(u64, 1), snap.reuse_total);
+    try std.testing.expectEqual(@as(usize, 1), upstream.accepts);
 }
 
 test "forwardRequest mirrors shadow traffic without affecting the primary response" {

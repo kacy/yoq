@@ -123,13 +123,13 @@ test "apply lock removes stale pid file" {
     paths.ensureDataDirStrict("apply-locks") catch return error.SkipZigTest;
 
     {
-        const file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{
+        const file = try std.Io.Dir.cwd().createFile(std.Options.debug_io, path, .{
             .read = true,
             .truncate = true,
-            .mode = 0o600,
+            .permissions = @enumFromInt(0o600),
         });
-        defer file.close();
-        try file.writeAll("99999999\n");
+        defer file.close(std.Options.debug_io);
+        try file.writePositionalAll(std.Options.debug_io, "99999999\n", 0);
     }
 
     var lock = try acquire(std.testing.allocator, "stale-app");
