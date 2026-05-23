@@ -17,6 +17,7 @@ const request_plan = @import("request_plan.zig");
 const proxy_runtime = @import("runtime.zig");
 const router = @import("router.zig");
 const upstream_mod = @import("upstream.zig");
+const upstream_pool = @import("upstream_pool.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const proxy_loop_header = "X-Yoq-Proxy";
@@ -612,13 +613,44 @@ pub const ReverseProxy = struct {
         upstream: *const upstream_mod.Upstream,
         client_ip: ?[4]u8,
     ) ![]u8 {
-        const fd = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
-        defer linux_platform.posix.close(fd);
         const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
         defer self.allocator.free(request);
 
-        socket_helpers.writeAll(fd, request) catch return error.SendFailed;
-        const result = try readResponse(self.allocator, fd, self.max_response_bytes, plan.method == .HEAD);
+        // prefer a pooled, kept-alive connection; dial a fresh one on a miss.
+        var from_pool = true;
+        var fd = upstream_pool.checkout(upstream.endpoint_id, upstream.address, upstream.port) orelse blk: {
+            from_pool = false;
+            const dialed = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
+            upstream_pool.noteDialed();
+            break :blk dialed;
+        };
+
+        socket_helpers.writeAll(fd, request) catch {
+            upstream_pool.discard(fd);
+            // a reused connection can race a peer close between our liveness
+            // check and the write. no request bytes were delivered, so it is
+            // safe to fall back to a fresh connection even for non-idempotent
+            // methods. a fresh-dialed connection failing is a real send error.
+            if (!from_pool) return error.SendFailed;
+            from_pool = false;
+            fd = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
+            upstream_pool.noteDialed();
+            socket_helpers.writeAll(fd, request) catch {
+                upstream_pool.discard(fd);
+                return error.SendFailed;
+            };
+        };
+
+        const result = readResponse(self.allocator, fd, self.max_response_bytes, plan.method == .HEAD) catch |err| {
+            upstream_pool.discard(fd);
+            return err;
+        };
+
+        if (result.reusable) {
+            upstream_pool.release(upstream.endpoint_id, upstream.address, upstream.port, fd);
+        } else {
+            upstream_pool.discard(fd);
+        }
         return result.bytes;
     }
 };
@@ -2606,6 +2638,126 @@ test "forwardRequest proxies upstream response bytes" {
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Host: api\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Test: 1\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Connection: keep-alive\r\n") != null);
+}
+
+/// a minimal upstream that accepts a single connection and serves two
+/// keep-alive responses on it, so a test can prove the proxy reuses the
+/// connection instead of dialing twice.
+const KeepAliveUpstream = struct {
+    listen_fd: linux_platform.posix.socket_t,
+    port: u16,
+    thread: ?std.Thread = null,
+    accepts: usize = 0,
+
+    fn init() !KeepAliveUpstream {
+        const bound = try initTestListenerSocket();
+        return .{ .listen_fd = bound.fd, .port = bound.port };
+    }
+
+    fn deinit(self: *KeepAliveUpstream) void {
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+        linux_platform.posix.close(self.listen_fd);
+    }
+
+    fn serve(self: *KeepAliveUpstream) void {
+        const client_fd = linux_platform.posix.accept(self.listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+        defer linux_platform.posix.close(client_fd);
+        socket_helpers.setSocketTimeoutMs(client_fd, 2000);
+        self.accepts += 1;
+
+        var served: usize = 0;
+        while (served < 2) : (served += 1) {
+            var buf: [16 * 1024]u8 = undefined;
+            const len = captureRequestBytes(client_fd, &buf);
+            if (len == 0) return;
+            // a keep-alive response: framed by Content-Length, no close.
+            _ = socket_helpers.writeAll(client_fd, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok") catch return;
+        }
+    }
+
+    fn start(self: *KeepAliveUpstream) !void {
+        self.thread = try std.Thread.spawn(.{}, serve, .{self});
+    }
+};
+
+test "forwardRequest reuses a pooled upstream connection across requests" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+
+    var upstream = try KeepAliveUpstream.init();
+    defer upstream.deinit();
+    try upstream.start();
+
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    upstream_pool.resetForTest();
+    defer upstream_pool.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/v1",
+        .http_proxy_preserve_host = false,
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/v1",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/v1" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+            .preserve_host = false,
+        },
+    };
+
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    const first = try proxy.forwardRequest("GET /v1/a HTTP/1.1\r\nHost: api.internal\r\n\r\n");
+    std.testing.allocator.free(first);
+    // the first response was framed and kept-alive, so it should be pooled.
+    try std.testing.expectEqual(@as(u64, 1), upstream_pool.snapshot().idle);
+
+    const second = try proxy.forwardRequest("GET /v1/b HTTP/1.1\r\nHost: api.internal\r\n\r\n");
+    std.testing.allocator.free(second);
+
+    const snap = upstream_pool.snapshot();
+    try std.testing.expectEqual(@as(u64, 1), snap.created_total);
+    try std.testing.expectEqual(@as(u64, 1), snap.reuse_total);
+    try std.testing.expectEqual(@as(usize, 1), upstream.accepts);
 }
 
 test "forwardRequest mirrors shadow traffic without affecting the primary response" {
