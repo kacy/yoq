@@ -11,6 +11,7 @@ pub fn apply(db: *sqlite.Db) SchemaError!void {
     migrateDeployments(db);
     migrateCronSchedules(db);
     migrateAuditLog(db);
+    migrateTokens(db);
 }
 
 fn migrateContainers(db: *sqlite.Db) void {
@@ -169,6 +170,19 @@ fn migrateAuditLog(db: *sqlite.Db) void {
         \\    action TEXT NOT NULL,
         \\    target TEXT,
         \\    outcome TEXT NOT NULL
+        \\);
+    ) catch {};
+}
+
+fn migrateTokens(db: *sqlite.Db) void {
+    createTableIfMissing(db,
+        \\CREATE TABLE IF NOT EXISTS tokens (
+        \\    name TEXT PRIMARY KEY,
+        \\    secret_hash TEXT NOT NULL,
+        \\    scopes TEXT NOT NULL,
+        \\    created_at INTEGER NOT NULL,
+        \\    expires_at INTEGER,
+        \\    revoked_at INTEGER
         \\);
     ) catch {};
 }
