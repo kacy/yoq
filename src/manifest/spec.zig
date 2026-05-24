@@ -44,6 +44,7 @@ pub const TrainingJob = workloads.TrainingJob;
 pub const Service = workloads.Service;
 pub const Worker = workloads.Worker;
 pub const Cron = workloads.Cron;
+pub const BackupSpec = workloads.BackupSpec;
 
 pub const Manifest = struct {
     services: []const Service,
@@ -51,9 +52,12 @@ pub const Manifest = struct {
     crons: []const Cron,
     training_jobs: []const TrainingJob,
     volumes: []const Volume,
+    backup: ?BackupSpec = null,
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *Manifest) void {
+        if (self.backup) |b| b.deinit(self.alloc);
+
         for (self.services) |svc| svc.deinit(self.alloc);
         self.alloc.free(self.services);
 

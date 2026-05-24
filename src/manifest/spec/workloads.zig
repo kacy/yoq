@@ -88,6 +88,20 @@ pub const Cron = struct {
     }
 };
 
+/// scheduled database backups, from a top-level `[backup]` block.
+pub const BackupSpec = struct {
+    /// interval between backups, in seconds (parsed from "24h"/"30m"/etc.).
+    every: u64,
+    /// directory the backup artifacts are written to.
+    output_dir: []const u8,
+    /// encrypt the artifact at rest (default true); false writes a raw copy.
+    encrypt: bool = true,
+
+    pub fn deinit(self: BackupSpec, alloc: std.mem.Allocator) void {
+        alloc.free(self.output_dir);
+    }
+};
+
 fn freeCommonFields(
     alloc: std.mem.Allocator,
     name: []const u8,
