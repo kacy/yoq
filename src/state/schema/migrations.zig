@@ -10,6 +10,7 @@ pub fn apply(db: *sqlite.Db) SchemaError!void {
     migrateServices(db);
     migrateDeployments(db);
     migrateCronSchedules(db);
+    migrateAuditLog(db);
 }
 
 fn migrateContainers(db: *sqlite.Db) void {
@@ -155,6 +156,19 @@ fn migrateCronSchedules(db: *sqlite.Db) void {
         \\    created_at INTEGER NOT NULL,
         \\    updated_at INTEGER NOT NULL,
         \\    PRIMARY KEY (app_name, name)
+        \\);
+    ) catch {};
+}
+
+fn migrateAuditLog(db: *sqlite.Db) void {
+    createTableIfMissing(db,
+        \\CREATE TABLE IF NOT EXISTS audit_log (
+        \\    id INTEGER PRIMARY KEY AUTOINCREMENT,
+        \\    recorded_at INTEGER NOT NULL,
+        \\    actor TEXT NOT NULL,
+        \\    action TEXT NOT NULL,
+        \\    target TEXT,
+        \\    outcome TEXT NOT NULL
         \\);
     ) catch {};
 }
