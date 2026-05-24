@@ -129,6 +129,7 @@ comptime {
     _ = @import("dev/watcher.zig");
     _ = @import("api/http.zig");
     _ = @import("api/routes.zig");
+    _ = @import("api/auth.zig");
     _ = @import("api/routes/security.zig");
     _ = @import("api/routes/security/audit_routes.zig");
     _ = @import("api/routes/cluster_agents.zig");

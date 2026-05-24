@@ -33,6 +33,10 @@ pub fn unauthorized() Response {
     return .{ .status = .unauthorized, .body = "{\"error\":\"unauthorized\"}", .allocated = false };
 }
 
+pub fn forbidden() Response {
+    return .{ .status = .forbidden, .body = "{\"error\":\"forbidden: insufficient scope\"}", .allocated = false };
+}
+
 pub fn methodNotAllowed() Response {
     return .{ .status = .method_not_allowed, .body = "{\"error\":\"method not allowed\"}", .allocated = false };
 }
