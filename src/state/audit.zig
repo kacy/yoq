@@ -44,6 +44,8 @@ pub const Action = enum {
     policy_delete,
     backup,
     restore,
+    token_create,
+    token_revoke,
 
     pub fn label(self: Action) []const u8 {
         return switch (self) {
@@ -59,6 +61,8 @@ pub const Action = enum {
             .policy_delete => "policy_delete",
             .backup => "backup",
             .restore => "restore",
+            .token_create => "token_create",
+            .token_revoke => "token_revoke",
         };
     }
 };

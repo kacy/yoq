@@ -99,6 +99,11 @@ const command_meta = [_]CommandMeta{
         .{ .name = "list" },
         .{ .name = "rotate" },
     } },
+    .{ .name = "token", .subcommands = &.{
+        .{ .name = "create", .flags = &.{ "--scope", "--ttl", "--json" } },
+        .{ .name = "list", .flags = &.{"--json"} },
+        .{ .name = "revoke" },
+    } },
     .{ .name = "policy", .subcommands = &.{
         .{ .name = "deny" },
         .{ .name = "allow" },

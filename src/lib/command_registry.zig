@@ -5,6 +5,7 @@ const version = @import("version.zig");
 const image_cmds = @import("../image/commands.zig");
 const cluster_cmds = @import("../cluster/commands.zig");
 const state_cmds = @import("../state/commands.zig");
+const token_cmds = @import("../state/tokens_cli.zig");
 const net_cmds = @import("../network/commands.zig");
 const runtime_cmds = @import("../runtime/commands.zig");
 const tls_cmds = @import("../tls/commands.zig");
@@ -78,6 +79,7 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "drain", .group = .cluster, .usage = "drain <id> [--server host:port]", .description = "drain an agent node", .handler = cluster_cmds.drain },
 
     .{ .name = "secret", .group = .state_security, .usage = "secret <set|get|rm|list|rotate> ...", .description = "manage encrypted secrets", .handler = state_cmds.secret },
+    .{ .name = "token", .group = .state_security, .usage = "token <create|list|revoke> ...", .description = "manage scoped API tokens", .handler = token_cmds.token },
     .{ .name = "policy", .group = .state_security, .usage = "policy <deny|allow|rm|list> ...", .description = "manage network policy rules", .handler = net_cmds.policy },
     .{ .name = "cert", .group = .state_security, .usage = "cert <install|list|rm|provision|renew> ...", .description = "manage TLS certificates", .handler = tls_cmds.cert },
     .{ .name = "backup", .group = .state_security, .usage = "backup [--output path] [--plain]", .description = "backup database state (encrypted by default)", .handler = state_cmds.backupCmd },
