@@ -14,6 +14,7 @@ const status_metrics = @import("routes/status_metrics.zig");
 const security = @import("routes/security.zig");
 const s3_gateway = @import("routes/s3_gateway.zig");
 const audit = @import("../state/audit.zig");
+const auth = @import("auth.zig");
 
 pub var cluster: ?*cluster_node.Node = null;
 pub var join_token: ?[]const u8 = null;
@@ -26,27 +27,31 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
         std.mem.eql(u8, request.path_only, "/version");
     const is_join_route = isJoinTokenRoute(&request);
     const has_any_auth = api_token != null or join_token != null;
-    const has_api_auth = if (api_token) |expected_token|
-        common.hasValidBearerToken(&request, expected_token)
-    else
-        false;
-    const has_join_auth = if (join_token) |expected_join_token|
-        is_join_route and common.hasValidBearerToken(&request, expected_join_token)
-    else
-        false;
 
-    if (has_any_auth and !is_public and !has_api_auth and !has_join_auth) {
-        return common.unauthorized();
-    }
-
-    if (has_any_auth and !is_public and !is_join_route and !has_api_auth) {
-        return common.unauthorized();
-    }
-
-    // record the caller for any audited operation this request performs. the
-    // server reuses worker threads, so reset to the default after each request.
-    audit.setActor(if (has_api_auth) .api_token else if (has_join_auth) .join_token else .unauthenticated);
+    // worker threads are reused, so reset the audit actor after each request.
     defer audit.resetActor();
+
+    var auth_result = auth.AuthResult{};
+    defer auth_result.deinit(alloc);
+
+    if (has_any_auth and !is_public) {
+        if (is_join_route) {
+            // cluster join routes are gated by the join token only.
+            const has_join_auth = if (join_token) |jt| common.hasValidBearerToken(&request, jt) else false;
+            if (!has_join_auth) return common.unauthorized();
+            audit.setActorName("join-token");
+        } else {
+            // operator routes: a legacy admin token or a named, scoped token.
+            auth_result = auth.authorize(alloc, &request, api_token);
+            if (!auth_result.ok) return common.unauthorized();
+            if (auth.requiredScope(request.method, request.path_only)) |scope| {
+                if (!auth_result.allows(scope)) return common.forbidden();
+            }
+            audit.setActorName(auth_result.actor_name);
+        }
+    } else {
+        audit.setActor(.unauthenticated);
+    }
 
     if (request.method == .GET) {
         if (std.mem.eql(u8, request.path_only, "/health")) {
