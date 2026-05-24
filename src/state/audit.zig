@@ -84,12 +84,32 @@ pub const Outcome = enum {
 /// overrides it per request.
 threadlocal var current_actor: Actor = .local;
 
+// an explicit actor name (e.g. an API token name) takes precedence over the
+// enum when set. len 0 means "use the enum label".
+threadlocal var actor_name_buf: [64]u8 = undefined;
+threadlocal var actor_name_len: usize = 0;
+
 pub fn setActor(actor: Actor) void {
     current_actor = actor;
+    actor_name_len = 0;
+}
+
+/// set a free-text actor name (overrides the enum until reset). used by the API
+/// dispatch to record the authenticated token's name.
+pub fn setActorName(name: []const u8) void {
+    const n = @min(name.len, actor_name_buf.len);
+    @memcpy(actor_name_buf[0..n], name[0..n]);
+    actor_name_len = n;
 }
 
 pub fn resetActor() void {
     current_actor = .local;
+    actor_name_len = 0;
+}
+
+fn actorLabel() []const u8 {
+    if (actor_name_len > 0) return actor_name_buf[0..actor_name_len];
+    return current_actor.label();
 }
 
 pub fn currentActor() Actor {
@@ -104,7 +124,7 @@ fn nowSeconds() i64 {
 /// a storage failure is logged but never propagated, so auditing can't break
 /// the operation it is recording.
 pub fn record(action: Action, target: ?[]const u8, outcome: Outcome) void {
-    store.appendAuditEntry(current_actor.label(), action.label(), target, outcome.label(), nowSeconds()) catch |err| {
+    store.appendAuditEntry(actorLabel(), action.label(), target, outcome.label(), nowSeconds()) catch |err| {
         log.warn("audit: failed to record {s} ({s}): {}", .{ action.label(), outcome.label(), err });
     };
 }
@@ -132,6 +152,33 @@ test "record writes an entry under the current actor" {
     try std.testing.expectEqualStrings("secret_set", entries.items[0].action);
     try std.testing.expectEqualStrings("db-password", entries.items[0].target.?);
     try std.testing.expectEqualStrings("ok", entries.items[0].outcome);
+}
+
+test "setActorName overrides the enum label until reset" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    defer resetActor();
+
+    setActorName("deploy-token");
+    record(.app_apply, "web", .ok);
+
+    var entries = try store.listAuditEntries(alloc, 1);
+    defer {
+        for (entries.items) |e| e.deinit(alloc);
+        entries.deinit(alloc);
+    }
+    try std.testing.expectEqualStrings("deploy-token", entries.items[0].actor);
+
+    // setActor clears the name override.
+    setActor(.local);
+    record(.app_apply, "web", .ok);
+    var again = try store.listAuditEntries(alloc, 1);
+    defer {
+        for (again.items) |e| e.deinit(alloc);
+        again.deinit(alloc);
+    }
+    try std.testing.expectEqualStrings("local", again.items[0].actor);
 }
 
 test "actor defaults to local and resets" {
