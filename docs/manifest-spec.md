@@ -537,6 +537,26 @@ cron definitions are stored in the app release snapshot. local and clustered app
 
 ---
 
+## scheduled backups
+
+a single top-level `[backup]` block schedules recurring snapshots of the yoq state database. backups are written to `output_dir` on the configured interval, encrypted at rest with the secrets-store key by default.
+
+| field | type | required | default | description |
+|-------|------|----------|---------|-------------|
+| `every` | string | yes | — | interval (`"30m"`, `"6h"`, `"24h"`) |
+| `output_dir` | string | yes | — | directory the artifacts are written to (created if missing) |
+| `encrypt` | bool | no | `true` | encrypt + checksum the artifact; `false` writes a raw SQLite copy |
+
+```toml
+[backup]
+every = "24h"
+output_dir = "/var/lib/yoq/backups"
+```
+
+encrypted artifacts carry a SHA256 of the database and can be checked with `yoq restore --verify <path>` before applying. only metadata is backed up — volume data is not included.
+
+---
+
 ## training jobs
 
 training jobs orchestrate distributed GPU training runs. defined under `[training.<name>]`.

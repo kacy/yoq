@@ -207,6 +207,33 @@ pub fn parseCron(alloc: std.mem.Allocator, name: []const u8, table: *const toml.
     };
 }
 
+/// parse the optional top-level `[backup]` block. returns null when absent.
+pub fn parseBackup(alloc: std.mem.Allocator, table: ?*const toml.Table) common.LoadError!?spec.BackupSpec {
+    const backup_table = table orelse return null;
+
+    const every_str = backup_table.getString("every") orelse {
+        log.err("manifest: [backup] is missing required field 'every'", .{});
+        return common.LoadError.InvalidSchedule;
+    };
+    const every = fields.parseDuration(every_str) orelse {
+        log.err("manifest: [backup] has invalid schedule '{s}' (expected e.g. '30m', '24h')", .{every_str});
+        return common.LoadError.InvalidSchedule;
+    };
+
+    const output_dir_raw = backup_table.getString("output_dir") orelse {
+        log.err("manifest: [backup] is missing required field 'output_dir'", .{});
+        return common.LoadError.InvalidVolumeConfig;
+    };
+    const output_dir = alloc.dupe(u8, output_dir_raw) catch return common.LoadError.OutOfMemory;
+    errdefer alloc.free(output_dir);
+
+    return .{
+        .every = every,
+        .output_dir = output_dir,
+        .encrypt = backup_table.getBool("encrypt") orelse true,
+    };
+}
+
 pub fn parseTrainingJob(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) common.LoadError!spec.TrainingJob {
     var parsed_common = try parseCommonFields(alloc, "training", name, table);
     errdefer parsed_common.deinit(alloc);

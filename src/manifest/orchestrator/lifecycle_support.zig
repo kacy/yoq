@@ -7,6 +7,7 @@ const store = @import("../../state/store.zig");
 const log = @import("../../lib/log.zig");
 const health = @import("../health.zig");
 const cron_scheduler = @import("../cron_scheduler.zig");
+const backup_scheduler = @import("../backup_scheduler.zig");
 const service_runtime = @import("service_runtime.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 
@@ -93,6 +94,22 @@ pub fn finishRuntimeSetup(self: anytype) void {
     self.registerHealthChecks();
     self.startTlsProxy();
     startCronSchedulerIfNeeded(self);
+    startBackupSchedulerIfNeeded(self);
+}
+
+fn startBackupSchedulerIfNeeded(self: anytype) void {
+    // only the full app owner runs scheduled backups (not a filtered subset).
+    if (self.service_filter != null or self.backup_sched != null) return;
+    const backup_spec = self.manifest.backup orelse return;
+
+    const bs = self.alloc.create(backup_scheduler.BackupScheduler) catch {
+        writeErr("failed to allocate backup scheduler\n", .{});
+        return;
+    };
+    bs.* = backup_scheduler.BackupScheduler.init(self.alloc, backup_spec);
+    self.backup_sched = bs;
+    bs.start();
+    writeErr("scheduled backups every {d}s to {s}\n", .{ backup_spec.every, backup_spec.output_dir });
 }
 
 fn startCronSchedulerIfNeeded(self: anytype) void {
@@ -183,6 +200,11 @@ pub fn stopAll(self: anytype) void {
     if (self.cron_sched) |cs| {
         cs.stop();
         writeErr("stopped cron scheduler\n", .{});
+    }
+
+    if (self.backup_sched) |bs| {
+        bs.stop();
+        writeErr("stopped backup scheduler\n", .{});
     }
 
     if (self.proxy) |p| {

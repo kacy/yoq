@@ -171,7 +171,12 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
     try dependencies.validateDependencies(services.items, workers.items);
 
     const sorted = try dependencies.sortByDependency(alloc, services.items);
-    errdefer alloc.free(sorted);
+    // sorted owns the service structs once we clear services below; on a later
+    // error we must free each service, not just the slice.
+    errdefer {
+        for (sorted) |svc| svc.deinit(alloc);
+        alloc.free(sorted);
+    }
 
     services.items.len = 0;
 
@@ -199,12 +204,16 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         alloc.free(owned_volumes);
     }
 
+    const backup_spec = try entries.parseBackup(alloc, root.getTable("backup"));
+    errdefer if (backup_spec) |b| b.deinit(alloc);
+
     return spec.Manifest{
         .services = sorted,
         .workers = owned_workers,
         .crons = owned_crons,
         .training_jobs = owned_training_jobs,
         .volumes = owned_volumes,
+        .backup = backup_spec,
         .alloc = alloc,
     };
 }
@@ -1835,6 +1844,64 @@ test "cron — invalid every returns error" {
         \\[cron.backup]
         \\image = "postgres:15"
         \\every = "5d"
+    ));
+}
+
+test "backup block — parsed with defaults" {
+    const alloc = std.testing.allocator;
+    var manifest = try loadFromString(alloc,
+        \\[service.api]
+        \\image = "myapp:latest"
+        \\
+        \\[backup]
+        \\every = "24h"
+        \\output_dir = "/var/lib/yoq/backups"
+    );
+    defer manifest.deinit();
+
+    const b = manifest.backup orelse return error.TestExpectedBackup;
+    try std.testing.expectEqual(@as(u64, 86400), b.every);
+    try std.testing.expectEqualStrings("/var/lib/yoq/backups", b.output_dir);
+    try std.testing.expect(b.encrypt); // defaults to true
+}
+
+test "backup block — encrypt can be disabled" {
+    const alloc = std.testing.allocator;
+    var manifest = try loadFromString(alloc,
+        \\[service.api]
+        \\image = "myapp:latest"
+        \\
+        \\[backup]
+        \\every = "30m"
+        \\output_dir = "/tmp/b"
+        \\encrypt = false
+    );
+    defer manifest.deinit();
+
+    const b = manifest.backup orelse return error.TestExpectedBackup;
+    try std.testing.expectEqual(@as(u64, 1800), b.every);
+    try std.testing.expect(!b.encrypt);
+}
+
+test "backup block — missing every returns error" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(LoadError.InvalidSchedule, loadFromString(alloc,
+        \\[service.api]
+        \\image = "myapp:latest"
+        \\
+        \\[backup]
+        \\output_dir = "/tmp/b"
+    ));
+}
+
+test "backup block — missing output_dir returns error" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(LoadError.InvalidVolumeConfig, loadFromString(alloc,
+        \\[service.api]
+        \\image = "myapp:latest"
+        \\
+        \\[backup]
+        \\every = "24h"
     ));
 }
 
