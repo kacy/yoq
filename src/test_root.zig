@@ -39,6 +39,8 @@ comptime {
     _ = @import("state/volumes.zig");
     _ = @import("state/secrets.zig");
     _ = @import("state/backup.zig");
+    _ = @import("state/audit.zig");
+    _ = @import("state/store/audit_log.zig");
     _ = @import("lib/cli.zig");
     _ = @import("lib/cmd.zig");
     _ = @import("lib/command_registry.zig");
@@ -124,6 +126,8 @@ comptime {
     _ = @import("dev/watcher.zig");
     _ = @import("api/http.zig");
     _ = @import("api/routes.zig");
+    _ = @import("api/routes/security.zig");
+    _ = @import("api/routes/security/audit_routes.zig");
     _ = @import("api/routes/cluster_agents.zig");
     _ = @import("api/routes/cluster_agents/apply_backend.zig");
     _ = @import("api/routes/cluster_agents/apply_response.zig");

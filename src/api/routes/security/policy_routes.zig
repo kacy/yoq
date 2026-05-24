@@ -3,6 +3,7 @@ const http = @import("../../http.zig");
 const store = @import("../../../state/store.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const net_policy = @import("../../../network/policy.zig");
+const audit = @import("../../../state/audit.zig");
 const common = @import("../common.zig");
 
 const Response = common.Response;
@@ -37,17 +38,34 @@ pub fn handleAddPolicy(alloc: std.mem.Allocator, request: http.Request) Response
         return common.badRequest("action must be 'deny' or 'allow'");
     }
 
-    store.addNetworkPolicy(source, target, action) catch return common.internalError();
+    store.addNetworkPolicy(source, target, action) catch {
+        audit.record(.policy_add, policyTarget(source, target), .failed);
+        return common.internalError();
+    };
     net_policy.syncPolicies(alloc);
 
+    audit.record(.policy_add, policyTarget(source, target), .ok);
     return .{ .status = .ok, .body = "{\"status\":\"ok\"}", .allocated = false };
 }
 
 pub fn handleDeletePolicy(alloc: std.mem.Allocator, source: []const u8, target: []const u8) Response {
-    store.removeNetworkPolicy(source, target) catch return common.internalError();
+    store.removeNetworkPolicy(source, target) catch {
+        audit.record(.policy_delete, policyTarget(source, target), .failed);
+        return common.internalError();
+    };
     net_policy.syncPolicies(alloc);
 
+    audit.record(.policy_delete, policyTarget(source, target), .ok);
     return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
+}
+
+/// format "source->target" for the audit target field, falling back to the
+/// source name if the formatted form would not fit.
+fn policyTarget(source: []const u8, target: []const u8) []const u8 {
+    const Buf = struct {
+        threadlocal var bytes: [256]u8 = undefined;
+    };
+    return std.fmt.bufPrint(&Buf.bytes, "{s}->{s}", .{ source, target }) catch source;
 }
 
 fn writePolicyListJson(writer: *std.Io.Writer, ctx: PolicyListContext) !void {

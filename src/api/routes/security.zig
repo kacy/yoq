@@ -4,6 +4,7 @@ const common = @import("common.zig");
 const secrets_routes = @import("security/secrets_routes.zig");
 const cert_routes = @import("security/cert_routes.zig");
 const policy_routes = @import("security/policy_routes.zig");
+const audit_routes = @import("security/audit_routes.zig");
 
 const Response = common.Response;
 const Status = http.StatusCode;
@@ -40,6 +41,17 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator) ?Response {
                 return common.methodNotAllowed();
             }
         }
+    }
+
+    if (std.mem.eql(u8, path, "/v1/audit")) {
+        if (request.method == .GET) {
+            const limit: u32 = blk: {
+                const raw = common.extractQueryParam(request.path, "limit") orelse break :blk 50;
+                break :blk @min(std.fmt.parseInt(u32, raw, 10) catch 50, 500);
+            };
+            return audit_routes.handleListAudit(alloc, limit);
+        }
+        return common.methodNotAllowed();
     }
 
     if (std.mem.eql(u8, path, "/v1/certificates")) {
@@ -225,6 +237,37 @@ test "route rejects policy path with too many segments" {
         .body = "",
     };
     try testing.expect(route(req, testing.allocator) == null);
+}
+
+test "route handles /v1/audit GET" {
+    const req = http.Request{
+        .method = .GET,
+        .path = "/v1/audit?limit=10",
+        .path_only = "/v1/audit",
+        .query = "limit=10",
+        .headers_raw = "",
+        .content_length = 0,
+        .body = "",
+    };
+    const resp = route(req, testing.allocator).?;
+    if (resp.allocated) testing.allocator.free(resp.body);
+    // ok when the store is reachable, internal error otherwise — both mean the
+    // route matched and dispatched.
+    try testing.expect(resp.status == .ok or resp.status == .internal_server_error);
+}
+
+test "route rejects /v1/audit POST" {
+    const req = http.Request{
+        .method = .POST,
+        .path = "/v1/audit",
+        .path_only = "/v1/audit",
+        .query = "",
+        .headers_raw = "",
+        .content_length = 0,
+        .body = "",
+    };
+    const resp = route(req, testing.allocator).?;
+    try testing.expectEqual(Status.method_not_allowed, resp.status);
 }
 
 test "route handles /v1/certificates GET" {

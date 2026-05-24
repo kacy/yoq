@@ -33,6 +33,7 @@ pub const ServiceNameRecord = service_name_types.ServiceNameRecord;
 pub const NetworkPolicyRecord = service_policy_types.NetworkPolicyRecord;
 pub const DeploymentRecord = @import("store/deployments.zig").DeploymentRecord;
 pub const CronScheduleRecord = @import("store/crons.zig").CronScheduleRecord;
+pub const AuditLogRecord = @import("store/audit_log.zig").AuditLogRecord;
 pub const TrainingJobRecord = @import("store/training.zig").TrainingJobRecord;
 pub const TrainingJobSummary = @import("store/training.zig").TrainingJobSummary;
 pub const CheckpointRecord = @import("store/training.zig").CheckpointRecord;
@@ -123,6 +124,8 @@ pub const replaceCronSchedulesForApp = @import("store/crons.zig").replaceCronSch
 pub const replaceCronSchedulesForAppInDb = @import("store/crons.zig").replaceCronSchedulesForAppInDb;
 pub const listCronSchedulesByApp = @import("store/crons.zig").listCronSchedulesByApp;
 pub const listCronSchedulesByAppInDb = @import("store/crons.zig").listCronSchedulesByAppInDb;
+pub const appendAuditEntry = @import("store/audit_log.zig").appendAuditEntry;
+pub const listAuditEntries = @import("store/audit_log.zig").listAuditEntries;
 
 pub const saveTrainingJob = @import("store/training.zig").saveTrainingJob;
 pub const saveTrainingJobInDb = @import("store/training.zig").saveTrainingJobInDb;
