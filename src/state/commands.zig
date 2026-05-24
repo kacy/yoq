@@ -6,6 +6,7 @@ const secrets = @import("secrets.zig");
 const store = @import("store.zig");
 const secrets_cli = @import("secrets_cli.zig");
 const backup_mod = @import("backup.zig");
+const audit = @import("audit.zig");
 const schema = @import("schema.zig");
 const paths = @import("../lib/paths.zig");
 
@@ -209,11 +210,13 @@ fn rotate(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) SecretComm
             writeErr("secret not found: {s}\n", .{name});
             return SecretCommandsError.SecretNotFound;
         } else {
+            audit.record(.secret_rotate, name, .failed);
             writeErr("failed to rotate secret\n", .{});
             return SecretCommandsError.StoreFailed;
         }
     };
 
+    audit.record(.secret_rotate, name, .ok);
     write("{s}\n", .{name});
 }
 
@@ -260,10 +263,12 @@ pub fn backupCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const path_z: [:0]const u8 = path_z_buf[0..path.len :0];
 
     backup_mod.backup(ctx.alloc, path_z, !plain) catch |err| {
+        audit.record(.backup, path, .failed);
         writeErr("backup failed: {}\n", .{err});
         return BackupCommandsError.BackupFailed;
     };
 
+    audit.record(.backup, path, .ok);
     if (plain) {
         write("backup saved to {s} (unencrypted)\n", .{path});
     } else {
@@ -316,8 +321,12 @@ pub fn restoreCmd(args: *std.process.Args.Iterator, ctx: AppContext) !void {
             backup_mod.BackupError.KeyUnavailable => writeErr("{s} failed: could not load the secrets key to decrypt the backup\n", .{if (verify_only) "verify" else "restore"}),
             else => writeErr("{s} failed: {}\n", .{ if (verify_only) "verify" else "restore", err }),
         }
+        if (!verify_only) audit.record(.restore, path, .failed);
         return BackupCommandsError.RestoreFailed;
     };
+
+    // a successful restore is an audited state change; --verify is read-only.
+    if (!verify_only) audit.record(.restore, path, .ok);
 
     if (verify_only) {
         write("backup verified ok: {s}\n", .{path});

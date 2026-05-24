@@ -13,6 +13,7 @@ const services = @import("routes/services.zig");
 const status_metrics = @import("routes/status_metrics.zig");
 const security = @import("routes/security.zig");
 const s3_gateway = @import("routes/s3_gateway.zig");
+const audit = @import("../state/audit.zig");
 
 pub var cluster: ?*cluster_node.Node = null;
 pub var join_token: ?[]const u8 = null;
@@ -41,6 +42,11 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
     if (has_any_auth and !is_public and !is_join_route and !has_api_auth) {
         return common.unauthorized();
     }
+
+    // record the caller for any audited operation this request performs. the
+    // server reuses worker threads, so reset to the default after each request.
+    audit.setActor(if (has_api_auth) .api_token else if (has_join_auth) .join_token else .unauthenticated);
+    defer audit.resetActor();
 
     if (request.method == .GET) {
         if (std.mem.eql(u8, request.path_only, "/health")) {

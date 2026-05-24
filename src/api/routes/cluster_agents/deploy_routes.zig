@@ -11,6 +11,8 @@ const volumes_mod = @import("../../../state/volumes.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
 const deployment_store = @import("../../../manifest/update/deployment_store.zig");
 const store = @import("../../../state/store.zig");
+const audit = @import("../../../state/audit.zig");
+const json_helpers = @import("../../../lib/json_helpers.zig");
 const common = @import("../common.zig");
 
 const Response = common.Response;
@@ -259,7 +261,10 @@ fn reconcileCronSchedules(db: *sqlite.Db, alloc: std.mem.Allocator, app_name: []
 }
 
 pub fn handleAppApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
-    return handleApply(alloc, request, ctx, .app, .{});
+    const resp = handleApply(alloc, request, ctx, .app, .{});
+    const app_name = json_helpers.extractJsonString(request.body, "app_name") orelse "";
+    audit.record(.app_apply, app_name, if (@intFromEnum(resp.status) < 400) .ok else .failed);
+    return resp;
 }
 
 pub fn handleAppDryRun(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {

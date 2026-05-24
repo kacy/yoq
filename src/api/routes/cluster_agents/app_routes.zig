@@ -2,6 +2,7 @@ const std = @import("std");
 const http = @import("../../http.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const store = @import("../../../state/store.zig");
+const audit = @import("../../../state/audit.zig");
 const common = @import("../common.zig");
 const app_rollout_control = @import("app_rollout_control.zig");
 const app_route_responses = @import("app_route_responses.zig");
@@ -137,7 +138,9 @@ pub fn handleAppRollback(
         .body = release.config_snapshot,
         .content_length = release.config_snapshot.len,
     };
-    return deploy_routes.handleAppRollbackApply(alloc, apply_request, ctx, release.id);
+    const resp = deploy_routes.handleAppRollbackApply(alloc, apply_request, ctx, release.id);
+    audit.record(.app_rollback, app_name, if (@intFromEnum(resp.status) < 400) .ok else .failed);
+    return resp;
 }
 
 pub fn handleRolloutControl(

@@ -2,6 +2,7 @@ const std = @import("std");
 const http = @import("../../http.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const secrets = @import("../../../state/secrets.zig");
+const audit = @import("../../../state/audit.zig");
 const common = @import("../common.zig");
 const store_support = @import("store_support.zig");
 
@@ -21,6 +22,7 @@ pub fn handleListSecrets(alloc: std.mem.Allocator) Response {
         names.deinit(alloc);
     }
 
+    audit.record(.secret_list, null, .ok);
     return common.jsonOkWrite(alloc, SecretListContext{
         .names = names.items,
     }, writeSecretListJson);
@@ -37,8 +39,12 @@ pub fn handleSetSecret(alloc: std.mem.Allocator, request: http.Request) Response
     var sec = store_support.openSecretsStore(alloc) orelse return common.internalError();
     defer store_support.closeSecretsStore(alloc, &sec);
 
-    sec.set(name, value) catch return common.internalError();
+    sec.set(name, value) catch {
+        audit.record(.secret_set, name, .failed);
+        return common.internalError();
+    };
 
+    audit.record(.secret_set, name, .ok);
     return .{ .status = .ok, .body = "{\"status\":\"ok\"}", .allocated = false };
 }
 
@@ -48,9 +54,11 @@ pub fn handleDeleteSecret(alloc: std.mem.Allocator, name: []const u8) Response {
 
     sec.remove(name) catch |err| {
         if (err == secrets.SecretsError.NotFound) return common.notFound();
+        audit.record(.secret_delete, name, .failed);
         return common.internalError();
     };
 
+    audit.record(.secret_delete, name, .ok);
     return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
 }
 

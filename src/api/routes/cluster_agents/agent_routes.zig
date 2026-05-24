@@ -4,6 +4,7 @@ const agent_registry = @import("../../../cluster/registry.zig");
 const cluster_config = @import("../../../cluster/config.zig");
 const request_support = @import("../../../cluster/agent/request_support.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
+const audit = @import("../../../state/audit.zig");
 const common = @import("../common.zig");
 const writers = @import("writers.zig");
 
@@ -17,6 +18,15 @@ fn nowRealSeconds() i64 {
 }
 
 pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: RouteContext) Response {
+    const resp = handleAgentRegisterImpl(alloc, request, ctx);
+    if (@intFromEnum(resp.status) < 400) {
+        const address = extractJsonString(request.body, "address") orelse "";
+        audit.record(.agent_register, address, .ok);
+    }
+    return resp;
+}
+
+fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     const expected_token = ctx.join_token orelse return common.badRequest("no join token configured");
     if (request.body.len == 0) return common.badRequest("missing request body");
@@ -402,9 +412,11 @@ pub fn handleAgentDrain(alloc: std.mem.Allocator, id: []const u8, ctx: RouteCont
     const sql = agent_registry.drainSql(&sql_buf, id) catch return common.internalError();
 
     _ = node.propose(sql) catch {
+        audit.record(.agent_drain, id, .failed);
         return common.notLeader(alloc, node);
     };
 
+    audit.record(.agent_drain, id, .ok);
     return .{ .status = .ok, .body = "{\"status\":\"draining\"}", .allocated = false };
 }
 
