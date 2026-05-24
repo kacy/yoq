@@ -24,6 +24,7 @@ const tls_proxy = @import("../tls/proxy.zig");
 const tls_backend = @import("../tls/backend.zig");
 const cert_store_mod = @import("../tls/cert_store.zig");
 const cron_scheduler = @import("cron_scheduler.zig");
+const backup_scheduler = @import("backup_scheduler.zig");
 const sqlite = @import("sqlite");
 const lifecycle_support = @import("orchestrator/lifecycle_support.zig");
 const runtime_loop = @import("orchestrator/runtime_loop.zig");
@@ -71,6 +72,7 @@ pub const Orchestrator = struct {
     tls_certs: ?*cert_store_mod.CertStore = null,
     tls_db: ?*sqlite.Db = null,
     cron_sched: ?*cron_scheduler.CronScheduler = null,
+    backup_sched: ?*backup_scheduler.BackupScheduler = null,
     /// when set, only start these services (+ transitive deps).
     /// null means start everything.
     service_filter: ?[]const []const u8 = null,
@@ -124,6 +126,10 @@ pub const Orchestrator = struct {
         if (self.cron_sched) |cs| {
             cs.deinit();
             self.alloc.destroy(cs);
+        }
+        if (self.backup_sched) |bs| {
+            bs.deinit();
+            self.alloc.destroy(bs);
         }
         if (self.start_set) |*set| {
             set.deinit(self.alloc);
