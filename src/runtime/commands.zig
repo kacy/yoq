@@ -8,9 +8,14 @@ const AppContext = @import("../lib/app_context.zig").AppContext;
 
 const status_command = @import("cli/status_command.zig");
 const metrics_command = @import("cli/metrics_command.zig");
+const audit_command = @import("cli/audit_command.zig");
 
 pub fn status(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     return status_command.status(args, ctx.io, ctx.alloc);
+}
+
+pub fn audit(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    return audit_command.audit(args, ctx.io, ctx.alloc);
 }
 
 pub fn apps(args: *std.process.Args.Iterator, ctx: AppContext) !void {
