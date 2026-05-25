@@ -47,23 +47,9 @@ pub const Action = enum {
     token_create,
     token_revoke,
 
+    /// the wire label is exactly the tag name (e.g. .secret_set -> "secret_set").
     pub fn label(self: Action) []const u8 {
-        return switch (self) {
-            .secret_set => "secret_set",
-            .secret_delete => "secret_delete",
-            .secret_list => "secret_list",
-            .secret_rotate => "secret_rotate",
-            .app_apply => "app_apply",
-            .app_rollback => "app_rollback",
-            .agent_register => "agent_register",
-            .agent_drain => "agent_drain",
-            .policy_add => "policy_add",
-            .policy_delete => "policy_delete",
-            .backup => "backup",
-            .restore => "restore",
-            .token_create => "token_create",
-            .token_revoke => "token_revoke",
-        };
+        return @tagName(self);
     }
 };
 
@@ -72,10 +58,7 @@ pub const Outcome = enum {
     failed,
 
     pub fn label(self: Outcome) []const u8 {
-        return switch (self) {
-            .ok => "ok",
-            .failed => "failed",
-        };
+        return @tagName(self);
     }
 };
 
