@@ -19,7 +19,7 @@ fn nowRealSeconds() i64 {
 
 pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: RouteContext) Response {
     const resp = handleAgentRegisterImpl(alloc, request, ctx);
-    if (@intFromEnum(resp.status) < 400) {
+    if (!resp.status.isError()) {
         const address = extractJsonString(request.body, "address") orelse "";
         audit.record(.agent_register, address, .ok);
     }
