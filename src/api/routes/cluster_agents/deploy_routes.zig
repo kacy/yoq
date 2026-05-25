@@ -263,7 +263,7 @@ fn reconcileCronSchedules(db: *sqlite.Db, alloc: std.mem.Allocator, app_name: []
 pub fn handleAppApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
     const resp = handleApply(alloc, request, ctx, .app, .{});
     const app_name = json_helpers.extractJsonString(request.body, "app_name") orelse "";
-    audit.record(.app_apply, app_name, if (@intFromEnum(resp.status) < 400) .ok else .failed);
+    audit.record(.app_apply, app_name, if (resp.status.isError()) .failed else .ok);
     return resp;
 }
 

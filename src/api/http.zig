@@ -53,6 +53,11 @@ pub const StatusCode = enum(u16) {
             .service_unavailable => "Service Unavailable",
         };
     }
+
+    /// true for 4xx/5xx responses.
+    pub fn isError(self: StatusCode) bool {
+        return @intFromEnum(self) >= 400;
+    }
 };
 
 pub const HttpError = error{

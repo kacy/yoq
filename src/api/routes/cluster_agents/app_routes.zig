@@ -139,7 +139,7 @@ pub fn handleAppRollback(
         .content_length = release.config_snapshot.len,
     };
     const resp = deploy_routes.handleAppRollbackApply(alloc, apply_request, ctx, release.id);
-    audit.record(.app_rollback, app_name, if (@intFromEnum(resp.status) < 400) .ok else .failed);
+    audit.record(.app_rollback, app_name, if (resp.status.isError()) .failed else .ok);
     return resp;
 }
 
