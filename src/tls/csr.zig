@@ -133,7 +133,7 @@ fn appendSubject(out: *DerBuf, domain: []const u8) !void {
 }
 
 /// append SubjectPublicKeyInfo for EC P-256.
-fn appendSubjectPublicKeyInfo(out: *DerBuf, public_key: EcdsaP256.PublicKey) !void {
+pub fn appendSubjectPublicKeyInfo(out: *DerBuf, public_key: EcdsaP256.PublicKey) !void {
     var inner: DerBuf = .{};
 
     // algorithm: SEQUENCE { OID(ecPublicKey), OID(prime256v1) }
@@ -206,30 +206,30 @@ pub const DerBuf = struct {
     data: [2048]u8 = undefined,
     len: usize = 0,
 
-    fn slice(self: *const DerBuf) []const u8 {
+    pub fn slice(self: *const DerBuf) []const u8 {
         return self.data[0..self.len];
     }
 
-    fn appendByte(self: *DerBuf, b: u8) !void {
+    pub fn appendByte(self: *DerBuf, b: u8) !void {
         if (self.len >= self.data.len) return error.BufferTooSmall;
         self.data[self.len] = b;
         self.len += 1;
     }
 
-    fn appendSlice(self: *DerBuf, s: []const u8) !void {
+    pub fn appendSlice(self: *DerBuf, s: []const u8) !void {
         if (self.len + s.len > self.data.len) return error.BufferTooSmall;
         @memcpy(self.data[self.len .. self.len + s.len], s);
         self.len += s.len;
     }
 
     /// write a TLV (tag-length-value) for the given data.
-    fn appendTagged(self: *DerBuf, tag: u8, content: []const u8) !void {
+    pub fn appendTagged(self: *DerBuf, tag: u8, content: []const u8) !void {
         try self.appendByte(tag);
         try self.appendLength(content.len);
         try self.appendSlice(content);
     }
 
-    fn appendLength(self: *DerBuf, length: usize) !void {
+    pub fn appendLength(self: *DerBuf, length: usize) !void {
         if (length < 128) {
             try self.appendByte(@intCast(length));
         } else if (length < 256) {
