@@ -135,16 +135,20 @@ fn buildAndSign(alloc: std.mem.Allocator, args: BuildArgs) X509Error![]u8 {
     return derCertToPem(alloc, cert.slice());
 }
 
-/// AlgorithmIdentifier for ecdsa-with-SHA256 (no params). matches what's
-/// inlined in csr.zig step 3 — kept as a constant here for clarity.
-const ecdsa_with_sha256_alg = [_]u8{
-    0x30, 0x0A, // SEQUENCE, length 10
-    0x06, 0x08, // OID, length 8
-    0x2A, 0x86,
-    0x48, 0xCE,
-    0x3D, 0x04,
-    0x03, 0x02,
-};
+// reuse the AlgorithmIdentifier from csr; both CSRs and certs sign with
+// ecdsa-with-SHA256 over ECDSA P-256 keys.
+const ecdsa_with_sha256_alg = csr.ecdsa_with_sha256_alg;
+
+// X.509 v3 extension OIDs (extnID values). named so the cert builder reads in
+// english instead of hex.
+const oid_basic_constraints = [_]u8{ 0x55, 0x1D, 0x13 }; // 2.5.29.19
+const oid_key_usage = [_]u8{ 0x55, 0x1D, 0x0F }; // 2.5.29.15
+const oid_subject_alt_name = [_]u8{ 0x55, 0x1D, 0x11 }; // 2.5.29.17
+const oid_ext_key_usage = [_]u8{ 0x55, 0x1D, 0x25 }; // 2.5.29.37
+
+// EKU purposes (TLS).
+const oid_eku_server_auth = [_]u8{ 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01 }; // 1.3.6.1.5.5.7.3.1
+const oid_eku_client_auth = [_]u8{ 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02 }; // 1.3.6.1.5.5.7.3.2
 
 fn buildTbs(out: *DerBuf, args: BuildArgs) !void {
     var content: DerBuf = .{};
@@ -163,13 +167,13 @@ fn buildTbs(out: *DerBuf, args: BuildArgs) !void {
     try content.appendSlice(&ecdsa_with_sha256_alg);
 
     // issuer Name
-    try appendName(&content, args.issuer_cn);
+    try csr.appendSubject(&content, args.issuer_cn);
 
     // validity
     try appendValidity(&content, args.not_before, args.not_after);
 
     // subject Name
-    try appendName(&content, args.subject_cn);
+    try csr.appendSubject(&content, args.subject_cn);
 
     // subjectPublicKeyInfo
     try csr.appendSubjectPublicKeyInfo(&content, args.subject_pub);
@@ -194,21 +198,6 @@ fn appendSerial(out: *DerBuf) !void {
     } else {
         try out.appendTagged(0x02, &raw);
     }
-}
-
-/// Name = SEQUENCE OF RelativeDistinguishedName; here just one RDN with CN.
-fn appendName(out: *DerBuf, cn: []const u8) !void {
-    var atv: DerBuf = .{};
-    try atv.appendSlice(&[_]u8{ 0x06, 0x03, 0x55, 0x04, 0x03 }); // OID commonName
-    try atv.appendTagged(0x0C, cn); // UTF8String
-
-    var atv_seq: DerBuf = .{};
-    try atv_seq.appendTagged(0x30, atv.slice());
-
-    var rdn: DerBuf = .{};
-    try rdn.appendTagged(0x31, atv_seq.slice()); // SET
-
-    try out.appendTagged(0x30, rdn.slice());
 }
 
 /// validity ::= SEQUENCE { notBefore Time, notAfter Time }
@@ -268,12 +257,12 @@ fn appendExtensions(out: *DerBuf, is_ca: bool, identity_uri: ?[]const u8) !void 
 fn appendBasicConstraintsCa(out: *DerBuf) !void {
     var value: DerBuf = .{};
     try value.appendSlice(&[_]u8{ 0x30, 0x03, 0x01, 0x01, 0xFF }); // SEQUENCE { BOOLEAN TRUE }
-    try appendExtension(out, &[_]u8{ 0x55, 0x1D, 0x13 }, true, value.slice());
+    try appendExtension(out, &oid_basic_constraints, true, value.slice());
 }
 
 /// basicConstraints { CA: FALSE } critical (encoded as an empty SEQUENCE).
 fn appendBasicConstraintsLeaf(out: *DerBuf) !void {
-    try appendExtension(out, &[_]u8{ 0x55, 0x1D, 0x13 }, true, &[_]u8{ 0x30, 0x00 });
+    try appendExtension(out, &oid_basic_constraints, true, &[_]u8{ 0x30, 0x00 });
 }
 
 /// keyUsage extension critical with the given named-bit mask.
@@ -285,7 +274,7 @@ fn appendKeyUsage(out: *DerBuf, bits: u8) !void {
         0x01, // 1 unused bit (we use 7 of 8 high bits)
         bits,
     };
-    try appendExtension(out, &[_]u8{ 0x55, 0x1D, 0x0F }, true, &value);
+    try appendExtension(out, &oid_key_usage, true, &value);
 }
 
 // keyUsage bit positions (high-bit-first as encoded in the BIT STRING).
@@ -295,15 +284,13 @@ const key_usage_leaf: u8 = 0b1000_0000; // digitalSignature(0)
 /// extKeyUsage with serverAuth + clientAuth (non-critical).
 fn appendExtKeyUsage(out: *DerBuf) !void {
     var inner: DerBuf = .{};
-    // OID serverAuth (1.3.6.1.5.5.7.3.1)
-    try inner.appendSlice(&[_]u8{ 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01 });
-    // OID clientAuth (1.3.6.1.5.5.7.3.2)
-    try inner.appendSlice(&[_]u8{ 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02 });
+    try inner.appendSlice(&oid_eku_server_auth);
+    try inner.appendSlice(&oid_eku_client_auth);
 
     var value: DerBuf = .{};
     try value.appendTagged(0x30, inner.slice());
 
-    try appendExtension(out, &[_]u8{ 0x55, 0x1D, 0x25 }, false, value.slice());
+    try appendExtension(out, &oid_ext_key_usage, false, value.slice());
 }
 
 /// subjectAltName with a single URI entry (critical for leaf identity).
@@ -314,7 +301,7 @@ fn appendSanUri(out: *DerBuf, uri: []const u8) !void {
     var value: DerBuf = .{};
     try value.appendTagged(0x30, names.slice());
 
-    try appendExtension(out, &[_]u8{ 0x55, 0x1D, 0x11 }, true, value.slice());
+    try appendExtension(out, &oid_subject_alt_name, true, value.slice());
 }
 
 /// Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE,
