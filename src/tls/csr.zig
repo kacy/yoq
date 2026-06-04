@@ -21,6 +21,14 @@ pub const CsrError = error{
     DomainTooLong,
 };
 
+/// AlgorithmIdentifier SEQUENCE for ecdsa-with-SHA256 (OID 1.2.840.10045.4.3.2),
+/// with no parameters. shared by CSRs (here) and signed X.509 certs (x509_gen).
+pub const ecdsa_with_sha256_alg = [_]u8{
+    0x30, 0x0A, // SEQUENCE, length 10
+    0x06, 0x08, // OID, length 8
+    0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02,
+};
+
 /// generate an ECDSA P-256 keypair and a DER-encoded CSR for the given domain.
 /// returns the CSR bytes and the keypair (caller needs the private key for
 /// the certificate later).
@@ -63,15 +71,8 @@ fn buildCsr(
     var inner: DerBuf = .{};
     inner.appendSlice(info.slice()) catch return CsrError.EncodingFailed;
 
-    // signatureAlgorithm: ecdsa-with-SHA256 (OID 1.2.840.10045.4.3.2)
-    inner.appendSlice(&[_]u8{
-        0x30, 0x0A, // SEQUENCE, length 10
-        0x06, 0x08, // OID, length 8
-        0x2A, 0x86,
-        0x48, 0xCE,
-        0x3D, 0x04,
-        0x03, 0x02,
-    }) catch return CsrError.EncodingFailed;
+    // signatureAlgorithm: ecdsa-with-SHA256
+    inner.appendSlice(&ecdsa_with_sha256_alg) catch return CsrError.EncodingFailed;
 
     // signature: BIT STRING wrapping DER-encoded ECDSA signature
     var der_sig_buf: [EcdsaP256.Signature.der_encoded_length_max]u8 = undefined;
@@ -113,12 +114,13 @@ fn buildCertRequestInfo(
     try out.appendTagged(0x30, content.slice());
 }
 
-/// append subject (CommonName only).
-fn appendSubject(out: *DerBuf, domain: []const u8) !void {
-    // AttributeTypeAndValue: SEQUENCE { OID(CN), UTF8String(domain) }
+/// append a Name with a single CommonName RDN. used for CSR subject and X.509
+/// issuer/subject names.
+pub fn appendSubject(out: *DerBuf, cn: []const u8) !void {
+    // AttributeTypeAndValue: SEQUENCE { OID(CN), UTF8String(cn) }
     var atv: DerBuf = .{};
     try atv.appendSlice(&[_]u8{ 0x06, 0x03, 0x55, 0x04, 0x03 }); // OID: commonName
-    try atv.appendTagged(0x0C, domain); // UTF8String
+    try atv.appendTagged(0x0C, cn); // UTF8String
 
     // wrap in SEQUENCE
     var atv_seq: DerBuf = .{};
@@ -133,7 +135,7 @@ fn appendSubject(out: *DerBuf, domain: []const u8) !void {
 }
 
 /// append SubjectPublicKeyInfo for EC P-256.
-fn appendSubjectPublicKeyInfo(out: *DerBuf, public_key: EcdsaP256.PublicKey) !void {
+pub fn appendSubjectPublicKeyInfo(out: *DerBuf, public_key: EcdsaP256.PublicKey) !void {
     var inner: DerBuf = .{};
 
     // algorithm: SEQUENCE { OID(ecPublicKey), OID(prime256v1) }
@@ -206,30 +208,30 @@ pub const DerBuf = struct {
     data: [2048]u8 = undefined,
     len: usize = 0,
 
-    fn slice(self: *const DerBuf) []const u8 {
+    pub fn slice(self: *const DerBuf) []const u8 {
         return self.data[0..self.len];
     }
 
-    fn appendByte(self: *DerBuf, b: u8) !void {
+    pub fn appendByte(self: *DerBuf, b: u8) !void {
         if (self.len >= self.data.len) return error.BufferTooSmall;
         self.data[self.len] = b;
         self.len += 1;
     }
 
-    fn appendSlice(self: *DerBuf, s: []const u8) !void {
+    pub fn appendSlice(self: *DerBuf, s: []const u8) !void {
         if (self.len + s.len > self.data.len) return error.BufferTooSmall;
         @memcpy(self.data[self.len .. self.len + s.len], s);
         self.len += s.len;
     }
 
     /// write a TLV (tag-length-value) for the given data.
-    fn appendTagged(self: *DerBuf, tag: u8, content: []const u8) !void {
+    pub fn appendTagged(self: *DerBuf, tag: u8, content: []const u8) !void {
         try self.appendByte(tag);
         try self.appendLength(content.len);
         try self.appendSlice(content);
     }
 
-    fn appendLength(self: *DerBuf, length: usize) !void {
+    pub fn appendLength(self: *DerBuf, length: usize) !void {
         if (length < 128) {
             try self.appendByte(@intCast(length));
         } else if (length < 256) {
