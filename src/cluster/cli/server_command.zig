@@ -297,6 +297,13 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
     if (join_token) |jt| {
         const ca_bootstrap = @import("../ca_bootstrap.zig");
         ca_bootstrap.spawn(&node, alloc, jt);
+
+        // periodic per-service leaf-cert issuance / rotation. no-ops when the
+        // service_mtls flag is off (default), or when this node isn't the
+        // leader. shares the join-token-derived key-encryption scheme with
+        // ca_bootstrap so every node can decrypt what's written.
+        const cert_issuer = @import("../cert_issuer.zig");
+        cert_issuer.spawn(&node, alloc, jt);
     }
 
     const dns = @import("../../network/dns.zig");

@@ -25,6 +25,7 @@ const listener_runtime = @import("../../../network/proxy/listener_runtime.zig");
 const proxy_control_plane = @import("../../../network/proxy/control_plane.zig");
 const steering_runtime = @import("../../../network/proxy/steering_runtime.zig");
 const upstream_pool = @import("../../../network/proxy/upstream_pool.zig");
+const cert_issuer = @import("../../../cluster/cert_issuer.zig");
 
 const Response = common.Response;
 const MetricsResponseContext = struct {
@@ -785,6 +786,21 @@ fn writeServiceObservabilityPrometheus(
     try writer.writeAll("# TYPE yoq_service_vip_alloc_failures_total counter\n");
     try writer.print("yoq_service_vip_alloc_failures_total {d}\n", .{vip_alloc_failures_total});
 
+    try writer.writeAll("# HELP yoq_service_mtls_cert_age_seconds Age of the current mTLS leaf cert, or -1 if no cert has been issued\n");
+    try writer.writeAll("# TYPE yoq_service_mtls_cert_age_seconds gauge\n");
+    try writer.writeAll("# HELP yoq_service_mtls_rotation_failures_total Issuance/rotation failures since the issuer last succeeded for the service\n");
+    try writer.writeAll("# TYPE yoq_service_mtls_rotation_failures_total counter\n");
+
+    // snapshot the issuer's per-service failure counters once for this scrape;
+    // lookups inside the loop are linear but the list is tiny in practice.
+    var mtls_failures = cert_issuer.snapshotFailures(std.heap.page_allocator) catch std.ArrayList(cert_issuer.FailureSnapshot).empty;
+    defer {
+        for (mtls_failures.items) |entry| std.heap.page_allocator.free(entry.service_name);
+        mtls_failures.deinit(std.heap.page_allocator);
+    }
+
+    const now_secs = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+
     for (services) |service| {
         const service_counters = service_observability.findServiceCounters(counters, service.service_name);
         const health_state = health.getServiceHealth(service.service_name);
@@ -852,7 +868,44 @@ fn writeServiceObservabilityPrometheus(
                 .{ service.service_name, status, @intFromBool(active) },
             );
         }
+
+        try writeMtlsCertMetrics(writer, service.service_name, mtls_failures.items, now_secs);
     }
+}
+
+/// emit the two mtls metrics for a single service. cert age is computed from
+/// the row's `created_at`; `-1` signals "no cert issued yet" so dashboards
+/// can distinguish absent from stale.
+fn writeMtlsCertMetrics(
+    writer: anytype,
+    service_name: []const u8,
+    failures: []const cert_issuer.FailureSnapshot,
+    now_secs: i64,
+) !void {
+    const age = blk: {
+        const rec_opt = store.getMtlsCert(std.heap.page_allocator, service_name) catch break :blk @as(i64, -1);
+        if (rec_opt) |rec| {
+            defer rec.deinit(std.heap.page_allocator);
+            break :blk now_secs - rec.created_at;
+        }
+        break :blk @as(i64, -1);
+    };
+    try writer.print(
+        "yoq_service_mtls_cert_age_seconds{{service=\"{s}\"}} {d}\n",
+        .{ service_name, age },
+    );
+
+    var failure_count: u64 = 0;
+    for (failures) |entry| {
+        if (std.mem.eql(u8, entry.service_name, service_name)) {
+            failure_count = entry.count;
+            break;
+        }
+    }
+    try writer.print(
+        "yoq_service_mtls_rotation_failures_total{{service=\"{s}\"}} {d}\n",
+        .{ service_name, failure_count },
+    );
 }
 
 fn writeBridgeFaultMode(writer: anytype, operation: service_registry_bridge.BridgeOperation) !void {

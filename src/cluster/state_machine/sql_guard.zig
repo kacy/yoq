@@ -42,6 +42,10 @@ fn isAllowedSingleStatement(sql: []const u8) bool {
         "INSERT INTO cluster_ca ",
         "UPDATE cluster_ca SET ",
         "DELETE FROM cluster_ca ",
+        "INSERT INTO certificates ",
+        "INSERT OR REPLACE INTO certificates ",
+        "UPDATE certificates SET ",
+        "DELETE FROM certificates ",
     };
 
     for (allowed_prefixes) |prefix| {
