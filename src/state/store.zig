@@ -133,6 +133,7 @@ pub const listTokens = @import("store/tokens.zig").listTokens;
 pub const findActiveTokenByHash = @import("store/tokens.zig").findActiveTokenByHash;
 pub const revokeToken = @import("store/tokens.zig").revokeToken;
 pub const getClusterCa = @import("store/cluster_ca.zig").getClusterCa;
+pub const getClusterCaInDb = @import("store/cluster_ca.zig").getClusterCaInDb;
 pub const clusterCaExistsInDb = @import("store/cluster_ca.zig").clusterCaExistsInDb;
 pub const buildClusterCaInsertSql = @import("store/cluster_ca.zig").buildInsertSql;
 pub const MtlsCertRecord = @import("store/certificates_mtls.zig").Record;
