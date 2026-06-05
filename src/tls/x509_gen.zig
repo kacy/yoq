@@ -218,16 +218,23 @@ fn formatUtcTime(unix: i64) [13]u8 {
     const yd = day.calculateYearDay();
     const md = yd.calculateMonthDay();
     const ds = es.getDaySeconds();
+
     var buf: [13]u8 = undefined;
-    _ = std.fmt.bufPrint(&buf, "{d:0>2}{d:0>2}{d:0>2}{d:0>2}{d:0>2}{d:0>2}Z", .{
-        yd.year % 100,
-        md.month.numeric(),
-        md.day_index + 1,
-        ds.getHoursIntoDay(),
-        ds.getMinutesIntoHour(),
-        ds.getSecondsIntoMinute(),
-    }) catch unreachable;
+    write2Digits(buf[0..2], @intCast(yd.year % 100));
+    write2Digits(buf[2..4], md.month.numeric());
+    write2Digits(buf[4..6], md.day_index + 1);
+    write2Digits(buf[6..8], ds.getHoursIntoDay());
+    write2Digits(buf[8..10], ds.getMinutesIntoHour());
+    write2Digits(buf[10..12], ds.getSecondsIntoMinute());
+    buf[12] = 'Z';
     return buf;
+}
+
+/// pad a 0..99 value into a two-byte ascii slot, zero-prefixed.
+fn write2Digits(slot: *[2]u8, value: u8) void {
+    const v = value % 100;
+    slot[0] = '0' + (v / 10);
+    slot[1] = '0' + (v % 10);
 }
 
 /// extensions [3] EXPLICIT SEQUENCE OF Extension.
