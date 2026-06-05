@@ -1225,6 +1225,15 @@ fn ensureDegradedServiceLocked(service_name: []const u8) !void {
     try degraded_services.append(std.heap.page_allocator, try std.heap.page_allocator.dupe(u8, service_name));
 }
 
+/// add a service to the degraded set from outside the reconciler. acquires
+/// the shared mutex so callers don't need to know about the internal lock.
+/// safe to call repeatedly — `ensureDegradedServiceLocked` is idempotent.
+pub fn markDegraded(service_name: []const u8) void {
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
+    ensureDegradedServiceLocked(service_name) catch {};
+}
+
 fn removeDegradedServiceLocked(service_name: []const u8) void {
     var idx: usize = 0;
     while (idx < degraded_services.items.len) {
