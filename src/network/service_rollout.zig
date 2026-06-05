@@ -6,6 +6,11 @@ pub const Flags = struct {
     service_registry_reconciler: bool = false,
     dns_returns_vip: bool = false,
     l7_proxy_http: bool = false,
+    /// opt-in: mint per-service mTLS leaf certs and replicate via raft.
+    /// off by default; the data plane stays plaintext until PR 5 wires
+    /// enforcement. setting `YOQ_SERVICE_MTLS=1` (or any truthy value)
+    /// turns it on; an invalid value logs and stays off.
+    service_mtls: bool = false,
 };
 
 pub const Mode = enum {
@@ -71,6 +76,7 @@ fn ensureInitialized() void {
         .service_registry_reconciler = readDeprecatedAlwaysOnBoolEnv("YOQ_SERVICE_REGISTRY_RECONCILER", "the reconciler is always authoritative"),
         .dns_returns_vip = readDeprecatedAlwaysOnBoolEnv("YOQ_DNS_RETURNS_VIP", "DNS always returns the service VIP"),
         .l7_proxy_http = readAlwaysOnBoolEnv("YOQ_L7_PROXY_HTTP"),
+        .service_mtls = readOptInBoolEnv("YOQ_SERVICE_MTLS"),
     };
     flags_initialized = true;
 }
@@ -80,13 +86,14 @@ fn logRolloutStateLocked() void {
     logged_rollout_state = true;
 
     log.info(
-        "service discovery: mode={s}, registry_v2={}, reconciler={}, dns_returns_vip={}, l7_proxy_http={}",
+        "service discovery: mode={s}, registry_v2={}, reconciler={}, dns_returns_vip={}, l7_proxy_http={}, service_mtls={}",
         .{
             modeLabel(modeFromFlags(flags)),
             flags.service_registry_v2,
             flags.service_registry_reconciler,
             flags.dns_returns_vip,
             flags.l7_proxy_http,
+            flags.service_mtls,
         },
     );
 }
@@ -115,6 +122,13 @@ fn readAlwaysOnBoolEnv(name: []const u8) bool {
     _ = parseBool(name, raw);
     log.warn("service discovery compatibility flag {s} is deprecated and ignored; HTTP proxy routing is always on", .{name});
     return true;
+}
+
+/// real opt-in env reader: returns `false` when unset and only flips to
+/// `true` when explicitly enabled. invalid values log and stay off.
+fn readOptInBoolEnv(name: []const u8) bool {
+    const raw = getEnv(name) orelse return false;
+    return parseBool(name, raw);
 }
 
 fn getEnv(name: []const u8) ?[]const u8 {
@@ -200,4 +214,13 @@ test "resetForTest clears overrides" {
     try std.testing.expect(current_flags.service_registry_reconciler);
     try std.testing.expect(current_flags.dns_returns_vip);
     try std.testing.expect(current_flags.l7_proxy_http);
+}
+
+test "service_mtls flag defaults to off and round-trips through setForTest" {
+    resetForTest();
+    try std.testing.expect(!current().service_mtls);
+
+    setForTest(.{ .service_mtls = true });
+    defer resetForTest();
+    try std.testing.expect(current().service_mtls);
 }
