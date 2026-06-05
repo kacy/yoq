@@ -135,6 +135,10 @@ pub const revokeToken = @import("store/tokens.zig").revokeToken;
 pub const getClusterCa = @import("store/cluster_ca.zig").getClusterCa;
 pub const clusterCaExistsInDb = @import("store/cluster_ca.zig").clusterCaExistsInDb;
 pub const buildClusterCaInsertSql = @import("store/cluster_ca.zig").buildInsertSql;
+pub const MtlsCertRecord = @import("store/certificates_mtls.zig").Record;
+pub const getMtlsCert = @import("store/certificates_mtls.zig").get;
+pub const getMtlsCertInDb = @import("store/certificates_mtls.zig").getInDb;
+pub const buildMtlsCertUpsertSql = @import("store/certificates_mtls.zig").buildUpsertSql;
 
 pub const saveTrainingJob = @import("store/training.zig").saveTrainingJob;
 pub const saveTrainingJobInDb = @import("store/training.zig").saveTrainingJobInDb;

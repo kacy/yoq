@@ -43,6 +43,7 @@ comptime {
     _ = @import("state/store/audit_log.zig");
     _ = @import("state/store/tokens.zig");
     _ = @import("state/store/cluster_ca.zig");
+    _ = @import("state/store/certificates_mtls.zig");
     _ = @import("state/tokens_cli.zig");
     _ = @import("cluster/ca_bootstrap.zig");
     _ = @import("lib/scopes.zig");
