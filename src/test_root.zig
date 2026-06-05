@@ -47,6 +47,7 @@ comptime {
     _ = @import("state/tokens_cli.zig");
     _ = @import("cluster/ca_bootstrap.zig");
     _ = @import("cluster/ca_access.zig");
+    _ = @import("cluster/cert_issuer.zig");
     _ = @import("lib/scopes.zig");
     _ = @import("lib/cli.zig");
     _ = @import("lib/cmd.zig");
