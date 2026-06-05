@@ -12,6 +12,7 @@ pub fn apply(db: *sqlite.Db) SchemaError!void {
     migrateCronSchedules(db);
     migrateAuditLog(db);
     migrateTokens(db);
+    migrateClusterCa(db);
 }
 
 fn migrateContainers(db: *sqlite.Db) void {
@@ -170,6 +171,24 @@ fn migrateAuditLog(db: *sqlite.Db) void {
         \\    action TEXT NOT NULL,
         \\    target TEXT,
         \\    outcome TEXT NOT NULL
+        \\);
+    ) catch {};
+}
+
+fn migrateClusterCa(db: *sqlite.Db) void {
+    // single-row table (CHECK(id=1)) holding the cluster's mTLS CA cert and its
+    // encrypted private key. the key is encrypted at rest with a join-token-
+    // derived key so any node in the cluster can decrypt it and sign leaves;
+    // the row is distributed via raft.
+    createTableIfMissing(db,
+        \\CREATE TABLE IF NOT EXISTS cluster_ca (
+        \\    id INTEGER PRIMARY KEY CHECK (id = 1),
+        \\    cert_pem BLOB NOT NULL,
+        \\    encrypted_key BLOB NOT NULL,
+        \\    key_nonce BLOB NOT NULL,
+        \\    key_tag BLOB NOT NULL,
+        \\    created_at INTEGER NOT NULL,
+        \\    not_after INTEGER NOT NULL
         \\);
     ) catch {};
 }

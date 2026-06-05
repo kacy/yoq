@@ -291,6 +291,14 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
         routes.join_token = null;
     }
 
+    // seed the cluster mTLS CA in the background — runs on the leader once,
+    // exits silently on followers when the row appears via raft apply. needs a
+    // join token to derive the key-encryption key, so skipped without one.
+    if (join_token) |jt| {
+        const ca_bootstrap = @import("../ca_bootstrap.zig");
+        ca_bootstrap.spawn(&node, alloc, jt);
+    }
+
     const dns = @import("../../network/dns.zig");
     dns.setClusterDb(node.stateMachineDb());
     defer dns.setClusterDb(null);

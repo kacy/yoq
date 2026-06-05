@@ -39,6 +39,9 @@ fn isAllowedSingleStatement(sql: []const u8) bool {
         "INSERT INTO service_endpoints ",
         "UPDATE service_endpoints SET ",
         "DELETE FROM service_endpoints ",
+        "INSERT INTO cluster_ca ",
+        "UPDATE cluster_ca SET ",
+        "DELETE FROM cluster_ca ",
     };
 
     for (allowed_prefixes) |prefix| {

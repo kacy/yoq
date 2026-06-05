@@ -5,6 +5,7 @@ const cluster_node = @import("../../../cluster/node.zig");
 const version = @import("../../../lib/version.zig");
 const http_client = @import("../../../cluster/http_client.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
+const store = @import("../../../state/store.zig");
 
 fn nowMilliseconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toMilliseconds();
@@ -105,6 +106,29 @@ fn appendPeerInfo(alloc: std.mem.Allocator, writer: *std.Io.Writer, peer: cluste
         "{{\"id\":{d},\"software_version\":\"{s}\",\"unix_ms\":{d},\"reachable\":1}}",
         .{ peer.id, peer_version.?, peer_unix_ms.? },
     ) catch {};
+}
+
+/// return the cluster mTLS trust bundle — the CA's public PEM. responds 404
+/// if the CA hasn't been bootstrapped yet (e.g. before quorum, or non-cluster
+/// mode). the private key blob is NEVER returned; it stays encrypted in raft
+/// state and is only decrypted in-process.
+pub fn handleClusterCa(alloc: std.mem.Allocator, ctx: RouteContext) Response {
+    const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+
+    var rec = (store.getClusterCa(alloc) catch return common.internalError()) orelse return common.notFound();
+    defer rec.deinit(alloc);
+    _ = node;
+
+    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
+    defer json_buf_writer.deinit();
+    const writer = &json_buf_writer.writer;
+
+    writer.writeAll("{\"cert_pem\":\"") catch return common.internalError();
+    json_helpers.writeJsonEscaped(writer, rec.cert_pem) catch return common.internalError();
+    writer.print("\",\"created_at\":{d},\"not_after\":{d}}}", .{ rec.created_at, rec.not_after }) catch return common.internalError();
+
+    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
 }
 
 pub fn handleClusterStatus(alloc: std.mem.Allocator, ctx: RouteContext) Response {

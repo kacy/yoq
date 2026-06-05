@@ -35,6 +35,7 @@ pub const DeploymentRecord = @import("store/deployments.zig").DeploymentRecord;
 pub const CronScheduleRecord = @import("store/crons.zig").CronScheduleRecord;
 pub const AuditLogRecord = @import("store/audit_log.zig").AuditLogRecord;
 pub const TokenRecord = @import("store/tokens.zig").TokenRecord;
+pub const ClusterCaRecord = @import("store/cluster_ca.zig").ClusterCaRecord;
 pub const TrainingJobRecord = @import("store/training.zig").TrainingJobRecord;
 pub const TrainingJobSummary = @import("store/training.zig").TrainingJobSummary;
 pub const CheckpointRecord = @import("store/training.zig").CheckpointRecord;
@@ -131,6 +132,9 @@ pub const createToken = @import("store/tokens.zig").createToken;
 pub const listTokens = @import("store/tokens.zig").listTokens;
 pub const findActiveTokenByHash = @import("store/tokens.zig").findActiveTokenByHash;
 pub const revokeToken = @import("store/tokens.zig").revokeToken;
+pub const getClusterCa = @import("store/cluster_ca.zig").getClusterCa;
+pub const clusterCaExistsInDb = @import("store/cluster_ca.zig").clusterCaExistsInDb;
+pub const buildClusterCaInsertSql = @import("store/cluster_ca.zig").buildInsertSql;
 
 pub const saveTrainingJob = @import("store/training.zig").saveTrainingJob;
 pub const saveTrainingJobInDb = @import("store/training.zig").saveTrainingJobInDb;
