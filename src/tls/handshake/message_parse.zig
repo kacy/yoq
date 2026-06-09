@@ -380,6 +380,60 @@ test "Truncated message returns error" {
     try std.testing.expectError(ParseError.Truncated, nextMessage(&[_]u8{ 0x08, 0x00, 0x00, 0x05, 0x00 }, &pos2));
 }
 
+test "ClientHello from buildClientHello parses with the existing server parser" {
+    const client_hello = @import("client_hello.zig");
+    var buf: [512]u8 = undefined;
+    const random = [_]u8{0xAA} ** 32;
+    const pub_key = [_]u8{0x42} ** 32;
+    const len = try message_build.buildClientHello(&buf, random, pub_key, "billing.svc");
+
+    // parseClientHelloFields takes the body bytes (after the 4-byte header)
+    const info = try client_hello.parseClientHelloFields(buf[4..len]);
+    try std.testing.expectEqualSlices(u8, &random, &info.client_random);
+    try std.testing.expect(info.has_aes_256_gcm);
+    try std.testing.expect(info.supported_versions_has_tls13);
+    try std.testing.expect(info.x25519_key_share != null);
+    try std.testing.expectEqualSlices(u8, &pub_key, &info.x25519_key_share.?);
+    try std.testing.expect(info.offers_h2_alpn);
+    try std.testing.expect(info.offers_http11_alpn);
+}
+
+test "ClientHello without SNI still parses" {
+    const client_hello = @import("client_hello.zig");
+    var buf: [512]u8 = undefined;
+    const random = [_]u8{0x11} ** 32;
+    const pub_key = [_]u8{0x22} ** 32;
+    const len = try message_build.buildClientHello(&buf, random, pub_key, null);
+    const info = try client_hello.parseClientHelloFields(buf[4..len]);
+    try std.testing.expect(info.has_aes_256_gcm);
+    try std.testing.expect(info.supported_versions_has_tls13);
+}
+
+test "CertificateRequest from builder round-trips" {
+    var buf: [128]u8 = undefined;
+    const len = try message_build.buildCertificateRequest(&buf);
+    const got = try parseCertificateRequest(buf[4..len]);
+    try std.testing.expectEqual(@as(usize, 0), got.context.len);
+    try std.testing.expect(certRequestOffersEcdsaP256Sha256(got));
+}
+
+test "buildCertificateVerify picks the per-side context string" {
+    var server_buf: [256]u8 = undefined;
+    var client_buf: [256]u8 = undefined;
+    const transcript = [_]u8{0xCC} ** common.hash_len;
+    const kp = common.EcdsaP256.KeyPair.generate(std.testing.io);
+
+    const slen = try message_build.buildCertificateVerify(&server_buf, .server, transcript, kp.secret_key);
+    const clen = try message_build.buildCertificateVerify(&client_buf, .client, transcript, kp.secret_key);
+
+    // signatures differ because the signed prefix differs
+    try std.testing.expect(!std.mem.eql(u8, server_buf[0..slen], client_buf[0..clen]));
+
+    // structure is identical: same type, same algorithm code
+    try std.testing.expectEqual(@as(u8, 0x0F), server_buf[0]);
+    try std.testing.expectEqual(@as(u8, 0x0F), client_buf[0]);
+}
+
 test "CertificateRequest with ecdsa-sha256 offer parses and matches" {
     // hand-build a CertificateRequest body: empty context, single
     // signature_algorithms extension carrying just 0x0403.

@@ -269,7 +269,7 @@ test "buildCertificateVerify produces valid structure" {
     linux_platform.randomBytes(&transcript);
 
     const kp = EcdsaP256.KeyPair.generate(std.testing.io);
-    const len = try buildCertificateVerify(&buf, transcript, kp.secret_key);
+    const len = try buildCertificateVerify(&buf, .server, transcript, kp.secret_key);
 
     try std.testing.expectEqual(@as(u8, 0x0F), buf[0]);
     try std.testing.expectEqual(@as(u8, 0x04), buf[4]);
@@ -286,8 +286,8 @@ test "buildCertificateVerify different transcripts produce different output" {
     linux_platform.randomBytes(&t2);
 
     const kp = EcdsaP256.KeyPair.generate(std.testing.io);
-    const len1 = try buildCertificateVerify(&buf1, t1, kp.secret_key);
-    const len2 = try buildCertificateVerify(&buf2, t2, kp.secret_key);
+    const len1 = try buildCertificateVerify(&buf1, .server, t1, kp.secret_key);
+    const len2 = try buildCertificateVerify(&buf2, .server, t2, kp.secret_key);
 
     try std.testing.expect(!std.mem.eql(u8, buf1[0..len1], buf2[0..len2]));
 }
@@ -300,7 +300,7 @@ test "buildCertificateVerify buffer too small" {
     const kp = EcdsaP256.KeyPair.generate(std.testing.io);
     try std.testing.expectError(
         HandshakeError.BufferTooSmall,
-        buildCertificateVerify(&buf, transcript, kp.secret_key),
+        buildCertificateVerify(&buf, .server, transcript, kp.secret_key),
     );
 }
 

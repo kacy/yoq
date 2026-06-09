@@ -99,7 +99,7 @@ pub fn handleTlsSession(
     const cv_transcript_hash = transcript.peek();
 
     var cv_buf: [512]u8 = undefined;
-    const cv_len = handshake.buildCertificateVerify(&cv_buf, cv_transcript_hash, private_key) catch
+    const cv_len = handshake.buildCertificateVerify(&cv_buf, .server, cv_transcript_hash, private_key) catch
         return error.HandshakeFailed;
     transcript.update(cv_buf[0..cv_len]);
     try sendEncryptedHandshake(client_fd, cv_buf[0..cv_len], server_hs_traffic, &server_seq);
