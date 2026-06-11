@@ -189,10 +189,12 @@ pub fn parseEncryptedExtensions(body: []const u8) ParseError!EncryptedExtensions
 }
 
 /// parse a TLS 1.3 Certificate message body. returns the leaf cert DER
-/// (the first cert in the chain). PR 4 only supports single-cert chains —
-/// matches what x509_gen issues and what the existing server emits.
+/// (the first cert in the chain), or an empty slice when the message
+/// carries no certs at all (TLS 1.3 client-auth: the client sends an
+/// empty Certificate to mean "I have nothing to authenticate with").
+/// PR 4 only supports single-cert chains.
 pub fn parseCertificateMessage(body: []const u8) ParseError![]const u8 {
-    if (body.len < 1 + 3 + 3 + 2) return ParseError.Truncated;
+    if (body.len < 1 + 3) return ParseError.Truncated;
     var pos: usize = 0;
     const ctx_len = body[pos];
     pos += 1;
@@ -204,6 +206,9 @@ pub fn parseCertificateMessage(body: []const u8) ParseError![]const u8 {
     pos += 3;
     if (pos + list_len > body.len) return ParseError.Truncated;
     const list_end = pos + list_len;
+
+    // empty cert list: peer has nothing to present. valid per RFC 8446 §4.4.2.
+    if (list_len == 0) return body[pos..pos];
 
     if (pos + 3 > list_end) return ParseError.Truncated;
     const cert_len = readU24(body[pos..]);
