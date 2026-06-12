@@ -209,8 +209,39 @@ pub const TlsConfig = struct {
         }
     };
 
-    domain: []const u8,
+    /// service-to-service mTLS posture. `off` (default) means no peer
+    /// authentication on this service; `warn` requests + verifies a peer
+    /// cert but still accepts the connection if it's missing or fails;
+    /// `require` rejects any peer that can't present a valid leaf signed
+    /// by the cluster CA.
+    pub const PeerMode = enum {
+        off,
+        warn,
+        require,
+
+        pub fn label(self: PeerMode) []const u8 {
+            return switch (self) {
+                .off => "off",
+                .warn => "warn",
+                .require => "require",
+            };
+        }
+
+        pub fn parse(value: []const u8) ?PeerMode {
+            if (std.mem.eql(u8, value, "off")) return .off;
+            if (std.mem.eql(u8, value, "warn")) return .warn;
+            if (std.mem.eql(u8, value, "require")) return .require;
+            return null;
+        }
+    };
+
+    /// public-facing DNS name; required when `acme` is set (so an ACME
+    /// cert can be provisioned). may be empty when only `peer` is in
+    /// use, since service-to-service mTLS uses SPIFFE-style identities,
+    /// not DNS names.
+    domain: []const u8 = "",
     acme: ?AcmeConfig = null,
+    peer: PeerMode = .off,
 
     pub fn deinit(self: TlsConfig, alloc: std.mem.Allocator) void {
         alloc.free(self.domain);
