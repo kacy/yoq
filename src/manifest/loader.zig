@@ -1376,6 +1376,67 @@ test "tls config — missing domain returns error" {
     ));
 }
 
+test "tls peer — defaults to off when unspecified" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.tls]
+        \\domain = "test.org"
+    );
+    defer manifest.deinit();
+
+    const tls = manifest.services[0].tls orelse return error.TestExpectedNonNull;
+    try std.testing.expectEqual(spec.TlsConfig.PeerMode.off, tls.peer);
+}
+
+test "tls peer — parses require / warn / off" {
+    const alloc = std.testing.allocator;
+
+    inline for ([_]struct { raw: []const u8, want: spec.TlsConfig.PeerMode }{
+        .{ .raw = "require", .want = .require },
+        .{ .raw = "warn", .want = .warn },
+        .{ .raw = "off", .want = .off },
+    }) |case| {
+        const src = "[service.web]\nimage = \"nginx:latest\"\n[service.web.tls]\nperker_unused = 0\npeer = \"" ++ case.raw ++ "\"\n";
+        var manifest = try loadFromString(alloc, src);
+        defer manifest.deinit();
+        const tls = manifest.services[0].tls orelse return error.TestExpectedNonNull;
+        try std.testing.expectEqual(case.want, tls.peer);
+    }
+}
+
+test "tls peer — mtls-only service needs no domain" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[service.api]
+        \\image = "demo:latest"
+        \\
+        \\[service.api.tls]
+        \\peer = "require"
+    );
+    defer manifest.deinit();
+
+    const tls = manifest.services[0].tls orelse return error.TestExpectedNonNull;
+    try std.testing.expectEqualStrings("", tls.domain);
+    try std.testing.expectEqual(spec.TlsConfig.PeerMode.require, tls.peer);
+}
+
+test "tls peer — invalid value returns error" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(LoadError.InvalidTlsConfig, loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\
+        \\[service.web.tls]
+        \\peer = "yes please"
+    ));
+}
+
 test "tls config — dns-01 provider settings" {
     const alloc = std.testing.allocator;
 

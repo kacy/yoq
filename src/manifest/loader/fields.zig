@@ -254,21 +254,30 @@ pub fn parseTlsConfig(
 ) common.LoadError!?spec.TlsConfig {
     const tls_table = table orelse return null;
 
-    const domain = tls_table.getString("domain") orelse {
-        log.err("manifest: service '{s}' tls is missing required field 'domain'", .{service_name});
+    const peer_raw = tls_table.getString("peer") orelse "off";
+    const peer = spec.TlsConfig.PeerMode.parse(peer_raw) orelse {
+        log.err("manifest: service '{s}' tls.peer must be 'off', 'warn', or 'require'", .{service_name});
         return common.LoadError.InvalidTlsConfig;
     };
-    if (domain.len == 0) {
-        log.err("manifest: service '{s}' tls domain cannot be empty", .{service_name});
+
+    const acme_table = tls_table.getTable("acme");
+    const domain_raw = tls_table.getString("domain") orelse "";
+
+    // domain is only required when ACME provisioning is configured. an
+    // mTLS-only service has no DNS-bound cert to mint, so `peer = "..."`
+    // alone is valid without a domain.
+    if (acme_table != null and domain_raw.len == 0) {
+        log.err("manifest: service '{s}' tls.domain is required when tls.acme is set", .{service_name});
         return common.LoadError.InvalidTlsConfig;
     }
 
-    const acme = try parseAcmeConfig(alloc, service_name, tls_table.getTable("acme"));
+    const acme = try parseAcmeConfig(alloc, service_name, acme_table);
     errdefer if (acme) |cfg| cfg.deinit(alloc);
 
     return .{
-        .domain = alloc.dupe(u8, domain) catch return common.LoadError.OutOfMemory,
+        .domain = alloc.dupe(u8, domain_raw) catch return common.LoadError.OutOfMemory,
         .acme = acme,
+        .peer = peer,
     };
 }
 
