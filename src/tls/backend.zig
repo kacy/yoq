@@ -8,10 +8,15 @@
 // and the orchestrator lifecycle run on different threads.
 
 const std = @import("std");
+const spec = @import("../manifest/spec.zig");
 
 pub const Backend = struct {
     ip: []const u8,
     port: u16,
+    /// service-to-service mTLS posture for inbound traffic to this
+    /// backend's service. `.off` keeps the legacy (TLS-terminate only)
+    /// behavior; `.warn` and `.require` flip the listener to mTLS.
+    peer_mode: spec.TlsConfig.PeerMode = .off,
 };
 
 pub const BackendRegistry = struct {
@@ -37,7 +42,13 @@ pub const BackendRegistry = struct {
     }
 
     /// register a backend for a domain. overwrites any existing mapping.
-    pub fn register(self: *BackendRegistry, domain: []const u8, ip: []const u8, port: u16) !void {
+    pub fn register(
+        self: *BackendRegistry,
+        domain: []const u8,
+        ip: []const u8,
+        port: u16,
+        peer_mode: spec.TlsConfig.PeerMode,
+    ) !void {
         self.mutex.lockUncancelable(std.Options.debug_io);
         defer self.mutex.unlock(std.Options.debug_io);
 
@@ -45,7 +56,7 @@ pub const BackendRegistry = struct {
         if (self.backends.getEntry(domain)) |entry| {
             self.allocator.free(entry.value_ptr.ip);
             const new_ip = try self.allocator.dupe(u8, ip);
-            entry.value_ptr.* = .{ .ip = new_ip, .port = port };
+            entry.value_ptr.* = .{ .ip = new_ip, .port = port, .peer_mode = peer_mode };
             return;
         }
 
@@ -54,7 +65,7 @@ pub const BackendRegistry = struct {
         const owned_ip = try self.allocator.dupe(u8, ip);
         errdefer self.allocator.free(owned_ip);
 
-        try self.backends.put(self.allocator, owned_domain, .{ .ip = owned_ip, .port = port });
+        try self.backends.put(self.allocator, owned_domain, .{ .ip = owned_ip, .port = port, .peer_mode = peer_mode });
     }
 
     /// remove a backend for a domain.
@@ -86,6 +97,7 @@ pub const BackendRegistry = struct {
         return .{
             .ip = try alloc.dupe(u8, backend.ip),
             .port = backend.port,
+            .peer_mode = backend.peer_mode,
         };
     }
 };
@@ -97,7 +109,7 @@ test "register and lookup" {
     var reg = BackendRegistry.init(alloc);
     defer reg.deinit();
 
-    try reg.register("example.com", "10.42.0.5", 8080);
+    try reg.register("example.com", "10.42.0.5", 8080, .off);
 
     const backend = reg.lookup("example.com");
     try std.testing.expect(backend != null);
@@ -118,8 +130,8 @@ test "register overwrites existing" {
     var reg = BackendRegistry.init(alloc);
     defer reg.deinit();
 
-    try reg.register("example.com", "10.42.0.5", 8080);
-    try reg.register("example.com", "10.42.0.10", 9090);
+    try reg.register("example.com", "10.42.0.5", 8080, .off);
+    try reg.register("example.com", "10.42.0.10", 9090, .off);
 
     const backend = reg.lookup("example.com");
     try std.testing.expect(backend != null);
@@ -132,10 +144,38 @@ test "unregister removes backend" {
     var reg = BackendRegistry.init(alloc);
     defer reg.deinit();
 
-    try reg.register("example.com", "10.42.0.5", 8080);
+    try reg.register("example.com", "10.42.0.5", 8080, .off);
     reg.unregister("example.com");
 
     try std.testing.expect(reg.lookup("example.com") == null);
+}
+
+test "register and lookup carry peer_mode through" {
+    const alloc = std.testing.allocator;
+    var reg = BackendRegistry.init(alloc);
+    defer reg.deinit();
+
+    try reg.register("api.example", "10.0.0.1", 8443, .require);
+
+    const got = reg.lookup("api.example").?;
+    try std.testing.expectEqual(spec.TlsConfig.PeerMode.require, got.peer_mode);
+
+    const owned = (try reg.lookupOwned(alloc, "api.example")).?;
+    defer alloc.free(owned.ip);
+    try std.testing.expectEqual(spec.TlsConfig.PeerMode.require, owned.peer_mode);
+}
+
+test "register without peer_mode defaults to off via overwrite path" {
+    const alloc = std.testing.allocator;
+    var reg = BackendRegistry.init(alloc);
+    defer reg.deinit();
+
+    try reg.register("api.example", "10.0.0.1", 8443, .require);
+    try reg.register("api.example", "10.0.0.2", 9090, .off);
+
+    const got = reg.lookup("api.example").?;
+    try std.testing.expectEqual(spec.TlsConfig.PeerMode.off, got.peer_mode);
+    try std.testing.expectEqualStrings("10.0.0.2", got.ip);
 }
 
 test "unregister nonexistent is safe" {
@@ -151,8 +191,8 @@ test "multiple domains" {
     var reg = BackendRegistry.init(alloc);
     defer reg.deinit();
 
-    try reg.register("a.com", "10.42.0.1", 80);
-    try reg.register("b.com", "10.42.0.2", 443);
+    try reg.register("a.com", "10.42.0.1", 80, .off);
+    try reg.register("b.com", "10.42.0.2", 443, .off);
 
     const a = reg.lookup("a.com");
     const b = reg.lookup("b.com");
@@ -167,7 +207,7 @@ test "lookupOwned returns stable backend copy" {
     var reg = BackendRegistry.init(alloc);
     defer reg.deinit();
 
-    try reg.register("example.com", "10.42.0.5", 8080);
+    try reg.register("example.com", "10.42.0.5", 8080, .off);
     const owned = (try reg.lookupOwned(alloc, "example.com")).?;
     defer alloc.free(owned.ip);
 

@@ -210,7 +210,7 @@ pub fn refreshServiceRuntimeBindings(
         const reg = backend_registry orelse return;
         const target = tlsBackendTargetForService(alloc, svc, tls.domain, record.ip_address) orelse return;
         defer alloc.free(target.ip);
-        reg.register(tls.domain, target.ip, target.port) catch {
+        reg.register(tls.domain, target.ip, target.port, tls.peer) catch {
             log.warn("failed to refresh backend for {s}", .{tls.domain});
             return;
         };
@@ -317,7 +317,7 @@ fn registerTlsBackends(
         const target = tlsBackendTargetForService(alloc, svc, tls.domain, record.ip_address) orelse continue;
         defer alloc.free(target.ip);
 
-        reg.register(tls.domain, target.ip, target.port) catch {
+        reg.register(tls.domain, target.ip, target.port, tls.peer) catch {
             log.warn("failed to register backend for {s}", .{tls.domain});
             continue;
         };

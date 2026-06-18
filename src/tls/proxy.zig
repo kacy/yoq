@@ -27,6 +27,7 @@ const backend_mod = @import("backend.zig");
 const acme_mod = @import("acme.zig");
 const managed_runtime = @import("acme/managed_runtime.zig");
 const runtime_wait = @import("../lib/runtime_wait.zig");
+const store_mod = @import("../state/store.zig");
 
 const max_connections: u32 = 256;
 var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
@@ -444,6 +445,27 @@ pub const TlsProxy = struct {
         };
         defer self.allocator.free(backend.ip);
 
+        // build MtlsOpts when the service has tls.peer set. the trust
+        // root is the cluster CA loaded from raft state. missing CA on
+        // a service that asked for mtls is a misconfiguration; fall
+        // back to plain TLS and log loudly.
+        var mtls_ca_rec: ?store_mod.ClusterCaRecord = null;
+        defer if (mtls_ca_rec) |rec| rec.deinit(self.allocator);
+
+        const mtls_opts: ?session_runtime.MtlsOpts = blk: {
+            if (backend.peer_mode == .off) break :blk null;
+            const rec = (store_mod.getClusterCa(self.allocator) catch null) orelse {
+                log.warn("tls.peer set for {s} but cluster CA not yet seeded; downgrading to plain TLS", .{server_name});
+                break :blk null;
+            };
+            mtls_ca_rec = rec;
+            break :blk session_runtime.MtlsOpts{
+                .require_client_cert = backend.peer_mode == .require,
+                .trust_ca_pem = rec.cert_pem,
+                .now_unix = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
+            };
+        };
+
         // perform TLS handshake and proxy traffic
         session_runtime.handleTlsSession(
             self.threaded_io.io(),
@@ -453,6 +475,7 @@ pub const TlsProxy = struct {
             cert_result.key_pem,
             backend,
             &handshake_complete,
+            mtls_opts,
         ) catch |err| {
             log.warn("TLS session error for {s}: {}", .{ server_name, err });
         };

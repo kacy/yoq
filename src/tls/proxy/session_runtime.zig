@@ -203,6 +203,7 @@ pub fn handleTlsSession(
     key_pem: []u8,
     backend_info: backend_mod.Backend,
     handshake_complete: *bool,
+    mtls_opts: ?MtlsOpts,
 ) !void {
     var session = try acceptServerHandshake(
         io,
@@ -211,10 +212,14 @@ pub fn handleTlsSession(
         client_hello,
         cert_pem,
         key_pem,
-        null,
+        mtls_opts,
         handshake_complete,
     );
     defer session.deinit(std.heap.page_allocator);
+
+    if (session.peer_identity) |peer| {
+        log.info("tls: mtls peer accepted: {s}", .{peer});
+    }
 
     const selected_alpn = session.selected_alpn;
     const app_keys = session.app_keys;
