@@ -699,6 +699,7 @@ pub fn resolveUpstreamWithPolicy(alloc: std.mem.Allocator, service_name: []const
 
     const now_ms = nowRealMilliseconds();
     const target_port = service.http_proxy_target_port;
+    const peer_mode = service.peer_mode;
     for (endpoints.items) |endpoint| {
         const port: u16 = target_port orelse if (endpoint.port < 0) 0 else @intCast(endpoint.port);
         try candidates.append(alloc, .{
@@ -707,6 +708,7 @@ pub fn resolveUpstreamWithPolicy(alloc: std.mem.Allocator, service_name: []const
             .address = try alloc.dupe(u8, endpoint.ip_address),
             .port = port,
             .eligible = endpoint.eligible and endpointAllowsRequestLocked(endpoint.endpoint_id, now_ms, cb_policy),
+            .peer_mode = peer_mode,
         });
     }
 
@@ -717,6 +719,7 @@ pub fn resolveUpstreamWithPolicy(alloc: std.mem.Allocator, service_name: []const
         .address = try alloc.dupe(u8, selected.address),
         .port = selected.port,
         .eligible = selected.eligible,
+        .peer_mode = selected.peer_mode,
     };
 }
 
