@@ -11,6 +11,7 @@ const pem = @import("../pem.zig");
 const record = @import("../record.zig");
 const socket_support = @import("socket_support.zig");
 const x509_verify = @import("../x509_verify.zig");
+const mtls_metrics = @import("../mtls_metrics.zig");
 
 const X25519 = std.crypto.dh.X25519;
 const Sha384 = std.crypto.hash.sha2.Sha384;
@@ -66,6 +67,9 @@ pub fn acceptServerHandshake(
     mtls_opts: ?MtlsOpts,
     handshake_complete: *bool,
 ) !ServerSession {
+    // metrics are tracked only for mtls handshakes — the regular TLS
+    // termination path has its own throughput surface elsewhere.
+    errdefer if (mtls_opts != null) mtls_metrics.record(.server, .failed);
     if (client_hello.len < 9) return error.InvalidClientHello;
     const rec_len = (@as(usize, client_hello[3]) << 8) | @as(usize, client_hello[4]);
     if (client_hello.len < 5 + rec_len) return error.InvalidClientHello;
@@ -183,6 +187,7 @@ pub fn acceptServerHandshake(
     const app_keys = handshake.deriveApplicationSecrets(master, app_transcript_hash);
 
     handshake_complete.* = true;
+    if (mtls_opts != null) mtls_metrics.record(.server, .ok);
 
     return .{
         .selected_alpn = selected_alpn,

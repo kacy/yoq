@@ -27,6 +27,7 @@ const message_parse = @import("handshake/message_parse.zig");
 const x509_verify = @import("x509_verify.zig");
 const pem_mod = @import("pem.zig");
 const common = @import("handshake/common.zig");
+const mtls_metrics = @import("mtls_metrics.zig");
 
 const X25519 = common.X25519;
 const Sha384 = common.Sha384;
@@ -145,6 +146,18 @@ pub const ClientSession = struct {
 // --- handshake entry point ---
 
 pub fn doHandshake(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    fd: posix.fd_t,
+    opts: HandshakeOpts,
+) ClientError!ClientSession {
+    errdefer mtls_metrics.record(.client, .failed);
+    const sess = try doHandshakeInner(io, alloc, fd, opts);
+    mtls_metrics.record(.client, .ok);
+    return sess;
+}
+
+fn doHandshakeInner(
     io: std.Io,
     alloc: std.mem.Allocator,
     fd: posix.fd_t,
