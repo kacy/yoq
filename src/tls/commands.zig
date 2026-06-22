@@ -6,6 +6,7 @@ const acme_command = @import("cli/acme_command.zig");
 const install_command = @import("cli/install_command.zig");
 const list_command = @import("cli/list_command.zig");
 const remove_command = @import("cli/remove_command.zig");
+const service_cert_command = @import("cli/service_cert_command.zig");
 
 const writeErr = cli.writeErr;
 
@@ -35,6 +36,7 @@ pub fn cert(args: *std.process.Args.Iterator, ctx: AppContext) !void {
             \\                                                  renew via ACME
             \\  list                                           list certificates
             \\  rm <domain>                                    remove a certificate
+            \\  service <name>                                 show the mtls leaf cert for a service
             \\
         , .{});
         return TlsCommandsError.InvalidArgument;
@@ -57,6 +59,9 @@ pub fn cert(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     }
     if (std.mem.eql(u8, cmd, "rm")) {
         return remove_command.run(args, ctx.alloc);
+    }
+    if (std.mem.eql(u8, cmd, "service")) {
+        return service_cert_command.run(args, ctx.alloc);
     }
 
     writeErr("unknown cert command: {s}\n", .{cmd});
