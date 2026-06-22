@@ -186,6 +186,7 @@ comptime {
     _ = @import("tls/x509_verify.zig");
     _ = @import("tls/handshake/message_parse.zig");
     _ = @import("tls/client_session.zig");
+    _ = @import("tls/client_dial.zig");
     _ = @import("tls/proxy.zig");
     _ = @import("tls/proxy/session_runtime.zig");
     _ = @import("storage/s3.zig");
