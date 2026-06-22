@@ -26,6 +26,7 @@ const proxy_control_plane = @import("../../../network/proxy/control_plane.zig");
 const steering_runtime = @import("../../../network/proxy/steering_runtime.zig");
 const upstream_pool = @import("../../../network/proxy/upstream_pool.zig");
 const cert_issuer = @import("../../../cluster/cert_issuer.zig");
+const mtls_metrics = @import("../../../tls/mtls_metrics.zig");
 
 const Response = common.Response;
 const MetricsResponseContext = struct {
@@ -790,6 +791,14 @@ fn writeServiceObservabilityPrometheus(
     try writer.writeAll("# TYPE yoq_service_mtls_cert_age_seconds gauge\n");
     try writer.writeAll("# HELP yoq_service_mtls_rotation_failures_total Issuance/rotation failures since the issuer last succeeded for the service\n");
     try writer.writeAll("# TYPE yoq_service_mtls_rotation_failures_total counter\n");
+
+    try writer.writeAll("# HELP yoq_service_mtls_handshakes_total Service-to-service mTLS handshakes by side and outcome\n");
+    try writer.writeAll("# TYPE yoq_service_mtls_handshakes_total counter\n");
+    const hs = mtls_metrics.snapshot();
+    try writer.print("yoq_service_mtls_handshakes_total{{side=\"client\",outcome=\"ok\"}} {d}\n", .{hs[0]});
+    try writer.print("yoq_service_mtls_handshakes_total{{side=\"client\",outcome=\"failed\"}} {d}\n", .{hs[1]});
+    try writer.print("yoq_service_mtls_handshakes_total{{side=\"server\",outcome=\"ok\"}} {d}\n", .{hs[2]});
+    try writer.print("yoq_service_mtls_handshakes_total{{side=\"server\",outcome=\"failed\"}} {d}\n", .{hs[3]});
 
     // snapshot the issuer's per-service failure counters once for this scrape;
     // lookups inside the loop are linear but the list is tiny in practice.
