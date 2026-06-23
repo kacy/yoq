@@ -15,6 +15,12 @@ const upstream_mod = @import("upstream.zig");
 const ip = @import("../ip.zig");
 const hpack = @import("hpack.zig");
 
+// DoS bounds for a single HTTP/2 connection. without these a client can open
+// unlimited concurrent streams or stall mid-frame while streaming bytes,
+// growing the per-connection buffers until OOM.
+const max_concurrent_streams: usize = 128;
+const max_downstream_buf_bytes: usize = 1 << 20; // 1 MiB of un-parsed frames
+
 pub fn proxyConnection(
     alloc: std.mem.Allocator,
     routes: []const router.Route,
@@ -122,6 +128,10 @@ const ConnectionRouter = struct {
                 const bytes_read = posix.read(self.client_fd, &buf) catch return error.ReceiveFailed;
                 if (bytes_read == 0) break;
                 try self.downstream_buf.appendSlice(self.allocator, buf[0..bytes_read]);
+                // bound un-parsed downstream bytes: a client that streams data
+                // without ever completing a frame would otherwise grow this
+                // without limit.
+                if (self.downstream_buf.items.len > max_downstream_buf_bytes) return error.ReceiveFailed;
                 self.last_activity_ms = nowMs();
             } else if (poll_fds.items[0].revents & (posix.POLL.ERR | posix.POLL.HUP) != 0) {
                 break;
@@ -324,6 +334,16 @@ const ConnectionRouter = struct {
             try socket_helpers.writeAll(self.streams.items[stream_idx].upstream_fd, rewritten.bytes);
             try self.consumeDownstreamBytes(rewritten.consumed);
             self.last_activity_ms = nowMs();
+            return;
+        }
+
+        // cap concurrent streams: refuse a new stream past the limit rather
+        // than grow `streams` (and dial upstreams) without bound. handled
+        // before any upstream dial so no fd is leaked.
+        if (self.streams.items.len >= max_concurrent_streams) {
+            try self.sendLocalStreamResponse(parsed.request.stream_id, .service_unavailable, "{\"error\":\"too many concurrent streams\"}");
+            proxy_runtime.recordResponse(.service_unavailable);
+            try self.consumeDownstreamBytes(parsed.consumed);
             return;
         }
 
