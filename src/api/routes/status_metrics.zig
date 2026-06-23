@@ -530,6 +530,7 @@ test "route rollout status reports steering blocker for VIP cutover readiness" {
         testing.allocator,
         "api",
         "consistent_hash",
+        "off",
         &.{
             .{
                 .route_name = "default",
@@ -626,6 +627,7 @@ test "route rollout status reports vip cutover ready after clean backfill audit 
         testing.allocator,
         "api",
         "consistent_hash",
+        "off",
         &.{
             .{
                 .route_name = "default",
@@ -733,6 +735,7 @@ test "route rollout status converges from steering blocked to vip cutover ready"
         testing.allocator,
         "api",
         "consistent_hash",
+        "off",
         &.{
             .{
                 .route_name = "default",

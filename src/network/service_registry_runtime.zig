@@ -5,6 +5,7 @@ const service_registry_backfill = @import("service_registry_backfill.zig");
 const rollout = @import("service_rollout.zig");
 const service_registry = @import("service_registry.zig");
 const store = @import("../state/store.zig");
+const spec = @import("../manifest/spec.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -299,6 +300,7 @@ fn serviceDefinitionFromRecord(service: *const store.ServiceRecord, route_defini
         .http_proxy_circuit_breaker_threshold = if (service.http_proxy_circuit_breaker_threshold) |v| @intCast(v) else null,
         .http_proxy_circuit_breaker_timeout_ms = if (service.http_proxy_circuit_breaker_timeout_ms) |v| @intCast(v) else null,
         .http_proxy_mirror_service = service.http_proxy_mirror_service,
+        .peer_mode = if (service.peer_mode) |label| (spec.TlsConfig.PeerMode.parse(label) orelse .off) else .off,
     };
 }
 

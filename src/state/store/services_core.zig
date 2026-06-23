@@ -34,7 +34,7 @@ fn createInDb(db: *sqlite.Db, record: ServiceRecord) StoreError!void {
     var committed = false;
     errdefer if (!committed) db.exec("ROLLBACK;", .{}, .{}) catch {};
     db.exec(
-        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO services (" ++ service_columns ++ ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.service_name,
@@ -53,6 +53,7 @@ fn createInDb(db: *sqlite.Db, record: ServiceRecord) StoreError!void {
             record.http_proxy_circuit_breaker_threshold,
             record.http_proxy_circuit_breaker_timeout_ms,
             record.http_proxy_mirror_service,
+            record.peer_mode,
             record.created_at,
             record.updated_at,
         },
@@ -140,6 +141,7 @@ pub fn syncConfig(
     alloc: Allocator,
     service_name: []const u8,
     lb_policy: []const u8,
+    peer_mode: []const u8,
     routes: []const ServiceHttpRouteInput,
 ) StoreError!ServiceRecord {
     var existing = try ensure(alloc, service_name, lb_policy);
@@ -154,9 +156,9 @@ pub fn syncConfig(
         var committed = false;
         errdefer if (!committed) lease.db.exec("ROLLBACK;", .{}, .{}) catch {};
         lease.db.exec(
-            "UPDATE services SET lb_policy = ?, updated_at = ? WHERE service_name = ?;",
+            "UPDATE services SET lb_policy = ?, peer_mode = ?, updated_at = ? WHERE service_name = ?;",
             .{},
-            .{ lb_policy, now, service_name },
+            .{ lb_policy, peer_mode, now, service_name },
         ) catch return StoreError.WriteFailed;
         try service_routes.replaceInDb(lease.db, service_name, now, routes);
         try service_routes.syncDerivedFields(lease.db, service_name, now, routes);
@@ -313,6 +315,7 @@ test "syncConfig updates proxy policy without changing vip" {
         alloc,
         "api",
         "consistent_hash",
+        "off",
         &.{
             .{
                 .route_name = "default",
@@ -337,4 +340,32 @@ test "syncConfig updates proxy policy without changing vip" {
     try std.testing.expectEqual(@as(?i64, 8080), updated.http_proxy_target_port);
     try std.testing.expectEqual(@as(?bool, false), updated.http_proxy_preserve_host);
     try std.testing.expectEqualStrings("api-shadow", updated.http_proxy_mirror_service.?);
+}
+
+test "syncConfig persists peer_mode round-trip" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+
+    const alloc = std.testing.allocator;
+
+    // initial create defaults to "off" (column default).
+    {
+        const first = try ensure(alloc, "billing", "consistent_hash");
+        defer first.deinit(alloc);
+    }
+
+    // flip to "require" via syncConfig.
+    const updated = try syncConfig(alloc, "billing", "consistent_hash", "require", &.{});
+    defer updated.deinit(alloc);
+    try std.testing.expectEqualStrings("require", updated.peer_mode.?);
+
+    // re-read via get to confirm persistence.
+    const reread = try get(alloc, "billing");
+    defer reread.deinit(alloc);
+    try std.testing.expectEqualStrings("require", reread.peer_mode.?);
+
+    // flip back to "warn".
+    const downgraded = try syncConfig(alloc, "billing", "consistent_hash", "warn", &.{});
+    defer downgraded.deinit(alloc);
+    try std.testing.expectEqualStrings("warn", downgraded.peer_mode.?);
 }

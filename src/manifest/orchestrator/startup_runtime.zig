@@ -162,10 +162,12 @@ pub fn syncServiceDefinitions(
             for (route_inputs.items) |route| if (route.backend_services.len > 0) alloc.free(route.backend_services);
         }
         if (route_alloc_failed) continue;
+        const peer_mode_label = if (svc.tls) |tls| tls.peer.label() else "off";
         const record = store.syncServiceConfig(
             alloc,
             svc.name,
             "consistent_hash",
+            peer_mode_label,
             route_inputs.items,
         ) catch |err| {
             log.warn("orchestrator: failed to sync service definition for {s}: {}", .{ svc.name, err });
