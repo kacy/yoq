@@ -13,6 +13,14 @@ pub const StateChangeHook = *const fn () void;
 pub const drain_timeout_ms: u64 = 5000;
 const drain_poll_interval_ms: u64 = 10;
 
+/// upper bound on concurrent L7 proxy connections. each connection is a
+/// detached thread; without this cap a connection flood spawns threads
+/// until the OS thread/fd limit is hit. mirrors the API server's
+/// `max_connections` guard (src/api/server/connection_runtime.zig). at the
+/// cap, new connections are accepted and immediately closed so the kernel
+/// accept queue keeps draining rather than backing up.
+pub const max_connections: u32 = 1024;
+
 pub const Snapshot = struct {
     enabled: bool,
     running: bool,
@@ -301,10 +309,12 @@ fn acceptLoop(alloc: std.mem.Allocator) void {
             break;
         }
 
-        mutex.lockUncancelable(std.Options.debug_io);
-        accepted_connections_total += 1;
-        active_connections += 1;
-        mutex.unlock(std.Options.debug_io);
+        // shed load at the cap: close immediately rather than spawn an
+        // unbounded number of worker threads under a connection flood.
+        if (!admitConnection()) {
+            linux_platform.posix.close(client_fd);
+            continue;
+        }
 
         const thread = std.Thread.spawn(.{}, connectionWorker, .{ alloc, client_fd }) catch {
             mutex.lockUncancelable(std.Options.debug_io);
@@ -316,6 +326,19 @@ fn acceptLoop(alloc: std.mem.Allocator) void {
         };
         thread.detach();
     }
+}
+
+/// count an accepted connection and decide whether to admit it. always bumps
+/// `accepted_connections_total`; admits (and bumps `active_connections`) only
+/// when below `max_connections`. returns false at the cap so the caller sheds
+/// the connection. mutex-guarded so it's safe under the accept loop.
+fn admitConnection() bool {
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
+    accepted_connections_total += 1;
+    if (active_connections >= max_connections) return false;
+    active_connections += 1;
+    return true;
 }
 
 fn connectionWorker(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
@@ -431,4 +454,28 @@ test "listener drain observes active connection count" {
     mutex.unlock(std.Options.debug_io);
 
     try std.testing.expect(waitForConnectionsToDrain(0));
+}
+
+test "admitConnection sheds load at the connection cap" {
+    resetForTest();
+    defer resetForTest();
+
+    // seed active_connections to one below the cap: the next admit succeeds,
+    // the one after is shed.
+    mutex.lockUncancelable(std.Options.debug_io);
+    active_connections = max_connections - 1;
+    mutex.unlock(std.Options.debug_io);
+
+    try std.testing.expect(admitConnection()); // reaches the cap
+    try std.testing.expect(!admitConnection()); // over the cap → shed
+    try std.testing.expect(!admitConnection());
+
+    // active_connections never exceeds the cap; both rejected attempts still
+    // counted toward accepted_connections_total.
+    mutex.lockUncancelable(std.Options.debug_io);
+    const active = active_connections;
+    const accepted = accepted_connections_total;
+    mutex.unlock(std.Options.debug_io);
+    try std.testing.expectEqual(max_connections, active);
+    try std.testing.expectEqual(@as(u64, 3), accepted);
 }
