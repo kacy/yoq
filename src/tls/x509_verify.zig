@@ -63,7 +63,18 @@ pub const Verified = struct {
     peer_san_uris: []const []const u8,
 };
 
-const max_san_uris = 8;
+pub const max_san_uris = 32;
+
+/// bounds-checked slice of `buf[start .. start + len]`. every length in a DER
+/// cert is attacker-controlled, so a raw `buf[pos .. pos + hdr.length]` would
+/// panic (ReleaseSafe) on a malformed cert — i.e. a remote DoS on the handshake
+/// thread. routing every length-driven slice through this turns that into a
+/// clean `error.InvalidCert`. the subtraction form avoids `start + len`
+/// overflow.
+fn sliceChecked(buf: []const u8, start: usize, len: usize) Error![]const u8 {
+    if (start > buf.len or len > buf.len - start) return Error.InvalidCert;
+    return buf[start .. start + len];
+}
 
 pub fn parseDer(der: []const u8, san_buf: *[max_san_uris][]const u8) Error!Parsed {
     var pos: usize = 0;
@@ -74,26 +85,26 @@ pub fn parseDer(der: []const u8, san_buf: *[max_san_uris][]const u8) Error!Parse
     const tbs_hdr = x509_parse.parseAsn1Tag(der, &pos) catch return Error.InvalidCert;
     if (tbs_hdr.tag != 0x30) return Error.InvalidCert;
     const tbs_body_start = pos;
-    if (tbs_body_start + tbs_hdr.length > der.len) return Error.InvalidCert;
+    const tbs_body = try sliceChecked(der, tbs_body_start, tbs_hdr.length);
     pos += tbs_hdr.length;
     const tbs = der[tbs_start..pos];
 
     // signatureAlgorithm AlgorithmIdentifier ::= SEQUENCE { OID, params? }
     const sig_alg = x509_parse.parseAsn1Tag(der, &pos) catch return Error.InvalidCert;
     if (sig_alg.tag != 0x30) return Error.InvalidCert;
-    const sig_algo_body = der[pos .. pos + sig_alg.length];
+    const sig_algo_body = try sliceChecked(der, pos, sig_alg.length);
     pos += sig_alg.length;
     const sig_oid = extractFirstOid(sig_algo_body) catch return Error.InvalidCert;
 
     // signatureValue BIT STRING
     const sig_bs = x509_parse.parseAsn1Tag(der, &pos) catch return Error.InvalidCert;
     if (sig_bs.tag != 0x03) return Error.InvalidCert;
-    if (pos + sig_bs.length > der.len) return Error.InvalidCert;
-    if (sig_bs.length == 0 or der[pos] != 0x00) return Error.InvalidCert; // unused-bits byte
-    const sig_der = der[pos + 1 .. pos + sig_bs.length];
+    const sig_bs_body = try sliceChecked(der, pos, sig_bs.length);
+    if (sig_bs_body.len == 0 or sig_bs_body[0] != 0x00) return Error.InvalidCert; // unused-bits byte
+    const sig_der = sig_bs_body[1..];
 
     var inner = TbsFields{};
-    try parseTbsFields(der[tbs_body_start .. tbs_body_start + tbs_hdr.length], &inner, san_buf);
+    try parseTbsFields(tbs_body, &inner, san_buf);
 
     return .{
         .tbs = tbs,
@@ -112,8 +123,7 @@ fn extractFirstOid(seq_body: []const u8) ![]const u8 {
     var pos: usize = 0;
     const hdr = try x509_parse.parseAsn1Tag(seq_body, &pos);
     if (hdr.tag != 0x06) return Error.InvalidCert;
-    if (pos + hdr.length > seq_body.len) return Error.InvalidCert;
-    return seq_body[pos .. pos + hdr.length];
+    return sliceChecked(seq_body, pos, hdr.length);
 }
 
 /// verify a leaf cert is signed by `ca_cert_pem`, is currently valid, and
@@ -205,31 +215,31 @@ fn parseTbsFields(body: []const u8, out: *TbsFields, san_buf: *[max_san_uris][]c
     // issuer Name SEQUENCE
     const issuer_hdr = x509_parse.parseAsn1Tag(body, &pos) catch return Error.InvalidCert;
     if (issuer_hdr.tag != 0x30) return Error.InvalidCert;
-    out.issuer_cn = try extractCnFromName(body[pos .. pos + issuer_hdr.length]);
+    out.issuer_cn = try extractCnFromName(try sliceChecked(body, pos, issuer_hdr.length));
     pos += issuer_hdr.length;
 
     // validity SEQUENCE { notBefore, notAfter }
     const validity_hdr = x509_parse.parseAsn1Tag(body, &pos) catch return Error.InvalidCert;
     if (validity_hdr.tag != 0x30) return Error.InvalidCert;
     var v_pos: usize = 0;
-    const validity_body = body[pos .. pos + validity_hdr.length];
+    const validity_body = try sliceChecked(body, pos, validity_hdr.length);
     const nb_hdr = x509_parse.parseAsn1Tag(validity_body, &v_pos) catch return Error.InvalidCert;
-    out.not_before = try parseTimeBytes(validity_body[v_pos .. v_pos + nb_hdr.length], nb_hdr.tag);
+    out.not_before = try parseTimeBytes(try sliceChecked(validity_body, v_pos, nb_hdr.length), nb_hdr.tag);
     v_pos += nb_hdr.length;
     const na_hdr = x509_parse.parseAsn1Tag(validity_body, &v_pos) catch return Error.InvalidCert;
-    out.not_after = try parseTimeBytes(validity_body[v_pos .. v_pos + na_hdr.length], na_hdr.tag);
+    out.not_after = try parseTimeBytes(try sliceChecked(validity_body, v_pos, na_hdr.length), na_hdr.tag);
     pos += validity_hdr.length;
 
     // subject Name SEQUENCE
     const subject_hdr = x509_parse.parseAsn1Tag(body, &pos) catch return Error.InvalidCert;
     if (subject_hdr.tag != 0x30) return Error.InvalidCert;
-    out.subject_cn = try extractCnFromName(body[pos .. pos + subject_hdr.length]);
+    out.subject_cn = try extractCnFromName(try sliceChecked(body, pos, subject_hdr.length));
     pos += subject_hdr.length;
 
     // subjectPublicKeyInfo SEQUENCE
     const spki_hdr = x509_parse.parseAsn1Tag(body, &pos) catch return Error.InvalidCert;
     if (spki_hdr.tag != 0x30) return Error.InvalidCert;
-    out.public_key_point = try extractEcPointFromSpki(body[pos .. pos + spki_hdr.length]);
+    out.public_key_point = try extractEcPointFromSpki(try sliceChecked(body, pos, spki_hdr.length));
     pos += spki_hdr.length;
 
     // extensions [3] EXPLICIT — optional. there can be other optional fields
@@ -238,9 +248,10 @@ fn parseTbsFields(body: []const u8, out: *TbsFields, san_buf: *[max_san_uris][]c
     while (pos < body.len) {
         const tag = body[pos];
         const hdr = x509_parse.parseAsn1Tag(body, &pos) catch return Error.InvalidCert;
+        const ext_slice = try sliceChecked(body, pos, hdr.length);
         if (tag == 0xA3) {
             // [3] EXPLICIT extensions
-            try extractSanUrisFromExtensions(body[pos .. pos + hdr.length], out, san_buf);
+            try extractSanUrisFromExtensions(ext_slice, out, san_buf);
         }
         pos += hdr.length;
     }
@@ -255,7 +266,7 @@ fn extractCnFromName(name_body: []const u8) Error![]const u8 {
             pos += rdn_hdr.length;
             continue;
         }
-        const rdn_body = name_body[pos .. pos + rdn_hdr.length];
+        const rdn_body = try sliceChecked(name_body, pos, rdn_hdr.length);
         pos += rdn_hdr.length;
 
         var rp: usize = 0;
@@ -265,18 +276,18 @@ fn extractCnFromName(name_body: []const u8) Error![]const u8 {
                 rp += atv_hdr.length;
                 continue;
             }
-            const atv_body = rdn_body[rp .. rp + atv_hdr.length];
+            const atv_body = try sliceChecked(rdn_body, rp, atv_hdr.length);
             rp += atv_hdr.length;
 
             var ap: usize = 0;
             const oid_hdr = x509_parse.parseAsn1Tag(atv_body, &ap) catch return Error.InvalidCert;
             if (oid_hdr.tag != 0x06) continue;
-            const oid_bytes = atv_body[ap .. ap + oid_hdr.length];
+            const oid_bytes = try sliceChecked(atv_body, ap, oid_hdr.length);
             ap += oid_hdr.length;
             if (!oidEquals(oid_bytes, &oid_common_name)) continue;
             const val_hdr = x509_parse.parseAsn1Tag(atv_body, &ap) catch return Error.InvalidCert;
             // utf8String (0x0C), printableString (0x13), or ia5String (0x16) are all fine.
-            return atv_body[ap .. ap + val_hdr.length];
+            return sliceChecked(atv_body, ap, val_hdr.length);
         }
     }
     return Error.InvalidCert;
@@ -290,8 +301,9 @@ fn extractEcPointFromSpki(spki_body: []const u8) Error![]const u8 {
     pos += alg.length;
     const bs = x509_parse.parseAsn1Tag(spki_body, &pos) catch return Error.InvalidCert;
     if (bs.tag != 0x03) return Error.InvalidCert;
-    if (bs.length == 0 or spki_body[pos] != 0x00) return Error.InvalidCert; // unused-bits byte
-    return spki_body[pos + 1 .. pos + bs.length];
+    const bs_body = try sliceChecked(spki_body, pos, bs.length);
+    if (bs_body.len == 0 or bs_body[0] != 0x00) return Error.InvalidCert; // unused-bits byte
+    return bs_body[1..];
 }
 
 fn extractSanUrisFromExtensions(exts_body: []const u8, out: *TbsFields, san_buf: *[max_san_uris][]const u8) Error!void {
@@ -299,7 +311,7 @@ fn extractSanUrisFromExtensions(exts_body: []const u8, out: *TbsFields, san_buf:
     var pos: usize = 0;
     const seq = x509_parse.parseAsn1Tag(exts_body, &pos) catch return Error.InvalidCert;
     if (seq.tag != 0x30) return Error.InvalidCert;
-    const exts = exts_body[pos .. pos + seq.length];
+    const exts = try sliceChecked(exts_body, pos, seq.length);
 
     var ep: usize = 0;
     while (ep < exts.len) {
@@ -308,13 +320,13 @@ fn extractSanUrisFromExtensions(exts_body: []const u8, out: *TbsFields, san_buf:
             ep += ext.length;
             continue;
         }
-        const ext_body = exts[ep .. ep + ext.length];
+        const ext_body = try sliceChecked(exts, ep, ext.length);
         ep += ext.length;
 
         var bp: usize = 0;
         const oid_hdr = x509_parse.parseAsn1Tag(ext_body, &bp) catch return Error.InvalidCert;
         if (oid_hdr.tag != 0x06) continue;
-        const oid_bytes = ext_body[bp .. bp + oid_hdr.length];
+        const oid_bytes = try sliceChecked(ext_body, bp, oid_hdr.length);
         bp += oid_hdr.length;
 
         // skip optional critical BOOLEAN
@@ -326,7 +338,7 @@ fn extractSanUrisFromExtensions(exts_body: []const u8, out: *TbsFields, san_buf:
         // extnValue OCTET STRING
         const octets = x509_parse.parseAsn1Tag(ext_body, &bp) catch return Error.InvalidCert;
         if (octets.tag != 0x04) continue;
-        const inner = ext_body[bp .. bp + octets.length];
+        const inner = try sliceChecked(ext_body, bp, octets.length);
 
         if (oidEquals(oid_bytes, &oid_san)) {
             try fillSanUris(inner, out, san_buf);
@@ -338,18 +350,21 @@ fn fillSanUris(san_octets: []const u8, out: *TbsFields, san_buf: *[max_san_uris]
     var pos: usize = 0;
     const seq = x509_parse.parseAsn1Tag(san_octets, &pos) catch return Error.InvalidCert;
     if (seq.tag != 0x30) return Error.InvalidCert;
-    const body = san_octets[pos .. pos + seq.length];
+    const body = try sliceChecked(san_octets, pos, seq.length);
 
     var p: usize = 0;
     while (p < body.len) {
         const tag = body[p];
         const hdr = x509_parse.parseAsn1Tag(body, &p) catch return Error.InvalidCert;
+        const uri = try sliceChecked(body, p, hdr.length);
         // [6] IMPLICIT IA5String → URI in CHOICE
         if (tag == 0x86) {
-            if (out.san_count < max_san_uris) {
-                san_buf[out.san_count] = body[p .. p + hdr.length];
-                out.san_count += 1;
-            }
+            // fail closed rather than silently drop: if a cert lists more
+            // SAN URIs than we can hold, a required identity could sit past
+            // the cap and never match. reject the cert instead.
+            if (out.san_count >= max_san_uris) return Error.InvalidCert;
+            san_buf[out.san_count] = uri;
+            out.san_count += 1;
         }
         p += hdr.length;
     }
@@ -517,4 +532,74 @@ test "rejects a tampered signature" {
         Error.SignatureInvalid,
         verifyLeafAgainstCa(alloc, pem_out.items, pair.ca_pem, null, test_now),
     );
+}
+
+test "parseDer rejects truncations at every prefix length without panicking" {
+    const alloc = std.testing.allocator;
+    const pair = try mintCaAndLeaf(alloc);
+    defer alloc.free(pair.ca_pem);
+    defer alloc.free(pair.leaf_pem);
+
+    const der = try pem_mod.parseCertDer(alloc, pair.leaf_pem);
+    defer alloc.free(der);
+
+    // every truncation of a valid cert must return an error (never panic /
+    // OOB-slice). this is the core property the sliceChecked helper buys us.
+    var cut: usize = 0;
+    while (cut < der.len) : (cut += 1) {
+        var san_buf: [max_san_uris][]const u8 = undefined;
+        const result = parseDer(der[0..cut], &san_buf);
+        // a prefix of a real cert is never itself a valid cert.
+        try std.testing.expectError(Error.InvalidCert, result);
+    }
+}
+
+test "parseDer rejects a cert whose inner length fields point past the buffer" {
+    const alloc = std.testing.allocator;
+    const pair = try mintCaAndLeaf(alloc);
+    defer alloc.free(pair.ca_pem);
+    defer alloc.free(pair.leaf_pem);
+
+    const der = try pem_mod.parseCertDer(alloc, pair.leaf_pem);
+    defer alloc.free(der);
+
+    // corrupt a single byte at a time across the first 64 bytes (the header /
+    // length region). none of these should ever panic — only return an error
+    // or, for benign value flips, parse. we only assert "no crash" by virtue
+    // of the test completing.
+    var i: usize = 0;
+    while (i < @min(der.len, 64)) : (i += 1) {
+        const mutable = try alloc.dupe(u8, der);
+        defer alloc.free(mutable);
+        mutable[i] +%= 0x40; // perturb length/tag bytes
+        var san_buf: [max_san_uris][]const u8 = undefined;
+        // ignore the result; the point is it returns rather than panics.
+        _ = parseDer(mutable, &san_buf) catch {};
+    }
+}
+
+test "fillSanUris fails closed when SAN count exceeds the cap" {
+    // build a SAN extension inner (SEQUENCE OF GeneralName) with max_san_uris+1
+    // [6] IA5String URI entries, each a single 'x'. parseDer isn't exercised
+    // here — we drive fillSanUris directly with a hand-built octet string.
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+
+    const entry_count = max_san_uris + 1;
+    // inner contents: entry_count × (0x86 0x01 'x') = 3 bytes each
+    const inner_len = entry_count * 3;
+    try std.testing.expect(inner_len < 128); // single-byte DER length below
+    try buf.append(alloc, 0x30); // SEQUENCE
+    try buf.append(alloc, @intCast(inner_len));
+    var n: usize = 0;
+    while (n < entry_count) : (n += 1) {
+        try buf.append(alloc, 0x86); // [6] IA5String
+        try buf.append(alloc, 0x01); // length 1
+        try buf.append(alloc, 'x');
+    }
+
+    var out = TbsFields{};
+    var san_buf: [max_san_uris][]const u8 = undefined;
+    try std.testing.expectError(Error.InvalidCert, fillSanUris(buf.items, &out, &san_buf));
 }

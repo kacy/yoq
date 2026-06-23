@@ -34,6 +34,13 @@ const Sha384 = common.Sha384;
 const EcdsaP256 = common.EcdsaP256;
 const hash_len = common.hash_len;
 
+/// upper bound on the server's flight of handshake messages (EE + Certificate
+/// + CertVerify + Finished). real ECDSA cert chains are a few KB; 64 KB is
+/// generous. a malicious server could otherwise stream handshake records
+/// forever, growing the reassembly buffer without bound. exceeding this is a
+/// handshake failure.
+const max_handshake_bytes: usize = 64 * 1024;
+
 pub const ClientError = error{
     WriteFailed,
     ReadFailed,
@@ -220,11 +227,16 @@ fn doHandshakeInner(
     var server_finished_received = false;
     var pending: std.ArrayList(u8) = .empty;
     defer pending.deinit(alloc);
+    var total_handshake_bytes: usize = 0;
 
     while (!server_finished_received) {
         const dec = try readEncryptedRecord(alloc, fd, server_hs, &server_seq);
         defer alloc.free(dec.plaintext);
         if (dec.content_type != .handshake) return ClientError.HandshakeFailed;
+        // bound the server's handshake flight: a malicious peer could stream
+        // handshake records indefinitely, growing `pending` without limit.
+        total_handshake_bytes += dec.plaintext.len;
+        if (total_handshake_bytes > max_handshake_bytes) return ClientError.HandshakeFailed;
         pending.appendSlice(alloc, dec.plaintext) catch return ClientError.AllocFailed;
 
         var pos: usize = 0;
@@ -445,7 +457,7 @@ fn verifyServerCertVerify(
     sig_der: []const u8,
     transcript_hash: [hash_len]u8,
 ) ClientError!void {
-    var san_buf: [8][]const u8 = undefined;
+    var san_buf: [x509_verify.max_san_uris][]const u8 = undefined;
     const parsed = x509_verify.parseDer(server_cert_der, &san_buf) catch return ClientError.SignatureInvalid;
     if (parsed.public_key_point.len != 65) return ClientError.SignatureInvalid;
 
