@@ -49,6 +49,7 @@ fn migrateServices(db: *sqlite.Db) void {
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_retry_on_5xx INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_circuit_breaker_threshold INTEGER;") catch {};
     addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN http_proxy_circuit_breaker_timeout_ms INTEGER;") catch {};
+    addColumnIfMissing(db, "ALTER TABLE services ADD COLUMN peer_mode TEXT DEFAULT 'off';") catch {};
     createTableIfMissing(db,
         \\CREATE TABLE IF NOT EXISTS service_http_routes (
         \\    service_name TEXT NOT NULL,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const spec = @import("../manifest/spec.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -87,6 +88,9 @@ pub const ServiceDefinition = struct {
     http_proxy_circuit_breaker_threshold: ?u8 = null,
     http_proxy_circuit_breaker_timeout_ms: ?u32 = null,
     http_proxy_mirror_service: ?[]const u8 = null,
+    /// service-to-service mTLS posture for traffic *to* this service.
+    /// copied verbatim from the manifest's `service.<name>.tls.peer`.
+    peer_mode: spec.TlsConfig.PeerMode = .off,
 };
 
 pub const HttpRouteDefinition = struct {
@@ -192,6 +196,7 @@ pub const ServiceSnapshot = struct {
     http_proxy_circuit_breaker_threshold: ?u8,
     http_proxy_circuit_breaker_timeout_ms: ?u32,
     http_proxy_mirror_service: ?[]const u8,
+    peer_mode: spec.TlsConfig.PeerMode = .off,
     total_endpoints: usize,
     eligible_endpoints: usize,
     healthy_endpoints: usize,
@@ -293,6 +298,7 @@ const ServiceState = struct {
     http_proxy_circuit_breaker_threshold: ?u8 = null,
     http_proxy_circuit_breaker_timeout_ms: ?u32 = null,
     http_proxy_mirror_service: ?[]const u8 = null,
+    peer_mode: spec.TlsConfig.PeerMode = .off,
     endpoints: std.ArrayList(EndpointState) = .empty,
     last_reconcile_status: ReconcileStatus = .idle,
     last_reconcile_error: ?[]const u8 = null,
@@ -673,6 +679,7 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
         .http_proxy_circuit_breaker_threshold = service.http_proxy_circuit_breaker_threshold,
         .http_proxy_circuit_breaker_timeout_ms = service.http_proxy_circuit_breaker_timeout_ms,
         .http_proxy_mirror_service = if (service.http_proxy_mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
+        .peer_mode = service.peer_mode,
         .total_endpoints = total_endpoints,
         .eligible_endpoints = eligible_endpoints,
         .healthy_endpoints = healthy_endpoints,
@@ -812,6 +819,7 @@ fn assignCompatProxyFields(alloc: Allocator, service: *ServiceState, definition:
     service.http_proxy_circuit_breaker_threshold = definition.http_proxy_circuit_breaker_threshold;
     service.http_proxy_circuit_breaker_timeout_ms = definition.http_proxy_circuit_breaker_timeout_ms;
     try replaceOptionalOwned(alloc, &service.http_proxy_mirror_service, definition.http_proxy_mirror_service);
+    service.peer_mode = definition.peer_mode;
 }
 
 fn isEndpointEligible(endpoint: *const EndpointState) bool {

@@ -79,6 +79,7 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    http_proxy_http2_idle_timeout_ms INTEGER,
         \\    http_proxy_target_port INTEGER,
         \\    http_proxy_preserve_host INTEGER,
+        \\    peer_mode TEXT DEFAULT 'off',
         \\    created_at INTEGER NOT NULL,
         \\    updated_at INTEGER NOT NULL
         \\);

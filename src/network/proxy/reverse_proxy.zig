@@ -19,6 +19,8 @@ const router = @import("router.zig");
 const upstream_mod = @import("upstream.zig");
 const upstream_pool = @import("upstream_pool.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
+const client_dial = @import("../../tls/client_dial.zig");
+const store_mod = @import("../../state/store.zig");
 
 const proxy_loop_header = "X-Yoq-Proxy";
 const x_forwarded_for_header = "X-Forwarded-For";
@@ -616,6 +618,10 @@ pub const ReverseProxy = struct {
         const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
         defer self.allocator.free(request);
 
+        if (upstream.peer_mode != .off) {
+            return self.forwardSingleAttemptMtls(request, plan, upstream);
+        }
+
         // prefer a pooled, kept-alive connection; dial a fresh one on a miss.
         var from_pool = true;
         var fd = upstream_pool.checkout(upstream.endpoint_id, upstream.address, upstream.port) orelse blk: {
@@ -653,7 +659,127 @@ pub const ReverseProxy = struct {
         }
         return result.bytes;
     }
+
+    /// mTLS-specific dial + request/response. always opens a fresh
+    /// connection (TLS sessions hold encryption state and can't be pooled
+    /// alongside bare-fd siblings keyed on the same address). on `.warn`
+    /// a missing/invalid cluster CA logs and downgrades to plaintext;
+    /// `.require` returns an error in the same case so the caller can
+    /// surface the failure (PR 5 finale will plug this into proper
+    /// observability).
+    fn forwardSingleAttemptMtls(
+        self: *const ReverseProxy,
+        request: []const u8,
+        plan: *const ForwardPlan,
+        upstream: *const upstream_mod.Upstream,
+    ) ![]u8 {
+        const ca_rec_opt = store_mod.getClusterCa(self.allocator) catch null;
+        const ca_rec = ca_rec_opt orelse {
+            if (upstream.peer_mode == .require) return error.ClusterCaMissing;
+            log.warn("mtls upstream {s}: cluster CA not seeded, downgrading to plain dial", .{upstream.address});
+            return self.forwardPlainAttempt(request, plan, upstream);
+        };
+        defer ca_rec.deinit(self.allocator);
+
+        var outcome = client_dial.dial(std.Options.debug_io, self.allocator, .{
+            .address = upstream.address,
+            .port = upstream.port,
+            .connect_timeout_ms = plan.route.connect_timeout_ms,
+            .ca_cert_pem = ca_rec.cert_pem,
+            .server_name = upstream.service,
+            .now_unix = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
+        }) catch |err| return err;
+
+        switch (outcome) {
+            .bare => |fd| {
+                // dial returned plaintext somehow (shouldn't happen when
+                // ca_cert_pem is set, but be defensive).
+                defer linux_platform.posix.close(fd);
+                return error.HandshakeFailed;
+            },
+            .session => |*sess| {
+                defer {
+                    sess.deinit();
+                    linux_platform.posix.close(sess.fd);
+                }
+
+                _ = sess.write(request) catch return error.SendFailed;
+                return try readResponseFromSession(self.allocator, sess, self.max_response_bytes);
+            },
+        }
+    }
+
+    /// fallback used by the mTLS `.warn` path when no cluster CA is
+    /// available — runs the plaintext dial/pool path so the connection
+    /// at least succeeds. equivalent to the legacy non-mTLS leg of
+    /// forwardSingleAttempt minus the request build (caller already has
+    /// the bytes).
+    fn forwardPlainAttempt(
+        self: *const ReverseProxy,
+        request: []const u8,
+        plan: *const ForwardPlan,
+        upstream: *const upstream_mod.Upstream,
+    ) ![]u8 {
+        var from_pool = true;
+        var fd = upstream_pool.checkout(upstream.endpoint_id, upstream.address, upstream.port) orelse blk: {
+            from_pool = false;
+            const dialed = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
+            upstream_pool.noteDialed();
+            break :blk dialed;
+        };
+
+        socket_helpers.writeAll(fd, request) catch {
+            upstream_pool.discard(fd);
+            if (!from_pool) return error.SendFailed;
+            from_pool = false;
+            fd = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
+            upstream_pool.noteDialed();
+            socket_helpers.writeAll(fd, request) catch {
+                upstream_pool.discard(fd);
+                return error.SendFailed;
+            };
+        };
+
+        const result = readResponse(self.allocator, fd, self.max_response_bytes, plan.method == .HEAD) catch |err| {
+            upstream_pool.discard(fd);
+            return err;
+        };
+
+        if (result.reusable) {
+            upstream_pool.release(upstream.endpoint_id, upstream.address, upstream.port, fd);
+        } else {
+            upstream_pool.discard(fd);
+        }
+        return result.bytes;
+    }
 };
+
+/// drain an mTLS session into a single buffer up to `max_bytes`. mTLS
+/// connections aren't pooled, so we don't need the framing-aware "is
+/// this connection still reusable" logic that the bare-fd readResponse
+/// provides — we just read until the peer closes (or `PeerClosed`
+/// surfaces via the session) and hand back the bytes. PeerClosed is
+/// the orderly EOF signal; any other read error propagates.
+fn readResponseFromSession(
+    alloc: std.mem.Allocator,
+    sess: anytype,
+    max_bytes: usize,
+) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    var chunk: [8192]u8 = undefined;
+    while (true) {
+        const n = sess.read(&chunk) catch |err| {
+            if (err == error.PeerClosed) break;
+            return err;
+        };
+        if (n == 0) break;
+        if (out.items.len + n > max_bytes) return error.ResponseTooLarge;
+        try out.appendSlice(alloc, chunk[0..n]);
+    }
+    return try out.toOwnedSlice(alloc);
+}
 
 fn cloneMirrorTask(
     alloc: std.mem.Allocator,
@@ -4760,4 +4886,53 @@ test "handleConnection rejects looped request after listener restart" {
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "{\"error\":\"proxy loop detected\"}") != null);
     linux_platform.posix.close(client_fd);
     server_thread.join();
+}
+
+// --- readResponseFromSession ---
+//
+// the mTLS read loop drains a session-shaped reader until either the peer
+// closes (surfaced as ClientSession.read's `PeerClosed`) or `max_bytes` is
+// exceeded. exercised here via a small fake session that implements the
+// duck-typed `.read([]u8) !usize` shape — keeps the test independent of
+// the live TLS stack while still proving the loop's framing.
+
+const FakeSession = struct {
+    chunks: []const []const u8,
+    index: usize = 0,
+    closed: bool = false,
+
+    fn read(self: *FakeSession, buf: []u8) !usize {
+        if (self.closed) return error.PeerClosed;
+        if (self.index >= self.chunks.len) {
+            self.closed = true;
+            return error.PeerClosed;
+        }
+        const chunk = self.chunks[self.index];
+        self.index += 1;
+        const n = @min(buf.len, chunk.len);
+        @memcpy(buf[0..n], chunk[0..n]);
+        return n;
+    }
+};
+
+test "readResponseFromSession concatenates chunks until peer closes" {
+    var sess = FakeSession{ .chunks = &.{ "HTTP/1.1 200 OK\r\n", "Content-Length: 2\r\n\r\nok" } };
+    const body = try readResponseFromSession(std.testing.allocator, &sess, 64 * 1024);
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", body);
+}
+
+test "readResponseFromSession returns ResponseTooLarge when max_bytes is exceeded" {
+    var sess = FakeSession{ .chunks = &.{ "AAAA", "BBBB", "CCCC" } };
+    try std.testing.expectError(
+        error.ResponseTooLarge,
+        readResponseFromSession(std.testing.allocator, &sess, 6),
+    );
+}
+
+test "readResponseFromSession returns empty buffer on immediate close" {
+    var sess = FakeSession{ .chunks = &.{} };
+    const body = try readResponseFromSession(std.testing.allocator, &sess, 64);
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqual(@as(usize, 0), body.len);
 }

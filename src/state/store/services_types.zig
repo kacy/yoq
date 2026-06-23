@@ -23,6 +23,11 @@ pub const ServiceRecord = struct {
     http_proxy_circuit_breaker_threshold: ?i64 = null,
     http_proxy_circuit_breaker_timeout_ms: ?i64 = null,
     http_proxy_mirror_service: ?[]const u8 = null,
+    /// service-to-service mTLS posture. textual: "off" | "warn" | "require".
+    /// null means "off" (the column default), which keeps existing record
+    /// literals working without churn. when non-null the slice is
+    /// allocator-owned and freed in deinit.
+    peer_mode: ?[]const u8 = null,
     created_at: i64,
     updated_at: i64,
 
@@ -36,11 +41,12 @@ pub const ServiceRecord = struct {
         if (self.http_proxy_path_prefix) |path_prefix| alloc.free(path_prefix);
         if (self.http_proxy_rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
         if (self.http_proxy_mirror_service) |mirror_service| alloc.free(mirror_service);
+        if (self.peer_mode) |peer_mode| alloc.free(peer_mode);
     }
 };
 
 pub const service_columns =
-    "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_rewrite_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_http2_idle_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, http_proxy_retry_on_5xx, http_proxy_circuit_breaker_threshold, http_proxy_circuit_breaker_timeout_ms, http_proxy_mirror_service, created_at, updated_at";
+    "service_name, vip_address, lb_policy, http_proxy_host, http_proxy_path_prefix, http_proxy_rewrite_prefix, http_proxy_retries, http_proxy_connect_timeout_ms, http_proxy_request_timeout_ms, http_proxy_http2_idle_timeout_ms, http_proxy_target_port, http_proxy_preserve_host, http_proxy_retry_on_5xx, http_proxy_circuit_breaker_threshold, http_proxy_circuit_breaker_timeout_ms, http_proxy_mirror_service, peer_mode, created_at, updated_at";
 
 pub const ServiceRow = struct {
     service_name: sqlite.Text,
@@ -59,6 +65,7 @@ pub const ServiceRow = struct {
     http_proxy_circuit_breaker_threshold: ?i64,
     http_proxy_circuit_breaker_timeout_ms: ?i64,
     http_proxy_mirror_service: ?sqlite.Text,
+    peer_mode: ?sqlite.Text,
     created_at: i64,
     updated_at: i64,
 };
@@ -82,6 +89,7 @@ pub fn rowToServiceRecord(row: ServiceRow, http_routes: []const ServiceHttpRoute
         .http_proxy_circuit_breaker_threshold = row.http_proxy_circuit_breaker_threshold,
         .http_proxy_circuit_breaker_timeout_ms = row.http_proxy_circuit_breaker_timeout_ms,
         .http_proxy_mirror_service = if (row.http_proxy_mirror_service) |mirror_service| mirror_service.data else null,
+        .peer_mode = if (row.peer_mode) |peer_mode| peer_mode.data else null,
         .created_at = row.created_at,
         .updated_at = row.updated_at,
     };
