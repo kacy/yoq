@@ -643,6 +643,23 @@ pub fn build(b: *std.Build) void {
             hardening_test_step.dependOn(step);
         }
 
+        // fuzz-tls: lives in src/ so the tls modules' relative imports resolve.
+        // the record layer pulls in linux_platform; no sqlite needed.
+        {
+            const step = b.step("fuzz-tls", "Fuzz TLS x509 + handshake parsers");
+            const mod = b.createModule(.{
+                .root_source_file = b.path("src/test_fuzz_tls.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            addLinuxImport(mod, b);
+            const comp = b.addTest(.{ .root_module = mod });
+            const run = createArtifactRunner(b, comp, "run fuzz-tls", false);
+            step.dependOn(&run.step);
+            hardening_test_step.dependOn(step);
+        }
+
         // fuzz-wireguard: lives in src/ so wireguard.zig's relative imports resolve
         {
             const step = b.step("fuzz-wireguard", "Fuzz WireGuard handshake");
