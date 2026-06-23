@@ -133,7 +133,9 @@ fn writeTarFromDir(
     }
 
     try file_writer.interface.flush();
-    tar_file.sync(std.Options.debug_io) catch {};
+    // a failed fsync means the layer tar may not be durable; surface it
+    // rather than silently hashing a possibly-unflushed file.
+    tar_file.sync(std.Options.debug_io) catch |err| log.warn("layer tar fsync failed: {}", .{err});
 
     var hash_file = try cwd().openFile(std.Options.debug_io, tar_path, .{});
     defer hash_file.close(std.Options.debug_io);

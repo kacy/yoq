@@ -273,7 +273,9 @@ fn downloadBlobUrlToStore(
         tmp_file.writeStreamingAll(std.Options.debug_io, chunk_buf[0..bytes_read]) catch return error.NetworkError;
     }
 
-    tmp_file.sync(std.Options.debug_io) catch {};
+    // surface a failed fsync — the digest verify below still guards
+    // correctness, but a silent sync failure hides a durability problem.
+    tmp_file.sync(std.Options.debug_io) catch |err| log.warn("blob download fsync failed: {}", .{err});
     try verifyFileDigest(tmp_path, expected);
     blob_store.commitTempBlob(tmp_path, expected) catch return error.NetworkError;
     committed = true;

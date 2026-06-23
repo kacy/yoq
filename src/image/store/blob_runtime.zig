@@ -51,7 +51,7 @@ pub fn putBlobFromFile(source_path: []const u8, expected_digest: digest_support.
             break;
         };
     }
-    dest_file.sync(std.Options.debug_io) catch {};
+    dest_file.sync(std.Options.debug_io) catch |err| log.warn("blob copy fsync failed: {}", .{err});
 
     if (!write_ok) {
         cwd().deleteFile(std.Options.debug_io, tmp_path) catch {};
@@ -89,7 +89,7 @@ fn writeToStore(data: []const u8, digest: digest_support.Digest) types.BlobError
         cwd().deleteFile(std.Options.debug_io, tmp_path) catch {};
         return types.BlobError.WriteFailed;
     };
-    file.sync(std.Options.debug_io) catch {};
+    file.sync(std.Options.debug_io) catch |err| log.warn("blob store fsync failed: {}", .{err});
 
     renameTempToBlob(tmp_path, digest) catch return types.BlobError.WriteFailed;
 }
