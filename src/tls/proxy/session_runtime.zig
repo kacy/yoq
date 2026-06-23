@@ -19,6 +19,11 @@ const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
 const hash_len = Sha384.digest_length;
 
+/// upper bound on a client's mTLS auth flight (Certificate + CertificateVerify
+/// + Finished). real client cert chains are a few KB; 64 KB is generous.
+/// prevents a malicious client from streaming handshake records without bound.
+const max_client_auth_bytes: usize = 64 * 1024;
+
 /// optional mTLS configuration for the server-side handshake. when set,
 /// the server emits a CertificateRequest, requires (or merely inspects)
 /// a client cert in response, and verifies it against `trust_ca_pem`.
@@ -451,10 +456,15 @@ fn acceptClientAuthAndFinished(
 
     var saw_finished = false;
     var saw_certificate = false;
+    var total_client_auth_bytes: usize = 0;
 
     while (!saw_finished) {
         const plaintext = try readOneEncryptedHandshakeRecordAlloc(alloc, client_fd, keys, client_seq);
         defer alloc.free(plaintext);
+        // bound the client's auth flight (Certificate + CertVerify + Finished):
+        // a malicious client could otherwise stream handshake records forever.
+        total_client_auth_bytes += plaintext.len;
+        if (total_client_auth_bytes > max_client_auth_bytes) return error.InvalidClientFinished;
         try pending.appendSlice(alloc, plaintext);
 
         var pos: usize = 0;
@@ -512,7 +522,7 @@ fn acceptClientAuthAndFinished(
 
         // surface the identity (use the SAN URI if present, fall back to
         // subject CN) so callers can audit / authorize.
-        var san_buf: [8][]const u8 = undefined;
+        var san_buf: [x509_verify.max_san_uris][]const u8 = undefined;
         const parsed = x509_verify.parseDer(client_cert_der.?, &san_buf) catch return error.InvalidClientFinished;
         if (parsed.san_uris.len > 0) {
             peer_identity_out.* = try alloc.dupe(u8, parsed.san_uris[0]);
@@ -556,7 +566,7 @@ fn readOneEncryptedHandshakeRecordAlloc(
 }
 
 fn verifyClientCertVerify(client_cert_der: []const u8, sig_der: []const u8, transcript_hash: [hash_len]u8) !void {
-    var san_buf: [8][]const u8 = undefined;
+    var san_buf: [x509_verify.max_san_uris][]const u8 = undefined;
     const parsed = x509_verify.parseDer(client_cert_der, &san_buf) catch return error.UntrustedClientCert;
     if (parsed.public_key_point.len != 65) return error.UntrustedClientCert;
     var sec1: [65]u8 = undefined;

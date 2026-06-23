@@ -37,7 +37,7 @@ pub fn run(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) Error!voi
     // parse the leaf to surface the SAN URI alongside the row's stored
     // timestamps. parse errors are non-fatal — we still show what we
     // have from the row.
-    var san_buf: [8][]const u8 = undefined;
+    var san_buf: [x509_verify.max_san_uris][]const u8 = undefined;
     var san: ?[]const u8 = null;
     var subject_cn: ?[]const u8 = null;
     var parsed_der: ?[]u8 = null;
