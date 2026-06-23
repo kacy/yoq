@@ -31,6 +31,15 @@ pub const IntegerDecode = struct {
 };
 
 const dynamic_table_default_max_size = 4096;
+
+// DoS bounds for decoding attacker-controlled header blocks. HPACK integers
+// and string lengths are otherwise unbounded; a malicious peer could drive a
+// near-usize length (overflowing the `start + value` arithmetic in
+// decodeString → panic) or list enough headers to exhaust memory.
+const max_hpack_integer: usize = 1 << 24; // 16 MiB — far above any real header
+const max_headers_per_block: usize = 256; // generous; real requests are <~100
+const max_decoded_header_bytes: usize = 1 << 20; // 1 MiB total per block
+const max_dynamic_table_size: usize = 1 << 20; // cap a peer's table-size update
 const static_table = [_]StaticHeaderField{
     .{ .name = ":authority", .value = "" },
     .{ .name = ":method", .value = "GET" },
@@ -117,6 +126,9 @@ pub fn decodeInteger(buf: []const u8, prefix_bits: u3) DecodeError!IntegerDecode
         const payload = byte & 0x7f;
         if (shift >= @bitSizeOf(usize)) return error.IntegerOverflow;
         value += (@as(usize, payload) << @intCast(shift));
+        // bound the running value so a crafted continuation can't drive it
+        // near usize-max (which would overflow downstream length arithmetic).
+        if (value > max_hpack_integer) return error.IntegerOverflow;
         consumed += 1;
         if ((byte & 0x80) == 0) break;
         shift += 7;
@@ -153,12 +165,19 @@ pub fn decodeHeaderBlock(alloc: std.mem.Allocator, block: []const u8) Error!std.
     var dynamic_table: DynamicTable = .{};
     defer dynamic_table.deinit(alloc);
 
+    // running total of decoded name+value bytes — bounds total memory even
+    // when individual fields are small but numerous.
+    var decoded_bytes: usize = 0;
+
     var pos: usize = 0;
     while (pos < block.len) {
+        if (headers.items.len >= max_headers_per_block) return error.IntegerOverflow;
         const byte = block[pos];
         if ((byte & 0x80) != 0) {
             const index_info = try decodeInteger(block[pos..], 7);
             const field = lookupHeader(index_info.value, &dynamic_table) orelse return error.InvalidIndex;
+            decoded_bytes += field.name.len + field.value.len;
+            if (decoded_bytes > max_decoded_header_bytes) return error.IntegerOverflow;
             try headers.append(alloc, .{
                 .name = try alloc.dupe(u8, field.name),
                 .value = try alloc.dupe(u8, field.value),
@@ -195,6 +214,9 @@ pub fn decodeHeaderBlock(alloc: std.mem.Allocator, block: []const u8) Error!std.
             break :blk literal.value;
         };
         errdefer alloc.free(value);
+
+        decoded_bytes += name.len + value.len;
+        if (decoded_bytes > max_decoded_header_bytes) return error.IntegerOverflow;
 
         try headers.append(alloc, .{ .name = name, .value = value });
         if (incremental_indexing) {
@@ -243,7 +265,8 @@ const DynamicTable = struct {
     }
 
     fn updateMaxSize(self: *DynamicTable, alloc: std.mem.Allocator, new_max_size: usize) void {
-        self.max_size = new_max_size;
+        // clamp a peer's table-size update so it can't pin large memory.
+        self.max_size = @min(new_max_size, max_dynamic_table_size);
         self.evictToLimit(alloc);
     }
 
@@ -498,4 +521,34 @@ test "decodeHeaderBlock reuses incremental dynamic entries" {
     try std.testing.expectEqualStrings("ok", headers.items[0].value);
     try std.testing.expectEqualStrings("x-test", headers.items[1].name);
     try std.testing.expectEqualStrings("ok", headers.items[1].value);
+}
+
+test "decodeInteger rejects a value above the cap" {
+    // 5-bit prefix all-ones, then continuation bytes that accumulate past
+    // max_hpack_integer. 0xff prefix + 0xff*N continuation + terminator.
+    var buf: [16]u8 = undefined;
+    buf[0] = 0x1f; // prefix = 31 (5-bit all ones), enter continuation
+    var i: usize = 1;
+    while (i < buf.len - 1) : (i += 1) buf[i] = 0xff;
+    buf[buf.len - 1] = 0x7f; // terminator with high bits set
+    try std.testing.expectError(error.IntegerOverflow, decodeInteger(&buf, 5));
+}
+
+test "decodeHeaderBlock rejects too many headers" {
+    const alloc = std.testing.allocator;
+    // 0xbe is an indexed header (dynamic index resolving to a static-ish
+    // entry); simpler: repeat an indexed static field (0x82 = :method GET).
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(alloc);
+    var i: usize = 0;
+    while (i < max_headers_per_block + 1) : (i += 1) try block.append(alloc, 0x82);
+
+    try std.testing.expectError(error.IntegerOverflow, decodeHeaderBlock(alloc, block.items));
+}
+
+test "updateMaxSize clamps a peer's oversized table-size update" {
+    var table: DynamicTable = .{};
+    defer table.deinit(std.testing.allocator);
+    table.updateMaxSize(std.testing.allocator, 1 << 30); // 1 GiB request
+    try std.testing.expectEqual(max_dynamic_table_size, table.max_size);
 }
