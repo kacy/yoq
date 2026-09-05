@@ -6,6 +6,7 @@ const http2 = @import("http2.zig");
 const h2c_upgrade = @import("h2c_upgrade.zig");
 const proxy_helpers = @import("proxy_helpers.zig");
 const socket_helpers = @import("socket_helpers.zig");
+const transport = @import("../../tls/client_transport.zig");
 const http2_request = @import("http2_request.zig");
 const http2_response = @import("http2_response.zig");
 const proxy_policy = @import("policy.zig");
@@ -225,7 +226,8 @@ const ConnectionRouter = struct {
             );
             defer self.allocator.free(request_bytes);
 
-            const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, request_bytes) catch |connect_err| {
+            const request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms));
+            const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, request_bytes, request_deadline_at_ms) catch |connect_err| {
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
                 const failure_kind: proxy_runtime.UpstreamFailureKind = if (connect_err == error.ConnectFailed or connect_err == error.ConnectTimedOut) .connect else .send;
                 proxy_runtime.recordUpstreamFailure(failure_kind);
@@ -250,7 +252,7 @@ const ConnectionRouter = struct {
                 .backend_service = try self.allocator.dupe(u8, backend_service),
                 .upstream = upstream,
                 .upstream_fd = upstream_fd,
-                .request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms)),
+                .request_deadline_at_ms = request_deadline_at_ms,
                 .mirror = self.startMirrorSessionForUpgrade(route, upgraded),
                 .downstream_end_stream = true,
             });
@@ -331,7 +333,7 @@ const ConnectionRouter = struct {
                 .stream_id = 1,
             });
             defer rewritten.deinit(self.allocator);
-            try socket_helpers.writeAll(self.streams.items[stream_idx].upstream_fd, rewritten.bytes);
+            try socket_helpers.writeAllUntil(self.streams.items[stream_idx].upstream_fd, rewritten.bytes, deadlineAt(self.streams.items[stream_idx].request_deadline_at_ms));
             try self.consumeDownstreamBytes(rewritten.consumed);
             self.last_activity_ms = nowMs();
             return;
@@ -396,7 +398,8 @@ const ConnectionRouter = struct {
             });
             defer rewritten.deinit(self.allocator);
 
-            const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, rewritten.bytes) catch |connect_err| {
+            const request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms));
+            const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, rewritten.bytes, request_deadline_at_ms) catch |connect_err| {
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
                 const failure_kind: proxy_runtime.UpstreamFailureKind = if (connect_err == error.ConnectFailed or connect_err == error.ConnectTimedOut) .connect else .send;
                 proxy_runtime.recordUpstreamFailure(failure_kind);
@@ -422,7 +425,7 @@ const ConnectionRouter = struct {
                 .backend_service = try self.allocator.dupe(u8, backend_service),
                 .upstream = upstream,
                 .upstream_fd = upstream_fd,
-                .request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms)),
+                .request_deadline_at_ms = request_deadline_at_ms,
                 .mirror = self.startMirrorSession(route, parsed),
             });
             try self.consumeDownstreamBytes(parsed.consumed);
@@ -442,7 +445,7 @@ const ConnectionRouter = struct {
         };
         const rewritten = try rewriteFrameSequenceStreamId(self.allocator, self.downstream_buf.items, 0, 1);
         defer rewritten.deinit(self.allocator);
-        try socket_helpers.writeAll(self.streams.items[stream_idx].upstream_fd, rewritten.bytes);
+        try socket_helpers.writeAllUntil(self.streams.items[stream_idx].upstream_fd, rewritten.bytes, deadlineAt(self.streams.items[stream_idx].request_deadline_at_ms));
         if (self.streams.items[stream_idx].mirror) |*mirror| {
             self.forwardMirrorFrame(mirror, rewritten.bytes) catch {
                 proxy_runtime.recordMirrorRouteUpstreamFailure(
@@ -563,7 +566,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, "");
             defer self.allocator.free(ack);
-            try socket_helpers.writeAll(self.streams.items[session_idx].upstream_fd, ack);
+            try socket_helpers.writeAllUntil(self.streams.items[session_idx].upstream_fd, ack, deadlineAt(self.streams.items[session_idx].request_deadline_at_ms));
         }
         try self.discardUpstreamFrame(session_idx);
     }
@@ -578,7 +581,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, payload);
             defer self.allocator.free(ack);
-            try socket_helpers.writeAll(self.streams.items[session_idx].upstream_fd, ack);
+            try socket_helpers.writeAllUntil(self.streams.items[session_idx].upstream_fd, ack, deadlineAt(self.streams.items[session_idx].request_deadline_at_ms));
         }
         try self.discardUpstreamFrame(session_idx);
     }
@@ -796,21 +799,12 @@ const ConnectionRouter = struct {
         };
         defer rewritten.deinit(self.allocator);
 
-        const upstream_fd = socket_helpers.connectToUpstream(route.connect_timeout_ms, route.request_timeout_ms, &upstream) catch {
+        const request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms));
+        const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, rewritten.bytes, request_deadline_at_ms) catch {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
         errdefer linux_platform.posix.close(upstream_fd);
-
-        const preface_and_settings = buildInitialUpstreamPreamble(self.allocator) catch {
-            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
-            return null;
-        };
-        defer self.allocator.free(preface_and_settings);
-        sendUpstreamPreamble(upstream_fd, preface_and_settings, rewritten.bytes) catch {
-            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
-            return null;
-        };
 
         return .{
             .backend_service = self.allocator.dupe(u8, mirror_service) catch {
@@ -819,7 +813,7 @@ const ConnectionRouter = struct {
             },
             .upstream = upstream,
             .upstream_fd = upstream_fd,
-            .request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms)),
+            .request_deadline_at_ms = request_deadline_at_ms,
         };
     }
 
@@ -858,7 +852,8 @@ const ConnectionRouter = struct {
         };
         defer self.allocator.free(request_bytes);
 
-        const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, request_bytes) catch {
+        const request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms));
+        const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, request_bytes, request_deadline_at_ms) catch {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
@@ -871,13 +866,13 @@ const ConnectionRouter = struct {
             },
             .upstream = upstream,
             .upstream_fd = upstream_fd,
-            .request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms)),
+            .request_deadline_at_ms = request_deadline_at_ms,
         };
     }
 
     fn forwardMirrorFrame(self: *ConnectionRouter, mirror: *MirrorSession, frame_bytes: []const u8) !void {
         _ = self;
-        socket_helpers.writeAll(mirror.upstream_fd, frame_bytes) catch {
+        socket_helpers.writeAllUntil(mirror.upstream_fd, frame_bytes, deadlineAt(mirror.request_deadline_at_ms)) catch {
             return error.WriteFailed;
         };
     }
@@ -907,7 +902,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, "");
             defer self.allocator.free(ack);
-            try socket_helpers.writeAll(mirror.upstream_fd, ack);
+            try socket_helpers.writeAllUntil(mirror.upstream_fd, ack, deadlineAt(mirror.request_deadline_at_ms));
         }
         _ = payload;
         try self.discardMirrorFrame(session_idx);
@@ -924,7 +919,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, payload);
             defer self.allocator.free(ack);
-            try socket_helpers.writeAll(mirror.upstream_fd, ack);
+            try socket_helpers.writeAllUntil(mirror.upstream_fd, ack, deadlineAt(mirror.request_deadline_at_ms));
         }
         try self.discardMirrorFrame(session_idx);
     }
@@ -1147,20 +1142,23 @@ fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64
     return hasher.final();
 }
 
-fn connectAndSendUpstream(alloc: std.mem.Allocator, route: router.Route, upstream: *const upstream_mod.Upstream, request_bytes: []const u8) !linux_platform.posix.socket_t {
-    const upstream_fd = try socket_helpers.connectToUpstream(route.connect_timeout_ms, route.request_timeout_ms, upstream);
+fn connectAndSendUpstream(alloc: std.mem.Allocator, route: router.Route, upstream: *const upstream_mod.Upstream, request_bytes: []const u8, request_deadline_at_ms: i64) !linux_platform.posix.socket_t {
+    const deadline = deadlineAt(request_deadline_at_ms);
+    const upstream_fd = try socket_helpers.connectToUpstreamUntil(route.connect_timeout_ms, deadline, upstream);
     errdefer linux_platform.posix.close(upstream_fd);
     const preface_and_settings = try buildInitialUpstreamPreamble(alloc);
     defer alloc.free(preface_and_settings);
-    try sendUpstreamPreamble(upstream_fd, preface_and_settings, request_bytes);
+    try socket_helpers.writeAllUntil(upstream_fd, preface_and_settings, deadline);
+    try socket_helpers.writeAllUntil(upstream_fd, request_bytes, deadline);
+    try socket_helpers.setSocketBlocking(upstream_fd);
+    socket_helpers.setSocketTimeoutMs(upstream_fd, route.request_timeout_ms);
     return upstream_fd;
 }
 
-fn sendUpstreamPreamble(upstream_fd: linux_platform.posix.socket_t, preface_and_settings: []const u8, request_bytes: []const u8) !void {
-    try socket_helpers.writeAll(upstream_fd, preface_and_settings);
-    try socket_helpers.writeAll(upstream_fd, request_bytes);
+fn deadlineAt(milliseconds: i64) transport.Deadline {
+    return .{ .expires_ns = @as(i96, milliseconds) * std.time.ns_per_ms };
 }
 
 fn nowMs() i64 {
-    return std.Io.Clock.real.now(std.Options.debug_io).toMilliseconds();
+    return std.Io.Clock.awake.now(std.Options.debug_io).toMilliseconds();
 }

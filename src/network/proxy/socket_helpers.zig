@@ -1,6 +1,7 @@
 const std = @import("std");
 const linux_platform = @import("linux_platform");
 const posix = std.posix;
+const transport = @import("../../tls/client_transport.zig");
 const ip = @import("../ip.zig");
 const log = @import("../../lib/log.zig");
 const upstream_mod = @import("upstream.zig");
@@ -10,15 +11,8 @@ pub fn clampPollTimeout(timeout_ms: u32) i32 {
 }
 
 pub fn waitForConnect(fd: linux_platform.posix.socket_t, timeout_ms: u32) !void {
-    var poll_fds = [_]posix.pollfd{
-        .{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 },
-    };
-    const timeout = clampPollTimeout(timeout_ms);
-    const ready = posix.poll(&poll_fds, timeout) catch return error.ConnectFailed;
-    if (ready == 0) return error.ConnectTimedOut;
-    if (poll_fds[0].revents & posix.POLL.OUT == 0 and poll_fds[0].revents & (posix.POLL.ERR | posix.POLL.HUP) == 0) {
-        return error.ConnectFailed;
-    }
+    const wire = transport.Stream{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(timeout_ms) };
+    wire.wait(posix.POLL.OUT) catch |err| return if (err == error.TimedOut) error.ConnectTimedOut else error.ConnectFailed;
 
     linux_platform.posix.getsockoptError(fd) catch |err| switch (err) {
         error.ConnectionTimedOut => return error.ConnectTimedOut,
@@ -66,13 +60,44 @@ pub fn setSocketTimeoutMs(fd: linux_platform.posix.socket_t, timeout_ms: u32) vo
     };
 }
 
+/// Bound the whole write, including partial sends. A socket timeout alone
+/// renews after every successful send and cannot bound a draining peer.
 pub fn writeAll(fd: linux_platform.posix.socket_t, data: []const u8) !void {
-    var written: usize = 0;
-    while (written < data.len) {
-        const bytes_written = linux_platform.posix.write(fd, data[written..]) catch return error.WriteFailed;
-        if (bytes_written == 0) return error.WriteFailed;
-        written += bytes_written;
-    }
+    var timeout: posix.timeval = .{ .sec = 0, .usec = 0 };
+    var length: posix.socklen_t = @sizeOf(posix.timeval);
+    const rc = std.os.linux.getsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, @ptrCast(&timeout), &length);
+    const configured_ms = @as(i128, timeout.sec) * 1000 + @divTrunc(@as(i128, timeout.usec) + 999, 1000);
+    const timeout_ms: u32 = if (posix.errno(rc) == .SUCCESS and configured_ms > 0)
+        @intCast(@min(configured_ms, std.math.maxInt(u32)))
+    else
+        5000;
+    try writeAllUntil(fd, data, transport.Deadline.afterMilliseconds(timeout_ms));
+}
+
+pub fn writeAllUntil(fd: linux_platform.posix.socket_t, data: []const u8, deadline: transport.Deadline) !void {
+    try (transport.Stream{ .fd = fd, .deadline = deadline }).writeAll(data);
+}
+
+/// Dial within the smaller connect budget without resetting the operation's
+/// deadline. The returned socket is consumed through a nonblocking Stream.
+pub fn connectToUpstreamUntil(connect_timeout_ms: u32, deadline: transport.Deadline, upstream: *const upstream_mod.Upstream) !linux_platform.posix.socket_t {
+    _ = try deadline.remaining();
+    const upstream_ip = ip.parseIp(upstream.address) orelse return error.InvalidUpstreamAddress;
+    const fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
+    errdefer linux_platform.posix.close(fd);
+    var connect_deadline = transport.Deadline.afterMilliseconds(connect_timeout_ms);
+    connect_deadline.expires_ns = @min(connect_deadline.expires_ns, deadline.expires_ns);
+    const wire = transport.Stream{ .fd = fd, .deadline = connect_deadline };
+    const addr = linux_platform.net.Address.initIp4(upstream_ip, upstream.port);
+    linux_platform.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+        error.WouldBlock, error.ConnectionPending => {
+            try wire.wait(posix.POLL.OUT);
+            try linux_platform.posix.getsockoptError(fd);
+        },
+        else => return error.ConnectFailed,
+    };
+    _ = try deadline.remaining();
+    return fd;
 }
 
 pub fn connectToUpstream(connect_timeout_ms: u32, request_timeout_ms: u32, upstream: *const upstream_mod.Upstream) !linux_platform.posix.socket_t {
@@ -131,4 +156,42 @@ test "peekConnAlive rejects a connection whose peer has closed" {
 
     linux_platform.posix.close(fds[1]);
     try std.testing.expect(!peekConnAlive(fds[0]));
+}
+
+test "listener lifecycle socket write deadline holds while peer slowly drains" {
+    const Fixture = struct {
+        fd: posix.fd_t,
+        quit: std.atomic.Value(bool) = .init(false),
+        received: std.atomic.Value(usize) = .init(0),
+
+        fn run(self: *@This()) void {
+            var bytes: [512]u8 = undefined;
+            while (!self.quit.load(.acquire)) {
+                const n = linux_platform.posix.recv(self.fd, &bytes, posix.MSG.DONTWAIT) catch |err| {
+                    if (err != error.WouldBlock) return;
+                    std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch return;
+                    continue;
+                };
+                if (n == 0) return;
+                _ = self.received.fetchAdd(n, .release);
+                std.Io.sleep(std.testing.io, .fromMilliseconds(2), .awake) catch return;
+            }
+        }
+    };
+    const fds = try testConnectedPair();
+    defer linux_platform.posix.close(fds[0]);
+    defer linux_platform.posix.close(fds[1]);
+    const buffer_size: c_int = 4096;
+    try posix.setsockopt(fds[0], posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&buffer_size));
+    setSocketTimeoutMs(fds[0], 100);
+    var fixture = Fixture{ .fd = fds[1] };
+    const worker = try std.Thread.spawn(.{}, Fixture.run, .{&fixture});
+    defer {
+        fixture.quit.store(true, .release);
+        worker.join();
+    }
+    const bytes = [_]u8{'x'} ** (256 * 1024);
+    try std.testing.expectError(error.TimedOut, writeAll(fds[0], &bytes));
+    try std.testing.expect(fixture.received.load(.acquire) > 0);
+    try std.testing.expect(fixture.received.load(.acquire) < bytes.len);
 }

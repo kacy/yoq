@@ -8,9 +8,8 @@
 // port 80 serves ACME HTTP-01 challenges at /.well-known/acme-challenge/
 // and redirects all other traffic to HTTPS.
 //
-// follows the same detached worker thread pattern as api/server.zig.
-// each connection gets its own thread — fine for the expected load
-// (TLS termination, not a CDN).
+// HTTP and TLS share bounded, owned connection workers. Stop cancels sockets
+// and joins every worker before certificates, challenges, or I/O are freed.
 //
 // containers serve plaintext HTTP. they never touch TLS.
 
@@ -29,8 +28,9 @@ const managed_runtime = @import("acme/managed_runtime.zig");
 const runtime_wait = @import("../lib/runtime_wait.zig");
 const store_mod = @import("../state/store.zig");
 
-const max_connections: u32 = 256;
-var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+const max_connections = 256;
+const WorkerGroup = @import("proxy/worker_group.zig").Group(max_connections);
+const accept_support = @import("proxy/accept_support.zig");
 
 pub const ProxyError = error{
     BindFailed,
@@ -118,6 +118,8 @@ pub const RenewalConfig = struct {
 
 pub const TlsProxy = struct {
     allocator: std.mem.Allocator,
+    lifecycle_mutex: std.Io.Mutex = .init,
+    workers: WorkerGroup = .{},
     threaded_io: std.Io.Threaded,
     backends: *backend_mod.BackendRegistry,
     certs: *cert_store.CertStore,
@@ -127,6 +129,7 @@ pub const TlsProxy = struct {
     tls_port: u16,
     http_port: u16,
     running: std.atomic.Value(bool),
+    listener_failed: std.atomic.Value(bool) = .init(false),
     renewal_config: ?RenewalConfig,
     tls_thread: ?std.Thread,
     http_thread: ?std.Thread,
@@ -145,6 +148,8 @@ pub const TlsProxy = struct {
         const http_fd = socket_support.createListenSocket(http_port) catch return ProxyError.SocketFailed;
         errdefer linux_platform.posix.close(http_fd);
 
+        const bound_tls_port = socket_support.boundPort(tls_fd) catch return ProxyError.SocketFailed;
+        const bound_http_port = socket_support.boundPort(http_fd) catch return ProxyError.SocketFailed;
         return .{
             .allocator = allocator,
             .threaded_io = std.Io.Threaded.init(allocator, .{}),
@@ -153,8 +158,8 @@ pub const TlsProxy = struct {
             .challenges = ChallengeStore.init(allocator),
             .tls_fd = tls_fd,
             .http_fd = http_fd,
-            .tls_port = tls_port,
-            .http_port = http_port,
+            .tls_port = bound_tls_port,
+            .http_port = bound_http_port,
             .running = std.atomic.Value(bool).init(false),
             .renewal_config = null,
             .tls_thread = null,
@@ -180,7 +185,18 @@ pub const TlsProxy = struct {
     /// start accepting connections on both ports.
     /// spawns two accept loop threads (TLS and HTTP).
     pub fn start(self: *TlsProxy) void {
+        self.lifecycle_mutex.lockUncancelable(std.Options.debug_io);
+        defer self.lifecycle_mutex.unlock(std.Options.debug_io);
         if (self.running.load(.acquire)) return;
+        self.stopLocked();
+        if (self.listener_failed.load(.acquire)) {
+            self.reopenListeners() catch {
+                log.warn("failed to reopen TLS proxy listeners", .{});
+                return;
+            };
+            self.listener_failed.store(false, .release);
+        }
+        self.workers.restart();
         self.running.store(true, .release);
 
         log.info("tls proxy listening on :{d} (tls) and :{d} (http)", .{ self.tls_port, self.http_port });
@@ -193,14 +209,14 @@ pub const TlsProxy = struct {
 
         self.http_thread = std.Thread.spawn(.{}, httpAcceptLoop, .{self}) catch {
             log.err("failed to start HTTP accept loop", .{});
-            self.stop();
+            self.stopLocked();
             return;
         };
 
         if (self.renewal_config != null) {
             self.renewal_thread = std.Thread.spawn(.{}, renewalLoop, .{self}) catch {
                 log.err("failed to start renewal checker", .{});
-                self.stop();
+                self.stopLocked();
                 return;
             };
         }
@@ -208,7 +224,14 @@ pub const TlsProxy = struct {
 
     /// stop accepting new connections.
     pub fn stop(self: *TlsProxy) void {
+        self.lifecycle_mutex.lockUncancelable(std.Options.debug_io);
+        defer self.lifecycle_mutex.unlock(std.Options.debug_io);
+        self.stopLocked();
+    }
+
+    fn stopLocked(self: *TlsProxy) void {
         self.running.store(false, .release);
+        self.workers.cancel();
         if (self.tls_thread) |thread| {
             thread.join();
             self.tls_thread = null;
@@ -221,59 +244,66 @@ pub const TlsProxy = struct {
             thread.join();
             self.renewal_thread = null;
         }
+        self.workers.join();
+    }
+
+    fn reopenListeners(self: *TlsProxy) !void {
+        if (self.tls_fd >= 0) linux_platform.posix.close(self.tls_fd);
+        if (self.http_fd >= 0) linux_platform.posix.close(self.http_fd);
+        self.tls_fd = -1;
+        self.http_fd = -1;
+        const tls_fd = try socket_support.createListenSocket(self.tls_port);
+        errdefer linux_platform.posix.close(tls_fd);
+        const http_fd = try socket_support.createListenSocket(self.http_port);
+        self.tls_fd = tls_fd;
+        self.http_fd = http_fd;
+    }
+
+    fn listenerFailed(self: *TlsProxy) void {
+        self.listener_failed.store(true, .release);
+        self.running.store(false, .release);
+        self.workers.cancel();
     }
 
     // -- accept loops --
 
     fn tlsAcceptLoop(self: *TlsProxy) void {
-        while (self.running.load(.acquire)) {
-            var poll_fds = [_]posix.pollfd{
-                .{ .fd = self.tls_fd, .events = posix.POLL.IN, .revents = 0 },
-            };
-            const poll_result = posix.poll(&poll_fds, 1000) catch continue;
-            if (poll_result == 0) continue;
-
-            const client_fd = linux_platform.posix.accept(self.tls_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
-                if (err == error.WouldBlock) continue;
-                log.warn("tls accept error: {}", .{err});
-                continue;
-            };
-
-            const current = active_connections.load(.acquire);
-            if (current >= max_connections) {
-                linux_platform.posix.close(client_fd);
-                continue;
-            }
-            _ = active_connections.fetchAdd(1, .acq_rel);
-
-            const thread = std.Thread.spawn(.{}, tlsConnectionHandler, .{ self, client_fd }) catch {
-                _ = active_connections.fetchSub(1, .acq_rel);
-                linux_platform.posix.close(client_fd);
-                continue;
-            };
-            thread.detach();
-        }
+        self.acceptLoop(self.tls_fd, tlsConnectionHandler);
     }
 
     fn httpAcceptLoop(self: *TlsProxy) void {
+        self.acceptLoop(self.http_fd, httpConnectionHandler);
+    }
+
+    fn acceptLoop(self: *TlsProxy, fd: posix.fd_t, comptime handler: anytype) void {
+        var backoff = accept_support.Backoff{};
         while (self.running.load(.acquire)) {
-            var poll_fds = [_]posix.pollfd{
-                .{ .fd = self.http_fd, .events = posix.POLL.IN, .revents = 0 },
+            const ready = accept_support.ready(fd) catch |err| {
+                if (err == error.Retry) {
+                    backoff.pause();
+                    continue;
+                }
+                self.listenerFailed();
+                return;
             };
-            const poll_result = posix.poll(&poll_fds, 1000) catch continue;
-            if (poll_result == 0) continue;
-
-            const client_fd = linux_platform.posix.accept(self.http_fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
-                if (err == error.WouldBlock) continue;
-                log.warn("http accept error: {}", .{err});
-                continue;
+            if (!ready) continue;
+            const client_fd = accept_support.accept(fd) catch |err| switch (err) {
+                error.WouldBlock => continue,
+                error.Retry => {
+                    backoff.pause();
+                    continue;
+                },
+                error.Fatal => {
+                    self.listenerFailed();
+                    return;
+                },
             };
-
-            const thread = std.Thread.spawn(.{}, httpConnectionHandler, .{ self, client_fd }) catch {
+            self.workers.spawn(client_fd, handler, .{ self, client_fd }) catch |err| {
                 linux_platform.posix.close(client_fd);
+                if (err != error.ConnectionLimit and err != error.Stopping) backoff.pause();
                 continue;
             };
-            thread.detach();
+            backoff.reset();
         }
     }
 
@@ -410,7 +440,6 @@ pub const TlsProxy = struct {
     fn tlsConnectionHandlerWithCa(self: *TlsProxy, client_fd: posix.fd_t, ca_store: anytype) void {
         var handshake_complete = false;
         defer {
-            _ = active_connections.fetchSub(1, .acq_rel);
             if (!handshake_complete) http_support.sendCloseNotify(client_fd);
             linux_platform.posix.close(client_fd);
         }
@@ -520,7 +549,7 @@ pub const TlsProxy = struct {
 
         var response_buf: [1024]u8 = undefined;
         const response = http_support.formatRedirectResponse(&response_buf, location) catch return;
-        _ = linux_platform.posix.write(client_fd, response) catch |e| {
+        _ = linux_platform.posix.send(client_fd, response, posix.MSG.NOSIGNAL) catch |e| {
             log.warn("tls proxy redirect write failed: {}", .{e});
         };
     }
@@ -537,7 +566,7 @@ pub const TlsProxy = struct {
 
         var response_buf: [1024]u8 = undefined;
         const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ key_auth.len, key_auth }) catch return;
-        _ = linux_platform.posix.write(client_fd, response) catch |e| {
+        _ = linux_platform.posix.send(client_fd, response, posix.MSG.NOSIGNAL) catch |e| {
             log.warn("tls proxy acme challenge write failed: {}", .{e});
         };
     }
@@ -739,9 +768,7 @@ const PeerTrustFixture = struct {
         try setTimeouts(server_fd);
 
         var source = PeerTrustFixture{ .trust = trust, .ca_pem = ca_pem };
-        _ = active_connections.fetchAdd(1, .acq_rel);
         const worker = std.Thread.spawn(.{}, serve, .{ &proxy, server_fd, &source }) catch |err| {
-            _ = active_connections.fetchSub(1, .acq_rel);
             return err;
         };
         owns_server = false;
@@ -820,4 +847,93 @@ test "peer trust listener preserves off and warn and never downgrades require" {
     const untrusted_key = try csr.derKeyToPem(alloc, &untrusted.key_pair.secret_key.toBytes());
     defer alloc.free(untrusted_key);
     try PeerTrustFixture.check(&certs, ca.cert_pem, .require, .present, untrusted.cert_pem, untrusted_key, false);
+}
+
+const LifecycleFixture = struct {
+    fn connect(fd: posix.fd_t) !posix.fd_t {
+        return socket_support.connectToBackend(.{ .ip = "127.0.0.1", .port = try socket_support.boundPort(fd) });
+    }
+
+    fn waitActive(proxy: *TlsProxy, expected: usize) !void {
+        const deadline = @import("client_transport.zig").Deadline.afterMilliseconds(2000);
+        while (proxy.workers.count() != expected) {
+            _ = try deadline.remaining();
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+    }
+};
+
+test "listener lifecycle TLS and HTTP share admission and join idle workers before restart" {
+    const alloc = std.testing.allocator;
+    var db = try @import("sqlite").Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    var certs = try cert_store.CertStore.initWithKey(&db, alloc, [_]u8{0xAB} ** cert_store.key_length);
+    var backends = backend_mod.BackendRegistry.init(alloc);
+    defer backends.deinit();
+    var proxy = try TlsProxy.init(alloc, &backends, &certs, 0, 0);
+    defer proxy.deinit();
+    proxy.workers.limit = 2;
+    try proxy.challenges.set("lifecycle", "challenge-response");
+    proxy.start();
+
+    const http = try LifecycleFixture.connect(proxy.http_fd);
+    defer linux_platform.posix.close(http);
+    const tls = try LifecycleFixture.connect(proxy.tls_fd);
+    defer linux_platform.posix.close(tls);
+    try LifecycleFixture.waitActive(&proxy, 2);
+    const shed = try LifecycleFixture.connect(proxy.http_fd);
+    defer linux_platform.posix.close(shed);
+    var byte: [1]u8 = undefined;
+    const wire = @import("client_transport.zig");
+    try std.testing.expectEqual(@as(usize, 0), try (wire.Stream{ .fd = shed, .deadline = wire.Deadline.afterMilliseconds(2000) }).read(&byte));
+    try std.testing.expectEqual(@as(usize, 2), proxy.workers.count());
+
+    // Finishing HTTP releases its slot even while TLS remains idle.
+    const request = "GET /.well-known/acme-challenge/lifecycle HTTP/1.1\r\nHost: local\r\n\r\n";
+    try (wire.Stream{ .fd = http, .deadline = wire.Deadline.afterMilliseconds(2000) }).writeAll(request);
+    var response: [512]u8 = undefined;
+    var length: usize = 0;
+    const response_wire = wire.Stream{ .fd = http, .deadline = wire.Deadline.afterMilliseconds(2000) };
+    while (length < response.len) {
+        const n = try response_wire.read(response[length..]);
+        if (n == 0) break;
+        length += n;
+    }
+    try std.testing.expect(std.mem.endsWith(u8, response[0..length], "challenge-response"));
+    try LifecycleFixture.waitActive(&proxy, 1);
+    proxy.stop();
+    try std.testing.expectEqual(@as(usize, 0), proxy.workers.count());
+    try std.testing.expect(proxy.tls_thread == null and proxy.http_thread == null);
+
+    proxy.start();
+    const next = try LifecycleFixture.connect(proxy.http_fd);
+    defer linux_platform.posix.close(next);
+    try LifecycleFixture.waitActive(&proxy, 1);
+    proxy.stop();
+    try std.testing.expectEqual(@as(usize, 0), proxy.workers.count());
+}
+
+test "listener lifecycle TLS fatal listener state can reopen" {
+    const alloc = std.testing.allocator;
+    var db = try @import("sqlite").Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    var certs = try cert_store.CertStore.initWithKey(&db, alloc, [_]u8{0xAB} ** cert_store.key_length);
+    var backends = backend_mod.BackendRegistry.init(alloc);
+    defer backends.deinit();
+    var proxy = try TlsProxy.init(alloc, &backends, &certs, 0, 0);
+    defer proxy.deinit();
+    proxy.start();
+    _ = std.os.linux.shutdown(proxy.http_fd, 2);
+    const deadline = @import("client_transport.zig").Deadline.afterMilliseconds(2000);
+    while (proxy.running.load(.acquire)) {
+        _ = try deadline.remaining();
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    proxy.start();
+    try std.testing.expect(proxy.running.load(.acquire));
+    const client = try LifecycleFixture.connect(proxy.http_fd);
+    defer linux_platform.posix.close(client);
+    try LifecycleFixture.waitActive(&proxy, 1);
+    proxy.stop();
+    try std.testing.expectEqual(@as(usize, 0), proxy.workers.count());
 }

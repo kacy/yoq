@@ -21,9 +21,22 @@ pub fn createListenSocket(port: u16) !posix.fd_t {
     return fd;
 }
 
+pub fn boundPort(fd: posix.fd_t) !u16 {
+    var addr: posix.sockaddr.in = undefined;
+    var len: posix.socklen_t = @sizeOf(@TypeOf(addr));
+    try linux_platform.posix.getsockname(fd, @ptrCast(&addr), &len);
+    return std.mem.bigToNative(u16, addr.port);
+}
+
 pub fn connectToBackend(backend: backend_mod.Backend) !posix.fd_t {
     const fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
     errdefer linux_platform.posix.close(fd);
+
+    // Client cancellation wakes the relay, but may arrive during a backend
+    // syscall. Bound those calls too so stop can always finish joining it.
+    const timeout = posix.timeval{ .sec = 5, .usec = 0 };
+    try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout));
+    try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
 
     const ip_addr = parseIpv4(backend.ip) orelse return error.InvalidBackendAddress;
 

@@ -13,12 +13,7 @@ pub const StateChangeHook = *const fn () void;
 pub const drain_timeout_ms: u64 = 5000;
 const drain_poll_interval_ms: u64 = 10;
 
-/// upper bound on concurrent L7 proxy connections. each connection is a
-/// detached thread; without this cap a connection flood spawns threads
-/// until the OS thread/fd limit is hit. mirrors the API server's
-/// `max_connections` guard (src/api/server/connection_runtime.zig). at the
-/// cap, new connections are accepted and immediately closed so the kernel
-/// accept queue keeps draining rather than backing up.
+/// Maximum owned connection workers; excess clients are closed immediately.
 pub const max_connections: u32 = 1024;
 
 pub const Snapshot = struct {
@@ -42,6 +37,10 @@ pub const ConnectTarget = struct {
 
 const PeerKey = @import("../../tls/proxy_credentials.zig").Key;
 var peer_key: ?PeerKey = null;
+const accept_support = @import("../../tls/proxy/accept_support.zig");
+const WorkerGroup = @import("../../tls/proxy/worker_group.zig").Group(max_connections);
+var workers: WorkerGroup = .{};
+var lifecycle_mutex: std.Io.Mutex = .init;
 var mutex: std.Io.Mutex = .init;
 var listen_fd: ?posix.fd_t = null;
 var listener_thread: ?std.Thread = null;
@@ -50,7 +49,6 @@ var running: bool = false;
 var listen_bind_addr: [4]u8 = default_bind_addr;
 var listen_port: u16 = default_listen_port;
 var accepted_connections_total: u64 = 0;
-var active_connections: u32 = 0;
 var last_error: ?[]u8 = null;
 var state_change_hook: ?StateChangeHook = null;
 
@@ -77,7 +75,6 @@ pub fn resetForTest() void {
     listen_bind_addr = default_bind_addr;
     listen_port = default_listen_port;
     accepted_connections_total = 0;
-    active_connections = 0;
     clearLastErrorLocked();
     state_change_hook = null;
 }
@@ -140,31 +137,31 @@ pub fn startOrSkipForTest(alloc: std.mem.Allocator, port: u16) !void {
 }
 
 pub fn stop() void {
-    var thread_to_join: ?std.Thread = null;
-    var fd_to_close: ?posix.fd_t = null;
-    var port_to_wake: ?u16 = null;
-    var hook_to_call: ?StateChangeHook = null;
+    lifecycle_mutex.lockUncancelable(std.Options.debug_io);
+    const hook = stopLocked();
+    lifecycle_mutex.unlock(std.Options.debug_io);
+    if (hook) |callback| callback();
+}
 
+fn stopLocked() ?StateChangeHook {
     mutex.lockUncancelable(std.Options.debug_io);
     stop_requested = true;
-    if (running or listen_fd != null or listener_thread != null) hook_to_call = state_change_hook;
+    const hook = if (running or listen_fd != null or listener_thread != null) state_change_hook else null;
     running = false;
-    if (listen_fd) |fd| {
-        fd_to_close = fd;
-        port_to_wake = listen_port;
-        listen_fd = null;
-    }
-    if (listener_thread) |thread| {
-        thread_to_join = thread;
-        listener_thread = null;
-    }
+    const thread = listener_thread;
+    const fd = listen_fd;
     mutex.unlock(std.Options.debug_io);
 
-    if (port_to_wake) |port| wakeAccept(port);
-    if (fd_to_close) |fd| linux_platform.posix.close(fd);
-    if (thread_to_join) |thread| thread.join();
-    _ = waitForConnectionsToDrain(drain_timeout_ms);
-    if (hook_to_call) |hook| hook();
+    workers.cancel();
+    if (thread) |owned| owned.join();
+    workers.join();
+    if (fd) |owned| linux_platform.posix.close(owned);
+
+    mutex.lockUncancelable(std.Options.debug_io);
+    listener_thread = null;
+    listen_fd = null;
+    mutex.unlock(std.Options.debug_io);
+    return hook;
 }
 
 pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
@@ -177,7 +174,7 @@ pub fn snapshot(alloc: std.mem.Allocator) !Snapshot {
         .bind_addr = listen_bind_addr,
         .port = listen_port,
         .accepted_connections_total = accepted_connections_total,
-        .active_connections = active_connections,
+        .active_connections = @intCast(workers.count()),
         .last_error = if (last_error) |message| try alloc.dupe(u8, message) else null,
     };
 }
@@ -205,10 +202,7 @@ pub fn connectTargetIfRunning() ?ConnectTarget {
 }
 
 pub fn activeConnectionCount() u32 {
-    mutex.lockUncancelable(std.Options.debug_io);
-    defer mutex.unlock(std.Options.debug_io);
-
-    return active_connections;
+    return @intCast(workers.count());
 }
 
 pub fn waitForConnectionsToDrain(timeout_ms: u64) bool {
@@ -221,24 +215,38 @@ pub fn waitForConnectionsToDrain(timeout_ms: u64) bool {
 }
 
 fn start(alloc: std.mem.Allocator) void {
-    mutex.lockUncancelable(std.Options.debug_io);
-    if (listener_thread != null) {
+    startWith(alloc, accept_support.accept);
+}
+
+fn startWith(alloc: std.mem.Allocator, comptime acceptFn: anytype) void {
+    lifecycle_mutex.lockUncancelable(std.Options.debug_io);
+    // Notify after releasing lifecycle ownership, so hooks may reconcile.
+    var changed = false;
+    defer {
+        mutex.lockUncancelable(std.Options.debug_io);
+        const hook = state_change_hook;
         mutex.unlock(std.Options.debug_io);
-        return;
+        lifecycle_mutex.unlock(std.Options.debug_io);
+        if (changed) if (hook) |callback| callback();
     }
+    mutex.lockUncancelable(std.Options.debug_io);
+    const already_running = running;
+    mutex.unlock(std.Options.debug_io);
+    if (already_running) return;
+    changed = true;
+    _ = stopLocked();
+    workers.restart();
+    mutex.lockUncancelable(std.Options.debug_io);
     stop_requested = false;
     accepted_connections_total = 0;
-    active_connections = 0;
     clearLastErrorLocked();
 
     const bind_addr = listen_bind_addr;
     const requested_port = listen_port;
 
-    const fd = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
+    const fd = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0) catch {
         setLastErrorLocked(error.SocketFailed);
-        const hook = state_change_hook;
         mutex.unlock(std.Options.debug_io);
-        if (hook) |callback| callback();
         return;
     };
 
@@ -248,18 +256,14 @@ fn start(alloc: std.mem.Allocator) void {
     const addr = linux_platform.net.Address.initIp4(bind_addr, requested_port);
     linux_platform.posix.bind(fd, &addr.any, addr.getOsSockLen()) catch {
         setLastErrorLocked(error.BindFailed);
-        const hook = state_change_hook;
         mutex.unlock(std.Options.debug_io);
         linux_platform.posix.close(fd);
-        if (hook) |callback| callback();
         return;
     };
     linux_platform.posix.listen(fd, 128) catch {
         setLastErrorLocked(error.ListenFailed);
-        const hook = state_change_hook;
         mutex.unlock(std.Options.debug_io);
         linux_platform.posix.close(fd);
-        if (hook) |callback| callback();
         return;
     };
 
@@ -268,10 +272,8 @@ fn start(alloc: std.mem.Allocator) void {
         var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
         linux_platform.posix.getsockname(fd, @ptrCast(&bound_addr), &bound_len) catch {
             setLastErrorLocked(error.BindFailed);
-            const hook = state_change_hook;
             mutex.unlock(std.Options.debug_io);
             linux_platform.posix.close(fd);
-            if (hook) |callback| callback();
             return;
         };
         listen_port = std.mem.bigToNative(u16, bound_addr.port);
@@ -279,92 +281,79 @@ fn start(alloc: std.mem.Allocator) void {
 
     listen_fd = fd;
     running = true;
-    listener_thread = std.Thread.spawn(.{}, acceptLoop, .{alloc}) catch {
+    const Loop = struct {
+        fn run(allocator: std.mem.Allocator) void {
+            acceptLoop(allocator, acceptFn);
+        }
+    };
+    listener_thread = std.Thread.spawn(.{}, Loop.run, .{alloc}) catch {
         setLastErrorLocked(error.ThreadSpawnFailed);
         running = false;
         listen_fd = null;
-        const hook = state_change_hook;
         mutex.unlock(std.Options.debug_io);
         linux_platform.posix.close(fd);
-        if (hook) |callback| callback();
         return;
     };
-    const hook = state_change_hook;
     mutex.unlock(std.Options.debug_io);
-    if (hook) |callback| callback();
 }
 
-fn acceptLoop(alloc: std.mem.Allocator) void {
+fn acceptLoop(alloc: std.mem.Allocator, comptime acceptFn: anytype) void {
+    var backoff = accept_support.Backoff{};
     while (true) {
-        const fd = blk: {
-            mutex.lockUncancelable(std.Options.debug_io);
-            defer mutex.unlock(std.Options.debug_io);
-            if (stop_requested) break;
-            break :blk listen_fd orelse break;
-        };
+        mutex.lockUncancelable(std.Options.debug_io);
+        const stopping = stop_requested;
+        const fd = listen_fd;
+        mutex.unlock(std.Options.debug_io);
+        if (stopping or fd == null) return;
 
-        const client_fd = linux_platform.posix.accept(fd, null, null, posix.SOCK.CLOEXEC) catch {
-            const hook = blk: {
+        const ready = accept_support.ready(fd.?) catch |err| {
+            if (err == error.Retry) {
+                backoff.pause();
+                continue;
+            }
+            listenerFailed();
+            return;
+        };
+        if (!ready) continue;
+        const client_fd = acceptFn(fd.?) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            error.Retry => {
+                backoff.pause();
+                continue;
+            },
+            error.Fatal => {
+                listenerFailed();
+                return;
+            },
+        };
+        mutex.lockUncancelable(std.Options.debug_io);
+        accepted_connections_total += 1;
+        mutex.unlock(std.Options.debug_io);
+        workers.spawn(client_fd, connectionWorker, .{ alloc, client_fd }) catch |err| {
+            linux_platform.posix.close(client_fd);
+            if (err != error.ConnectionLimit and err != error.Stopping) {
                 mutex.lockUncancelable(std.Options.debug_io);
-                defer mutex.unlock(std.Options.debug_io);
-                if (stop_requested or listen_fd == null) break :blk null;
-                setLastErrorLocked(error.AcceptFailed);
-                running = false;
-                break :blk state_change_hook;
-            };
-            if (hook) |callback| callback();
-            break;
-        };
-
-        const shutting_down = blk: {
-            mutex.lockUncancelable(std.Options.debug_io);
-            defer mutex.unlock(std.Options.debug_io);
-            break :blk stop_requested or listen_fd == null;
-        };
-        if (shutting_down) {
-            linux_platform.posix.close(client_fd);
-            break;
-        }
-
-        // shed load at the cap: close immediately rather than spawn an
-        // unbounded number of worker threads under a connection flood.
-        if (!admitConnection()) {
-            linux_platform.posix.close(client_fd);
-            continue;
-        }
-
-        const thread = std.Thread.spawn(.{}, connectionWorker, .{ alloc, client_fd }) catch {
-            mutex.lockUncancelable(std.Options.debug_io);
-            if (active_connections > 0) active_connections -= 1;
-            setLastErrorLocked(error.ThreadSpawnFailed);
-            mutex.unlock(std.Options.debug_io);
-            linux_platform.posix.close(client_fd);
+                setLastErrorLocked(error.ThreadSpawnFailed);
+                mutex.unlock(std.Options.debug_io);
+                backoff.pause();
+            }
             continue;
         };
-        thread.detach();
+        backoff.reset();
     }
 }
 
-/// count an accepted connection and decide whether to admit it. always bumps
-/// `accepted_connections_total`; admits (and bumps `active_connections`) only
-/// when below `max_connections`. returns false at the cap so the caller sheds
-/// the connection. mutex-guarded so it's safe under the accept loop.
-fn admitConnection() bool {
+fn listenerFailed() void {
     mutex.lockUncancelable(std.Options.debug_io);
-    defer mutex.unlock(std.Options.debug_io);
-    accepted_connections_total += 1;
-    if (active_connections >= max_connections) return false;
-    active_connections += 1;
-    return true;
+    if (!stop_requested) setLastErrorLocked(error.AcceptFailed);
+    running = false;
+    mutex.unlock(std.Options.debug_io);
+    workers.cancel();
+    // The next reconciliation joins this handle before opening a new socket.
+    // Do not invoke a hook here: it could synchronously try to join this thread.
 }
 
 fn connectionWorker(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
-    defer {
-        mutex.lockUncancelable(std.Options.debug_io);
-        if (active_connections > 0) active_connections -= 1;
-        mutex.unlock(std.Options.debug_io);
-    }
-
     var routes = proxy_runtime.snapshotRouteConfigs(alloc) catch {
         linux_platform.posix.close(client_fd);
         return;
@@ -377,19 +366,6 @@ fn connectionWorker(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
     proxy.peer_key = peer_key;
     mutex.unlock(std.Options.debug_io);
     proxy.handleConnection(client_fd);
-}
-
-fn wakeAccept(port: u16) void {
-    const fd = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch return;
-    defer linux_platform.posix.close(fd);
-
-    const addr = linux_platform.net.Address.initIp4(wakeBindAddr(), port);
-    linux_platform.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch {};
-}
-
-fn wakeBindAddr() [4]u8 {
-    if (std.mem.eql(u8, listen_bind_addr[0..], &[_]u8{ 0, 0, 0, 0 })) return default_bind_addr;
-    return listen_bind_addr;
 }
 
 fn deinitRoutes(alloc: std.mem.Allocator, routes: *std.ArrayList(router.Route)) void {
@@ -459,43 +435,214 @@ test "listener runtime starts and stops on loopback" {
     try std.testing.expectEqual(@as(u64, 0), state.accepted_connections_total);
 }
 
-test "listener drain observes active connection count" {
+const LifecycleFixture = struct {
+    fn connect() !posix.fd_t {
+        const port = portIfRunning() orelse return error.ListenerNotRunning;
+        const fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+        errdefer linux_platform.posix.close(fd);
+        const addr = linux_platform.net.Address.initIp4(default_bind_addr, port);
+        try linux_platform.posix.connect(fd, &addr.any, addr.getOsSockLen());
+        return fd;
+    }
+
+    fn waitActive(expected: u32) !void {
+        const deadline = @import("../../tls/client_transport.zig").Deadline.afterMilliseconds(2000);
+        while (activeConnectionCount() != expected) {
+            _ = try deadline.remaining();
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+    }
+};
+
+test "listener lifecycle cancels idle workers before restart" {
+    const store = @import("../../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
     resetForTest();
     defer resetForTest();
 
-    mutex.lockUncancelable(std.Options.debug_io);
-    active_connections = 1;
-    mutex.unlock(std.Options.debug_io);
-
-    try std.testing.expect(!waitForConnectionsToDrain(0));
-
-    mutex.lockUncancelable(std.Options.debug_io);
-    active_connections = 0;
-    mutex.unlock(std.Options.debug_io);
-
-    try std.testing.expect(waitForConnectionsToDrain(0));
+    for (0..3) |_| {
+        startForTest(std.testing.allocator, 0);
+        const client = try LifecycleFixture.connect();
+        defer linux_platform.posix.close(client);
+        // Keep the client open, without completing a request, across stop.
+        try LifecycleFixture.waitActive(1);
+        try std.testing.expect(!waitForConnectionsToDrain(0));
+        stop();
+        try std.testing.expectEqual(@as(u32, 0), activeConnectionCount());
+        try std.testing.expect(waitForConnectionsToDrain(0));
+        try std.testing.expect(listener_thread == null);
+        try std.testing.expect(listen_fd == null);
+    }
 }
 
-test "admitConnection sheds load at the connection cap" {
+test "listener lifecycle retries temporary accept failures and reopens after fatal failure" {
+    const Injected = struct {
+        var calls: std.atomic.Value(u32) = .init(0);
+        fn transient(fd: posix.fd_t) accept_support.Error!posix.fd_t {
+            if (calls.fetchAdd(1, .acq_rel) < 3) return error.Retry;
+            return accept_support.accept(fd);
+        }
+        fn fatal(_: posix.fd_t) accept_support.Error!posix.fd_t {
+            return error.Fatal;
+        }
+    };
+    const store = @import("../../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    resetForTest();
+    defer resetForTest();
+    Injected.calls.store(0, .release);
+    configure(default_bind_addr, 0);
+    startWith(std.testing.allocator, Injected.transient);
+    const first = try LifecycleFixture.connect();
+    defer linux_platform.posix.close(first);
+    try LifecycleFixture.waitActive(1);
+    try std.testing.expect(Injected.calls.load(.acquire) >= 4);
+    try std.testing.expect(portIfRunning() != null);
+    stop();
+
+    configure(default_bind_addr, 0);
+    startWith(std.testing.allocator, Injected.fatal);
+    const failed = try LifecycleFixture.connect();
+    defer linux_platform.posix.close(failed);
+    const deadline = @import("../../tls/client_transport.zig").Deadline.afterMilliseconds(2000);
+    while (portIfRunning() != null) {
+        _ = try deadline.remaining();
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    const failed_state = try snapshot(std.testing.allocator);
+    defer failed_state.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("error.AcceptFailed", failed_state.last_error.?);
+    // Recovery must retire the failed thread without requiring an explicit stop.
+    start(std.testing.allocator);
+    const recovered = try LifecycleFixture.connect();
+    defer linux_platform.posix.close(recovered);
+    try LifecycleFixture.waitActive(1);
+    const recovered_state = try snapshot(std.testing.allocator);
+    defer recovered_state.deinit(std.testing.allocator);
+    try std.testing.expect(recovered_state.running);
+    try std.testing.expect(recovered_state.last_error == null);
+}
+
+test "listener lifecycle stop bounds trickling primary and mirror backends" {
+    const wire = @import("../../tls/client_transport.zig");
+    const sockets = @import("../../tls/proxy/socket_support.zig");
+    const Fixture = struct {
+        fd: posix.fd_t,
+        quit: std.atomic.Value(bool) = .init(false),
+        chunks: std.atomic.Value(usize) = .init(0),
+
+        fn run(self: *@This()) void {
+            self.serve() catch {};
+        }
+
+        fn serve(self: *@This()) !void {
+            try (wire.Stream{ .fd = self.fd, .deadline = wire.Deadline.afterMilliseconds(2000) }).wait(posix.POLL.IN);
+            const fd = try linux_platform.posix.accept(self.fd, null, null, posix.SOCK.CLOEXEC);
+            defer linux_platform.posix.close(fd);
+            const stream = wire.Stream{ .fd = fd, .deadline = wire.Deadline.afterMilliseconds(10000) };
+            var request: [4096]u8 = undefined;
+            var length: usize = 0;
+            while (std.mem.indexOf(u8, request[0..length], "\r\n\r\n") == null) {
+                const n = try stream.read(request[length..]);
+                if (n == 0) return error.UnexpectedEof;
+                length += n;
+                if (length == request.len) return error.RequestTooLarge;
+            }
+            try stream.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n");
+            while (!self.quit.load(.acquire)) {
+                try stream.writeAll("x");
+                _ = self.chunks.fetchAdd(1, .release);
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake);
+            }
+        }
+    };
+    const Stopper = struct {
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            stop();
+            self.done.store(true, .release);
+        }
+    };
+    const store = @import("../../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    @import("upstream_pool.zig").resetForTest();
+    defer @import("upstream_pool.zig").resetForTest();
+    service_rollout.setForTest(.{ .service_registry_v2 = true, .l7_proxy_http = true });
+    defer service_rollout.resetForTest();
     resetForTest();
     defer resetForTest();
 
-    // seed active_connections to one below the cap: the next admit succeeds,
-    // the one after is shed.
-    mutex.lockUncancelable(std.Options.debug_io);
-    active_connections = max_connections - 1;
-    mutex.unlock(std.Options.debug_io);
-
-    try std.testing.expect(admitConnection()); // reaches the cap
-    try std.testing.expect(!admitConnection()); // over the cap → shed
-    try std.testing.expect(!admitConnection());
-
-    // active_connections never exceeds the cap; both rejected attempts still
-    // counted toward accepted_connections_total.
-    mutex.lockUncancelable(std.Options.debug_io);
-    const active = active_connections;
-    const accepted = accepted_connections_total;
-    mutex.unlock(std.Options.debug_io);
-    try std.testing.expectEqual(max_connections, active);
-    try std.testing.expectEqual(@as(u64, 3), accepted);
+    const primary_fd = try sockets.createListenSocket(0);
+    defer linux_platform.posix.close(primary_fd);
+    const mirror_fd = try sockets.createListenSocket(0);
+    defer linux_platform.posix.close(mirror_fd);
+    var fixtures = [_]Fixture{ .{ .fd = primary_fd }, .{ .fd = mirror_fd } };
+    var threads: [2]?std.Thread = @splat(null);
+    var stopper = Stopper{};
+    var stopping: ?std.Thread = null;
+    // On assertion failure close the trickling peers before joining stop, so
+    // the original unbounded implementation fails without hanging the suite.
+    defer {
+        for (&fixtures) |*fixture| fixture.quit.store(true, .release);
+        for (threads) |thread| if (thread) |owned| owned.join();
+        if (stopping) |thread| thread.join();
+    }
+    for (&fixtures, 0..) |*fixture, index| threads[index] = try std.Thread.spawn(.{}, Fixture.run, .{fixture});
+    try store.createService(.{
+        .service_name = "drip",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "drip.internal",
+        .http_proxy_path_prefix = "/",
+        .http_proxy_mirror_service = "shadow",
+        .http_proxy_request_timeout_ms = 500,
+        .http_proxy_retries = 0,
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.createService(.{ .service_name = "shadow", .vip_address = "10.43.0.3", .lb_policy = "consistent_hash", .created_at = 1000, .updated_at = 1000 });
+    for ([_][]const u8{ "drip", "shadow" }, 0..) |name, index| {
+        try store.upsertServiceEndpoint(.{
+            .service_name = name,
+            .endpoint_id = name,
+            .container_id = name,
+            .node_id = null,
+            .ip_address = "127.0.0.1",
+            .port = try sockets.boundPort(fixtures[index].fd),
+            .weight = 1,
+            .admin_state = "active",
+            .generation = 1,
+            .registered_at = 1000,
+            .last_seen_at = 1000,
+        });
+    }
+    proxy_runtime.bootstrapIfEnabled();
+    startForTest(std.testing.allocator, 0);
+    const client = try LifecycleFixture.connect();
+    defer linux_platform.posix.close(client);
+    try (wire.Stream{ .fd = client, .deadline = wire.Deadline.afterMilliseconds(2000) }).writeAll("GET / HTTP/1.1\r\nHost: drip.internal\r\n\r\n");
+    const ready_deadline = wire.Deadline.afterMilliseconds(2000);
+    while (fixtures[0].chunks.load(.acquire) < 2 or fixtures[1].chunks.load(.acquire) < 2) {
+        _ = try ready_deadline.remaining();
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    stopping = try std.Thread.spawn(.{}, Stopper.run, .{&stopper});
+    const stop_deadline = wire.Deadline.afterMilliseconds(2500);
+    while (!stopper.done.load(.acquire)) {
+        _ = try stop_deadline.remaining();
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(u32, 0), activeConnectionCount());
+    try std.testing.expect(listener_thread == null);
 }
