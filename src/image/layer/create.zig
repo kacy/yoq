@@ -178,19 +178,13 @@ fn writeTarDirectoryEntry(dir: std.Io.Dir, writer: *std.tar.Writer, path: []cons
 /// standard Writer.Options does not expose. GNU extensions retain long paths.
 fn writeOwnedHeader(writer: *std.tar.Writer, kind: std.tar.Writer.Header.FileType, path: []const u8, link: []const u8, size: u64, owner: metadata.Metadata) !void {
     var header = std.tar.Writer.Header.init(kind);
-    header.setPath(writer.prefix, path) catch |err| switch (err) {
-        error.NameTooLong => {
-            var full_path_buf: [max_path]u8 = undefined;
-            const full_path = if (writer.prefix.len == 0) path else try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ writer.prefix, path });
-            try writeLongName(writer, .gnu_long_name, full_path);
-        },
-        else => return err,
+    header.setPath(writer.prefix, path) catch {
+        var full_path_buf: [max_path]u8 = undefined;
+        const full_path = if (writer.prefix.len == 0) path else try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ writer.prefix, path });
+        try writeLongName(writer, .gnu_long_name, full_path);
     };
     if (kind == .symbolic_link) {
-        header.setLinkname(link) catch |err| switch (err) {
-            error.NameTooLong => try writeLongName(writer, .gnu_long_link, link),
-            else => return err,
-        };
+        header.setLinkname(link) catch try writeLongName(writer, .gnu_long_link, link);
     }
     try header.setSize(size);
     @memset(&header.mode, '0');
