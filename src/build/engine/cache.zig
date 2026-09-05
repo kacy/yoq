@@ -20,26 +20,35 @@ pub fn computeCacheKey(
     args: []const u8,
     state: *const types.BuildState,
 ) ![]const u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(instruction);
-    hasher.update("\n");
-    hasher.update(args);
-    hasher.update("\n");
-    hasher.update(state.parent_digest);
-    hasher.update("\n");
+    return computeCacheKeyWithContext(alloc, instruction, args, state, null, null);
+}
 
-    for (state.env.items) |env| {
-        hasher.update(env);
-        hasher.update("\n");
+pub fn computeCacheKeyWithContext(
+    alloc: std.mem.Allocator,
+    instruction: []const u8,
+    args: []const u8,
+    state: *const types.BuildState,
+    source_hash: ?[]const u8,
+    destination: ?[]const u8,
+) ![]const u8 {
+    var hasher = @import("../hash_encoding.zig").Hasher.init("yoq.build-cache.v2");
+    hasher.bytes(instruction);
+    hasher.bytes(args);
+    hasher.number(state.layers.items.len);
+    for (state.layers.items) |item| {
+        hasher.bytes(item.digest);
+        hasher.bytes(item.diff_id);
+        hasher.number(item.size);
     }
+    hasher.bytes(state.workdir);
+    hasher.optional(state.user);
+    hasher.optional(state.shell);
+    hasher.number(state.env.items.len);
+    for (state.env.items) |env| hasher.bytes(env);
+    hasher.optional(source_hash);
+    hasher.optional(destination);
 
-    if (state.shell) |sh| {
-        hasher.update("shell:");
-        hasher.update(sh);
-        hasher.update("\n");
-    }
-
-    const digest = blob_store.Digest{ .hash = hasher.finalResult() };
+    const digest = blob_store.Digest{ .hash = hasher.hash.finalResult() };
     var buf: [71]u8 = undefined;
     return try alloc.dupe(u8, digest.string(&buf));
 }
@@ -102,4 +111,60 @@ test "cache key changes when shell changes" {
     defer alloc.free(key2);
 
     try std.testing.expect(!std.mem.eql(u8, key1, key2));
+}
+
+test "build identity retains lower ancestry when last layers match" {
+    const alloc = std.testing.allocator;
+    var left = types.BuildState.init(alloc);
+    defer left.deinit();
+    var right = types.BuildState.init(alloc);
+    defer right.deinit();
+    try left.addLayer("base-left", "diff-left", 1);
+    try right.addLayer("base-right", "diff-right", 1);
+    try left.addLayer("common-last", "common-diff", 2);
+    try right.addLayer("common-last", "common-diff", 2);
+    const left_key = try computeCacheKey(alloc, "RUN", "cat /base", &left);
+    defer alloc.free(left_key);
+    const right_key = try computeCacheKey(alloc, "RUN", "cat /base", &right);
+    defer alloc.free(right_key);
+    try std.testing.expect(!std.mem.eql(u8, left_key, right_key));
+}
+
+test "build identity includes effective workdir user and destination" {
+    const alloc = std.testing.allocator;
+    var state = types.BuildState.init(alloc);
+    defer state.deinit();
+    const initial = try computeCacheKey(alloc, "RUN", "id > result", &state);
+    defer alloc.free(initial);
+    state.workdir = try alloc.dupe(u8, "/work");
+    const moved = try computeCacheKey(alloc, "RUN", "id > result", &state);
+    defer alloc.free(moved);
+    try std.testing.expect(!std.mem.eql(u8, initial, moved));
+    state.user = try alloc.dupe(u8, "1000:1000");
+    const user = try computeCacheKey(alloc, "RUN", "id > result", &state);
+    defer alloc.free(user);
+    try std.testing.expect(!std.mem.eql(u8, moved, user));
+    for ([_][]const u8{ "COPY", "ADD" }) |instruction| {
+        const left = try computeCacheKeyWithContext(alloc, instruction, "source relative", &state, "same-source", "/left/relative");
+        defer alloc.free(left);
+        const right = try computeCacheKeyWithContext(alloc, instruction, "source relative", &state, "same-source", "/right/relative");
+        defer alloc.free(right);
+        try std.testing.expect(!std.mem.eql(u8, left, right));
+    }
+}
+
+test "build identity separates newline-containing environment fields" {
+    const alloc = std.testing.allocator;
+    var left = types.BuildState.init(alloc);
+    defer left.deinit();
+    var right = types.BuildState.init(alloc);
+    defer right.deinit();
+    try left.env.append(alloc, try alloc.dupe(u8, "A=x\nB=y"));
+    try right.env.append(alloc, try alloc.dupe(u8, "A=x"));
+    try right.env.append(alloc, try alloc.dupe(u8, "B=y"));
+    const left_key = try computeCacheKey(alloc, "RUN", "env", &left);
+    defer alloc.free(left_key);
+    const right_key = try computeCacheKey(alloc, "RUN", "env", &right);
+    defer alloc.free(right_key);
+    try std.testing.expect(!std.mem.eql(u8, left_key, right_key));
 }

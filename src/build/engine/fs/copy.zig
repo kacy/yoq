@@ -31,7 +31,7 @@ pub fn processCopy(
     var file_hash_buf: [71]u8 = undefined;
     const file_hash_str = file_hash.string(&file_hash_buf);
 
-    const cache_key = (try common.withCache(alloc, state, "COPY", args, file_hash_str)) orelse return;
+    const cache_key = (try common.withCache(alloc, state, "COPY", args, file_hash_str, actual_dest.path)) orelse return;
     defer alloc.free(cache_key);
 
     var layer_dir_buf: [paths.max_path]u8 = undefined;
@@ -67,7 +67,7 @@ pub fn processCopyFromStage(
         layer_paths_list.deinit(alloc);
     }
 
-    try common.withExtractedLayers(alloc, source_state.layer_digests.items, &layer_paths_list);
+    try common.withExtractedLayers(alloc, source_state.layers.items, &layer_paths_list);
     if (layer_paths_list.items.len == 0) return;
 
     paths.ensureDataDir("tmp") catch return types.BuildError.CopyStepFailed;
