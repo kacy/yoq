@@ -5,7 +5,9 @@ const paths = @import("../../lib/paths.zig");
 const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
 
-pub const layer_subdir = "layers/v2/sha256";
+// v3 preserves numeric image ownership and ordinary directory/file modes.
+// Earlier extraction policies must never satisfy this cache.
+pub const layer_subdir = "layers/v3/sha256";
 const max_path = paths.max_path;
 
 fn cwd() std.Io.Dir {

@@ -72,6 +72,9 @@ pub const UserMapping = struct {
     outer_gid: u32,
     /// number of gids to map
     gid_count: u32 = 1,
+    /// Privileged mappings can retain setgroups so the child can clear its
+    /// inherited supplementary groups. Unprivileged mappings must deny it.
+    allow_setgroups: bool = false,
 };
 
 /// clone_args struct for the clone3 syscall.
@@ -284,9 +287,12 @@ fn writeUserMapping(child_pid: posix.pid_t, mapping: UserMapping) !void {
     // max path: /proc/4194304/uid_map = 22 chars, but we add margin
     var path_buf: [128]u8 = undefined;
 
-    // step 1: deny setgroups (required before writing gid_map unprivileged)
-    const setgroups_path = try std.fmt.bufPrint(&path_buf, "/proc/{d}/setgroups", .{child_pid});
-    try writeProc(setgroups_path, "deny\n");
+    // Unprivileged gid mappings require setgroups to be permanently denied.
+    // Privileged callers may keep it available for child credential setup.
+    if (!mapping.allow_setgroups) {
+        const setgroups_path = try std.fmt.bufPrint(&path_buf, "/proc/{d}/setgroups", .{child_pid});
+        try writeProc(setgroups_path, "deny\n");
+    }
 
     // step 2: write uid_map
     var map_buf: [128]u8 = undefined;

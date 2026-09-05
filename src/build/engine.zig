@@ -23,6 +23,9 @@ comptime {
     _ = @import("engine/handlers_meta.zig");
     _ = @import("engine/handlers_fs.zig");
     _ = @import("engine/fs/common.zig");
+    _ = @import("engine/fs/base.zig");
+    _ = @import("engine/child_exec.zig");
+    _ = @import("engine/identity.zig");
     _ = @import("engine/onbuild.zig");
     _ = @import("engine/image_output.zig");
 }
