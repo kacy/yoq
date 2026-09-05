@@ -75,6 +75,30 @@ pub fn publishBytes(path: []const u8, data: []const u8) SnapshotError!void {
     (linux_platform.File{ .handle = dir.handle }).sync() catch return SnapshotError.IoError;
 }
 
+/// Raft identifies state by index and term, not SQLite's physical layout. A
+/// previous attempt may have published equivalent bytes before activation
+/// failed. Keep that validated generation and return its exact database.
+pub fn publishSnapshot(path: []const u8, data: []const u8) SnapshotError!PreparedSnapshot {
+    var incoming = try PreparedSnapshot.init(data);
+    errdefer incoming.deinit();
+    publishBytes(path, data) catch |err| {
+        if (err != error.SnapshotConflict) return err;
+        const existing = try readBytes(std.heap.page_allocator, path);
+        defer std.heap.page_allocator.free(existing);
+        var retained = try PreparedSnapshot.init(existing);
+        errdefer retained.deinit();
+        if (retained.meta.last_included_index != incoming.meta.last_included_index or
+            retained.meta.last_included_term != incoming.meta.last_included_term)
+            return SnapshotError.SnapshotConflict;
+        // Retry the durability barrier too: the earlier attempt may have
+        // linked the generation but failed to sync its directory.
+        try publishBytes(path, existing);
+        incoming.deinit();
+        return retained;
+    };
+    return incoming;
+}
+
 pub fn takeSnapshot(self: anytype, dest_path: []const u8, meta: SnapshotMeta) SnapshotError!void {
     if (meta.last_included_index != self.last_applied or meta.last_included_index > std.math.maxInt(i64) or meta.last_included_term > std.math.maxInt(i64)) return SnapshotError.InvalidSnapshot;
     var tmp_path_buf: [512]u8 = undefined;
@@ -113,7 +137,8 @@ pub fn takeSnapshot(self: anytype, dest_path: []const u8, meta: SnapshotMeta) Sn
     std.mem.writeInt(u64, data[8..16], meta.last_included_term, .little);
     std.mem.writeInt(u64, data[16..24], @intCast(tmp_data.len), .little);
     @memcpy(data[snapshot_header_size..], tmp_data);
-    try publishBytes(dest_path, data);
+    var published = try publishSnapshot(dest_path, data);
+    published.deinit();
 }
 
 pub fn restoreFromSnapshot(self: anytype, src_path: []const u8) SnapshotError!SnapshotMeta {

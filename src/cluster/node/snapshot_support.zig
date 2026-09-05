@@ -43,14 +43,13 @@ pub fn recover(alloc: std.mem.Allocator, data_dir: []const u8, log: anytype, sta
     const selected = (try log.readSnapshotMeta()) orelse return;
     const data = try readSelected(alloc, data_dir, selected);
     defer alloc.free(data);
-    var prepared = try artifact.PreparedSnapshot.init(data);
-    defer prepared.deinit();
-    if (selected.data_len == 0) {
+    var prepared = if (selected.data_len == 0) blk: {
         var path_buf: [512]u8 = undefined;
-        const path = try generationPath(&path_buf, data_dir, prepared.meta);
-        try artifact.publishBytes(path, data);
-        try log.activateSnapshot(prepared.meta);
-    }
+        const path = try generationPath(&path_buf, data_dir, selected);
+        break :blk try artifact.publishSnapshot(path, data);
+    } else try artifact.PreparedSnapshot.init(data);
+    defer prepared.deinit();
+    if (selected.data_len == 0) try log.activateSnapshot(prepared.meta);
     if (state_machine.last_applied < selected.last_included_index) try prepared.restore(state_machine);
 }
 
@@ -87,16 +86,16 @@ pub fn takeSnapshot(self: anytype, index: LogIndex, term: types.Term) void {
 /// node must not participate with an older state database.
 pub fn install(self: anytype, data: []const u8, expected: ?SnapshotMeta) !void {
     if (self.snapshot_failed.load(.acquire)) return error.SnapshotRecoveryRequired;
-    var prepared = try artifact.PreparedSnapshot.init(data);
+    const requested = try artifact.parseSnapshotMeta(data);
+    if (expected) |want| {
+        if (!sameBoundary(requested, want)) return error.SnapshotMismatch;
+    }
+    if (requested.last_included_index <= self.state_machine.last_applied) return;
+    var path_buf: [512]u8 = undefined;
+    const path = try generationPath(&path_buf, self.config.data_dir, requested);
+    var prepared = try artifact.publishSnapshot(path, data);
     defer prepared.deinit();
     const meta = prepared.meta;
-    if (expected) |want| {
-        if (!sameBoundary(meta, want)) return error.SnapshotMismatch;
-    }
-    if (meta.last_included_index <= self.state_machine.last_applied) return;
-    var path_buf: [512]u8 = undefined;
-    const path = try generationPath(&path_buf, self.config.data_dir, meta);
-    try artifact.publishBytes(path, data);
     try self.log.activateSnapshot(meta);
     prepared.restore(&self.state_machine) catch |err| {
         self.snapshot_failed.store(true, .release);
@@ -338,4 +337,109 @@ test "snapshot restart repairs activation before restore and preserves later app
         const row = (try state.db.one(struct { value: i64 }, "SELECT cpu_used AS value FROM agents WHERE id = 'snapshot-probe';", .{}, .{})).?;
         try std.testing.expectEqual(@as(i64, 99), row.value);
     }
+}
+
+fn changeSnapshotLayout(state: anytype) !void {
+    // Change SQLite header bytes and retain free pages without changing any
+    // replicated rows or the applied boundary.
+    try state.db.exec("PRAGMA user_version = 73;", .{}, .{});
+    try state.db.exec("CREATE TABLE snapshot_padding (data BLOB);", .{}, .{});
+    try state.db.exec("INSERT INTO snapshot_padding VALUES (zeroblob(65536));", .{}, .{});
+    try state.db.exec("DROP TABLE snapshot_padding;", .{}, .{});
+}
+
+fn snapshotUserVersion(state: anytype) !i64 {
+    const row = (try state.db.one(struct { user_version: i64 }, "PRAGMA user_version;", .{}, .{})).?;
+    return row.user_version;
+}
+
+test "snapshot install retry restores the retained generation when SQLite layouts differ" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [512]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const dir = dir_buf[0..dir_len];
+    const original = try testSnapshot(dir);
+    defer std.testing.allocator.free(original);
+    const original_meta = try artifact.parseSnapshotMeta(original);
+    var node = try TestNode.init(dir);
+    defer node.deinit();
+    try node.log.db.exec("CREATE TRIGGER refuse_snapshot BEFORE UPDATE ON snapshot_meta BEGIN SELECT RAISE(ABORT, 'injected activation failure'); END;", .{}, .{});
+    try std.testing.expectError(error.WriteFailed, install(&node, original, original_meta));
+    try std.testing.expect((try node.log.readSnapshotMeta()) == null);
+    try std.testing.expectEqual(@as(u64, 0), node.state_machine.last_applied);
+
+    var alternate = try @import("../state_machine.zig").StateMachine.initMemory();
+    defer alternate.deinit();
+    _ = try alternate.restoreFromBytes(original);
+    try changeSnapshotLayout(&alternate);
+    var alternate_buf: [512]u8 = undefined;
+    const alternate_path = try std.fmt.bufPrint(&alternate_buf, "{s}/alternate.dat", .{dir});
+    try alternate.takeSnapshot(alternate_path, original_meta);
+    const incoming = try artifact.readBytes(std.testing.allocator, alternate_path);
+    defer std.testing.allocator.free(incoming);
+    const incoming_meta = try artifact.parseSnapshotMeta(incoming);
+    try std.testing.expect(incoming_meta.data_len != original_meta.data_len);
+
+    try node.log.db.exec("DROP TRIGGER refuse_snapshot;", .{}, .{});
+    try install(&node, incoming, incoming_meta);
+    try std.testing.expectEqual(original_meta.data_len, (try node.log.readSnapshotMeta()).?.data_len);
+    try std.testing.expectEqual(@as(u64, 2), node.state_machine.last_applied);
+    try std.testing.expectEqual(@as(i64, 0), try snapshotUserVersion(&node.state_machine));
+    const selected = try readSelected(std.testing.allocator, dir, (try node.log.readSnapshotMeta()).?);
+    defer std.testing.allocator.free(selected);
+    try std.testing.expectEqualSlices(u8, original, selected);
+}
+
+test "snapshot local retry reuses a published generation after activation failed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [512]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const dir = dir_buf[0..dir_len];
+    const data = try testSnapshot(dir);
+    defer std.testing.allocator.free(data);
+    var node = try TestNode.init(dir);
+    defer node.deinit();
+    _ = try node.state_machine.restoreFromBytes(data);
+    try node.log.append(.{ .index = 2, .term = 3, .data = "boundary" });
+    try node.log.db.exec("CREATE TRIGGER refuse_snapshot BEFORE UPDATE ON snapshot_meta BEGIN SELECT RAISE(ABORT, 'injected activation failure'); END;", .{}, .{});
+    takeSnapshot(&node, 2, 3);
+    try std.testing.expect((try node.log.readSnapshotMeta()) == null);
+    var path_buf: [512]u8 = undefined;
+    const path = try generationPath(&path_buf, dir, .{ .last_included_index = 2, .last_included_term = 3, .data_len = 0 });
+    const retained = try artifact.readBytes(std.testing.allocator, path);
+    defer std.testing.allocator.free(retained);
+    const retained_meta = try artifact.parseSnapshotMeta(retained);
+    try changeSnapshotLayout(&node.state_machine);
+    try node.log.db.exec("DROP TRIGGER refuse_snapshot;", .{}, .{});
+    takeSnapshot(&node, 2, 3);
+    try std.testing.expectEqual(@as(u64, 2), node.last_snapshot_index);
+    try std.testing.expectEqual(retained_meta.data_len, (try node.log.readSnapshotMeta()).?.data_len);
+    const selected = try readSelected(std.testing.allocator, dir, (try node.log.readSnapshotMeta()).?);
+    defer std.testing.allocator.free(selected);
+    try std.testing.expectEqualSlices(u8, retained, selected);
+}
+
+test "snapshot generation reuse rejects mismatched boundaries and corrupt retained bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [512]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    const dir = dir_buf[0..dir_len];
+    const data = try testSnapshot(dir);
+    defer std.testing.allocator.free(data);
+    var path_buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/retained.dat", .{dir});
+    try artifact.publishBytes(path, data);
+    // The term is outside the SQLite payload, so this is still a structurally
+    // valid snapshot. A filename collision cannot authorize another boundary.
+    std.mem.writeInt(u64, data[8..16], 9, .little);
+    try std.testing.expectError(error.SnapshotConflict, artifact.publishSnapshot(path, data));
+    std.mem.writeInt(u64, data[8..16], 3, .little);
+    const original_magic = data[artifact.snapshot_header_size];
+    data[artifact.snapshot_header_size] = 0;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "retained.dat", .data = data });
+    data[artifact.snapshot_header_size] = original_magic;
+    try std.testing.expectError(error.CorruptSnapshot, artifact.publishSnapshot(path, data));
 }
