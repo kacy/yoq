@@ -2,7 +2,8 @@
 //
 // the `certificates` table is shared with ACME (source="acme") and manual
 // installs (source="manual"). this module only touches rows we own —
-// source="mtls", keyed by "service:<name>" in the `domain` column — and
+// source="mtls", keyed by "service:<name>" or the reserved "proxy:ingress"
+// domain — and
 // writes through raft (via node.propose) so every node ends up with the
 // same row. local-only writes via CertStore.install would diverge across
 // followers.
