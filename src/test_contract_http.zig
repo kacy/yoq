@@ -31,6 +31,15 @@ fn runHandleConnectionRaw(alloc: std.mem.Allocator, raw_request: []const u8) ![]
         if (n == 0) break;
         if (response.items.len + n > 16 * 1024) return error.ResponseTooLarge;
         try response.appendSlice(alloc, buffer[0..n]);
+        if (std.mem.indexOf(u8, response.items, "\r\n\r\n")) |header_end| {
+            const line_end = std.mem.indexOf(u8, response.items, "\r\n").?;
+            const length = try http.findContentLength(response.items[line_end + 2 .. header_end]);
+            const expected = header_end + 4 + if (std.mem.startsWith(u8, raw_request, "HEAD ")) @as(usize, 0) else length;
+            // A server can close with unread rejected input, producing a reset
+            // after its response. Framing, rather than EOF, defines completion.
+            if (response.items.len == expected) break;
+            if (response.items.len > expected) return error.BadResponse;
+        }
     }
     return response.toOwnedSlice(alloc);
 }
