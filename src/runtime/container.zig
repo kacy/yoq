@@ -16,6 +16,7 @@ const process = @import("process.zig");
 const store = @import("../state/store.zig");
 const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
+const logs = @import("logs.zig");
 const exec_runtime = @import("container/exec_runtime.zig");
 const id_paths = @import("container/id_paths.zig");
 const start_support = @import("container/start_support.zig");
