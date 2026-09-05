@@ -1,5 +1,5 @@
 const std = @import("std");
-const platform = @import("../../lib/linux_platform.zig");
+const platform = @import("linux_platform");
 const posix = std.posix;
 
 /// One joined loopback worker serves predetermined HTTP responses. It also
