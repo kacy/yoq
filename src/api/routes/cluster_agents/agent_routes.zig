@@ -7,6 +7,7 @@ const json_helpers = @import("../../../lib/json_helpers.zig");
 const audit = @import("../../../state/audit.zig");
 const common = @import("../common.zig");
 const writers = @import("writers.zig");
+const credentials = @import("../../../cluster/agent_credentials.zig");
 
 const Response = common.Response;
 const RouteContext = common.RouteContext;
@@ -147,18 +148,12 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
         },
     ) catch return common.internalError();
 
-    if (peer_sql) |wg_sql| {
-        var combined_buf: [4096]u8 = undefined;
-        const combined = std.fmt.bufPrint(&combined_buf, "{s} {s}", .{ wg_sql, sql }) catch
-            return common.internalError();
-        _ = node.propose(combined) catch {
-            return common.notLeader(alloc, node);
-        };
-    } else {
-        _ = node.propose(sql) catch {
-            return common.notLeader(alloc, node);
-        };
-    }
+    var credential = credentials.issue();
+    defer std.crypto.secureZero(u8, &credential);
+    const credential_hash = credentials.hash(&credential);
+    var combined_buf: [4608]u8 = undefined;
+    const combined = std.fmt.bufPrint(&combined_buf, "{s} {s} UPDATE agents SET credential_hash = '{s}' WHERE id = '{s}';", .{ peer_sql orelse "", sql, credential_hash, id_buf }) catch return common.internalError();
+    _ = node.propose(combined) catch return common.notLeader(alloc, node);
 
     var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
     defer json_buf_writer.deinit();
@@ -167,7 +162,7 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
 
     writer.writeAll("{\"id\":\"") catch return common.internalError();
     writer.writeAll(&id_buf) catch return common.internalError();
-    writer.writeByte('"') catch return common.internalError();
+    writer.print("\",\"credential\":\"{s}\"", .{credential}) catch return common.internalError();
 
     if (assigned_node_id) |nid| {
         writer.print(",\"node_id\":{d}", .{nid}) catch return common.internalError();
@@ -377,8 +372,9 @@ pub fn handleAgentAssignments(alloc: std.mem.Allocator, agent_id: []const u8, ct
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
-pub fn handleAssignmentStatusUpdate(alloc: std.mem.Allocator, request: http.Request, assignment_id: []const u8, ctx: RouteContext) Response {
+pub fn handleAssignmentStatusUpdate(alloc: std.mem.Allocator, request: http.Request, agent_id: []const u8, assignment_id: []const u8, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+    if (!(credentials.ownsAssignment(node.stateMachineDb(), agent_id, assignment_id) catch false)) return common.forbidden();
     if (request.body.len == 0) return common.badRequest("missing request body");
 
     const status = extractJsonString(request.body, "status") orelse return common.badRequest("missing status field");
@@ -396,8 +392,14 @@ pub fn handleAssignmentStatusUpdate(alloc: std.mem.Allocator, request: http.Requ
 
     var sql_buf: [256]u8 = undefined;
     const sql = agent_registry.updateAssignmentStatusSql(&sql_buf, assignment_id, status, reason) catch return common.internalError();
+    // Retain ownership at apply time too: an assignment can move between
+    // authorization and this replicated mutation being committed.
+    var owner_buf: [64]u8 = undefined;
+    const escaped = @import("../../../lib/sql.zig").escapeSqlString(&owner_buf, agent_id) catch return common.internalError();
+    var bound_buf: [512]u8 = undefined;
+    const bound = std.fmt.bufPrint(&bound_buf, "{s} AND agent_id = '{s}';", .{ sql[0 .. sql.len - 1], escaped }) catch return common.internalError();
 
-    _ = node.propose(sql) catch {
+    _ = node.propose(bound) catch {
         return common.notLeader(alloc, node);
     };
 
@@ -434,4 +436,14 @@ pub fn handleUpdateLabels(alloc: std.mem.Allocator, request: http.Request, id: [
     };
 
     return .{ .status = .ok, .body = "{\"ok\":true}", .allocated = false };
+}
+
+pub fn handleRevokeCredential(alloc: std.mem.Allocator, agent_id: []const u8, ctx: RouteContext) Response {
+    const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+    var escaped_buf: [64]u8 = undefined;
+    const id = @import("../../../lib/sql.zig").escapeSqlString(&escaped_buf, agent_id) catch return common.internalError();
+    var sql_buf: [192]u8 = undefined;
+    const sql = std.fmt.bufPrint(&sql_buf, "UPDATE agents SET credential_hash = NULL WHERE id = '{s}';", .{id}) catch return common.internalError();
+    _ = node.propose(sql) catch return common.notLeader(alloc, node);
+    return .{ .status = .ok, .body = "{\"revoked\":true}", .allocated = false };
 }

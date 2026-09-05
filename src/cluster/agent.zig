@@ -65,6 +65,8 @@ pub const Agent = struct {
     server_port: u16,
     token: []const u8,
     owned_token: ?[]u8 = null,
+    /// Server-issued operational credential, owned independently of enrollment.
+    worker_credential: ?[]u8 = null,
     agent_api_port: u16 = 7701,
     running: std.atomic.Value(bool),
     loop_thread: ?std.Thread,
@@ -185,6 +187,18 @@ pub const Agent = struct {
             writeErr("unexpected agent ID length: {d}\n", .{id_str.len});
             return AgentError.InvalidResponse;
         }
+
+        const secret = extractJsonString(resp.body, "credential") orelse return AgentError.InvalidResponse;
+        if (secret.len != 64) return AgentError.InvalidResponse;
+        for (secret) |byte| {
+            if (!std.ascii.isHex(byte)) return AgentError.InvalidResponse;
+        }
+        const owned_credential = self.alloc.dupe(u8, secret) catch return AgentError.InvalidResponse;
+        if (self.worker_credential) |old| {
+            std.crypto.secureZero(u8, old);
+            self.alloc.free(old);
+        }
+        self.worker_credential = owned_credential;
 
         @memcpy(&self.id, id_str);
 

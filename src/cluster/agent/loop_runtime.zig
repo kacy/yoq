@@ -68,7 +68,7 @@ pub fn doHeartbeat(self: anytype) void {
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/agents/{s}/heartbeat", .{self.id}) catch return;
 
-    var resp = http_client.postWithAuth(self.alloc, self.server_addr, self.server_port, path, body, self.token) catch return;
+    var resp = http_client.postWithAuth(self.alloc, self.server_addr, self.server_port, path, body, self.worker_credential) catch return;
     defer resp.deinit(self.alloc);
 
     if (resp.status_code != 200) {
@@ -180,5 +180,5 @@ pub fn reconcilePeers(self: anytype) void {
 
 pub fn fetchPeers(self: anytype) ?http_client.Response {
     const path = if (self.role == .agent) "/wireguard/peers?servers_only=1" else "/wireguard/peers";
-    return http_client.getWithAuth(self.alloc, self.server_addr, self.server_port, path, self.token) catch return null;
+    return http_client.getWithAuth(self.alloc, self.server_addr, self.server_port, path, self.worker_credential) catch return null;
 }
