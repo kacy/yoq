@@ -685,6 +685,7 @@ pub const ReverseProxy = struct {
             .address = upstream.address,
             .port = upstream.port,
             .connect_timeout_ms = plan.route.connect_timeout_ms,
+            .request_timeout_ms = plan.route.request_timeout_ms,
             .ca_cert_pem = ca_rec.cert_pem,
             .server_name = upstream.service,
             .now_unix = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),

@@ -17,10 +17,12 @@ const linux_platform = @import("linux_platform");
 const posix = std.posix;
 
 const client_session = @import("client_session.zig");
+const transport = @import("client_transport.zig");
 
 pub const DialError = error{
     ConnectFailed,
     ConnectTimedOut,
+    TimedOut,
     InvalidAddress,
     HandshakeFailed,
     AllocFailed,
@@ -33,6 +35,8 @@ pub const Options = struct {
     /// connect-side TCP timeout in milliseconds. matches the existing
     /// `connectToUpstream` knob in the L7 proxy.
     connect_timeout_ms: u32 = 5_000,
+    /// Total budget for handshake, request writes, and response reads.
+    request_timeout_ms: u32 = 30_000,
     /// trust root for the server cert chain. when null, the dial stays
     /// plaintext (returns `.bare`).
     ca_cert_pem: ?[]const u8 = null,
@@ -53,7 +57,7 @@ pub const Outcome = union(enum) {
     /// read/write on the returned fd.
     bare: posix.fd_t,
     /// mTLS upstream — the caller uses the session's read/write
-    /// methods. owns the underlying fd; `deinit` closes it.
+    /// methods. The caller owns the fd and closes it after session.deinit().
     session: client_session.ClientSession,
 };
 
@@ -63,27 +67,34 @@ pub fn dial(io: std.Io, alloc: std.mem.Allocator, opts: Options) DialError!Outco
     const fd = openTcp(opts.address, opts.port, opts.connect_timeout_ms) catch |err| return mapDialError(err);
     errdefer linux_platform.posix.close(fd);
 
-    const ca_pem = opts.ca_cert_pem orelse return .{ .bare = fd };
+    const ca_pem = opts.ca_cert_pem orelse {
+        const flags = linux_platform.posix.fcntl(fd, posix.F.GETFL, 0) catch return error.ConnectFailed;
+        const nonblock: usize = @intCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
+        _ = linux_platform.posix.fcntl(fd, posix.F.SETFL, flags & ~nonblock) catch return error.ConnectFailed;
+        return .{ .bare = fd };
+    };
 
+    const deadline = transport.Deadline.afterMilliseconds(opts.request_timeout_ms);
     const sess = client_session.doHandshake(io, alloc, fd, .{
+        .deadline = deadline,
         .server_name = opts.server_name,
         .ca_cert_pem = ca_pem,
         .expected_server_identity = opts.expected_server_identity,
         .client_cert_pem = opts.client_cert_pem,
         .client_key_pem = opts.client_key_pem,
         .now_unix = opts.now_unix,
-    }) catch return DialError.HandshakeFailed;
+    }) catch |err| return if (err == error.TimedOut) error.TimedOut else error.HandshakeFailed;
     return .{ .session = sess };
 }
 
 /// open a TCP socket and connect to the upstream within
-/// `connect_timeout_ms`. blocking socket with a poll-for-writable
-/// wait — same pattern as `socket_helpers.connectToUpstream`.
+/// `connect_timeout_ms`. The socket stays nonblocking; TLS transport
+/// polls against its absolute deadline when a syscall would block.
 fn openTcp(address: []const u8, port: u16, connect_timeout_ms: u32) !posix.fd_t {
     var ip_bytes: [4]u8 = undefined;
     if (!parseIpv4(address, &ip_bytes)) return error.InvalidAddress;
 
-    const fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    const fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
     errdefer linux_platform.posix.close(fd);
 
     var addr = posix.sockaddr.in{
@@ -92,8 +103,15 @@ fn openTcp(address: []const u8, port: u16, connect_timeout_ms: u32) !posix.fd_t 
         .addr = std.mem.bytesToValue(u32, &ip_bytes),
         .zero = .{0} ** 8,
     };
-    linux_platform.posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch return error.ConnectFailed;
-    _ = connect_timeout_ms; // blocking connect — keeping the knob for the upcoming nonblocking path
+    const socket = transport.Stream{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(connect_timeout_ms) };
+    linux_platform.posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch |err| switch (err) {
+        error.WouldBlock, error.ConnectionPending => {
+            socket.wait(posix.POLL.OUT) catch |wait_err| return if (wait_err == error.TimedOut) error.ConnectTimedOut else error.ConnectFailed;
+            linux_platform.posix.getsockoptError(fd) catch return error.ConnectFailed;
+        },
+        error.ConnectionTimedOut => return error.ConnectTimedOut,
+        else => return error.ConnectFailed,
+    };
     return fd;
 }
 
@@ -127,6 +145,7 @@ fn mapDialError(err: anyerror) DialError {
     return switch (err) {
         error.InvalidAddress => DialError.InvalidAddress,
         error.ConnectFailed => DialError.ConnectFailed,
+        error.ConnectTimedOut => DialError.ConnectTimedOut,
         else => DialError.ConnectFailed,
     };
 }
@@ -313,4 +332,20 @@ test "dial runs a TLS handshake against a real TCP listener" {
             try std.testing.expect(server_err == null);
         },
     }
+}
+
+test "TLS deadline bounds an upstream that accepts no handshake" {
+    const listener = try openTestListener();
+    defer linux_platform.posix.close(listener.fd);
+    const start = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
+    try std.testing.expectError(error.TimedOut, dial(std.testing.io, std.testing.allocator, .{
+        .address = "127.0.0.1",
+        .port = listener.port,
+        .connect_timeout_ms = 500,
+        .request_timeout_ms = 30,
+        .ca_cert_pem = "unused until ServerHello arrives",
+        .now_unix = td_now,
+    }));
+    const elapsed = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds() - start;
+    try std.testing.expect(elapsed < 2 * std.time.ns_per_s);
 }
