@@ -7,6 +7,7 @@ test "smoke test" {
 // pull in tests from all modules
 comptime {
     _ = @import("runtime/container.zig");
+    _ = @import("runtime/container/startup_channel.zig");
     _ = @import("runtime/container/start_support.zig");
     _ = @import("runtime/cgroups.zig");
     _ = @import("runtime/namespaces.zig");

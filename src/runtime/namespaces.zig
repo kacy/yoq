@@ -149,13 +149,16 @@ pub fn spawn(
         return NamespaceError.PipeFailed;
     };
 
+    var owns_child_ends = true;
     errdefer {
-        linux_platform.posix.close(pipe_read);
         linux_platform.posix.close(pipe_write);
         linux_platform.posix.close(stdout_pipe[0]);
-        linux_platform.posix.close(stdout_pipe[1]);
         linux_platform.posix.close(stderr_pipe[0]);
-        linux_platform.posix.close(stderr_pipe[1]);
+        if (owns_child_ends) {
+            linux_platform.posix.close(pipe_read);
+            linux_platform.posix.close(stdout_pipe[1]);
+            linux_platform.posix.close(stderr_pipe[1]);
+        }
     }
 
     // allocate child stack. clone3 needs an explicit stack for the child.
@@ -245,6 +248,7 @@ pub fn spawn(
     linux_platform.posix.close(stdout_pipe[1]);
     linux_platform.posix.close(stderr_pipe[1]);
 
+    owns_child_ends = false;
     const child_pid: posix.pid_t = @intCast(pid);
 
     // set up user namespace mappings if requested
@@ -256,10 +260,8 @@ pub fn spawn(
         writeUserMapping(child_pid, mapping) catch {
             // child has no uid/gid mappings — must not proceed
             _ = linux.syscall2(.kill, @as(usize, @bitCast(@as(isize, child_pid))), @intFromEnum(linux.SIG.KILL));
-            _ = linux.syscall4(.wait4, @as(usize, @bitCast(@as(isize, child_pid))), 0, 0, 0);
-            linux_platform.posix.close(pipe_write);
-            linux_platform.posix.close(stdout_pipe[0]);
-            linux_platform.posix.close(stderr_pipe[0]);
+            while (linux.errno(linux.syscall4(.wait4, @as(usize, @bitCast(@as(isize, child_pid))), 0, 0, 0)) == .INTR) {}
+            // Remaining parent ends belong to the single errdefer above.
             return NamespaceError.WriteFailed;
         };
     }
