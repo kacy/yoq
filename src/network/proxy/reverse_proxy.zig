@@ -3377,7 +3377,7 @@ test "forwardRequest returns bad gateway after upstream request timeout" {
     upstream.wait();
     try std.testing.expectEqual(@as(usize, 1), upstream.accepted);
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 502 Bad Gateway\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response, "{\"error\":\"upstream receive failed\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "{\"error\":\"upstream request timed out\"}") != null);
 }
 
 test "forwardRequest retries onto a different endpoint after circuit opens" {
