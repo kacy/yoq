@@ -49,26 +49,23 @@ pub const BackupError = error{
 /// checksummed by default; pass encrypt_artifact=false for a raw SQLite copy.
 /// safe to call while the server is running — uses SQLite online backup.
 pub fn backup(alloc: std.mem.Allocator, output_path: [:0]const u8, encrypt_artifact: bool) BackupError!void {
-    if (!encrypt_artifact) return snapshotDbTo(output_path);
+    return backupWithOptions(alloc, output_path, encrypt_artifact, null, null);
+}
 
-    // snapshot to a temp file, then encrypt it into the final artifact.
-    const tmp_path = std.fmt.allocPrintSentinel(alloc, "{s}.tmp", .{output_path}, 0) catch return BackupError.OutOfMemory;
-    defer alloc.free(tmp_path);
-
-    try snapshotDbTo(tmp_path);
-    defer deleteFileQuiet(tmp_path);
-
-    const plaintext = readWholeFile(alloc, tmp_path) catch return BackupError.IoFailed;
-    defer alloc.free(plaintext);
-
-    var digest: [sha_len]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(plaintext, &digest, .{});
-
-    const key = secrets.loadOrCreateKey() catch return BackupError.KeyUnavailable;
+fn backupWithOptions(alloc: std.mem.Allocator, output_path: [:0]const u8, encrypt_artifact: bool, source: ?[:0]const u8, supplied_key: ?[secrets.key_length]u8) BackupError!void {
+    var staging = try PrivateDatabase.init();
+    defer staging.deinit();
+    try snapshotDbTo(staging.path(), source);
+    const plaintext = readWholeFile(alloc, staging.path()) catch return error.IoFailed;
+    defer {
+        std.crypto.secureZero(u8, plaintext);
+        alloc.free(plaintext);
+    }
+    if (!encrypt_artifact) return publishArtifact(output_path, plaintext);
+    const key = supplied_key orelse (secrets.loadOrCreateKey() catch return error.KeyUnavailable);
     const artifact = try encodeArtifact(alloc, plaintext, key);
     defer alloc.free(artifact);
-
-    writeFileBytes(output_path, artifact) catch return BackupError.IoFailed;
+    try publishArtifact(output_path, artifact);
 }
 
 /// build an encrypted, checksummed backup artifact from a plaintext database.
@@ -129,37 +126,89 @@ const RestoreOptions = struct {
 // database and secrets key. Production callers use the defaults above.
 fn restoreWithOptions(alloc: std.mem.Allocator, input_path: [:0]const u8, options: RestoreOptions) BackupError!void {
     const contents = readWholeFile(alloc, input_path) catch return BackupError.RestoreFailed;
-    defer alloc.free(contents);
-
-    // raw SQLite file (legacy / --plain): no magic header.
-    if (!std.mem.startsWith(u8, contents, magic)) {
-        if (options.verify_only) return validateDbFile(input_path);
-        return restoreDbFrom(input_path, options.destination);
+    defer {
+        std.crypto.secureZero(u8, contents);
+        alloc.free(contents);
     }
 
-    const key = options.key orelse (secrets.loadOrCreateKey() catch return BackupError.KeyUnavailable);
-    const plaintext = try decodeArtifact(alloc, contents, key);
-    defer alloc.free(plaintext);
+    // Both formats are materialized under a private directory. SQLite must
+    // read exactly the bytes checked above, not reopen the caller's pathname.
+    var staging = try PrivateDatabase.init();
+    defer staging.deinit();
+    if (!std.mem.startsWith(u8, contents, magic)) {
+        writeFileBytes(staging.path(), contents) catch return error.IoFailed;
+    } else {
+        const key = options.key orelse (secrets.loadOrCreateKey() catch return error.KeyUnavailable);
+        const plaintext = try decodeArtifact(alloc, contents, key);
+        defer {
+            std.crypto.secureZero(u8, plaintext);
+            alloc.free(plaintext);
+        }
+        writeFileBytes(staging.path(), plaintext) catch return error.IoFailed;
+    }
+    if (options.verify_only) return validateDbFile(staging.path());
+    return restoreDbFrom(staging.path(), options.destination);
+}
 
-    // materialize the decrypted database to a temp file for SQLite to read.
-    const tmp_path = std.fmt.allocPrintSentinel(alloc, "{s}.restore.tmp", .{input_path}, 0) catch return BackupError.OutOfMemory;
-    defer alloc.free(tmp_path);
-    writeFileBytes(tmp_path, plaintext) catch return BackupError.IoFailed;
-    defer deleteFileQuiet(tmp_path);
+// /tmp's sticky bit protects this directory from renaming by other users;
+// 0700 protects SQLite's pathname reopens and any journal/WAL sidecars.
+// Never stage plaintext next to a caller-selected artifact pathname.
+const PrivateDatabase = struct {
+    directory: [96]u8 = undefined,
+    directory_len: usize,
+    filename: [128]u8 = undefined,
+    filename_len: usize,
 
-    if (options.verify_only) return validateDbFile(tmp_path);
-    return restoreDbFrom(tmp_path, options.destination);
+    fn init() BackupError!PrivateDatabase {
+        var self: PrivateDatabase = .{ .directory_len = 0, .filename_len = 0 };
+        for (0..16) |_| {
+            var random: [16]u8 = undefined;
+            @import("linux_platform").randomBytes(&random);
+            const directory = std.fmt.bufPrint(&self.directory, "/tmp/yoq-backup-{s}", .{std.fmt.bytesToHex(random, .lower)}) catch return error.PathError;
+            std.Io.Dir.cwd().createDir(io, directory, .fromMode(0o700)) catch |err| switch (err) {
+                error.PathAlreadyExists => continue,
+                else => return error.IoFailed,
+            };
+            self.directory_len = directory.len;
+            errdefer self.deinit();
+            const filename = std.fmt.bufPrintZ(&self.filename, "{s}/database", .{directory}) catch return error.PathError;
+            self.filename_len = filename.len;
+            var file = std.Io.Dir.cwd().createFile(io, filename, .{ .exclusive = true, .permissions = .fromMode(0o600) }) catch return error.IoFailed;
+            file.close(io);
+            return self;
+        }
+        return error.IoFailed;
+    }
+
+    fn path(self: *const PrivateDatabase) [:0]const u8 {
+        return self.filename[0..self.filename_len :0];
+    }
+
+    fn deinit(self: *PrivateDatabase) void {
+        std.Io.Dir.cwd().deleteTree(io, self.directory[0..self.directory_len]) catch {};
+    }
+};
+
+fn publishArtifact(path: []const u8, bytes: []const u8) BackupError!void {
+    var dir = std.Io.Dir.cwd().openDir(io, std.fs.path.dirname(path) orelse ".", .{ .iterate = true }) catch return error.IoFailed;
+    defer dir.close(io);
+    var pending = dir.createFileAtomic(io, std.fs.path.basename(path), .{ .replace = true, .permissions = .fromMode(0o600) }) catch return error.IoFailed;
+    defer pending.deinit(io);
+    pending.file.writeStreamingAll(io, bytes) catch return error.IoFailed;
+    pending.file.sync(io) catch return error.IoFailed;
+    pending.replace(io) catch return error.IoFailed;
+    (@import("linux_platform").File{ .handle = dir.handle }).sync() catch return error.IoFailed;
 }
 
 // -- internal sqlite helpers --
 
 /// online-backup the live database into dest_path (a fresh SQLite file).
-fn snapshotDbTo(output_path: [:0]const u8) BackupError!void {
+fn snapshotDbTo(output_path: [:0]const u8, source: ?[:0]const u8) BackupError!void {
     var src_path_buf: [paths.max_path]u8 = undefined;
-    const src_path = schema.defaultDbPath(&src_path_buf) catch return BackupError.PathError;
+    const src_path = source orelse (schema.defaultDbPath(&src_path_buf) catch return BackupError.PathError);
 
     var src_db: ?*c.sqlite3 = null;
-    if (c.sqlite3_open(src_path.ptr, &src_db) != c.SQLITE_OK or src_db == null) {
+    if (c.sqlite3_open_v2(src_path.ptr, &src_db, c.SQLITE_OPEN_READONLY, null) != c.SQLITE_OK or src_db == null) {
         if (src_db) |db| _ = c.sqlite3_close(db);
         return BackupError.DbOpenFailed;
     }
@@ -285,10 +334,6 @@ fn writeFileBytes(path: [:0]const u8, bytes: []const u8) !void {
     const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true, .permissions = @enumFromInt(0o600) });
     defer file.close(io);
     try file.writePositionalAll(io, bytes, 0);
-}
-
-fn deleteFileQuiet(path: [:0]const u8) void {
-    std.Io.Dir.cwd().deleteFile(io, path) catch {};
 }
 
 // -- tests --
@@ -505,4 +550,72 @@ test "restore locking retains exclusion in autocommit until its connection close
         }
         try expectReopenedRestoreContents(destination, "live-container");
     }
+}
+
+test "private backup staging permissions and cleanup include SQLite sidecars" {
+    var staging = try PrivateDatabase.init();
+    const directory = staging.directory;
+    const directory_len = staging.directory_len;
+    var dir = try std.Io.Dir.cwd().openDir(io, directory[0..directory_len], .{ .iterate = true });
+    const stat = try dir.stat(io);
+    try std.testing.expectEqual(@as(u32, 0), stat.permissions.toMode() & 0o077);
+    var file = try dir.openFile(io, "database", .{});
+    try std.testing.expectEqual(@as(u32, 0), (try file.stat(io)).permissions.toMode() & 0o077);
+    file.close(io);
+    try dir.writeFile(io, .{ .sub_path = "database-wal", .data = "sensitive sidecar" });
+    dir.close(io);
+    staging.deinit();
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, directory[0..directory_len], .{}));
+}
+
+test "private backup real raw and encrypted artifacts replace symlinks without touching targets" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source = try restoreTestPath(tmp, "source.db");
+    defer alloc.free(source);
+    try createRestoreTestDb(source, "backed-up");
+    const victim = "must remain untouched";
+    try tmp.dir.writeFile(io, .{ .sub_path = "victim", .data = victim });
+    const key = [_]u8{42} ** secrets.key_length;
+    for ([_]bool{ false, true }) |encrypted| {
+        const name = if (encrypted) "encrypted.backup" else "raw.backup";
+        const output = try restoreTestPath(tmp, name);
+        defer alloc.free(output);
+        try tmp.dir.symLink(io, "victim", name, .{});
+        const legacy_tmp = try std.fmt.allocPrint(alloc, "{s}.tmp", .{name});
+        defer alloc.free(legacy_tmp);
+        try tmp.dir.symLink(io, "victim", legacy_tmp, .{});
+        const legacy_restore = try std.fmt.allocPrint(alloc, "{s}.restore.tmp", .{name});
+        defer alloc.free(legacy_restore);
+        try tmp.dir.symLink(io, "victim", legacy_restore, .{});
+        try backupWithOptions(alloc, output, encrypted, source, key);
+        var artifact = try tmp.dir.openFile(io, name, .{ .follow_symlinks = false });
+        try std.testing.expectEqual(@as(u32, 0), (try artifact.stat(io)).permissions.toMode() & 0o077);
+        artifact.close(io);
+        try restoreWithOptions(alloc, output, .{ .verify_only = true, .key = key });
+        const restored = try restoreTestPath(tmp, if (encrypted) "encrypted-restored.db" else "raw-restored.db");
+        defer alloc.free(restored);
+        try restoreWithOptions(alloc, output, .{ .destination = restored, .key = key });
+        try expectReopenedRestoreContents(restored, "backed-up");
+        const unchanged = try tmp.dir.readFileAlloc(io, "victim", alloc, .limited(100));
+        defer alloc.free(unchanged);
+        try std.testing.expectEqualStrings(victim, unchanged);
+    }
+}
+
+test "private backup failure leaves prior artifact intact" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const missing = try restoreTestPath(tmp, "missing.db");
+    defer alloc.free(missing);
+    const output = try restoreTestPath(tmp, "backup");
+    defer alloc.free(output);
+    try tmp.dir.writeFile(io, .{ .sub_path = "backup", .data = "prior artifact" });
+    try std.testing.expectError(error.DbOpenFailed, backupWithOptions(alloc, output, true, missing, null));
+    const unchanged = try tmp.dir.readFileAlloc(io, "backup", alloc, .limited(100));
+    defer alloc.free(unchanged);
+    try std.testing.expectEqualStrings("prior artifact", unchanged);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "missing.db", .{}));
 }
