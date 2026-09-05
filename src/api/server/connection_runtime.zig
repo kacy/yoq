@@ -338,7 +338,7 @@ test "api request budget rejects unauthorized uploads before allocating bodies" 
     defer routes.api_token = prior;
     const Upload = struct {
         fn run() !void {
-            var fds = try testSocketPair();
+            const fds = try testSocketPair();
             defer for (fds) |fd| linux_platform.posix.close(fd);
             const wire = transport.Stream{ .fd = fds[0], .deadline = transport.Deadline.afterMilliseconds(1000) };
             try wire.writeAll("PUT /s3/bucket/key HTTP/1.1\r\nHost: local\r\nContent-Length: 268435456\r\n\r\n");
@@ -435,7 +435,7 @@ test "api request deadlines stop trickling uploads and nonreading response peers
     };
     const thread = try std.Thread.spawn(.{}, Trickle.run, .{fds[0]});
     defer thread.join();
-    defer posix.shutdown(fds[0], .both) catch {};
+    defer _ = std.os.linux.shutdown(fds[0], 2);
     const wire = transport.Stream{ .fd = fds[1], .deadline = transport.Deadline.afterMilliseconds(50) };
     try std.testing.expectError(error.ReadIncomplete, readRequestFrom(std.testing.allocator, wire, wire));
     try std.testing.expectEqual(@as(usize, 0), request_bytes.load(.acquire));
