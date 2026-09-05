@@ -404,6 +404,10 @@ pub const TlsProxy = struct {
     // -- connection handlers --
 
     fn tlsConnectionHandler(self: *TlsProxy, client_fd: posix.fd_t) void {
+        self.tlsConnectionHandlerWithCa(client_fd, store_mod);
+    }
+
+    fn tlsConnectionHandlerWithCa(self: *TlsProxy, client_fd: posix.fd_t, ca_store: anytype) void {
         var handshake_complete = false;
         defer {
             _ = active_connections.fetchSub(1, .acq_rel);
@@ -445,17 +449,21 @@ pub const TlsProxy = struct {
         };
         defer self.allocator.free(backend.ip);
 
-        // build MtlsOpts when the service has tls.peer set. the trust
-        // root is the cluster CA loaded from raft state. missing CA on
-        // a service that asked for mtls is a misconfiguration; fall
-        // back to plain TLS and log loudly.
+        // Required peer authentication must stay required while trust is
+        // unavailable. Warn mode remains permissive and reports the failure.
         var mtls_ca_rec: ?store_mod.ClusterCaRecord = null;
         defer if (mtls_ca_rec) |rec| rec.deinit(self.allocator);
 
         const mtls_opts: ?session_runtime.MtlsOpts = blk: {
             if (backend.peer_mode == .off) break :blk null;
-            const rec = (store_mod.getClusterCa(self.allocator) catch null) orelse {
-                log.warn("tls.peer set for {s} but cluster CA not yet seeded; downgrading to plain TLS", .{server_name});
+            const loaded = ca_store.getClusterCa(self.allocator) catch |err| {
+                log.warn("failed to load peer trust for {s}: {}", .{ server_name, err });
+                if (backend.peer_mode == .require) return;
+                break :blk null;
+            };
+            const rec = loaded orelse {
+                log.warn("peer trust unavailable for {s}: cluster CA not yet seeded", .{server_name});
+                if (backend.peer_mode == .require) return;
                 break :blk null;
             };
             mtls_ca_rec = rec;
