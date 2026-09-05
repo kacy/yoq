@@ -114,7 +114,7 @@ pub const HandleResult = union(enum) {
 const peer_identity = @import("../../tls/peer_identity.zig");
 const proxy_credentials = @import("../../tls/proxy_credentials.zig");
 
-const PeerTimeouts = struct { connect_timeout_ms: u32, request_timeout_ms: u32, head: bool = false };
+const PeerTimeouts = struct { connect_timeout_ms: u32, request_timeout_ms: u32, head: bool = false, protocol: Protocol = .http1 };
 
 pub const ReverseProxy = struct {
     peer_key: ?proxy_credentials.Key = null,
@@ -631,10 +631,10 @@ pub const ReverseProxy = struct {
         defer self.allocator.free(request);
 
         if (upstream.peer_mode != .off) {
-            return self.forwardSingleAttemptMtls(request, .{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms, .head = plan.method == .HEAD }, upstream);
+            return self.forwardSingleAttemptMtls(request, .{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms, .head = plan.method == .HEAD, .protocol = plan.protocol }, upstream);
         }
 
-        return self.forwardPlainAttempt(request, .{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms, .head = plan.method == .HEAD }, upstream);
+        return self.forwardPlainAttempt(request, .{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms, .head = plan.method == .HEAD, .protocol = plan.protocol }, upstream);
     }
 
     /// mTLS-specific dial + request/response. always opens a fresh
@@ -705,7 +705,7 @@ pub const ReverseProxy = struct {
                 }
 
                 _ = sess.write(request) catch return error.SendFailed;
-                return (try readResponseFrom(self.allocator, sess, self.max_response_bytes, timeouts.head)).bytes;
+                return (try readProtocolResponse(self.allocator, sess, self.max_response_bytes, timeouts)).bytes;
             },
         }
     }
@@ -740,7 +740,7 @@ pub const ReverseProxy = struct {
             };
         };
 
-        const result = readResponse(self.allocator, transport.Stream{ .fd = fd, .deadline = deadline }, self.max_response_bytes, timeouts.head) catch |err| {
+        const result = readProtocolResponse(self.allocator, transport.Stream{ .fd = fd, .deadline = deadline }, self.max_response_bytes, timeouts) catch |err| {
             upstream_pool.discard(fd);
             return err;
         };
@@ -816,9 +816,9 @@ fn runMirrorTask(input: MirrorTask) void {
     proxy.max_response_bytes = task.max_response_bytes;
     defer proxy.deinit();
     const response = if (upstream.peer_mode != .off)
-        proxy.forwardSingleAttemptMtls(request, .{ .connect_timeout_ms = task.connect_timeout_ms, .request_timeout_ms = task.request_timeout_ms, .head = task.method == .HEAD }, &upstream)
+        proxy.forwardSingleAttemptMtls(request, .{ .connect_timeout_ms = task.connect_timeout_ms, .request_timeout_ms = task.request_timeout_ms, .head = task.method == .HEAD, .protocol = task.protocol }, &upstream)
     else
-        proxy.forwardPlainAttempt(request, .{ .connect_timeout_ms = task.connect_timeout_ms, .request_timeout_ms = task.request_timeout_ms, .head = task.method == .HEAD }, &upstream);
+        proxy.forwardPlainAttempt(request, .{ .connect_timeout_ms = task.connect_timeout_ms, .request_timeout_ms = task.request_timeout_ms, .head = task.method == .HEAD, .protocol = task.protocol }, &upstream);
     const bytes = response catch {
         proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
         return;
@@ -1224,9 +1224,8 @@ const BodyFraming = union(enum) {
 
 /// read a full upstream response. unlike a naive read-until-EOF, this honors
 /// HTTP/1.1 framing so a kept-alive connection can be returned promptly without
-/// waiting for the peer to close. responses we cannot frame (HTTP/2 byte
-/// streams, HTTP/1.0, missing length) fall back to read-until-EOF and are
-/// reported as non-reusable.
+/// waiting for the peer to close. Responses without a body length use EOF
+/// framing and cannot reuse the connection.
 fn readResponse(
     alloc: std.mem.Allocator,
     socket: anytype,
@@ -1234,6 +1233,26 @@ fn readResponse(
     head_request: bool,
 ) !UpstreamResponse {
     return readResponseFrom(alloc, transport.stream(socket), max_bytes, head_request);
+}
+
+/// Buffered HTTP/2 forwarding retains its bounded, connection-close exchange.
+/// Streaming HTTP/2 connections are handled separately by http2_connection.
+fn readProtocolResponse(alloc: std.mem.Allocator, wire: anytype, max_bytes: usize, options: PeerTimeouts) !UpstreamResponse {
+    if (options.protocol == .http1) return readResponseFrom(alloc, wire, max_bytes, options.head);
+    const response = try alloc.alloc(u8, max_bytes);
+    errdefer alloc.free(response);
+    var total: usize = 0;
+    while (total < response.len) {
+        const count = try readUpstream(wire, response[total..]);
+        if (count == 0) break;
+        total += count;
+    }
+    if (total == response.len) {
+        var extra: [1]u8 = undefined;
+        if (try readUpstream(wire, &extra) != 0) return error.ResponseTooLarge;
+    }
+    if (total == 0) return error.ReceiveFailed;
+    return shrinkResponse(alloc, response, total, false);
 }
 
 /// TLS and plaintext use the same bounded framing rules. Keep interim bytes
@@ -5177,4 +5196,15 @@ test "response framing bounds interim floods and separates unsupported upgrades"
     try std.testing.expectEqual(@as(usize, 1), upgrade.index);
     var truncated = FakeSession{ .chunks = &.{"HTTP/1.1 103 Early Hints\r\n\r\n"} };
     try std.testing.expectError(error.InvalidResponse, readResponseFrom(std.testing.allocator, &truncated, 4096, false));
+}
+
+test "response framing keeps binary HTTP2 separate on TLS readers" {
+    const binary = "\x00\x00\x00\x04\x00\x00\x00\x00\x00";
+    var session = FakeSession{ .chunks = &.{ binary[0..3], binary[3..] } };
+    const response = try readProtocolResponse(std.testing.allocator, &session, 64, .{ .connect_timeout_ms = 1000, .request_timeout_ms = 1000, .protocol = .http2 });
+    defer std.testing.allocator.free(response.bytes);
+    try std.testing.expectEqualStrings(binary, response.bytes);
+    try std.testing.expect(!response.reusable);
+    var malformed_http1 = FakeSession{ .chunks = &.{binary} };
+    try std.testing.expectError(error.InvalidResponse, readProtocolResponse(std.testing.allocator, &malformed_http1, 64, .{ .connect_timeout_ms = 1000, .request_timeout_ms = 1000 }));
 }
