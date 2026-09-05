@@ -219,14 +219,14 @@ test "mount destination resolves image symlinks inside pinned root" {
         defer linux_platform.posix.close(fd);
         const expected = try root.openDir(io, "inside/new", .{ .iterate = true });
         defer expected.close(io);
-        try std.testing.expectEqual((try linux_platform.posix.fstat(expected.handle)).ino, (try linux_platform.posix.fstat(fd)).ino);
+        try std.testing.expectEqual(try testInode(expected.handle), try testInode(fd));
     }
     const pinned = try prepareTarget(root.handle, "/absolute/new", true);
     defer linux_platform.posix.close(pinned);
-    const before = try linux_platform.posix.fstat(pinned);
+    const before = try testInode(pinned);
     try root.deleteFile(io, "absolute");
     try root.symLink(io, "../outside", "absolute", .{});
-    try std.testing.expectEqual(before.ino, (try linux_platform.posix.fstat(pinned)).ino);
+    try std.testing.expectEqual(before, try testInode(pinned));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "outside/new", .{}));
     try std.testing.expectError(error.UnsafeMountPath, prepareTarget(root.handle, "../outside", true));
 }
@@ -254,4 +254,9 @@ test "mount source open rejects intermediate symlinks after policy validation" {
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/link/source", .{path_buf[0..len]});
     defer std.testing.allocator.free(path);
     try std.testing.expectError(error.UnsafeMountPath, openSource(path));
+}
+
+fn testInode(fd: posix.fd_t) !std.Io.File.INode {
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    return (try file.stat(std.testing.io)).inode;
 }
