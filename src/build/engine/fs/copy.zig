@@ -23,6 +23,8 @@ pub fn processCopy(
     context_dir: []const u8,
 ) types.BuildError!void {
     const split = copy_args.parseCopyArgs(args);
+    var actual_dest_buf: [paths.max_path]u8 = undefined;
+    const actual_dest = try common.Destination.resolve(state.workdir, split.dest, &actual_dest_buf);
 
     const file_hash = context.hashFiles(alloc, context_dir, split.src) catch
         return types.BuildError.CopyStepFailed;
@@ -36,11 +38,8 @@ pub fn processCopy(
     const layer_dir = try common.withTempLayerDir(&layer_dir_buf, "build-copy-layer");
     defer cwd().deleteTree(std.Options.debug_io, layer_dir) catch {};
 
-    var actual_dest_buf: [paths.max_path]u8 = undefined;
-    const actual_dest = try common.resolveDestination(state.workdir, split.dest, &actual_dest_buf);
-
-    try common.ensureDestParents(layer_dir, actual_dest);
-    context.copyFiles(alloc, context_dir, split.src, layer_dir, actual_dest) catch
+    try actual_dest.ensureParents(layer_dir);
+    context.copyFiles(alloc, context_dir, split.src, layer_dir, actual_dest.path) catch
         return types.BuildError.CopyStepFailed;
 
     const layer_result = layer.createLayerFromDir(alloc, layer_dir) catch return types.BuildError.LayerFailed;
@@ -56,6 +55,9 @@ pub fn processCopyFromStage(
     stages: []const types.BuildStage,
     completed_states: []const types.BuildState,
 ) types.BuildError!void {
+    var actual_dest_buf: [paths.max_path]u8 = undefined;
+    const actual_dest = try common.Destination.resolve(state.workdir, dest, &actual_dest_buf);
+
     const source_state = stages_mod.findStageByRef(stages, completed_states, stage_ref) orelse
         return types.BuildError.CopyStepFailed;
 
@@ -112,11 +114,8 @@ pub fn processCopyFromStage(
     cwd().createDirPath(std.Options.debug_io, layer_dir) catch return types.BuildError.CopyStepFailed;
     defer cwd().deleteTree(std.Options.debug_io, layer_dir) catch {};
 
-    var actual_dest_buf: [paths.max_path]u8 = undefined;
-    const actual_dest = try common.resolveDestination(state.workdir, dest, &actual_dest_buf);
-
-    try common.ensureDestParents(layer_dir, actual_dest);
-    context.copyFiles(alloc, merged_dir, src, layer_dir, actual_dest) catch
+    try actual_dest.ensureParents(layer_dir);
+    context.copyFiles(alloc, merged_dir, src, layer_dir, actual_dest.path) catch
         return types.BuildError.CopyStepFailed;
 
     const layer_result = layer.createLayerFromDir(alloc, layer_dir) catch return types.BuildError.LayerFailed;

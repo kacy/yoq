@@ -50,6 +50,9 @@ fn processArchiveAdd(
     context_dir: []const u8,
     format: copy_args.ArchiveFormat,
 ) types.BuildError!void {
+    var actual_dest_buf: [paths.max_path]u8 = undefined;
+    const actual_dest = try common.Destination.resolve(state.workdir, dest, &actual_dest_buf);
+
     const file_hash = context.hashFiles(alloc, context_dir, src) catch
         return types.BuildError.CopyStepFailed;
     var file_hash_buf: [71]u8 = undefined;
@@ -62,17 +65,8 @@ fn processArchiveAdd(
     const layer_dir = try common.withTempLayerDir(&layer_dir_buf, "build-add-layer");
     defer cwd().deleteTree(std.Options.debug_io, layer_dir) catch {};
 
-    var actual_dest_buf: [paths.max_path]u8 = undefined;
-    const actual_dest = try common.resolveDestination(state.workdir, dest, &actual_dest_buf);
-    const extract_rel = if (actual_dest.len > 0 and actual_dest[0] == '/') actual_dest[1..] else actual_dest;
-
     var extract_dir_buf: [paths.max_path]u8 = undefined;
-    const extract_dir = if (extract_rel.len > 0)
-        std.fmt.bufPrint(&extract_dir_buf, "{s}/{s}", .{ layer_dir, extract_rel }) catch
-            return types.BuildError.CopyStepFailed
-    else
-        layer_dir;
-    cwd().createDirPath(std.Options.debug_io, extract_dir) catch return types.BuildError.CopyStepFailed;
+    const extract_dir = try actual_dest.createDirectory(layer_dir, &extract_dir_buf);
 
     const archive_path = buildArchivePath(alloc, context_dir, src) catch
         return types.BuildError.CopyStepFailed;
