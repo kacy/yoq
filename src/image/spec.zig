@@ -207,6 +207,8 @@ pub const ImageRef = struct {
     repository: []const u8,
     /// the tag or digest (e.g. "latest")
     reference: []const u8,
+    /// Preserve whether the caller used @, including malformed digests.
+    digest_reference: bool = false,
 };
 
 pub fn parseImageRef(ref: []const u8) ImageRef {
@@ -229,8 +231,9 @@ pub fn parseImageRef(ref: []const u8) ImageRef {
     var repository = remainder;
     var reference: []const u8 = "latest";
 
-    // check for @sha256: digest reference first
-    if (std.mem.indexOf(u8, remainder, "@sha256:")) |at_idx| {
+    // Preserve any digest reference; the registry validates its algorithm and hash.
+    const at = std.mem.indexOfScalar(u8, remainder, '@');
+    if (at) |at_idx| {
         repository = remainder[0..at_idx];
         reference = remainder[at_idx + 1 ..]; // include "sha256:..."
     } else if (std.mem.lastIndexOfScalar(u8, remainder, ':')) |colon_idx| {
@@ -246,6 +249,7 @@ pub fn parseImageRef(ref: []const u8) ImageRef {
         .host = host,
         .repository = repository,
         .reference = reference,
+        .digest_reference = at != null,
     };
 }
 

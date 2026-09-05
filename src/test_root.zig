@@ -65,6 +65,9 @@ comptime {
     _ = @import("image/spec.zig");
     _ = @import("image/store.zig");
     _ = @import("image/registry.zig");
+    _ = @import("image/registry/manifest.zig");
+    _ = @import("image/registry/blob_transfer.zig");
+    _ = @import("image/registry/http.zig");
     _ = @import("image/layer.zig");
     _ = @import("image/oci.zig");
     _ = @import("image/commands.zig");

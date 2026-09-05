@@ -20,6 +20,9 @@ pub const Digest = struct {
 
     pub fn fromHex(hex_str: []const u8) ?Digest {
         if (hex_str.len != 64) return null;
+        for (hex_str) |ch| {
+            if (!((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F'))) return null;
+        }
 
         var hash: [32]u8 = undefined;
         for (0..32) |i| {

@@ -51,3 +51,30 @@ fn setSocketTimeouts(conn: *std.http.Client.Connection) void {
     posix.setsockopt(stream.socket.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, opt_bytes) catch {};
     posix.setsockopt(stream.socket.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, opt_bytes) catch {};
 }
+
+/// Stop before appending bytes beyond the cap, even when a response is
+/// chunked or has no Content-Length. At most one extra byte is requested.
+pub fn readBody(alloc: std.mem.Allocator, reader: *std.Io.Reader, limit: usize) error{ NetworkError, ResponseTooLarge }![]u8 {
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(alloc);
+    var chunk: [8192]u8 = undefined;
+    while (true) {
+        const remaining = limit - body.items.len;
+        const count = reader.readSliceShort(chunk[0..@min(chunk.len, remaining + 1)]) catch return error.NetworkError;
+        if (count == 0) break;
+        if (count > remaining) return error.ResponseTooLarge;
+        body.appendSlice(alloc, chunk[0..count]) catch return error.NetworkError;
+    }
+    return body.toOwnedSlice(alloc) catch return error.NetworkError;
+}
+
+test "registry transfer bounded reader accepts the limit and stops at one extra byte" {
+    const alloc = std.testing.allocator;
+    var exact = std.Io.Reader.fixed("abcd");
+    const body = try readBody(alloc, &exact, 4);
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings("abcd", body);
+    var oversized = std.Io.Reader.fixed("abcdefghi");
+    try std.testing.expectError(error.ResponseTooLarge, readBody(alloc, &oversized, 4));
+    try std.testing.expectEqual(@as(usize, 5), oversized.seek);
+}
