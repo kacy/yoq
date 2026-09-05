@@ -1112,6 +1112,10 @@ fn proxyFailureResponse(err: anyerror) ProxyResponse {
             .status = .bad_gateway,
             .body = "{\"error\":\"upstream response too large\"}",
         },
+        error.TimedOut => .{
+            .status = .bad_gateway,
+            .body = "{\"error\":\"upstream request timed out\"}",
+        },
         error.ConnectTimedOut => .{
             .status = .bad_gateway,
             .body = "{\"error\":\"upstream connect timed out\"}",
@@ -1152,7 +1156,7 @@ fn mapUpstreamFailure(err: anyerror) proxy_runtime.UpstreamFailureKind {
     return switch (err) {
         error.ConnectFailed, error.ConnectTimedOut => .connect,
         error.SendFailed => .send,
-        error.ReceiveFailed => .receive,
+        error.ReceiveFailed, error.TimedOut => .receive,
         else => .other,
     };
 }
@@ -1161,7 +1165,7 @@ fn mapRouteFailureKind(err: anyerror) proxy_runtime.RouteFailureKind {
     return switch (err) {
         error.ConnectFailed, error.ConnectTimedOut => .connect,
         error.SendFailed => .send,
-        error.ReceiveFailed => .receive,
+        error.ReceiveFailed, error.TimedOut => .receive,
         else => .invalid_response,
     };
 }
@@ -5115,4 +5119,12 @@ test "upstream peer identity authenticates proxy credentials and observes rotati
     proxy.peer_key = f.key;
     try f.publish(wrong.cert_pem, &wrong.key_pair.secret_key.toBytes(), now);
     try std.testing.expectError(error.IdentityMismatch, proxy_credentials.load(alloc, f.key, ca.cert_pem, now));
+}
+
+test "listener lifecycle exchange deadline is reported as a receive timeout" {
+    try std.testing.expectEqual(proxy_runtime.UpstreamFailureKind.receive, mapUpstreamFailure(error.TimedOut));
+    try std.testing.expectEqual(proxy_runtime.RouteFailureKind.receive, mapRouteFailureKind(error.TimedOut));
+    const response = proxyFailureResponse(error.TimedOut);
+    try std.testing.expectEqual(http.StatusCode.bad_gateway, response.status);
+    try std.testing.expectEqualStrings("{\"error\":\"upstream request timed out\"}", response.body);
 }
