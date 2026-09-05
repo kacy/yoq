@@ -8,63 +8,72 @@ const layer_path = @import("path.zig");
 const types = @import("types.zig");
 
 const max_path = paths.max_path;
-const cache_marker_name = ".yoq_complete";
+const platform = @import("linux_platform");
+const linux = std.os.linux;
+const cache_lock = @import("cache_lock.zig");
+const cache_marker_name = "complete";
 
 fn cwd() std.Io.Dir {
     return std.Io.Dir.cwd();
 }
 
 pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.LayerError![]const u8 {
-    const digest = blob_store.Digest.parse(digest_str) orelse return types.LayerError.BlobNotFound;
+    const digest = blob_store.Digest.parse(digest_str) orelse return error.BlobNotFound;
+    const hex = digest.hex();
+    var parent_buf: [max_path]u8 = undefined;
+    const parent_path = try layer_path.layerDir(&parent_buf);
+    cwd().createDirPath(std.Options.debug_io, parent_path) catch return error.ExtractionFailed;
+    var parent = cwd().openDir(std.Options.debug_io, parent_path, .{ .iterate = true }) catch return error.ExtractionFailed;
+    defer parent.close(std.Options.debug_io);
+    const lock = cache_lock.Lock.acquire(parent, &hex) catch return error.ExtractionFailed;
+    defer lock.deinit();
 
     var dest_buf: [max_path]u8 = undefined;
-    const dest_path = layer_path.layerPath(digest, &dest_buf) catch
-        return types.LayerError.PathTooLong;
-    const dest_owned = alloc.dupe(u8, dest_path) catch return types.LayerError.ExtractionFailed;
-
-    if (cwd().access(std.Options.debug_io, dest_path, .{})) |_| {
-        if (hasCompleteCacheMarker(dest_path)) {
-            if (blob_store.verifyBlob(digest)) {
-                return dest_owned;
-            }
+    const dest_path = try layer_path.layerPath(digest, &dest_buf);
+    if (hasCompleteCacheMarker(parent, &hex)) {
+        if (!blob_store.verifyBlob(digest)) {
             blob_store.removeBlob(digest);
-            alloc.free(dest_owned);
-            return types.LayerError.BlobNotFound;
+            return error.BlobNotFound;
         }
-        removeExtractedLayer(dest_path);
-    } else |_| {}
-
+        return alloc.dupe(u8, dest_path) catch error.ExtractionFailed;
+    }
+    // Only unpublished/stale entries are removed, while holding the same lock
+    // as extractors and garbage collection. Published entries never mutate.
+    parent.deleteTree(std.Options.debug_io, &hex) catch |err| {
+        if (err != error.FileNotFound) return error.ExtractionFailed;
+    };
     if (!blob_store.verifyBlob(digest)) {
         blob_store.removeBlob(digest);
-        alloc.free(dest_owned);
-        return types.LayerError.BlobNotFound;
+        return error.BlobNotFound;
     }
 
-    var parent_buf: [max_path]u8 = undefined;
-    const parent_path = layer_path.layerDir(&parent_buf) catch return types.LayerError.PathTooLong;
-    cwd().createDirPath(std.Options.debug_io, parent_path) catch |err| {
-        log.warn("failed to create layer cache dir: {}", .{err});
-    };
-
-    cwd().createDirPath(std.Options.debug_io, dest_path) catch return types.LayerError.ExtractionFailed;
-
+    var random: [16]u8 = undefined;
+    platform.randomBytes(&random);
+    var stage_name_buf: [64]u8 = undefined;
+    const stage_name = std.fmt.bufPrintZ(&stage_name_buf, ".staging-{s}", .{std.fmt.bytesToHex(random, .lower)}) catch return error.PathTooLong;
+    parent.createDir(std.Options.debug_io, stage_name, .fromMode(0o700)) catch return error.ExtractionFailed;
+    defer parent.deleteTree(std.Options.debug_io, stage_name) catch {};
+    var stage = parent.openDir(std.Options.debug_io, stage_name, .{ .iterate = true }) catch return error.ExtractionFailed;
+    defer stage.close(std.Options.debug_io);
+    stage.createDir(std.Options.debug_io, "rootfs", .fromMode(0o755)) catch return error.ExtractionFailed;
+    var stage_path_buf: [max_path]u8 = undefined;
+    const stage_path = std.fmt.bufPrint(&stage_path_buf, "{s}/{s}/rootfs", .{ parent_path, stage_name }) catch return error.PathTooLong;
     var blob_path_buf: [max_path]u8 = undefined;
-    const blob_path = blob_store.blobPath(digest, &blob_path_buf) catch
-        return types.LayerError.BlobNotFound;
+    const blob_path = blob_store.blobPath(digest, &blob_path_buf) catch return error.BlobNotFound;
+    extractTarGz(blob_path, stage_path) catch return error.ExtractionFailed;
 
-    extractTarGz(blob_path, dest_path) catch {
-        removeExtractedLayer(dest_path);
-        alloc.free(dest_owned);
-        return types.LayerError.ExtractionFailed;
-    };
-
-    createCompleteCacheMarker(dest_path) catch {
-        removeExtractedLayer(dest_path);
-        alloc.free(dest_owned);
-        return types.LayerError.ExtractionFailed;
-    };
-
-    return dest_owned;
+    // Flush the complete tree before publishing metadata. syncfs also covers
+    // archive directories whose final modes intentionally prohibit traversal.
+    if (linux.errno(linux.syscall1(.syncfs, @intCast(stage.handle))) != .SUCCESS) return error.ExtractionFailed;
+    var marker = stage.createFile(std.Options.debug_io, cache_marker_name, .{ .exclusive = true, .permissions = .fromMode(0o600) }) catch return error.ExtractionFailed;
+    defer marker.close(std.Options.debug_io);
+    marker.writeStreamingAll(std.Options.debug_io, &hex) catch return error.ExtractionFailed;
+    marker.sync(std.Options.debug_io) catch return error.ExtractionFailed;
+    (platform.File{ .handle = stage.handle }).sync() catch return error.ExtractionFailed;
+    const dest_name = std.posix.toPosixPath(&hex) catch return error.PathTooLong;
+    if (linux.errno(linux.renameat2(parent.handle, stage_name, parent.handle, &dest_name, .{ .NOREPLACE = true })) != .SUCCESS) return error.ExtractionFailed;
+    (platform.File{ .handle = parent.handle }).sync() catch return error.ExtractionFailed;
+    return alloc.dupe(u8, dest_path) catch error.ExtractionFailed;
 }
 
 pub fn assembleRootfs(
@@ -100,30 +109,18 @@ fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
     try tar_extract.extractTarGzFile(gz_path, dest_path, "extract");
 }
 
-fn hasCompleteCacheMarker(dest_path: []const u8) bool {
-    var marker_buf: [max_path]u8 = undefined;
-    const marker_path = cacheMarkerPath(&marker_buf, dest_path) catch return false;
-    cwd().access(std.Options.debug_io, marker_path, .{}) catch return false;
+fn hasCompleteCacheMarker(parent: std.Io.Dir, hex: []const u8) bool {
+    var entry = parent.openDir(std.Options.debug_io, hex, .{}) catch return false;
+    defer entry.close(std.Options.debug_io);
+    var marker = entry.openFile(std.Options.debug_io, cache_marker_name, .{ .follow_symlinks = false }) catch return false;
+    defer marker.close(std.Options.debug_io);
+    const stat = marker.stat(std.Options.debug_io) catch return false;
+    if (stat.size != hex.len or stat.kind != .file) return false;
+    var bytes: [64]u8 = undefined;
+    var reader = marker.reader(std.Options.debug_io, &.{});
+    reader.interface.readSliceAll(&bytes) catch return false;
+    if (!std.mem.eql(u8, &bytes, hex)) return false;
+    var root = entry.openDir(std.Options.debug_io, "rootfs", .{}) catch return false;
+    root.close(std.Options.debug_io);
     return true;
-}
-
-fn createCompleteCacheMarker(dest_path: []const u8) !void {
-    var dir = try cwd().openDir(std.Options.debug_io, dest_path, .{});
-    defer dir.close(std.Options.debug_io);
-    // The archive may contain this name as a symlink. Replace the entry,
-    // never open its target when publishing completion.
-    var file = try dir.createFileAtomic(std.Options.debug_io, cache_marker_name, .{ .replace = true });
-    defer file.deinit(std.Options.debug_io);
-    try file.file.writeStreamingAll(std.Options.debug_io, "ok\n");
-    try file.replace(std.Options.debug_io);
-}
-
-fn cacheMarkerPath(buf: *[max_path]u8, dest_path: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ dest_path, cache_marker_name });
-}
-
-fn removeExtractedLayer(dest_path: []const u8) void {
-    cwd().deleteTree(std.Options.debug_io, dest_path) catch {
-        cwd().deleteFile(std.Options.debug_io, dest_path) catch {};
-    };
 }
