@@ -46,7 +46,6 @@ pub const Stream = struct {
                     try self.wait(posix.POLL.IN);
                     continue;
                 },
-                error.Interrupted => continue,
                 else => return error.ReadFailed,
             };
         }
@@ -60,7 +59,6 @@ pub const Stream = struct {
                     try self.wait(posix.POLL.OUT);
                     continue;
                 },
-                error.Interrupted => continue,
                 else => return error.WriteFailed,
             };
         }
