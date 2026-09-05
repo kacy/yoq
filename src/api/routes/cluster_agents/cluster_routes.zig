@@ -222,6 +222,7 @@ test "applied snapshot cluster status exposes and clears the committed apply bac
         .data_dir = "/tmp",
     });
     defer node.deinit();
+    node.raft.log = &node.log;
     node.raft.commit_index = 1;
     const ctx: RouteContext = .{ .cluster = &node, .join_token = null };
     const stalled = handleClusterStatus(alloc, ctx);
