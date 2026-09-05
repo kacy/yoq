@@ -41,6 +41,11 @@ on:
         required: false
         default: 7
         type: number
+      ref:
+        description: immutable commit to check out
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -54,6 +59,8 @@ jobs:
     steps:
       - name: check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: set up zig
         uses: ./.github/actions/setup-zig
