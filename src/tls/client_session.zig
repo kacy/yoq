@@ -181,7 +181,7 @@ fn doHandshakeInner(
     fd: posix.fd_t,
     opts: HandshakeOpts,
 ) ClientError!ClientSession {
-    const wire = transport.Stream{ .fd = fd, .deadline = opts.deadline };
+    const wire = transport.Stream{ .fd = fd, .deadline = opts.deadline orelse transport.Deadline.afterMilliseconds(30_000) };
     var transcript = Sha384.init(.{});
 
     // 1) build + send ClientHello (plaintext record)
@@ -327,7 +327,7 @@ fn doHandshakeInner(
 
     return .{
         .fd = fd,
-        .deadline = opts.deadline,
+        .deadline = wire.deadline,
         .alloc = alloc,
         .client_app = app.client,
         .server_app = app.server,
