@@ -74,12 +74,16 @@ pub fn resolveAccounts(value: []const u8, passwd: []const u8, groups: []const u8
     return result;
 }
 
-pub fn apply(identity: Identity) IdentityError!void {
+pub fn apply(identity: Identity, preserve_default_groups: bool) IdentityError!void {
     const empty: [0]linux.gid_t = .{};
-    if (linux.errno(linux.setgroups(0, &empty)) != .SUCCESS) {
-        // Unprivileged user namespaces deny setgroups. Never retain inherited
-        // supplementary groups when that restriction prevents clearing them.
-        if (linux.getgroups(0, null) != 0) return error.IdentityFailed;
+    const cleared = linux.errno(linux.setgroups(0, &empty));
+    if (cleared != .SUCCESS and linux.getgroups(0, null) != 0) {
+        // A rootless default build keeps the launcher's existing credentials
+        // when its single-ID namespace permanently denies setgroups. Explicit
+        // USER changes and privileged builds must clear supplementary groups.
+        if (cleared != .PERM or !preserve_default_groups or
+            linux.geteuid() != identity.uid or linux.getegid() != identity.gid)
+            return error.IdentityFailed;
     }
     if (linux.errno(linux.setresgid(identity.gid, identity.gid, identity.gid)) != .SUCCESS) return error.IdentityFailed;
     if (linux.errno(linux.setresuid(identity.uid, identity.uid, identity.uid)) != .SUCCESS) return error.IdentityFailed;
@@ -114,4 +118,38 @@ test "build identity resolves numeric and named users and explicit groups" {
     for ([_][]const u8{ "", ":staff", "app:", "app:42:99", "app\x00" }) |invalid| {
         try std.testing.expectError(error.InvalidUser, resolveAccounts(invalid, passwd, groups));
     }
+}
+
+test "build identity kernel retains denied rootless default groups but rejects explicit identity" {
+    if (linux.geteuid() != 0) return error.SkipZigTest;
+    const Fixture = struct {
+        fn writeProc(path: []const u8, contents: []const u8) !void {
+            const fd = try platform.posix.open(path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+            defer platform.posix.close(fd);
+            if (try platform.posix.write(fd, contents) != contents.len) return error.WriteFailed;
+        }
+        fn run() u8 {
+            const group = [_]linux.gid_t{12345};
+            if (linux.errno(linux.setgroups(group.len, &group)) != .SUCCESS) return 10;
+            // Privileged defaults still clear inherited supplementary groups.
+            apply(.{}, false) catch return 11;
+            if (linux.getgroups(0, null) != 0) return 12;
+            if (linux.errno(linux.setgroups(group.len, &group)) != .SUCCESS) return 13;
+            if (linux.errno(linux.unshare(linux.CLONE.NEWUSER)) != .SUCCESS) return 14;
+            writeProc("/proc/self/uid_map", "0 0 1\n") catch return 15;
+            writeProc("/proc/self/setgroups", "deny\n") catch return 16;
+            writeProc("/proc/self/gid_map", "0 0 1\n") catch return 17;
+            if (linux.getgroups(0, null) != 1) return 18;
+            apply(.{}, true) catch return 19;
+            if (linux.getgroups(0, null) != 1) return 20;
+            if (apply(.{}, false)) |_| return 21 else |err| if (err != error.IdentityFailed) return 22;
+            if (apply(.{ .uid = 1 }, true)) |_| return 23 else |err| if (err != error.IdentityFailed) return 24;
+            return 0;
+        }
+    };
+    const rc = linux.fork();
+    if (linux.errno(rc) != .SUCCESS) return error.ForkFailed;
+    if (rc == 0) linux.exit_group(Fixture.run());
+    const result = try @import("../../runtime/process.zig").wait(@intCast(rc), false);
+    try std.testing.expectEqual(@import("../../runtime/process.zig").ExitStatus{ .exited = 0 }, result.status);
 }

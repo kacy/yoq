@@ -118,6 +118,7 @@ fn executeStep(alloc: std.mem.Allocator, state: *types.BuildState, args: []const
         .workdir = workdir,
         .user = state.user,
         .create_workdir = create_workdir,
+        .rootless = std.os.linux.geteuid() != 0,
         .shell = state.shell,
     };
 

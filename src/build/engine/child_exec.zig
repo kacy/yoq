@@ -24,6 +24,7 @@ pub const BuildChildContext = struct {
     shell: ?[]const u8,
     user: ?[]const u8 = null,
     create_workdir: bool = false,
+    rootless: bool = false,
 };
 
 /// Build root always belongs to a new user namespace. A privileged launcher
@@ -63,7 +64,7 @@ pub fn buildChildMain(arg: ?*anyopaque) callconv(.c) u8 {
         return 0;
     }
     filesystem.mountEssential() catch return 1;
-    identity.apply(account) catch return 1;
+    identity.apply(account, ctx.rootless and ctx.user == null) catch return 1;
     linux_platform.posix.chdir(ctx.workdir) catch return 1;
 
     return execShellCommand(ctx.command, ctx.env, ctx.shell);
