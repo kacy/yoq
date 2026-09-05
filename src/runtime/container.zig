@@ -19,6 +19,8 @@ const log = @import("../lib/log.zig");
 const exec_runtime = @import("container/exec_runtime.zig");
 const id_paths = @import("container/id_paths.zig");
 const start_support = @import("container/start_support.zig");
+const startup = @import("container/startup_channel.zig");
+const sqlite = @import("sqlite");
 
 /// PID of the currently running container process.
 /// set after spawn, cleared on exit. used by the signal handler
@@ -152,25 +154,18 @@ pub const Container = struct {
         if (self.status != .running) return;
 
         const result = process.wait(pid, true) catch return;
-        switch (result.status) {
-            .exited => |code| {
-                self.status = .stopped;
-                self.exit_code = code;
-                self.pid = null;
-                active_pid.store(0, .release);
-            },
-            .signaled => {
-                self.status = .stopped;
-                self.exit_code = 128; // convention for signal death
-                self.pid = null;
-                active_pid.store(0, .release);
-            },
-            .running => {},
-            .stopped => {
-                // process is stopped (SIGSTOP), keep as running
-                // it may continue later
-            },
-        }
+        const exit_code: u8 = switch (result.status) {
+            .exited => |code| code,
+            .signaled => 128,
+            .running, .stopped => return,
+        };
+        self.status = .stopped;
+        self.exit_code = exit_code;
+        self.pid = null;
+        active_pid.store(0, .release);
+        // Poll is also a terminal lifecycle path. Release the same owned
+        // resources as wait(), before a caller can restart this instance.
+        self.finalize(exit_code);
     }
 
     /// send SIGTERM to the container's init process.
@@ -198,75 +193,56 @@ pub const Container = struct {
     /// start the container: set up filesystem, spawn process in namespaces,
     /// and begin log capture. returns once the container is running.
     pub fn start(self: *Container) ContainerError!void {
+        self.state_mutex.lockUncancelable(std.Options.debug_io);
+        defer self.state_mutex.unlock(std.Options.debug_io);
+        if (self.pid != null or self.status == .running) return ContainerError.AlreadyRunning;
+        if (self.net_info != null or self.runtime.cgroup != null) return ContainerError.StartFailed;
+
         const config = self.config;
+        if (!config.host_mode and !config.namespaces.mount) return ContainerError.StartFailed;
+        errdefer if (config.lower_dirs.len > 0) cleanupContainerDirs(config.id);
         const overlay = start_support.prepareOverlayRuntime(config, containers_subdir) catch return ContainerError.StartFailed;
-        var child_ctx = start_support.initChildContext(config, overlay);
+        var child_ctx = start_support.initChildContext(config, &overlay);
+        var channel = startup.Channel.init() catch return ContainerError.StartFailed;
+        defer channel.deinit();
+        child_ctx.startup_fd = channel.child;
+        child_ctx.parent_startup_fd = channel.parent;
 
-        // create cgroup for resource limits
-        // this is a hard failure - we don't run containers without resource limits
-        // as that would allow DoS attacks on the host
-        self.runtime.cgroup = cgroups.Cgroup.create(config.id) catch |e| {
-            log.err("cgroup setup failed for {s}: {}. container cannot start without resource limits.", .{ config.id, e });
-            if (overlay.has_overlay) cleanupContainerDirs(config.id);
+        // Retain the database used for network setup through rollback: cleanup
+        // must not depend on successfully reopening it after a later failure.
+        var network_db: ?sqlite.Db = null;
+        defer if (network_db) |*db| db.deinit();
+        var spawned: ?namespaces.SpawnResult = null;
+        errdefer start_support.cleanupFailedStart(self, &spawned, if (network_db) |*db| db else null, &active_pid);
+
+        self.runtime.cgroup = cgroups.Cgroup.create(config.id) catch |err| {
+            log.err("cgroup setup failed for {s}: {}", .{ config.id, err });
             return ContainerError.StartFailed;
         };
+        spawned = namespaces.spawn(config.namespaces, null, exec_runtime.childMain, @ptrCast(&child_ctx)) catch return ContainerError.StartFailed;
+        const child = &spawned.?;
+        startup.closeOwned(&channel.child);
+        self.pid = child.pid;
+        active_pid.store(child.pid, .release);
 
-        // spawn the container process in isolated namespaces.
-        // the child blocks until we call signalReady(), giving us time
-        // to set up networking before it proceeds.
-        var spawn_result = namespaces.spawn(
-            config.namespaces,
-            null,
-            exec_runtime.childMain,
-            @ptrCast(&child_ctx),
-        ) catch {
-            if (overlay.has_overlay) cleanupContainerDirs(config.id);
-            if (self.runtime.cgroup) |*cg| cg.destroy() catch {};
-            return ContainerError.StartFailed;
-        };
+        self.runtime.cgroup.?.addProcess(child.pid) catch return ContainerError.StartFailed;
+        self.runtime.cgroup.?.setLimits(config.limits) catch return ContainerError.StartFailed;
+        start_support.startLogCapture(config, &self.runtime, child) catch return ContainerError.StartFailed;
 
-        self.pid = spawn_result.pid;
-        active_pid.store(spawn_result.pid, .release);
+        // Release namespace mapping first. The child mounts its root and final
+        // /dev, but cannot execute user code until the second explicit gate.
+        child.signalReady();
+        startup.expect(channel.parent, .filesystem_ready) catch return ContainerError.StartFailed;
+        var files: startup.NetworkFiles = .{};
+        if (config.network != null) {
+            network_db = store.openDb() catch return ContainerError.StartFailed;
+            files = start_support.setupNetwork(config, child.pid, &self.net_info, &network_db.?) catch return ContainerError.StartFailed;
+        }
+        startup.sendNetwork(channel.parent, files) catch return ContainerError.StartFailed;
+        startup.expect(channel.parent, .prepared) catch return ContainerError.StartFailed;
 
-        // add child to cgroup and set resource limits
-        // these are hard failures - resource limits must be enforced
-        self.runtime.cgroup.?.addProcess(spawn_result.pid) catch |e| {
-            log.err("failed to add process to cgroup for {s}: {}. stopping container.", .{ config.id, e });
-            start_support.cleanupFailedSpawn(self, &spawn_result, &active_pid);
-            if (overlay.has_overlay) cleanupContainerDirs(config.id);
-            return ContainerError.StartFailed;
-        };
-
-        self.runtime.cgroup.?.setLimits(config.limits) catch |e| {
-            log.err("failed to set cgroup limits for {s}: {}. stopping container.", .{ config.id, e });
-            start_support.cleanupFailedSpawn(self, &spawn_result, &active_pid);
-            if (overlay.has_overlay) cleanupContainerDirs(config.id);
-            return ContainerError.StartFailed;
-        };
-
-        // set up container networking (non-fatal — container works without it)
-        start_support.setupNetwork(config, if (overlay.dirs) |*dirs| dirs else null, spawn_result.pid, &self.net_info);
-        start_support.setupGpu(config, if (overlay.dirs) |*dirs| dirs else null);
-
-        // open log file and start capture threads BEFORE signaling child ready.
-        // if we signal ready first, fast-exiting commands (like echo) complete
-        // before the capture threads start, resulting in empty logs.
-        //
-        // fd ownership model:
-        //   - on success: each capture thread owns its fd and closes it on exit
-        //   - on failure: we close fds here before they'd otherwise leak
-        start_support.startLogCapture(config, &self.runtime, &spawn_result);
-
-        start_support.updateRunningStatus(config.id, spawn_result.pid) catch {
-            start_support.cleanupFailedSpawn(self, &spawn_result, &active_pid);
-            if (overlay.has_overlay) cleanupContainerDirs(config.id);
-            return ContainerError.StartFailed;
-        };
-
-        // signal child that all parent-side setup is complete only after the
-        // persisted running state is durable enough for detached callers.
-        spawn_result.signalReady();
-
+        start_support.updateRunningStatus(config.id, child.pid) catch return ContainerError.StartFailed;
+        startup.notify(channel.parent, .execute) catch return ContainerError.StartFailed;
         self.status = .running;
     }
 
@@ -620,4 +596,64 @@ test "ExitCode enum values follow conventions" {
 
     // bind mount denied should be distinct from general filesystem error
     try std.testing.expect(@intFromEnum(ExitCode.bind_mount_denied) != @intFromEnum(ExitCode.filesystem_error));
+}
+
+test "startup refuses filesystem setup in the host mount namespace" {
+    var instance = Container{
+        .config = .{ .id = "0123456789ab", .rootfs = "/unused", .command = "unused", .namespaces = .{ .mount = false } },
+        .status = .created,
+        .pid = null,
+        .exit_code = null,
+        .created_at = 0,
+    };
+    try std.testing.expectError(error.StartFailed, instance.start());
+    try std.testing.expect(instance.pid == null and instance.runtime.cgroup == null);
+}
+
+test "startup poll finalizes exited child before another start can replace handles" {
+    const platform = @import("linux_platform");
+    const logs = @import("logs.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output = try platform.posix.pipe();
+    const child = linux.fork();
+    if (linux.errno(child) != .SUCCESS) return error.ForkFailed;
+    if (child == 0) linux.exit_group(7);
+    const pid: posix.pid_t = @intCast(child);
+    platform.posix.close(output[1]);
+    var instance = Container{
+        .config = .{ .id = "0123456789ab", .rootfs = "", .command = "test" },
+        .status = .running,
+        .pid = pid,
+        .exit_code = null,
+        .created_at = 0,
+    };
+    var read_fd = output[0];
+    defer {
+        if (instance.pid) |remaining| {
+            process.kill(remaining) catch {};
+            _ = process.wait(remaining, false) catch {};
+        }
+        if (read_fd >= 0) platform.posix.close(read_fd);
+        instance.finalize(instance.exit_code orelse 255);
+    }
+    instance.runtime.log_file = try tmp.dir.createFile(std.testing.io, "capture", .{});
+    instance.runtime.stdout_thread = try std.Thread.spawn(.{}, logs.captureStream, .{ instance.runtime.log_file.?, read_fd, "stdout", @as(?[]const u8, null), @as(usize, 0), false });
+    read_fd = -1;
+    for (0..2000) |_| {
+        try instance.poll();
+        if (instance.status == .stopped) break;
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(Status.stopped, instance.status);
+    try std.testing.expectEqual(@as(?u8, 7), instance.exit_code);
+    try std.testing.expect(instance.pid == null);
+    try std.testing.expect(instance.runtime.stdout_thread == null);
+    try std.testing.expect(instance.runtime.log_file == null);
+    var survivor = try tmp.dir.createFile(std.testing.io, "survivor", .{});
+    defer survivor.close(std.testing.io);
+    try instance.poll();
+    try survivor.writeStreamingAll(std.testing.io, "repeated poll is harmless");
 }
