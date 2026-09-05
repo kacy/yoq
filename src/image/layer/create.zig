@@ -266,7 +266,7 @@ test "layer metadata roundtrip preserves numeric owners and ordinary modes only"
     try file.setPermissions(io, .fromMode(0o6755));
     const directory: std.Io.File = .{ .handle = work.handle, .flags = .{ .nonblocking = false } };
     try directory.setOwner(io, 1234, 2345);
-    try directory.setPermissions(io, .fromMode(0o750));
+    try directory.setPermissions(io, .fromMode(0o1750));
     var source_buf: [max_path]u8 = undefined;
     const source_len = try source.dir.realPath(io, &source_buf);
     const result = (try createLayerFromDir(alloc, source_buf[0..source_len])).?;
@@ -280,7 +280,7 @@ test "layer metadata roundtrip preserves numeric owners and ordinary modes only"
     const file_meta = try metadata.Metadata.stat(target.dir, "work/tool");
     try std.testing.expectEqual(@as(u32, 1234), work_meta.uid);
     try std.testing.expectEqual(@as(u32, 2345), work_meta.gid);
-    try std.testing.expectEqual(@as(u32, 0o750), work_meta.mode);
+    try std.testing.expectEqual(@as(u32, 0o1750), work_meta.mode);
     try std.testing.expectEqual(@as(u32, 1234), file_meta.uid);
     try std.testing.expectEqual(@as(u32, 2345), file_meta.gid);
     try std.testing.expectEqual(@as(u32, 0o755), file_meta.mode);

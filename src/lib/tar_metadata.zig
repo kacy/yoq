@@ -1,7 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 
-/// Numeric ownership and ordinary permissions. Privilege-granting mode bits
+/// Numeric ownership, ordinary permissions, and the protective sticky bit. Privilege-granting bits
 /// are intentionally excluded from both generated and extracted layers.
 pub const Metadata = struct {
     uid: u32,
@@ -14,14 +14,14 @@ pub const Metadata = struct {
         var result: linux.Statx = undefined;
         if (linux.errno(linux.statx(dir.handle, &name, linux.AT.SYMLINK_NOFOLLOW, .{ .UID = true, .GID = true, .MODE = true, .MTIME = true }, &result)) != .SUCCESS)
             return error.StatFailed;
-        return .{ .uid = result.uid, .gid = result.gid, .mode = result.mode & 0o777, .mtime = @intCast(@max(0, result.mtime.sec)) };
+        return .{ .uid = result.uid, .gid = result.gid, .mode = result.mode & 0o1777, .mtime = @intCast(@max(0, result.mtime.sec)) };
     }
 
     pub fn fromHeader(bytes: *const [512]u8, mode: u32) !Metadata {
         return .{
             .uid = try decodeId(bytes[108..116]),
             .gid = try decodeId(bytes[116..124]),
-            .mode = mode & 0o777,
+            .mode = mode & 0o1777,
         };
     }
 
