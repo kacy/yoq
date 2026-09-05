@@ -12,7 +12,7 @@
 // thread safety: all raft state access goes through self.mu.
 //
 // snapshots: the tick loop periodically checks if enough entries have
-// been committed since the last snapshot. when the threshold is exceeded,
+// been applied since the last snapshot. when the threshold is exceeded,
 // it triggers a snapshot via the state machine and notifies raft.
 // incoming InstallSnapshot RPCs are routed to raft, and the resulting
 // apply_snapshot actions restore the state machine from the snapshot data.
@@ -87,6 +87,13 @@ pub const TestInitError = error{
     TransportInitFailed,
     AuthInitFailed,
     RaftInitFailed,
+};
+
+pub const ApplyStatus = struct {
+    commit_index: LogIndex,
+    last_applied: LogIndex,
+    backlog: LogIndex,
+    healthy: bool,
 };
 
 pub const Node = struct {
@@ -364,6 +371,19 @@ pub const Node = struct {
         return Raft.protocolVersion();
     }
 
+    /// Read the apply boundary and its committed backlog under one lock.
+    pub fn applyStatus(self: *Node) ApplyStatus {
+        self.mu.lockUncancelable(std.Options.debug_io);
+        defer self.mu.unlock(std.Options.debug_io);
+        const backlog = self.raft.commit_index -| self.state_machine.last_applied;
+        return .{
+            .commit_index = self.raft.commit_index,
+            .last_applied = self.state_machine.last_applied,
+            .backlog = backlog,
+            .healthy = backlog == 0,
+        };
+    }
+
     pub fn currentTerm(self: *Node) types.Term {
         return query_support.currentTerm(self);
     }
@@ -420,7 +440,7 @@ pub const Node = struct {
         membership_sync.cleanupDeadAgents(self, agents);
     }
 
-    /// check if enough entries have been committed since the last snapshot
+    /// check if enough entries have been applied since the last snapshot
     /// to warrant taking a new one. called with self.mu held.
     fn maybeSnapshot(self: *Node) void {
         snapshot_support.maybeSnapshot(self);
@@ -1121,4 +1141,178 @@ test "install_snapshot restart ignores stale snapshot older than recovered bound
     const status_after_stale = (try getAgentStatusForTest(alloc, &restarted.state_machine.db, "snapstale")).?;
     defer alloc.free(status_after_stale);
     try std.testing.expectEqualStrings("active", status_after_stale);
+}
+
+fn snapshotCounterForTest(db: *sqlite.Db) !i64 {
+    const Row = struct { cpu_used: i64 };
+    const row = (try db.one(Row, "SELECT cpu_used FROM agents WHERE id = 'snapshot-agent';", .{}, .{})) orelse
+        return error.ExpectedSnapshotAgent;
+    return row.cpu_used;
+}
+
+fn expectSnapshotLogEntry(node: *Node, index: LogIndex) !void {
+    const entry = (try node.log.getEntry(std.testing.allocator, index)) orelse return error.ExpectedSnapshotLogEntry;
+    defer std.testing.allocator.free(entry.data);
+    try std.testing.expectEqual(index, entry.index);
+}
+
+test "applied snapshot retries failed commits without compacting unapplied entries" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [512]u8 = undefined;
+    const root = try testDirPath(tmp.dir, &root_buf);
+    var node = try Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = root,
+    });
+    defer node.deinit();
+    node.fixPointers();
+    try insertAgentForTest(&node.state_machine.db, "snapshot-agent", "active");
+    const increment = "UPDATE agents SET cpu_used = cpu_used + 1 WHERE id = 'snapshot-agent';";
+    for (1..1002) |index| {
+        try node.log.append(.{ .index = index, .term = 1, .data = increment });
+    }
+    try node.state_machine.db.exec(
+        "CREATE TRIGGER reject_snapshot_apply BEFORE UPDATE ON agents WHEN OLD.cpu_used = 999 " ++
+            "BEGIN SELECT RAISE(ABORT, 'injected apply failure'); END;",
+        .{},
+        .{},
+    );
+    node.raft.commit_index = 1001;
+    try node.raft.actions.append(alloc, .{ .commit_entries = .{ .up_to = 1001 } });
+    {
+        node.mu.lockUncancelable(std.Options.debug_io);
+        defer node.mu.unlock(std.Options.debug_io);
+        node.processActions();
+        node.maybeSnapshot();
+    }
+    try std.testing.expectEqual(@as(LogIndex, 999), node.state_machine.last_applied);
+    try std.testing.expectEqual(@as(i64, 999), try snapshotCounterForTest(&node.state_machine.db));
+    try std.testing.expectEqual(@as(LogIndex, 0), node.last_snapshot_index);
+    try std.testing.expect(node.log.getSnapshotMeta() == null);
+    try expectSnapshotLogEntry(&node, 1);
+    try expectSnapshotLogEntry(&node, 1000);
+    const stalled = node.applyStatus();
+    try std.testing.expectEqual(@as(LogIndex, 2), stalled.backlog);
+    try std.testing.expect(!stalled.healthy);
+
+    // Let one more entry apply, leaving another failure just beyond the real
+    // 1000-entry snapshot threshold. No new commit action is delivered.
+    try node.state_machine.db.exec("DROP TRIGGER reject_snapshot_apply;", .{}, .{});
+    try node.state_machine.db.exec(
+        "CREATE TRIGGER reject_snapshot_apply BEFORE UPDATE ON agents WHEN OLD.cpu_used = 1000 " ++
+            "BEGIN SELECT RAISE(ABORT, 'injected apply failure'); END;",
+        .{},
+        .{},
+    );
+    try std.testing.expectEqual(@as(usize, 0), node.raft.actions.items.len);
+    {
+        node.mu.lockUncancelable(std.Options.debug_io);
+        defer node.mu.unlock(std.Options.debug_io);
+        action_loop.retryCommittedEntries(&node);
+        node.maybeSnapshot();
+    }
+    try std.testing.expectEqual(@as(LogIndex, 1000), node.last_snapshot_index);
+    try std.testing.expectEqual(@as(LogIndex, 1000), node.log.getSnapshotMeta().?.last_included_index);
+    try std.testing.expectEqual(@as(i64, 1000), try snapshotCounterForTest(&node.state_machine.db));
+    const compacted_entry = try node.log.getEntry(alloc, 1000);
+    defer if (compacted_entry) |entry| alloc.free(entry.data);
+    try std.testing.expect(compacted_entry == null);
+    try expectSnapshotLogEntry(&node, 1001);
+    try std.testing.expectEqual(@as(LogIndex, 1), node.applyStatus().backlog);
+
+    var snapshot_path_buf: [512]u8 = undefined;
+    const snapshot_path = bootstrap.snapshotPath(&snapshot_path_buf, root) orelse return error.ExpectedSnapshotPath;
+    var restored = try StateMachine.initMemory();
+    defer restored.deinit();
+    const meta = try restored.restoreFromSnapshot(snapshot_path);
+    try std.testing.expectEqual(@as(LogIndex, 1000), meta.last_included_index);
+    try std.testing.expectEqual(@as(LogIndex, 1000), restored.last_applied);
+    try std.testing.expectEqual(@as(i64, 1000), try snapshotCounterForTest(&restored.db));
+
+    try node.state_machine.db.exec("DROP TRIGGER reject_snapshot_apply;", .{}, .{});
+    {
+        node.mu.lockUncancelable(std.Options.debug_io);
+        defer node.mu.unlock(std.Options.debug_io);
+        action_loop.retryCommittedEntries(&node);
+        action_loop.retryCommittedEntries(&node);
+        node.maybeSnapshot();
+    }
+    try std.testing.expectEqual(@as(LogIndex, 1001), node.state_machine.last_applied);
+    try std.testing.expectEqual(@as(i64, 1001), try snapshotCounterForTest(&node.state_machine.db));
+    try std.testing.expect(node.applyStatus().healthy);
+    try std.testing.expectEqual(@as(LogIndex, 1000), node.last_snapshot_index);
+    try expectSnapshotLogEntry(&node, 1001);
+}
+
+test "applied snapshot rejects queued boundaries that do not describe the database" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [512]u8 = undefined;
+    const root = try testDirPath(tmp.dir, &root_buf);
+    var node = try Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = root,
+    });
+    defer node.deinit();
+    node.fixPointers();
+    try insertAgentForTest(&node.state_machine.db, "snapshot-agent", "active");
+    for (1..4) |index| {
+        try node.log.append(.{
+            .index = index,
+            .term = if (index == 1) 1 else 2,
+            .data = "UPDATE agents SET cpu_used = cpu_used + 1 WHERE id = 'snapshot-agent';",
+        });
+    }
+    node.raft.commit_index = 3;
+    try node.raft.actions.append(alloc, .{ .commit_entries = .{ .up_to = 1 } });
+    try node.raft.actions.append(alloc, .{ .take_snapshot = .{ .up_to_index = 1, .term = 1 } });
+    {
+        node.mu.lockUncancelable(std.Options.debug_io);
+        defer node.mu.unlock(std.Options.debug_io);
+        node.processActions();
+    }
+    try std.testing.expectEqual(@as(LogIndex, 1), node.last_snapshot_index);
+    var snapshot_path_buf: [512]u8 = undefined;
+    const snapshot_path = bootstrap.snapshotPath(&snapshot_path_buf, root) orelse return error.ExpectedSnapshotPath;
+    const original = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, snapshot_path, alloc, .limited(1024 * 1024));
+    defer alloc.free(original);
+
+    try node.raft.actions.append(alloc, .{ .commit_entries = .{ .up_to = 2 } });
+    try node.raft.actions.append(alloc, .{ .take_snapshot = .{ .up_to_index = 3, .term = 2 } });
+    try node.raft.actions.append(alloc, .{ .take_snapshot = .{ .up_to_index = 1, .term = 1 } });
+    try node.raft.actions.append(alloc, .{ .take_snapshot = .{ .up_to_index = 2, .term = 1 } });
+    {
+        node.mu.lockUncancelable(std.Options.debug_io);
+        defer node.mu.unlock(std.Options.debug_io);
+        node.processActions();
+    }
+    try std.testing.expectEqual(@as(LogIndex, 2), node.state_machine.last_applied);
+    try std.testing.expectEqual(@as(LogIndex, 1), node.last_snapshot_index);
+    const unchanged = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, snapshot_path, alloc, .limited(1024 * 1024));
+    defer alloc.free(unchanged);
+    try std.testing.expectEqualSlices(u8, original, unchanged);
+    try expectSnapshotLogEntry(&node, 2);
+    try expectSnapshotLogEntry(&node, 3);
+
+    try node.raft.actions.append(alloc, .{ .take_snapshot = .{ .up_to_index = 2, .term = 2 } });
+    {
+        node.mu.lockUncancelable(std.Options.debug_io);
+        defer node.mu.unlock(std.Options.debug_io);
+        node.processActions();
+    }
+    try std.testing.expectEqual(@as(LogIndex, 2), node.last_snapshot_index);
+    try std.testing.expectEqual(@as(types.Term, 2), node.log.getSnapshotMeta().?.last_included_term);
+    try expectSnapshotLogEntry(&node, 3);
+    var restored = try StateMachine.initMemory();
+    defer restored.deinit();
+    const meta = try restored.restoreFromSnapshot(snapshot_path);
+    try std.testing.expectEqual(@as(LogIndex, 2), meta.last_included_index);
+    try std.testing.expectEqual(@as(i64, 2), try snapshotCounterForTest(&restored.db));
 }

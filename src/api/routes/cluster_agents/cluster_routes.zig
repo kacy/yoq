@@ -195,6 +195,10 @@ fn writeClusterStatusJson(writer: *std.Io.Writer, ctx: ClusterStatusContext) !vo
     try writer.writeByte('"');
     try writer.print(",\"term\":{d}", .{ctx.node.currentTerm()});
     try writer.print(",\"peers\":{d}", .{ctx.node.config.peers.len});
+    const apply = ctx.node.applyStatus();
+    try writer.print(",\"commit_index\":{d},\"last_applied\":{d},\"apply_backlog\":{d},\"apply_healthy\":{}", .{
+        apply.commit_index, apply.last_applied, apply.backlog, apply.healthy,
+    });
 
     if (ctx.node.leaderId()) |leader_id| {
         try writer.print(",\"leader_id\":{d}", .{leader_id});
@@ -207,4 +211,39 @@ fn writeClusterStatusJson(writer: *std.Io.Writer, ctx: ClusterStatusContext) !vo
     }
 
     try writer.writeByte('}');
+}
+
+test "applied snapshot cluster status exposes and clears the committed apply backlog" {
+    const alloc = std.testing.allocator;
+    var node = try cluster_node.Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = "/tmp",
+    });
+    defer node.deinit();
+    node.raft.commit_index = 1;
+    const ctx: RouteContext = .{ .cluster = &node, .join_token = null };
+    const stalled = handleClusterStatus(alloc, ctx);
+    defer if (stalled.allocated) alloc.free(stalled.body);
+    try std.testing.expectEqual(http.StatusCode.ok, stalled.status);
+    var stalled_json = try std.json.parseFromSlice(std.json.Value, alloc, stalled.body, .{});
+    defer stalled_json.deinit();
+    try std.testing.expectEqual(@as(i64, 1), stalled_json.value.object.get("commit_index").?.integer);
+    try std.testing.expectEqual(@as(i64, 0), stalled_json.value.object.get("last_applied").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), stalled_json.value.object.get("apply_backlog").?.integer);
+    try std.testing.expect(!stalled_json.value.object.get("apply_healthy").?.bool);
+
+    node.state_machine.apply(.{
+        .index = 1,
+        .term = 1,
+        .data = "UPDATE agents SET cpu_used = 0;",
+    });
+    const recovered = handleClusterStatus(alloc, ctx);
+    defer if (recovered.allocated) alloc.free(recovered.body);
+    var recovered_json = try std.json.parseFromSlice(std.json.Value, alloc, recovered.body, .{});
+    defer recovered_json.deinit();
+    try std.testing.expectEqual(@as(i64, 1), recovered_json.value.object.get("last_applied").?.integer);
+    try std.testing.expectEqual(@as(i64, 0), recovered_json.value.object.get("apply_backlog").?.integer);
+    try std.testing.expect(recovered_json.value.object.get("apply_healthy").?.bool);
 }
