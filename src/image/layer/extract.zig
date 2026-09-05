@@ -107,7 +107,7 @@ pub fn isSafeSymlinkTarget(entry_path: []const u8, link_target: []const u8) bool
 }
 
 fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
-    try tar_extract.extractTarGzFile(gz_path, dest_path, "extract");
+    try tar_extract.extractImageLayer(gz_path, dest_path);
 }
 
 fn hasCompleteCacheMarker(parent: std.Io.Dir, hex: []const u8) bool {

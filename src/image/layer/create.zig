@@ -4,6 +4,7 @@ const blob_store = @import("../store.zig");
 const paths = @import("../../lib/paths.zig");
 const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
+const metadata = @import("../../lib/tar_metadata.zig");
 
 const max_path = paths.max_path;
 
@@ -159,7 +160,7 @@ pub fn writeTarEntry(
     entry: std.Io.Dir.Walker.Entry,
 ) !void {
     switch (entry.kind) {
-        .directory => try writeTarDirectoryEntry(tar_writer, entry.path),
+        .directory => try writeTarDirectoryEntry(dir, tar_writer, entry.path),
         .file => try writeTarFileEntry(dir, tar_writer, entry.path),
         .sym_link => try writeTarSymlinkEntry(dir, tar_writer, entry.path),
         else => {
@@ -169,11 +170,56 @@ pub fn writeTarEntry(
     }
 }
 
-fn writeTarDirectoryEntry(tar_writer: *std.tar.Writer, path: []const u8) !void {
-    tar_writer.writeDir(path, .{}) catch |err| {
-        log.warn("tar: failed to write dir entry '{s}': {}", .{ path, err });
-        return err;
+fn writeTarDirectoryEntry(dir: std.Io.Dir, writer: *std.tar.Writer, path: []const u8) !void {
+    try writeOwnedHeader(writer, .directory, path, "", 0, try metadata.Metadata.stat(dir, path));
+}
+
+/// Use the standard header encoder, adding the numeric ownership that the
+/// standard Writer.Options does not expose. GNU extensions retain long paths.
+fn writeOwnedHeader(writer: *std.tar.Writer, kind: std.tar.Writer.Header.FileType, path: []const u8, link: []const u8, size: u64, owner: metadata.Metadata) !void {
+    var header = std.tar.Writer.Header.init(kind);
+    header.setPath(writer.prefix, path) catch |err| switch (err) {
+        error.NameTooLong => {
+            var full_path_buf: [max_path]u8 = undefined;
+            const full_path = if (writer.prefix.len == 0) path else try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ writer.prefix, path });
+            try writeLongName(writer, .gnu_long_name, full_path);
+        },
+        else => return err,
     };
+    if (kind == .symbolic_link) {
+        header.setLinkname(link) catch |err| switch (err) {
+            error.NameTooLong => try writeLongName(writer, .gnu_long_link, link),
+            else => return err,
+        };
+    }
+    try header.setSize(size);
+    @memset(&header.mode, '0');
+    try header.setMode(owner.mode);
+    try header.setMtime(owner.mtime);
+    // Patch raw bytes rather than writing binary IDs through the standard
+    // header's sentinel-terminated octal fields.
+    var bytes: [512]u8 = std.mem.asBytes(&header).*;
+    metadata.encodeId(bytes[108..116], owner.uid);
+    metadata.encodeId(bytes[116..124], owner.gid);
+    @memset(bytes[148..156], ' ');
+    var checksum: u32 = 0;
+    for (bytes) |byte| checksum += byte;
+    _ = try std.fmt.bufPrint(bytes[148..156], "{o:0>6}\x00 ", .{checksum});
+    try writer.underlying_writer.writeAll(&bytes);
+}
+
+fn writeLongName(writer: *std.tar.Writer, kind: std.tar.Writer.Header.FileType, value: []const u8) !void {
+    var header = std.tar.Writer.Header.init(kind);
+    try header.setSize(value.len + 1);
+    try header.write(writer.underlying_writer);
+    try writer.underlying_writer.writeAll(value);
+    try writer.underlying_writer.writeByte(0);
+    try writePadding(writer, value.len + 1);
+}
+
+fn writePadding(writer: *std.tar.Writer, size: u64) !void {
+    const zeros = [_]u8{0} ** 512;
+    try writer.underlying_writer.writeAll(zeros[0..@intCast((512 - size % 512) % 512)]);
 }
 
 fn writeTarFileEntry(dir: std.Io.Dir, tar_writer: *std.tar.Writer, path: []const u8) !void {
@@ -190,12 +236,9 @@ fn writeTarFileEntry(dir: std.Io.Dir, tar_writer: *std.tar.Writer, path: []const
         return err;
     };
 
-    tar_writer.writeFileStream(path, stat.size, &reader.interface, .{
-        .mtime = @intCast(stat.mtime.toSeconds()),
-    }) catch |err| {
-        log.warn("tar: failed to write file '{s}': {}", .{ path, err });
-        return err;
-    };
+    try writeOwnedHeader(tar_writer, .regular, path, "", stat.size, try metadata.Metadata.stat(dir, path));
+    try reader.interface.streamExact64(tar_writer.underlying_writer, stat.size);
+    try writePadding(tar_writer, stat.size);
 }
 
 fn writeTarSymlinkEntry(dir: std.Io.Dir, tar_writer: *std.tar.Writer, path: []const u8) !void {
@@ -206,8 +249,72 @@ fn writeTarSymlinkEntry(dir: std.Io.Dir, tar_writer: *std.tar.Writer, path: []co
     };
     const link_target = link_buf[0..link_len];
 
-    tar_writer.writeLink(path, link_target, .{}) catch |err| {
-        log.warn("tar: failed to write symlink '{s}': {}", .{ path, err });
-        return err;
-    };
+    try writeOwnedHeader(tar_writer, .symbolic_link, path, link_target, 0, try metadata.Metadata.stat(dir, path));
+}
+
+test "layer metadata roundtrip preserves numeric owners and ordinary modes only" {
+    if (std.os.linux.geteuid() != 0) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var source = std.testing.tmpDir(.{});
+    defer source.cleanup();
+    var target = std.testing.tmpDir(.{});
+    defer target.cleanup();
+    var generic = std.testing.tmpDir(.{});
+    defer generic.cleanup();
+    try source.dir.createDir(io, "work", .default_dir);
+    var work = try source.dir.openDir(io, "work", .{});
+    defer work.close(io);
+    try work.writeFile(io, .{ .sub_path = "tool", .data = "#!/bin/sh\necho ok\n" });
+    const file = try work.openFile(io, "tool", .{});
+    defer file.close(io);
+    try file.setOwner(io, 1234, 2345);
+    try file.setPermissions(io, .fromMode(0o6755));
+    const directory: std.Io.File = .{ .handle = work.handle, .flags = .{ .nonblocking = false } };
+    try directory.setOwner(io, 1234, 2345);
+    try directory.setPermissions(io, .fromMode(0o750));
+    var source_buf: [max_path]u8 = undefined;
+    const source_len = try source.dir.realPath(io, &source_buf);
+    const result = (try createLayerFromDir(alloc, source_buf[0..source_len])).?;
+    defer blob_store.deleteBlob(result.compressed_digest) catch {};
+    var blob_buf: [max_path]u8 = undefined;
+    const blob_path = try blob_store.blobPath(result.compressed_digest, &blob_buf);
+    var target_buf: [max_path]u8 = undefined;
+    const target_len = try target.dir.realPath(io, &target_buf);
+    try @import("../../lib/tar_extract.zig").extractImageLayer(blob_path, target_buf[0..target_len]);
+    const work_meta = try metadata.Metadata.stat(target.dir, "work");
+    const file_meta = try metadata.Metadata.stat(target.dir, "work/tool");
+    try std.testing.expectEqual(@as(u32, 1234), work_meta.uid);
+    try std.testing.expectEqual(@as(u32, 2345), work_meta.gid);
+    try std.testing.expectEqual(@as(u32, 0o750), work_meta.mode);
+    try std.testing.expectEqual(@as(u32, 1234), file_meta.uid);
+    try std.testing.expectEqual(@as(u32, 2345), file_meta.gid);
+    try std.testing.expectEqual(@as(u32, 0o755), file_meta.mode);
+    const file_stat = try target.dir.statFile(io, "work/tool", .{});
+    try std.testing.expectEqual(@as(u32, 0), file_stat.permissions.toMode() & 0o6000);
+    var generic_buf: [max_path]u8 = undefined;
+    const generic_len = try generic.dir.realPath(io, &generic_buf);
+    try @import("../../lib/tar_extract.zig").extractTarGzFile(blob_path, generic_buf[0..generic_len], "generic archive");
+    try std.testing.expectEqual(@as(u32, 0), (try metadata.Metadata.stat(generic.dir, "work/tool")).uid);
+}
+
+test "layer metadata header preserves long names prefix and zero modes" {
+    const alloc = std.testing.allocator;
+    var bytes: std.Io.Writer.Allocating = .init(alloc);
+    defer bytes.deinit();
+    var writer: std.tar.Writer = .{ .underlying_writer = &bytes.writer, .prefix = "prefix" };
+    const name = "n" ** 300;
+    const link = "l" ** 300;
+    try writeOwnedHeader(&writer, .symbolic_link, name, link, 0, .{ .uid = 4000000000, .gid = 2345, .mode = 0, .mtime = 123 });
+    var reader: std.Io.Reader = .fixed(bytes.written());
+    var name_buf: [4096]u8 = undefined;
+    var link_buf: [4096]u8 = undefined;
+    var iterator: std.tar.Iterator = .init(&reader, .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf });
+    const entry = (try iterator.next()).?;
+    try std.testing.expectEqualStrings("prefix/" ++ name, entry.name);
+    try std.testing.expectEqualStrings(link, entry.link_name);
+    try std.testing.expectEqual(@as(u32, 0), entry.mode);
+    const owner = try metadata.Metadata.fromHeader(&iterator.header_buffer, entry.mode);
+    try std.testing.expectEqual(@as(u32, 4000000000), owner.uid);
+    try std.testing.expectEqual(@as(u32, 2345), owner.gid);
 }

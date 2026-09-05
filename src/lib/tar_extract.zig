@@ -4,6 +4,7 @@ const linux = std.os.linux;
 
 const log = @import("log.zig");
 const syscall = @import("syscall.zig");
+const Metadata = @import("tar_metadata.zig").Metadata;
 
 pub const max_file_size: u64 = 10 * 1024 * 1024 * 1024;
 
@@ -17,10 +18,20 @@ pub fn extractTarFile(tar_path: []const u8, dest_path: []const u8, context: []co
 
     var tar_read_buf: [4096]u8 = undefined;
     var tar_reader = tar_file.reader(std.Options.debug_io, &tar_read_buf);
-    try extractTarReader(&tar_reader.interface, dest_path, context);
+    try extractTarReader(&tar_reader.interface, dest_path, context, false);
 }
 
 pub fn extractTarGzFile(gz_path: []const u8, dest_path: []const u8, context: []const u8) !void {
+    return extractGzip(gz_path, dest_path, context, false);
+}
+
+/// Image layers carry container identities. Generic ADD archives deliberately
+/// retain the caller's ownership policy instead of adopting archive owners.
+pub fn extractImageLayer(gz_path: []const u8, dest_path: []const u8) !void {
+    return extractGzip(gz_path, dest_path, "image layer", true);
+}
+
+fn extractGzip(gz_path: []const u8, dest_path: []const u8, context: []const u8, image_layer: bool) !void {
     var gz_file = try cwd().openFile(std.Options.debug_io, gz_path, .{});
     defer gz_file.close(std.Options.debug_io);
 
@@ -34,14 +45,24 @@ pub fn extractTarGzFile(gz_path: []const u8, dest_path: []const u8, context: []c
         &decompress_buf,
     );
 
-    try extractTarReader(&decompress.reader, dest_path, context);
+    try extractTarReader(&decompress.reader, dest_path, context, image_layer);
 
     // Drain the rest of the gzip stream so footer validation still runs
     // after the tar iterator stops at the logical end of archive entries.
     _ = try decompress.reader.discardRemaining();
 }
 
-fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []const u8) !void {
+fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []const u8, image_layer: bool) !void {
+    // Rootless extraction cannot adopt arbitrary numeric owners. Preserve its
+    // existing caller ownership; explicit USER still requires a usable mapping.
+    const restore_owner = image_layer and linux.geteuid() == 0;
+    var directory_path_bytes: usize = 0;
+    var directories: std.StringHashMap(Metadata) = .init(std.heap.page_allocator);
+    defer {
+        var keys = directories.keyIterator();
+        while (keys.next()) |key| std.heap.page_allocator.free(key.*);
+        directories.deinit();
+    }
     var dest_dir = try cwd().openDir(std.Options.debug_io, dest_path, .{});
     defer dest_dir.close(std.Options.debug_io);
 
@@ -69,6 +90,22 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
             .directory => {
                 var dir = try ensureDirectory(dest_dir, name);
                 dir.close(std.Options.debug_io);
+                if (image_layer) {
+                    const value = try Metadata.fromHeader(&it.header_buffer, entry.mode);
+                    if (!directories.contains(name)) {
+                        if (directories.count() >= 65536 or name.len > 16 * 1024 * 1024 - directory_path_bytes)
+                            return error.DirectoryMetadataTooLarge;
+                    }
+                    const found = try directories.getOrPut(name);
+                    if (!found.found_existing) {
+                        found.key_ptr.* = std.heap.page_allocator.dupe(u8, name) catch |err| {
+                            _ = directories.remove(name);
+                            return err;
+                        };
+                    }
+                    if (!found.found_existing) directory_path_bytes += name.len;
+                    found.value_ptr.* = value;
+                }
             },
             .file => {
                 if (entry.size > max_file_size) return error.FileTooBig;
@@ -85,6 +122,7 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
                 });
                 defer file.deinit(std.Options.debug_io);
                 try copyTarEntryToFile(&it, entry, file.file);
+                if (image_layer) try (try Metadata.fromHeader(&it.header_buffer, entry.mode)).apply(file.file, restore_owner);
                 try file.replace(std.Options.debug_io);
             },
             .sym_link => {
@@ -99,8 +137,31 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
                 var parent = try ensureParentDir(dest_dir, name);
                 defer parent.close(std.Options.debug_io);
                 try parent.symLink(std.Options.debug_io, entry.link_name, std.fs.path.basename(name), .{});
+                if (restore_owner) {
+                    const owner = try Metadata.fromHeader(&it.header_buffer, entry.mode);
+                    const basename = try std.posix.toPosixPath(std.fs.path.basename(name));
+                    if (linux.errno(linux.fchownat(parent.handle, &basename, owner.uid, owner.gid, linux.AT.SYMLINK_NOFOLLOW)) != .SUCCESS)
+                        return error.SetOwnerFailed;
+                }
             },
         }
+    }
+    // Apply directories deepest-first after contents are complete, so a mode
+    // such as 0500 or 0000 cannot prevent extraction of its children. Keeping
+    // only the last record gives duplicate directory headers their usual meaning.
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(std.heap.page_allocator);
+    var keys = directories.keyIterator();
+    while (keys.next()) |key| try names.append(std.heap.page_allocator, key.*);
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn deeper(_: void, left: []const u8, right: []const u8) bool {
+            return left.len > right.len;
+        }
+    }.deeper);
+    for (names.items) |name| {
+        var dir = try openRootedDir(dest_dir, name);
+        defer dir.close(std.Options.debug_io);
+        try directories.get(name).?.apply(.{ .handle = dir.handle, .flags = .{ .nonblocking = false } }, restore_owner);
     }
 }
 

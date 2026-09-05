@@ -62,6 +62,8 @@ comptime {
     _ = @import("lib/paths.zig");
     _ = @import("lib/master_key.zig");
     _ = @import("lib/tar_extract.zig");
+    _ = @import("lib/tar_metadata.zig");
+    _ = @import("image/layer/create.zig");
     _ = @import("lib/toml.zig");
     _ = @import("lib/json_helpers.zig");
     _ = @import("lib/json_output.zig");

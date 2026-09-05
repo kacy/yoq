@@ -119,7 +119,7 @@ test "layer path format" {
     const path = try layerPath(digest, &buf);
 
     // should contain the cache subdir and the hex digest
-    try std.testing.expect(std.mem.indexOf(u8, path, "layers/v2/sha256") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "layers/v3/sha256") != null);
     try std.testing.expect(std.mem.endsWith(u8, path, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9/rootfs"));
 }
 
