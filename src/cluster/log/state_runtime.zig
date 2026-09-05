@@ -13,6 +13,11 @@ pub fn init(path: [:0]const u8) LogError!sqlite.Db {
         .open_flags = .{ .write = true, .create = true },
     }) catch return LogError.DbOpenFailed;
 
+    db.exec("PRAGMA synchronous = FULL;", .{}, .{}) catch {
+        db.deinit();
+        return LogError.DbOpenFailed;
+    };
+
     schema_support.initSchema(&db) catch {
         db.deinit();
         return LogError.DbOpenFailed;
@@ -47,9 +52,9 @@ pub fn getCurrentTerm(db: *sqlite.Db) Term {
 }
 
 pub fn setCurrentTerm(db: *sqlite.Db, term: Term) LogError!void {
-    db.exec(
+    common.execStatement(
+        db,
         "UPDATE raft_state SET current_term = ? WHERE id = 1;",
-        .{},
         .{@as(i64, @intCast(term))},
     ) catch return LogError.WriteFailed;
 }

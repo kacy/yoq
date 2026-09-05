@@ -40,6 +40,7 @@ pub fn initGossip(alloc: std.mem.Allocator, config: anytype, transport: anytype)
 }
 
 pub fn start(self: anytype) StartError!void {
+    if (self.snapshot_failed.load(.acquire)) return StartError.InitFailed;
     if (self.running.load(.acquire)) return StartError.AlreadyStarted;
     self.running.store(true, .release);
     self.raft.log = &self.log;

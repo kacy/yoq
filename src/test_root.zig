@@ -171,6 +171,7 @@ comptime {
     _ = @import("cluster/state_machine.zig");
     _ = @import("cluster/state_machine/snapshot_support.zig");
     _ = @import("cluster/node.zig");
+    _ = @import("cluster/node/snapshot_support.zig");
     _ = @import("cluster/config.zig");
     _ = @import("cluster/agent_types.zig");
     _ = @import("cluster/heartbeat_batcher.zig");

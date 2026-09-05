@@ -104,8 +104,7 @@ pub fn isAllowedStatement(sql: []const u8) bool {
     return sql_guard.isAllowedStatement(sql);
 }
 
-/// read snapshot metadata from a snapshot file without loading the full database.
-/// useful for checking what a snapshot contains before deciding to restore it.
+/// Read snapshot metadata after validating the complete file length.
 pub fn readSnapshotMeta(path: []const u8) SnapshotError!SnapshotMeta {
     return snapshot_support.readSnapshotMeta(path);
 }
@@ -963,4 +962,31 @@ test "replicated batch respects bounded slices and quoted SQL punctuation" {
         return error.ExpectedAgent;
     defer std.testing.allocator.free(row.address.data);
     try std.testing.expectEqualStrings("it's; -- literal /* text */ \"q\" `q` [q]", row.address.data);
+}
+
+test "snapshot creation rejects advertised and persisted boundary mismatches" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [512]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    var path_buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/snapshot.dat", .{dir_buf[0..dir_len]});
+    var state = try StateMachine.initMemory();
+    defer state.deinit();
+    state.apply(.{ .index = 1, .term = 1, .data = "UPDATE agents SET cpu_used = 0;" });
+    try std.testing.expectEqual(@as(LogIndex, 1), state.last_applied);
+    try std.testing.expectError(error.InvalidSnapshot, state.takeSnapshot(path, .{
+        .last_included_index = 2,
+        .last_included_term = 1,
+        .data_len = 0,
+    }));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "snapshot.dat", .{}));
+    // A stale in-memory boundary must not override the actual backed-up DB.
+    try state.db.exec("UPDATE state_machine_meta SET last_applied = 0 WHERE id = 1;", .{}, .{});
+    try std.testing.expectError(error.CorruptSnapshot, state.takeSnapshot(path, .{
+        .last_included_index = 1,
+        .last_included_term = 1,
+        .data_len = 0,
+    }));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "snapshot.dat", .{}));
 }

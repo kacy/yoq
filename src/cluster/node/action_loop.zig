@@ -60,9 +60,11 @@ pub fn tickLoop(self: anytype) void {
             self.mu.lockUncancelable(std.Options.debug_io);
             defer self.mu.unlock(std.Options.debug_io);
 
+            if (self.snapshot_failed.load(.acquire)) return;
             self.raft.tick();
             processActions(self);
             retryCommittedEntries(self);
+            if (self.snapshot_failed.load(.acquire)) return;
 
             self.tick_count +%= 1;
             still_leader = self.raft.role == .leader;
@@ -97,6 +99,7 @@ pub fn tickLoop(self: anytype) void {
 /// every tick even if Raft has no new commit action, so a transient database
 /// failure cannot strand an otherwise idle cluster. Call with the lock held.
 pub fn retryCommittedEntries(self: anytype) void {
+    if (self.snapshot_failed.load(.acquire)) return;
     self.state_machine.applyUpTo(&self.log, self.alloc, self.raft.commit_index);
 }
 
@@ -121,6 +124,14 @@ pub fn recvLoop(self: anytype) void {
 }
 
 pub fn handleMessage(self: anytype, received: transport_mod.ReceivedMessage) void {
+    if (self.snapshot_failed.load(.acquire)) {
+        switch (received.message) {
+            .append_entries => |args| freeEntries(self.alloc, args.entries),
+            .install_snapshot => |args| self.alloc.free(args.data),
+            else => {},
+        }
+        return;
+    }
     const sender_id = received.sender_id orelse resolveNodeId(self, received.from_addr);
 
     switch (received.message) {
@@ -184,6 +195,13 @@ pub fn handleMessage(self: anytype, received: transport_mod.ReceivedMessage) voi
             const commit_before = self.raft.commit_index;
             const reply = self.raft.handleInstallSnapshot(args);
 
+            // A lower returned term means adopting the leader's term failed
+            // to persist. Do not install data or acknowledge that RPC.
+            if (args.term > reply.term) {
+                self.alloc.free(args.data);
+                return;
+            }
+
             if (args.term < reply.term or args.last_included_index <= commit_before) {
                 self.transport.send(peer_id, .{ .install_snapshot_reply = reply }) catch |e| {
                     logger.warn("failed to send snapshot reply to node {}: {}", .{ peer_id, e });
@@ -192,24 +210,15 @@ pub fn handleMessage(self: anytype, received: transport_mod.ReceivedMessage) voi
                 return;
             }
 
-            const meta = self.state_machine.restoreFromBytes(args.data) catch |e| {
-                logger.warn("snapshot: failed to restore from bytes: {}", .{e});
+            snapshot_support.install(self, args.data, .{
+                .last_included_index = args.last_included_index,
+                .last_included_term = args.last_included_term,
+                .data_len = 0,
+            }) catch |err| {
+                logger.warn("snapshot: failed to install: {}", .{err});
                 self.alloc.free(args.data);
                 return;
             };
-            if (!self.log.truncateUpTo(meta.last_included_index)) {
-                logger.warn("snapshot: failed to truncate raft log up to {}", .{meta.last_included_index});
-                self.alloc.free(args.data);
-                return;
-            }
-            if (!self.raft.finishInstallSnapshot(meta)) {
-                logger.warn("snapshot: failed to commit snapshot metadata at index {}", .{meta.last_included_index});
-                self.alloc.free(args.data);
-                return;
-            }
-
-            self.last_snapshot_index = meta.last_included_index;
-            logger.info("snapshot: restored state machine to index {}", .{meta.last_included_index});
             self.transport.send(peer_id, .{ .install_snapshot_reply = reply }) catch |e| {
                 logger.warn("failed to send snapshot reply to node {}: {}", .{ peer_id, e });
             };
@@ -246,6 +255,10 @@ pub fn processActions(self: anytype) void {
 
     var has_sends = false;
     for (actions) |action| {
+        if (self.snapshot_failed.load(.acquire)) {
+            if (action == .apply_snapshot) self.alloc.free(action.apply_snapshot.data);
+            continue;
+        }
         switch (action) {
             .commit_entries => |commit| {
                 self.state_machine.applyUpTo(&self.log, self.alloc, commit.up_to);
@@ -258,27 +271,9 @@ pub fn processActions(self: anytype) void {
             },
             .apply_snapshot => |snap| {
                 defer self.alloc.free(snap.data);
-
-                const meta = @import("../state_machine.zig").parseSnapshotMeta(snap.data) catch |e| {
-                    logger.warn("snapshot: invalid snapshot data: {}", .{e});
-                    continue;
+                snapshot_support.install(self, snap.data, null) catch |err| {
+                    logger.warn("snapshot: failed to install queued snapshot: {}", .{err});
                 };
-
-                if (!self.log.setSnapshotMeta(meta)) {
-                    logger.warn("snapshot: failed to persist snapshot metadata at index {}", .{meta.last_included_index});
-                    continue;
-                }
-                if (!self.log.truncateUpTo(meta.last_included_index)) {
-                    logger.warn("snapshot: failed to truncate raft log up to index {}", .{meta.last_included_index});
-                    continue;
-                }
-
-                _ = self.state_machine.restoreFromBytes(snap.data) catch |e| {
-                    logger.warn("snapshot: failed to restore state machine: {}", .{e});
-                    continue;
-                };
-                self.last_snapshot_index = meta.last_included_index;
-                logger.info("snapshot: restored state machine to index {}", .{meta.last_included_index});
             },
             .take_snapshot => |snap| {
                 snapshot_support.takeSnapshot(self, snap.up_to_index, snap.term);
@@ -287,12 +282,22 @@ pub fn processActions(self: anytype) void {
         }
     }
 
+    if (self.snapshot_failed.load(.acquire)) {
+        for (actions) |action| {
+            if (action == .send_append_entries) freeEntries(self.alloc, action.send_append_entries.args.entries);
+        }
+        return;
+    }
     if (!has_sends) return;
 
     self.mu.unlock(std.Options.debug_io);
     defer self.mu.lockUncancelable(std.Options.debug_io);
 
     for (actions) |action| {
+        if (self.snapshot_failed.load(.acquire)) {
+            if (action == .send_append_entries) freeEntries(self.alloc, action.send_append_entries.args.entries);
+            continue;
+        }
         switch (action) {
             .send_request_vote => |vote| {
                 self.transport.send(vote.target, .{ .request_vote = vote.args }) catch |e| {
