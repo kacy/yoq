@@ -217,14 +217,20 @@ test "startup rollback reaps child and joins partial or complete capture ownersh
     try store.initTestDb();
     defer store.deinitTestDb();
     try store.save(.{ .id = "0123456789ab", .rootfs = "", .command = "test", .hostname = "test", .status = "created", .pid = null, .exit_code = null, .created_at = 0 });
-    {
-        var lease = try @import("../../state/store/common.zig").leaseDb();
-        defer lease.deinit();
-        try lease.db.exec("CREATE TRIGGER reject_start BEFORE UPDATE OF status ON containers WHEN NEW.status = 'running' BEGIN SELECT RAISE(ABORT, 'injected startup failure'); END;", .{}, .{});
-    }
     const Factory = struct {
         fail_after: usize,
         started: usize = 0,
+
+        fn denyUpdates(_: ?*anyopaque, action: c_int, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+            return if (action == sqlite.c.SQLITE_UPDATE) sqlite.c.SQLITE_DENY else sqlite.c.SQLITE_OK;
+        }
+
+        fn rejectStatusWrites(enabled: bool) !void {
+            var lease = try @import("../../state/store/common.zig").leaseDb();
+            defer lease.deinit();
+            try std.testing.expectEqual(@as(c_int, sqlite.c.SQLITE_OK), sqlite.c.sqlite3_set_authorizer(lease.db.db, if (enabled) denyUpdates else null, null));
+        }
+
         fn spawn(self: *@This(), args: anytype) !std.Thread {
             if (self.started == self.fail_after) return error.InjectedFailure;
             self.started += 1;
@@ -268,7 +274,13 @@ test "startup rollback reaps child and joins partial or complete capture ownersh
         if (fail_after < 2) try std.testing.expectError(error.InjectedFailure, result) else try result;
         try std.testing.expectEqual(fail_after > 0, child.?.stdout_fd == -1);
         try std.testing.expectEqual(fail_after > 1, child.?.stderr_fd == -1);
-        if (fail_after == 2) try std.testing.expectError(error.WriteFailed, updateRunningStatus(container.config.id, pid));
+        if (fail_after == 2) {
+            // Reject during preparation: this is a real persistence failure,
+            // without leaving a failed statement for finalize to report again.
+            try Factory.rejectStatusWrites(true);
+            defer Factory.rejectStatusWrites(false) catch {};
+            try std.testing.expectError(error.WriteFailed, updateRunningStatus(container.config.id, pid));
+        }
         // The actual SQLite rejection above happens after both FD transfers.
         cleanupFailedStart(&container, &child, null, &active);
         try std.testing.expect(child == null and container.pid == null);
