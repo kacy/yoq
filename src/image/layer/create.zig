@@ -257,7 +257,7 @@ test "layer metadata roundtrip preserves numeric owners and ordinary modes only"
     var generic = std.testing.tmpDir(.{});
     defer generic.cleanup();
     try source.dir.createDir(io, "work", .default_dir);
-    var work = try source.dir.openDir(io, "work", .{});
+    var work = try source.dir.openDir(io, "work", .{ .iterate = true });
     defer work.close(io);
     try work.writeFile(io, .{ .sub_path = "tool", .data = "#!/bin/sh\necho ok\n" });
     const file = try work.openFile(io, "tool", .{});
