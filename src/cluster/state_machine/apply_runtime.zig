@@ -22,26 +22,34 @@ pub fn apply(self: anytype, entry: LogEntry) void {
         return;
     }
 
-    var stmt = self.db.prepareDynamic(entry.data) catch |err| {
+    applyBatch(&self.db, entry) catch |err| {
         log.err("state machine: failed to apply entry {d}: {}", .{ entry.index, err });
-        return;
-    };
-    defer stmt.deinit();
-
-    stmt.exec(.{}, .{}) catch |err| {
-        // clear the raw sqlite statement error state so finalization does not
-        // emit a second package-level error log for expected exec failures
-        _ = sqlite.c.sqlite3_clear_bindings(stmt.stmt);
-        _ = sqlite.c.sqlite3_reset(stmt.stmt);
-        log.err("state machine: failed to apply entry {d}: {}", .{ entry.index, err });
-        return;
-    };
-
-    db_runtime.setLastApplied(&self.db, entry.index) catch |err| {
-        log.err("state machine: failed to persist last_applied {d}: {}", .{ entry.index, err });
         return;
     };
     self.last_applied = entry.index;
+}
+
+/// The entire entry has already passed the guard. Use the same iterator to
+/// execute every statement, keeping the mutations and replay position in one
+/// transaction. Neither a later statement failure nor a failed commit may
+/// leave a partial batch or advance the in-memory position.
+fn applyBatch(db: *sqlite.Db, entry: LogEntry) !void {
+    try db_runtime.execStatement(db, "BEGIN IMMEDIATE;", .{});
+    errdefer {
+        // SQLite may already have rolled back on a storage/constraint error.
+        if (sqlite.c.sqlite3_get_autocommit(db.db) == 0) {
+            db_runtime.execStatement(db, "ROLLBACK;", .{}) catch |err| {
+                log.err("state machine: failed to roll back entry {d}: {}", .{ entry.index, err });
+            };
+        }
+    }
+
+    var statements = sql_guard.StatementIterator{ .sql = entry.data };
+    while (statements.next()) |sql| {
+        try db_runtime.execStatement(db, sql, .{});
+    }
+    try db_runtime.setLastApplied(db, entry.index);
+    try db_runtime.execStatement(db, "COMMIT;", .{});
 }
 
 pub fn applyUpTo(self: anytype, raft_log: *Log, alloc: std.mem.Allocator, up_to: LogIndex) void {
