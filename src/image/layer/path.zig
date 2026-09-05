@@ -5,7 +5,7 @@ const paths = @import("../../lib/paths.zig");
 const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
 
-pub const layer_subdir = "layers/sha256";
+pub const layer_subdir = "layers/v2/sha256";
 const max_path = paths.max_path;
 
 fn cwd() std.Io.Dir {
@@ -14,7 +14,7 @@ fn cwd() std.Io.Dir {
 
 pub fn layerPath(digest: blob_store.Digest, buf: *[max_path]u8) types.LayerError![]const u8 {
     const hex = digest.hex();
-    return paths.dataPathFmt(buf, "{s}/{s}", .{ layer_subdir, hex }) catch
+    return paths.dataPathFmt(buf, "{s}/{s}/rootfs", .{ layer_subdir, hex }) catch
         return types.LayerError.PathTooLong;
 }
 
@@ -52,11 +52,13 @@ pub fn listExtractedLayersOnDisk(alloc: std.mem.Allocator) types.LayerError!std.
 }
 
 pub fn deleteExtractedLayer(hex: []const u8) void {
-    var path_buf: [max_path]u8 = undefined;
-    const path = paths.dataPathFmt(&path_buf, "{s}/{s}", .{ layer_subdir, hex }) catch return;
-    cwd().deleteTree(std.Options.debug_io, path) catch |err| {
-        if (err != error.FileNotFound) {
-            log.warn("failed to delete extracted layer {s}: {}", .{ hex, err });
-        }
+    var parent_buf: [max_path]u8 = undefined;
+    const parent_path = layerDir(&parent_buf) catch return;
+    var parent = cwd().openDir(std.Options.debug_io, parent_path, .{ .iterate = true }) catch return;
+    defer parent.close(std.Options.debug_io);
+    const lock = @import("cache_lock.zig").Lock.acquire(parent, hex) catch return;
+    defer lock.deinit();
+    parent.deleteTree(std.Options.debug_io, hex) catch |err| {
+        if (err != error.FileNotFound) log.warn("failed to delete extracted layer {s}: {}", .{ hex, err });
     };
 }

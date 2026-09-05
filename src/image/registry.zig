@@ -19,6 +19,12 @@ pub const PushResult = common.PushResult;
 /// uses errdefer chains so each allocation is automatically cleaned up
 /// on any subsequent failure — no manual cleanup blocks needed.
 pub fn pull(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!PullResult {
+    return pullForPlatform(io, alloc, image_ref, manifest_fetch.nativePlatform());
+}
+
+/// Resolve an explicit target; callers doing cross-platform builds need not
+/// pretend to be the architecture running this process.
+pub fn pullForPlatform(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.ImageRef, platform: spec.Platform) RegistryError!PullResult {
     if (image_ref.digest_reference and blob_store.Digest.parse(image_ref.reference) == null)
         return RegistryError.DigestMismatch;
     var client: std.http.Client = .{ .io = io, .allocator = alloc };
@@ -40,7 +46,7 @@ pub fn pull(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.ImageRef) Regi
         alloc.free(token.value);
     }
 
-    const manifest_result = manifest_fetch.fetchManifest(alloc, &client, image_ref.host, repository, image_ref.reference, token) catch |e| {
+    const manifest_result = manifest_fetch.fetchForPlatform(alloc, &client, image_ref.host, repository, image_ref.reference, token, platform) catch |e| {
         return switch (e) {
             error.ManifestNotFound => RegistryError.ManifestNotFound,
             error.NetworkError => RegistryError.NetworkError,

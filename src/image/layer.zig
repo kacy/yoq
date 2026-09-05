@@ -119,8 +119,8 @@ test "layer path format" {
     const path = try layerPath(digest, &buf);
 
     // should contain the cache subdir and the hex digest
-    try std.testing.expect(std.mem.indexOf(u8, path, "layers/sha256") != null);
-    try std.testing.expect(std.mem.endsWith(u8, path, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"));
+    try std.testing.expect(std.mem.indexOf(u8, path, "layers/v2/sha256") != null);
+    try std.testing.expect(std.mem.endsWith(u8, path, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9/rootfs"));
 }
 
 test "extract layer — missing blob returns error" {
@@ -277,7 +277,7 @@ test "create layer then extract layer preserves file contents" {
     try std.testing.expectEqualStrings("hello.txt", link_buf[0..link_len]);
 }
 
-test "extract layer replaces an archive symlink at the cache marker without following it" {
+test "extract layer keeps archive completion names separate from cache metadata" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const alloc = std.testing.allocator;
 
@@ -307,8 +307,13 @@ test "extract layer replaces an archive symlink at the cache marker without foll
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("untouched", try outside.dir.readFile(std.testing.io, "sentinel", &buf));
     const stat = try extracted.statFile(std.testing.io, ".yoq_complete", .{ .follow_symlinks = false });
-    try std.testing.expectEqual(.file, stat.kind);
-    try std.testing.expectEqualStrings("ok\n", try extracted.readFile(std.testing.io, ".yoq_complete", &buf));
+    try std.testing.expectEqual(.sym_link, stat.kind);
+    var link_buf: [max_path]u8 = undefined;
+    const link_len = try extracted.readLink(std.testing.io, ".yoq_complete", &link_buf);
+    try std.testing.expectEqualStrings(outside_buf[0..outside_len], link_buf[0..link_len]);
+    const cached_again = try extractLayer(alloc, digestString(digest, &digest_buf));
+    defer alloc.free(cached_again);
+    try std.testing.expectEqualStrings(extracted_path, cached_again);
 }
 
 test "create layer from dir — deterministic digest" {
@@ -480,4 +485,76 @@ fn gzipBytes(alloc: std.mem.Allocator, data: []const u8) ![]u8 {
     compressor.finish() catch return error.CompressFailed;
 
     return out.toOwnedSlice();
+}
+
+test "extract layer concurrent callers publish one complete immutable directory" {
+    const alloc = std.testing.allocator;
+    var tar_bytes: std.Io.Writer.Allocating = .init(alloc);
+    defer tar_bytes.deinit();
+    var tar: std.tar.Writer = .{ .underlying_writer = &tar_bytes.writer };
+    try tar.writeFileBytes("first", "complete first file", .{});
+    const padding = try alloc.alloc(u8, 1024 * 1024);
+    defer alloc.free(padding);
+    @memset(padding, 42);
+    try tar.writeFileBytes("large", padding, .{});
+    try tar.writeFileBytes("last", "complete last file", .{});
+    try tar.writeFileBytes("complete", "archive-owned, never cache metadata", .{});
+    try tar.writeFileBytes(".yoq_complete", "also archive-owned", .{});
+    try tar.finishPedantically();
+    const gzip = try gzipBytes(alloc, tar_bytes.written());
+    defer alloc.free(gzip);
+    const digest = try blob_store.putBlob(gzip);
+    defer blob_store.deleteBlob(digest) catch {};
+    defer deleteExtractedLayerForDigest(digest);
+    var digest_buf: [71]u8 = undefined;
+    const reference = digestString(digest, &digest_buf);
+    const Worker = struct {
+        reference: []const u8,
+        begin: *std.atomic.Value(bool),
+        result: ?[]const u8 = null,
+        failure: ?anyerror = null,
+        inode: u64 = 0,
+        fn run(self: *@This()) void {
+            while (!self.begin.load(.acquire)) std.atomic.spinLoopHint();
+            self.extract() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn extract(self: *@This()) !void {
+            const path = try extractLayer(std.testing.allocator, self.reference);
+            self.result = path;
+            var dir = try cwd().openDir(std.testing.io, path, .{ .iterate = true });
+            defer dir.close(std.testing.io);
+            self.inode = @intCast((try dir.stat(std.testing.io)).inode);
+            var buf: [64]u8 = undefined;
+            try std.testing.expectEqualStrings("complete first file", try dir.readFile(std.testing.io, "first", &buf));
+            try std.testing.expectEqualStrings("complete last file", try dir.readFile(std.testing.io, "last", &buf));
+            try std.testing.expectEqualStrings("archive-owned, never cache metadata", try dir.readFile(std.testing.io, "complete", &buf));
+            try std.testing.expectEqualStrings("also archive-owned", try dir.readFile(std.testing.io, ".yoq_complete", &buf));
+        }
+    };
+    var begin = std.atomic.Value(bool).init(false);
+    var workers: [4]Worker = undefined;
+    var threads: [4]std.Thread = undefined;
+    var started: usize = 0;
+    defer {
+        begin.store(true, .release);
+        for (threads[0..started]) |thread| thread.join();
+        for (workers[0..started]) |worker| if (worker.result) |path| alloc.free(path);
+    }
+    for (&workers, &threads) |*worker, *thread| {
+        worker.* = .{ .reference = reference, .begin = &begin };
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{worker});
+        started += 1;
+    }
+    begin.store(true, .release);
+    for (threads) |thread| thread.join();
+    // Keep result cleanup while avoiding double joins in the error defer.
+    started = 0;
+    defer for (workers) |worker| if (worker.result) |path| alloc.free(path);
+    for (workers) |worker| {
+        if (worker.failure) |err| return err;
+        try std.testing.expectEqualStrings(workers[0].result.?, worker.result.?);
+        try std.testing.expectEqual(workers[0].inode, worker.inode);
+    }
 }
