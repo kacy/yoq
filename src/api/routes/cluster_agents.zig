@@ -49,6 +49,11 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
         const agent_id_end = std.mem.indexOf(u8, rest, "/") orelse rest.len;
         if (!common.validateContainerId(rest[0..agent_id_end])) return common.badRequest("invalid agent id");
 
+        if (common.matchSubpath(rest, "/credential")) |id| {
+            if (request.method != .DELETE) return common.methodNotAllowed();
+            return agent_routes.handleRevokeCredential(alloc, id, ctx);
+        }
+
         if (common.matchSubpath(rest, "/labels")) |id| {
             if (request.method != .PUT) return common.methodNotAllowed();
             return agent_routes.handleUpdateLabels(alloc, request, id, ctx);
@@ -71,7 +76,7 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
 
         if (common.matchAssignmentStatusPath(rest)) |ids| {
             if (request.method != .POST) return common.methodNotAllowed();
-            return agent_routes.handleAssignmentStatusUpdate(alloc, request, ids.assignment_id, ctx);
+            return agent_routes.handleAssignmentStatusUpdate(alloc, request, ids.agent_id, ids.assignment_id, ctx);
         }
     }
 

@@ -186,6 +186,7 @@ pub fn initClusterTables(db: *sqlite.Db) SchemaError!void {
     try exec(db,
         \\CREATE TABLE IF NOT EXISTS agents (
         \\    id TEXT PRIMARY KEY,
+        \\    credential_hash TEXT,
         \\    address TEXT NOT NULL,
         \\    agent_api_port INTEGER,
         \\    status TEXT NOT NULL DEFAULT 'active',

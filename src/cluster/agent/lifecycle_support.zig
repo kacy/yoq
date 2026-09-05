@@ -91,6 +91,7 @@ pub fn stop(self: anytype) void {
     if (self.owned_token) |token| {
         std.crypto.secureZero(u8, token);
     }
+    if (self.worker_credential) |secret| std.crypto.secureZero(u8, secret);
 }
 
 pub fn wait(self: anytype) void {
@@ -145,5 +146,10 @@ pub fn deinit(self: anytype) void {
         self.token = "";
     }
 
+    if (self.worker_credential) |secret| {
+        std.crypto.secureZero(u8, secret);
+        self.alloc.free(secret);
+        self.worker_credential = null;
+    }
     agent_store.closeDb();
 }
