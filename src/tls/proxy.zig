@@ -404,6 +404,10 @@ pub const TlsProxy = struct {
     // -- connection handlers --
 
     fn tlsConnectionHandler(self: *TlsProxy, client_fd: posix.fd_t) void {
+        self.tlsConnectionHandlerWithCa(client_fd, store_mod);
+    }
+
+    fn tlsConnectionHandlerWithCa(self: *TlsProxy, client_fd: posix.fd_t, ca_store: anytype) void {
         var handshake_complete = false;
         defer {
             _ = active_connections.fetchSub(1, .acq_rel);
@@ -445,17 +449,21 @@ pub const TlsProxy = struct {
         };
         defer self.allocator.free(backend.ip);
 
-        // build MtlsOpts when the service has tls.peer set. the trust
-        // root is the cluster CA loaded from raft state. missing CA on
-        // a service that asked for mtls is a misconfiguration; fall
-        // back to plain TLS and log loudly.
+        // Required peer authentication must stay required while trust is
+        // unavailable. Warn mode remains permissive and reports the failure.
         var mtls_ca_rec: ?store_mod.ClusterCaRecord = null;
         defer if (mtls_ca_rec) |rec| rec.deinit(self.allocator);
 
         const mtls_opts: ?session_runtime.MtlsOpts = blk: {
             if (backend.peer_mode == .off) break :blk null;
-            const rec = (store_mod.getClusterCa(self.allocator) catch null) orelse {
-                log.warn("tls.peer set for {s} but cluster CA not yet seeded; downgrading to plain TLS", .{server_name});
+            const loaded = ca_store.getClusterCa(self.allocator) catch |err| {
+                log.warn("failed to load peer trust for {s}: {}", .{ server_name, err });
+                if (backend.peer_mode == .require) return;
+                break :blk null;
+            };
+            const rec = loaded orelse {
+                log.warn("peer trust unavailable for {s}: cluster CA not yet seeded", .{server_name});
+                if (backend.peer_mode == .require) return;
                 break :blk null;
             };
             mtls_ca_rec = rec;
@@ -662,4 +670,154 @@ test "ChallengeStore set overwrites existing token safely" {
     const auth = cs.get("token123");
     try std.testing.expect(auth != null);
     try std.testing.expectEqualStrings("second", auth.?);
+}
+
+const PeerTrustFixture = struct {
+    const Trust = enum { missing, failed, present, malformed };
+    const PeerMode = @import("../manifest/spec.zig").TlsConfig.PeerMode;
+
+    trust: Trust,
+    ca_pem: []const u8,
+    calls: usize = 0,
+
+    fn getClusterCa(self: *PeerTrustFixture, alloc: std.mem.Allocator) !?store_mod.ClusterCaRecord {
+        self.calls += 1;
+        switch (self.trust) {
+            .missing => return null,
+            .failed => return error.ReadFailed,
+            .present, .malformed => return .{
+                .cert_pem = try alloc.dupe(u8, if (self.trust == .malformed) "invalid CA" else self.ca_pem),
+                .encrypted_key = &.{},
+                .key_nonce = &.{},
+                .key_tag = &.{},
+                .created_at = 0,
+                .not_after = 0,
+            },
+        }
+    }
+
+    fn boundPort(fd: posix.fd_t) !u16 {
+        var addr: posix.sockaddr.in = undefined;
+        var len: posix.socklen_t = @sizeOf(@TypeOf(addr));
+        try linux_platform.posix.getsockname(fd, @ptrCast(&addr), &len);
+        return std.mem.bigToNative(u16, addr.port);
+    }
+
+    fn setTimeouts(fd: posix.fd_t) !void {
+        const timeout = posix.timeval{ .sec = 5, .usec = 0 };
+        try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+        try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout));
+    }
+
+    fn serve(proxy: *TlsProxy, fd: posix.fd_t, source: *PeerTrustFixture) void {
+        proxy.tlsConnectionHandlerWithCa(fd, source);
+    }
+
+    fn check(
+        certs: *cert_store.CertStore,
+        ca_pem: []const u8,
+        mode: PeerMode,
+        trust: Trust,
+        client_cert: ?[]const u8,
+        client_key: ?[]const u8,
+        allowed: bool,
+    ) !void {
+        const alloc = std.testing.allocator;
+        const backend_fd = try socket_support.createListenSocket(0);
+        defer linux_platform.posix.close(backend_fd);
+        var backends = backend_mod.BackendRegistry.init(alloc);
+        defer backends.deinit();
+        try backends.register("peer.test", "127.0.0.1", try boundPort(backend_fd), mode);
+        var proxy = try TlsProxy.init(alloc, &backends, certs, 0, 0);
+        defer proxy.deinit();
+        const client_fd = try socket_support.connectToBackend(.{ .ip = "127.0.0.1", .port = try boundPort(proxy.tls_fd) });
+        defer linux_platform.posix.close(client_fd);
+        try setTimeouts(client_fd);
+        const server_fd = try linux_platform.posix.accept(proxy.tls_fd, null, null, posix.SOCK.CLOEXEC);
+        var owns_server = true;
+        defer if (owns_server) linux_platform.posix.close(server_fd);
+        try setTimeouts(server_fd);
+
+        var source = PeerTrustFixture{ .trust = trust, .ca_pem = ca_pem };
+        _ = active_connections.fetchAdd(1, .acq_rel);
+        const worker = std.Thread.spawn(.{}, serve, .{ &proxy, server_fd, &source }) catch |err| {
+            _ = active_connections.fetchSub(1, .acq_rel);
+            return err;
+        };
+        owns_server = false;
+        var joined = false;
+        defer if (!joined) {
+            _ = std.os.linux.shutdown(client_fd, 2);
+            worker.join();
+        };
+
+        const client_session = @import("client_session.zig");
+        var handshake_succeeded = false;
+        if (client_session.doHandshake(std.testing.io, alloc, client_fd, .{
+            .server_name = "peer.test",
+            .ca_cert_pem = ca_pem,
+            .expected_server_identity = "spiffe://yoq/service/server",
+            .client_cert_pem = client_cert,
+            .client_key_pem = client_key,
+            .now_unix = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
+        })) |session| {
+            var owned_session = session;
+            owned_session.deinit();
+            handshake_succeeded = true;
+        } else |err| {
+            if (allowed) return err;
+        }
+        _ = std.os.linux.shutdown(client_fd, 2);
+        worker.join();
+        joined = true;
+
+        // A TLS client can finish before the server rejects its certificate.
+        // The backend connection proves that server-side authorization passed.
+        var fds = [_]posix.pollfd{.{ .fd = backend_fd, .events = posix.POLL.IN, .revents = 0 }};
+        const ready = try posix.poll(&fds, 0);
+        try std.testing.expectEqual(allowed, ready > 0 and fds[0].revents & posix.POLL.IN != 0);
+        if (allowed) {
+            try std.testing.expect(handshake_succeeded);
+            const accepted = try linux_platform.posix.accept(backend_fd, null, null, posix.SOCK.CLOEXEC);
+            linux_platform.posix.close(accepted);
+        }
+        try std.testing.expectEqual(@as(usize, if (mode == .off) 0 else 1), source.calls);
+    }
+};
+
+test "peer trust listener preserves off and warn and never downgrades require" {
+    const alloc = std.testing.allocator;
+    const x509_gen = @import("x509_gen.zig");
+    const csr = @import("csr.zig");
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+    const ca = try x509_gen.generateCa(std.testing.io, alloc, "peer-ca", now - 3600, now + 86400);
+    defer alloc.free(ca.cert_pem);
+    const server = try x509_gen.issueLeaf(std.testing.io, alloc, ca.key_pair, "peer-ca", "server", "spiffe://yoq/service/server", now - 60, now + 86400);
+    defer alloc.free(server.cert_pem);
+    const server_key = try csr.derKeyToPem(alloc, &server.key_pair.secret_key.toBytes());
+    defer alloc.free(server_key);
+    const client = try x509_gen.issueLeaf(std.testing.io, alloc, ca.key_pair, "peer-ca", "client", "spiffe://yoq/service/client", now - 60, now + 86400);
+    defer alloc.free(client.cert_pem);
+    const client_key = try csr.derKeyToPem(alloc, &client.key_pair.secret_key.toBytes());
+    defer alloc.free(client_key);
+    var db = try @import("sqlite").Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    var certs = try cert_store.CertStore.initWithKey(&db, alloc, [_]u8{0xAB} ** cert_store.key_length);
+    try certs.install("peer.test", server.cert_pem, server_key, "manual");
+
+    for ([_]PeerTrustFixture.PeerMode{ .off, .warn, .require }) |mode| {
+        for ([_]PeerTrustFixture.Trust{ .missing, .failed, .present }) |trust| {
+            try PeerTrustFixture.check(&certs, ca.cert_pem, mode, trust, null, null, mode != .require);
+        }
+    }
+    try PeerTrustFixture.check(&certs, ca.cert_pem, .require, .present, client.cert_pem, client_key, true);
+    try PeerTrustFixture.check(&certs, ca.cert_pem, .require, .malformed, client.cert_pem, client_key, false);
+
+    const other_ca = try x509_gen.generateCa(std.testing.io, alloc, "other-ca", now - 3600, now + 86400);
+    defer alloc.free(other_ca.cert_pem);
+    const untrusted = try x509_gen.issueLeaf(std.testing.io, alloc, other_ca.key_pair, "other-ca", "client", "spiffe://yoq/service/client", now - 60, now + 86400);
+    defer alloc.free(untrusted.cert_pem);
+    const untrusted_key = try csr.derKeyToPem(alloc, &untrusted.key_pair.secret_key.toBytes());
+    defer alloc.free(untrusted_key);
+    try PeerTrustFixture.check(&certs, ca.cert_pem, .require, .present, untrusted.cert_pem, untrusted_key, false);
 }
