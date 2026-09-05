@@ -53,7 +53,7 @@ fn exercise(root: []const u8, source: []const u8, nested: [:0]const u8, outside:
 }
 
 fn runCase(recursive: bool) !void {
-    try preflight.requireRuntimeCore();
+    try preflight.requireMountNamespace();
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
