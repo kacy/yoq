@@ -139,6 +139,7 @@ comptime {
     _ = @import("api/routes/security.zig");
     _ = @import("api/routes/security/audit_routes.zig");
     _ = @import("api/routes/cluster_agents.zig");
+    _ = @import("api/routes/cluster_agents/cluster_routes.zig");
     _ = @import("api/routes/cluster_agents/apply_backend.zig");
     _ = @import("api/routes/cluster_agents/apply_response.zig");
     _ = @import("api/routes/cluster_agents/apply_request.zig");

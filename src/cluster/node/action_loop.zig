@@ -9,7 +9,6 @@ const logger = @import("../../lib/log.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const NodeId = types.NodeId;
-const SnapshotMeta = types.SnapshotMeta;
 
 fn freeEntries(alloc: std.mem.Allocator, entries: []const types.LogEntry) void {
     for (entries) |entry| alloc.free(entry.data);
@@ -63,6 +62,7 @@ pub fn tickLoop(self: anytype) void {
 
             self.raft.tick();
             processActions(self);
+            retryCommittedEntries(self);
 
             self.tick_count +%= 1;
             still_leader = self.raft.role == .leader;
@@ -91,6 +91,13 @@ pub fn tickLoop(self: anytype) void {
         }
         if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(100), "cluster node tick loop")) return;
     }
+}
+
+/// A failed apply leaves the commit index ahead of the database. Retry on
+/// every tick even if Raft has no new commit action, so a transient database
+/// failure cannot strand an otherwise idle cluster. Call with the lock held.
+pub fn retryCommittedEntries(self: anytype) void {
+    self.state_machine.applyUpTo(&self.log, self.alloc, self.raft.commit_index);
 }
 
 pub fn recvLoop(self: anytype) void {
@@ -274,30 +281,7 @@ pub fn processActions(self: anytype) void {
                 logger.info("snapshot: restored state machine to index {}", .{meta.last_included_index});
             },
             .take_snapshot => |snap| {
-                var snap_path_buf: [512]u8 = undefined;
-                const snap_path = @import("bootstrap.zig").snapshotPath(&snap_path_buf, self.config.data_dir) orelse continue;
-
-                const meta = SnapshotMeta{
-                    .last_included_index = snap.up_to_index,
-                    .last_included_term = snap.term,
-                    .data_len = 0,
-                };
-
-                self.state_machine.takeSnapshot(snap_path, meta) catch |e| {
-                    logger.warn("snapshot: failed to take snapshot at index {}: {}", .{ snap.up_to_index, e });
-                    continue;
-                };
-
-                if (!self.raft.onSnapshotComplete(meta)) {
-                    logger.warn("snapshot: failed to persist snapshot metadata at index {}", .{snap.up_to_index});
-                    continue;
-                }
-                if (!self.log.truncateUpTo(snap.up_to_index)) {
-                    logger.warn("snapshot: failed to truncate raft log up to index {}", .{snap.up_to_index});
-                    continue;
-                }
-                self.last_snapshot_index = snap.up_to_index;
-                logger.info("snapshot: completed at index {}, term {}", .{ snap.up_to_index, snap.term });
+                snapshot_support.takeSnapshot(self, snap.up_to_index, snap.term);
             },
             else => has_sends = true,
         }
