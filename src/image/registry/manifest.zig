@@ -205,7 +205,8 @@ fn fetchSingle(alloc: std.mem.Allocator, client: *std.http.Client, host: []const
 
     var is_index = spec.isIndexMediaType(content_type);
     if (!is_index) {
-        if (spec.parseImageIndex(alloc, raw_body)) |parsed| {
+        if (spec.parseImageIndex(alloc, raw_body)) |value| {
+            var parsed = value;
             defer parsed.deinit();
             is_index = true;
         } else |_| {}
