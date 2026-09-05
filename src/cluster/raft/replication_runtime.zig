@@ -93,12 +93,12 @@ pub fn handleAppendEntriesReply(
     min_election_ticks: u32,
     max_election_ticks: u32,
 ) void {
-    if (self.role != .leader) return;
-
-    if (reply.term > self.log.getCurrentTerm()) {
+    const current_term = self.log.getCurrentTerm();
+    if (reply.term > current_term) {
         _ = common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
         return;
     }
+    if (reply.term != current_term or self.role != .leader) return;
 
     const peer_idx = common.peerIndex(self, from) orelse return;
     if (reply.success) {

@@ -1,5 +1,6 @@
 const logger = @import("../../lib/log.zig");
 const common = @import("common.zig");
+const replication_runtime = @import("replication_runtime.zig");
 const types = @import("../raft_types.zig");
 
 const InstallSnapshotArgs = types.InstallSnapshotArgs;
@@ -41,18 +42,20 @@ pub fn handleInstallSnapshotReply(
     min_election_ticks: u32,
     max_election_ticks: u32,
 ) void {
-    if (self.role != .leader) return;
-
-    if (reply.term > self.log.getCurrentTerm()) {
+    const current_term = self.log.getCurrentTerm();
+    if (reply.term > current_term) {
         _ = common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
         return;
     }
+    if (reply.term != current_term or self.role != .leader) return;
 
     const peer_idx = common.peerIndex(self, from) orelse return;
     if (self.snapshot_meta) |meta| {
         if (meta.last_included_index > self.match_index[peer_idx]) {
-            self.match_index[peer_idx] = meta.last_included_index;
+            // Snapshot replies carry no index and may acknowledge an older
+            // snapshot. Probe the current boundary before counting progress.
             self.next_index[peer_idx] = meta.last_included_index + 1;
+            replication_runtime.sendAppendEntries(self, peer_idx);
         }
     }
 }
