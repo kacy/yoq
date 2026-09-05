@@ -9,7 +9,11 @@ pub fn processEnv(alloc: std.mem.Allocator, state: *types.BuildState, args: []co
 }
 
 pub fn processWorkdir(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
-    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const normalized = try normalizeWorkdir(state.workdir, args, &buf);
+    const owned = if (std.mem.eql(u8, normalized, "/")) "/" else alloc.dupe(u8, normalized) catch return error.OutOfMemory;
+    errdefer if (!std.mem.eql(u8, owned, "/")) alloc.free(owned);
+    try @import("fs/base.zig").createWorkdir(alloc, state, normalized);
     if (!std.mem.eql(u8, state.workdir, "/")) alloc.free(state.workdir);
     state.workdir = owned;
 }
@@ -33,6 +37,7 @@ pub fn processExpose(alloc: std.mem.Allocator, state: *types.BuildState, args: [
 }
 
 pub fn processUser(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
+    @import("identity.zig").validate(args) catch return error.MetadataFailed;
     const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
     if (state.user) |old| alloc.free(old);
     state.user = owned;
@@ -225,4 +230,43 @@ test "expandArgs — simple $VAR" {
     const result = try expandArgs(alloc, "hello $NAME", &args_map);
     defer alloc.free(result);
     try std.testing.expectEqualStrings("hello world", result);
+}
+
+/// WORKDIR is relative to the preceding directory. Parent components stop at
+/// the container root, just as ordinary absolute filesystem paths do.
+pub fn normalizeWorkdir(previous: []const u8, value: []const u8, out: []u8) types.BuildError![]const u8 {
+    if (value.len == 0 or out.len == 0) return error.MetadataFailed;
+    out[0] = '/';
+    var len: usize = 1;
+    const inputs = [_][]const u8{ if (value[0] == '/') "" else previous, value };
+    for (inputs) |input| {
+        if (std.mem.indexOfScalar(u8, input, 0) != null) return error.MetadataFailed;
+        var parts = std.mem.tokenizeScalar(u8, input, '/');
+        while (parts.next()) |part| {
+            if (std.mem.eql(u8, part, ".")) continue;
+            if (std.mem.eql(u8, part, "..")) {
+                while (len > 1 and out[len - 1] != '/') len -= 1;
+                if (len > 1) len -= 1;
+                continue;
+            }
+            const sep: usize = if (len > 1) 1 else 0;
+            if (part.len + sep > out.len - len) return error.MetadataFailed;
+            if (sep != 0) {
+                out[len] = '/';
+                len += 1;
+            }
+            @memcpy(out[len..][0..part.len], part);
+            len += part.len;
+        }
+    }
+    return out[0..len];
+}
+
+test "build workdir resolves successive relative directories and confines parents" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("/app/src", try normalizeWorkdir("/app", "./src//", &buf));
+    try std.testing.expectEqualStrings("/other", try normalizeWorkdir("/app/src", "../../../../other", &buf));
+    try std.testing.expectEqualStrings("/absolute", try normalizeWorkdir("/app", "/absolute", &buf));
+    try std.testing.expectError(error.MetadataFailed, normalizeWorkdir("/", "", &buf));
+    try std.testing.expectError(error.MetadataFailed, normalizeWorkdir("/", "bad\x00path", &buf));
 }
