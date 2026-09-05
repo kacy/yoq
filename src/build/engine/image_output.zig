@@ -56,7 +56,7 @@ pub fn produceImage(alloc: std.mem.Allocator, state: *types.BuildState, tag: ?[]
     return types.BuildResult{
         .manifest_digest = owned_digest,
         .total_size = state.total_size,
-        .layer_count = state.layer_digests.items.len,
+        .layer_count = state.layers.items.len,
         .alloc = alloc,
     };
 }
@@ -184,10 +184,10 @@ pub fn buildConfigJson(alloc: std.mem.Allocator, state: *const types.BuildState)
 
     try writer.writeAll("}");
     try writer.writeAll(",\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[");
-    for (state.diff_ids.items, 0..) |diff_id, i| {
+    for (state.layers.items, 0..) |item, i| {
         if (i > 0) try writer.writeAll(",");
         try writer.writeByte('"');
-        try writer.writeAll(diff_id);
+        try writer.writeAll(item.diff_id);
         try writer.writeByte('"');
     }
     try writer.writeAll("]}}");
@@ -218,13 +218,13 @@ pub fn buildManifestJson(
     try writer.writeAll("}");
 
     try writer.writeAll(",\"layers\":[");
-    for (state.layer_digests.items, 0..) |digest, i| {
+    for (state.layers.items, 0..) |item, i| {
         if (i > 0) try writer.writeAll(",");
         try writer.writeAll("{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar+gzip\"");
         try writer.writeAll(",\"digest\":\"");
-        try writer.writeAll(digest);
+        try writer.writeAll(item.digest);
         try writer.writeAll("\"");
-        try writer.print(",\"size\":{d}", .{state.layer_sizes.items[i]});
+        try writer.print(",\"size\":{d}", .{item.size});
         try writer.writeAll("}");
     }
     try writer.writeAll("]}");

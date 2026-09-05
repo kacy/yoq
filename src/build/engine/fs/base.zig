@@ -80,7 +80,6 @@ pub fn processFrom(
     }
 
     config_inherit.inheritConfig(alloc, state, result.config_bytes);
-    replaceParentDigest(alloc, state, result.manifest_digest) catch return types.BuildError.PullFailed;
 }
 
 pub fn processRun(
@@ -90,7 +89,7 @@ pub fn processRun(
 ) types.BuildError!void {
     log.info("RUN {s}", .{args});
 
-    const cache_key = (try common.withCache(alloc, state, "RUN", args, null)) orelse return;
+    const cache_key = (try common.withCache(alloc, state, "RUN", args, null, null)) orelse return;
     defer alloc.free(cache_key);
 
     var layer_paths_list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -98,7 +97,7 @@ pub fn processRun(
         for (layer_paths_list.items) |path| alloc.free(path);
         layer_paths_list.deinit(alloc);
     }
-    try common.withExtractedLayers(alloc, state.layer_digests.items, &layer_paths_list);
+    try common.withExtractedLayers(alloc, state.layers.items, &layer_paths_list);
 
     var id_buf: [12]u8 = undefined;
     container.generateId(&id_buf) catch return types.BuildError.RunStepFailed;
@@ -169,14 +168,4 @@ fn loadLocalBaseImage(
     defer alloc.free(config_bytes);
 
     config_inherit.inheritConfig(alloc, state, config_bytes);
-    replaceParentDigest(alloc, state, manifest_digest_str) catch return types.BuildError.PullFailed;
-}
-
-fn replaceParentDigest(
-    alloc: std.mem.Allocator,
-    state: *types.BuildState,
-    value: []const u8,
-) !void {
-    if (state.parent_digest.len > 0) alloc.free(state.parent_digest);
-    state.parent_digest = try alloc.dupe(u8, value);
 }

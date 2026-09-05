@@ -1,6 +1,5 @@
 const std = @import("std");
 
-const blob_store = @import("../../../image/store.zig");
 const layer = @import("../../../image/layer.zig");
 const paths = @import("../../../lib/paths.zig");
 const cache = @import("../cache.zig");
@@ -89,11 +88,11 @@ pub fn withTempLayerDir(
 
 pub fn withExtractedLayers(
     alloc: std.mem.Allocator,
-    layer_digests: []const []const u8,
+    layers: []const types.Layer,
     out_list: *std.ArrayListUnmanaged([]const u8),
 ) types.BuildError!void {
-    for (layer_digests) |digest| {
-        const path = layer.extractLayer(alloc, digest) catch return types.BuildError.RunStepFailed;
+    for (layers) |item| {
+        const path = layer.extractLayer(alloc, item.digest) catch return types.BuildError.RunStepFailed;
         out_list.append(alloc, path) catch {
             alloc.free(path);
             return types.BuildError.RunStepFailed;
@@ -107,25 +106,9 @@ pub fn withCache(
     instruction: []const u8,
     args: []const u8,
     extra: ?[]const u8,
+    destination: ?[]const u8,
 ) types.BuildError!?[]const u8 {
-    if (extra) |extra_hash| {
-        var cache_input_buf: [2048]u8 = undefined;
-        const cache_input = std.fmt.bufPrint(&cache_input_buf, "{s}\n{s}\n{s}\n{s}", .{
-            instruction,
-            args,
-            state.parent_digest,
-            extra_hash,
-        }) catch return types.BuildError.CacheFailed;
-
-        const cache_digest = blob_store.computeDigest(cache_input);
-        var cache_key_buf: [71]u8 = undefined;
-        const cache_key = cache_digest.string(&cache_key_buf);
-
-        if (cache.checkCache(alloc, cache_key, state)) return null;
-        return alloc.dupe(u8, cache_key) catch types.BuildError.CacheFailed;
-    }
-
-    const cache_key = cache.computeCacheKey(alloc, instruction, args, state) catch
+    const cache_key = cache.computeCacheKeyWithContext(alloc, instruction, args, state, extra, destination) catch
         return types.BuildError.CacheFailed;
     if (cache.checkCache(alloc, cache_key, state)) {
         alloc.free(cache_key);

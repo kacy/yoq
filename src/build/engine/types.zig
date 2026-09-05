@@ -25,10 +25,14 @@ pub const BuildResult = struct {
     }
 };
 
+pub const Layer = struct {
+    digest: []const u8,
+    diff_id: []const u8,
+    size: u64,
+};
+
 pub const BuildState = struct {
-    layer_digests: std.ArrayListUnmanaged([]const u8) = .empty,
-    layer_sizes: std.ArrayListUnmanaged(u64) = .empty,
-    diff_ids: std.ArrayListUnmanaged([]const u8) = .empty,
+    layers: std.ArrayListUnmanaged(Layer) = .empty,
     total_size: u64 = 0,
 
     env: std.ArrayListUnmanaged([]const u8) = .empty,
@@ -47,7 +51,6 @@ pub const BuildState = struct {
     pending_onbuild: std.ArrayListUnmanaged([]const u8) = .empty,
 
     build_args: std.StringHashMapUnmanaged([]const u8) = .empty,
-    parent_digest: []const u8 = "",
 
     alloc: std.mem.Allocator,
 
@@ -56,11 +59,11 @@ pub const BuildState = struct {
     }
 
     pub fn deinit(self: *BuildState) void {
-        for (self.layer_digests.items) |digest| self.alloc.free(digest);
-        self.layer_digests.deinit(self.alloc);
-        for (self.diff_ids.items) |diff_id| self.alloc.free(diff_id);
-        self.diff_ids.deinit(self.alloc);
-        self.layer_sizes.deinit(self.alloc);
+        for (self.layers.items) |layer| {
+            self.alloc.free(layer.digest);
+            self.alloc.free(layer.diff_id);
+        }
+        self.layers.deinit(self.alloc);
         for (self.env.items) |env_var| self.alloc.free(env_var);
         self.env.deinit(self.alloc);
         for (self.exposed_ports.items) |port| self.alloc.free(port);
@@ -86,22 +89,18 @@ pub const BuildState = struct {
             self.alloc.free(entry.value_ptr.*);
         }
         self.build_args.deinit(self.alloc);
-        if (self.parent_digest.len > 0) self.alloc.free(self.parent_digest);
     }
 
     pub fn addLayer(self: *BuildState, compressed_digest: []const u8, diff_id: []const u8, size: u64) !void {
+        const total_size = try std.math.add(u64, self.total_size, size);
         const owned_digest = try self.alloc.dupe(u8, compressed_digest);
         errdefer self.alloc.free(owned_digest);
         const owned_diff_id = try self.alloc.dupe(u8, diff_id);
         errdefer self.alloc.free(owned_diff_id);
+        try self.layers.ensureUnusedCapacity(self.alloc, 1);
 
-        try self.layer_digests.append(self.alloc, owned_digest);
-        try self.diff_ids.append(self.alloc, owned_diff_id);
-        try self.layer_sizes.append(self.alloc, size);
-        self.total_size += size;
-
-        if (self.parent_digest.len > 0) self.alloc.free(self.parent_digest);
-        self.parent_digest = try self.alloc.dupe(u8, compressed_digest);
+        self.layers.appendAssumeCapacity(.{ .digest = owned_digest, .diff_id = owned_diff_id, .size = size });
+        self.total_size = total_size;
     }
 };
 
@@ -121,3 +120,27 @@ pub const TriggerInstruction = struct {
     kind: dockerfile.InstructionKind,
     args: []const u8,
 };
+
+test "build identity layer ownership survives every allocation failure" {
+    const Fixture = struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var state = BuildState.init(alloc);
+            defer state.deinit();
+            for (0..12) |index| {
+                state.addLayer("compressed", "uncompressed", 7) catch |err| {
+                    try std.testing.expectEqual(index, state.layers.items.len);
+                    try std.testing.expectEqual(@as(u64, index * 7), state.total_size);
+                    for (state.layers.items) |item| {
+                        try std.testing.expectEqualStrings("compressed", item.digest);
+                        try std.testing.expectEqualStrings("uncompressed", item.diff_id);
+                        try std.testing.expectEqual(@as(u64, 7), item.size);
+                    }
+                    return err;
+                };
+            }
+            try std.testing.expectEqual(@as(usize, 12), state.layers.items.len);
+            try std.testing.expectEqual(@as(u64, 84), state.total_size);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Fixture.run, .{});
+}
