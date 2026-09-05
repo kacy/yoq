@@ -4,6 +4,8 @@ const posix = std.posix;
 const http = @import("../http.zig");
 const routes = @import("../routes.zig");
 const log = @import("../../lib/log.zig");
+const transport = @import("../../lib/socket_stream.zig");
+const audit = @import("../../state/audit.zig");
 const rate_limit = @import("rate_limit.zig");
 
 pub const max_connections: u32 = 128;
@@ -15,9 +17,11 @@ pub var active_connections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0
 pub const OwnedRequest = struct {
     buffer: []u8,
     request: http.Request,
+    reserved_bytes: usize,
 
     pub fn deinit(self: OwnedRequest, alloc: std.mem.Allocator) void {
         alloc.free(self.buffer);
+        releaseRequestBytes(self.reserved_bytes);
     }
 };
 
@@ -69,8 +73,6 @@ pub fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
         return;
     }
 
-    setReadTimeout(client_fd, 5);
-
     const owned_request = readRequestAlloc(alloc, client_fd) catch |err| switch (err) {
         error.MalformedRequest => {
             sendError(client_fd, .bad_request, "malformed request");
@@ -90,6 +92,18 @@ pub fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
         },
         error.ReadIncomplete => {
             sendError(client_fd, .bad_request, "request too large or timed out");
+            return;
+        },
+        error.Unauthorized => {
+            sendError(client_fd, .unauthorized, "unauthorized");
+            return;
+        },
+        error.Forbidden => {
+            sendError(client_fd, .forbidden, "forbidden");
+            return;
+        },
+        error.BudgetExhausted => {
+            sendError(client_fd, .service_unavailable, "request capacity exhausted");
             return;
         },
         error.AllocFailed => {
@@ -124,126 +138,127 @@ pub const ReadRequestError = error{
     BodyTooLarge,
     ReadIncomplete,
     AllocFailed,
+    Unauthorized,
+    Forbidden,
+    BudgetExhausted,
 };
 
-pub fn readRequestAlloc(alloc: std.mem.Allocator, fd: posix.fd_t) ReadRequestError!OwnedRequest {
-    var data: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer data.deinit(alloc);
+// Headers have their own fixed stack bound. The shared budget covers all owned
+// request buffers through dispatch, including slow uploads and error cleanup.
+const max_request_bytes: usize = http.max_body_bytes + http.max_header_bytes + 4;
+var request_bytes = std.atomic.Value(usize).init(0);
 
-    var expected_total: ?usize = null;
-    var chunk: [8192]u8 = undefined;
-
+fn reserveRequestBytes(bytes: usize) bool {
+    var current = request_bytes.load(.acquire);
     while (true) {
-        if (expected_total) |needed| {
-            if (data.items.len >= needed) break;
-        }
+        if (bytes > max_request_bytes - current) return false;
+        current = request_bytes.cmpxchgWeak(current, current + bytes, .acq_rel, .acquire) orelse return true;
+    }
+}
 
-        const bytes_read = posix.read(fd, &chunk) catch break;
-        if (bytes_read == 0) break;
+fn releaseRequestBytes(bytes: usize) void {
+    _ = request_bytes.fetchSub(bytes, .acq_rel);
+}
 
-        data.appendSlice(alloc, chunk[0..bytes_read]) catch return error.AllocFailed;
-
-        if (expected_total == null) {
-            if (findHeaderEnd(data.items)) |header_end| {
-                const request_line_end = std.mem.indexOf(u8, data.items, "\r\n") orelse return error.MalformedRequest;
-                if (request_line_end + 2 > header_end) return error.MalformedRequest;
-
-                const headers_raw = data.items[request_line_end + 2 .. header_end];
-                const content_length = http.findContentLength(headers_raw) catch return error.MalformedRequest;
-                if (content_length > http.max_body_bytes) return error.BodyTooLarge;
-
-                expected_total = header_end + 4 + content_length;
-                data.ensureTotalCapacity(alloc, expected_total.?) catch return error.AllocFailed;
-            } else if (data.items.len > http.max_header_bytes) {
-                return error.HeadersTooLarge;
-            }
+fn bodyLimit(request: http.Request) usize {
+    if (request.method == .GET or request.method == .HEAD or request.method == .DELETE) return 0;
+    if (std.mem.eql(u8, request.path_only, "/health") or std.mem.eql(u8, request.path_only, "/version")) return 0;
+    if (request.method == .PUT and std.mem.startsWith(u8, request.path_only, "/s3/")) {
+        const rest = request.path_only[4..];
+        if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+            if (slash != 0 and slash + 1 < rest.len) return http.max_body_bytes;
         }
     }
+    if (std.mem.startsWith(u8, request.path_only, "/agents/")) return 256 * 1024;
+    return 1024 * 1024;
+}
 
-    const required_len = expected_total orelse return error.ReadIncomplete;
-    if (data.items.len < required_len) return error.ReadIncomplete;
+pub fn readRequestAlloc(alloc: std.mem.Allocator, fd: posix.fd_t) ReadRequestError!OwnedRequest {
+    // Both budgets start at admission. A trickling peer cannot renew either.
+    const headers = transport.Stream{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(5000) };
+    const body = transport.Stream{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(30000) };
+    return readRequestFrom(alloc, headers, body);
+}
 
-    const buffer = data.toOwnedSlice(alloc) catch return error.AllocFailed;
+fn readRequestFrom(alloc: std.mem.Allocator, header_reader: anytype, body_reader: anytype) ReadRequestError!OwnedRequest {
+    var head_buf: [http.max_header_bytes + 4]u8 = undefined;
+    var head_len: usize = 0;
+    const head = while (true) {
+        if (head_len == head_buf.len) return error.HeadersTooLarge;
+        const n = header_reader.read(head_buf[head_len..]) catch return error.ReadIncomplete;
+        if (n == 0) return error.ReadIncomplete;
+        head_len += n;
+        if (http.parseRequestHead(head_buf[0..head_len]) catch |err| return parseError(err)) |head| break head;
+    };
+
+    // Check exactly the same authentication and scopes as dispatch, before any
+    // body allocation. Dispatch checks again in case a token was revoked during upload.
+    defer audit.resetActor();
+    if (routes.authorizeRequest(head, alloc)) |denied| {
+        return if (denied.status == .forbidden) error.Forbidden else error.Unauthorized;
+    }
+    if (head.content_length > bodyLimit(head)) return error.BodyTooLarge;
+
+    const body_start = findHeaderEnd(head_buf[0..head_len]).? + 4;
+    const total = body_start + head.content_length;
+    if (!reserveRequestBytes(total)) return error.BudgetExhausted;
+    errdefer releaseRequestBytes(total);
+    const buffer = alloc.alloc(u8, total) catch return error.AllocFailed;
     errdefer alloc.free(buffer);
+    var received = @min(head_len, total);
+    @memcpy(buffer[0..received], head_buf[0..received]);
+    while (received < total) {
+        const n = body_reader.read(buffer[received..]) catch return error.ReadIncomplete;
+        if (n == 0) return error.ReadIncomplete;
+        received += n;
+    }
+    const request = (http.parseRequest(buffer) catch |err| return parseError(err)) orelse return error.ReadIncomplete;
+    return .{ .buffer = buffer, .request = request, .reserved_bytes = total };
+}
 
-    const parsed = http.parseRequest(buffer) catch |err| return switch (err) {
+fn parseError(err: http.HttpError) ReadRequestError {
+    return switch (err) {
         error.UriTooLong => error.UriTooLong,
         error.HeadersTooLarge => error.HeadersTooLarge,
         error.BodyTooLarge => error.BodyTooLarge,
         else => error.MalformedRequest,
     };
-    const request = parsed orelse return error.ReadIncomplete;
-
-    return .{
-        .buffer = buffer,
-        .request = request,
-    };
-}
-
-pub fn readRequest(fd: posix.fd_t, buf: []u8) ReadRequestError!http.Request {
-    var total: usize = 0;
-    while (total < buf.len) {
-        const bytes_read = posix.read(fd, buf[total..]) catch break;
-        if (bytes_read == 0) break;
-        total += bytes_read;
-
-        if (findHeaderEnd(buf[0..total]) == null and total > http.max_header_bytes) {
-            return error.HeadersTooLarge;
-        }
-
-        const parsed = http.parseRequest(buf[0..total]) catch |err| return switch (err) {
-            error.UriTooLong => error.UriTooLong,
-            error.HeadersTooLarge => error.HeadersTooLarge,
-            error.BodyTooLarge => error.BodyTooLarge,
-            else => error.MalformedRequest,
-        };
-        if (parsed) |request| return request;
-    }
-
-    return error.ReadIncomplete;
 }
 
 pub fn findHeaderEnd(buf: []const u8) ?usize {
     return std.mem.indexOf(u8, buf, "\r\n\r\n");
 }
 
-fn setReadTimeout(fd: posix.fd_t, seconds: i64) void {
-    var sock_addr: posix.sockaddr.storage = undefined;
-    var sock_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
-    linux_platform.posix.getsockname(fd, @ptrCast(&sock_addr), &sock_len) catch return;
-
-    const timeout = posix.timeval{ .sec = seconds, .usec = 0 };
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |e| {
-        log.warn("api server failed to set read timeout: {}", .{e});
-    };
-}
-
 fn sendError(fd: posix.fd_t, status: http.StatusCode, message: []const u8) void {
     var resp_buf: [1024]u8 = undefined;
     const resp = http.formatError(&resp_buf, status, message);
-    writeAll(fd, resp);
+    const wire = transport.Stream{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(5000) };
+    wire.writeAll(resp) catch {};
 }
 
 fn writeResponse(fd: posix.fd_t, status: http.StatusCode, content_type: []const u8, body: []const u8, omit_body: bool) void {
+    const wire = transport.Stream{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(5000) };
+    writeResponseTo(wire, status, content_type, body, omit_body) catch {};
+}
+
+fn writeResponseTo(writer: anytype, status: http.StatusCode, content_type: []const u8, body: []const u8, omit_body: bool) !void {
     var header_buf: [512]u8 = undefined;
     const headers = http.formatResponseHeaders(&header_buf, status, content_type, body.len);
-    if (headers.len == 0) {
-        sendError(fd, .internal_server_error, "response formatting failed");
-        return;
-    }
-
-    writeAll(fd, headers);
-    if (!omit_body and body.len > 0) writeAll(fd, body);
+    if (headers.len == 0) return error.ResponseFormattingFailed;
+    try writer.writeAll(headers);
+    if (!omit_body) try writer.writeAll(body);
 }
 
-fn writeAll(fd: posix.fd_t, data: []const u8) void {
-    var written: usize = 0;
-    while (written < data.len) {
-        const bytes_written = linux_platform.posix.write(fd, data[written..]) catch return;
-        if (bytes_written == 0) return;
-        written += bytes_written;
+const TestFile = struct {
+    fd: posix.fd_t,
+    fn read(self: @This(), bytes: []u8) !usize {
+        return posix.read(self.fd, bytes);
     }
-}
+    fn writeAll(self: @This(), bytes: []const u8) !void {
+        var sent: usize = 0;
+        while (sent < bytes.len) sent += try linux_platform.posix.write(self.fd, bytes[sent..]);
+    }
+};
 
 test "readRequestAlloc handles body larger than legacy buffer" {
     var tmp = std.testing.tmpDir(.{});
@@ -268,7 +283,7 @@ test "readRequestAlloc handles body larger than legacy buffer" {
     try file.writeStreamingAll(std.testing.io, body);
     _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
 
-    const owned = try readRequestAlloc(std.testing.allocator, file.handle);
+    const owned = try readRequestFrom(std.testing.allocator, TestFile{ .fd = file.handle }, TestFile{ .fd = file.handle });
     defer owned.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, body_len), owned.request.body.len);
@@ -288,7 +303,7 @@ test "writeResponse streams body larger than response scratch buffer" {
     defer std.testing.allocator.free(body);
     @memset(body, 'R');
 
-    writeResponse(file.handle, .ok, "application/octet-stream", body, false);
+    try writeResponseTo(TestFile{ .fd = file.handle }, .ok, "application/octet-stream", body, false);
     _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
 
     const response = try tmp.dir.readFileAlloc(std.testing.io, "large-response.txt", std.testing.allocator, .limited(body_len + 512));
@@ -306,7 +321,7 @@ test "writeResponse omits body for HEAD semantics while preserving content lengt
     var file = try tmp.dir.createFile(std.testing.io, "head-response.txt", .{ .read = true });
     defer file.close(std.testing.io);
 
-    writeResponse(file.handle, .ok, "application/json", "metadata", true);
+    try writeResponseTo(TestFile{ .fd = file.handle }, .ok, "application/json", "metadata", true);
     _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
 
     const response = try tmp.dir.readFileAlloc(std.testing.io, "head-response.txt", std.testing.allocator, .limited(512));
@@ -315,4 +330,152 @@ test "writeResponse omits body for HEAD semantics while preserving content lengt
     try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, response, "Content-Length: 8\r\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, response, "\r\n\r\n"));
+}
+
+test "api request budget rejects unauthorized uploads before allocating bodies" {
+    const prior = routes.api_token;
+    routes.api_token = "admin";
+    defer routes.api_token = prior;
+    const Upload = struct {
+        fn run() !void {
+            const fds = try testSocketPair();
+            defer for (fds) |fd| linux_platform.posix.close(fd);
+            const wire = transport.Stream{ .fd = fds[0], .deadline = transport.Deadline.afterMilliseconds(1000) };
+            try wire.writeAll("PUT /s3/bucket/key HTTP/1.1\r\nHost: local\r\nContent-Length: 268435456\r\n\r\n");
+            // No body is sent. A zero-capacity allocator proves rejection comes
+            // before reservation/allocation and before waiting for that body.
+            var storage: [0]u8 = .{};
+            var fixed = std.heap.FixedBufferAllocator.init(&storage);
+            try std.testing.expectError(error.Unauthorized, readRequestAlloc(fixed.allocator(), fds[1]));
+        }
+        fn worker(result: *?anyerror) void {
+            run() catch |err| {
+                result.* = err;
+            };
+        }
+    };
+    var errors: [8]?anyerror = @splat(null);
+    var threads: [8]?std.Thread = @splat(null);
+    defer for (&threads) |*thread| {
+        if (thread.*) |t| t.join();
+    };
+    for (&threads, &errors) |*thread, *err| thread.* = try std.Thread.spawn(.{}, Upload.worker, .{err});
+    for (&threads) |*thread| {
+        thread.*.?.join();
+        thread.* = null;
+    }
+    for (errors) |err| if (err) |failure| return failure;
+    try std.testing.expectEqual(@as(usize, 0), request_bytes.load(.acquire));
+}
+
+fn testSocketPair() ![2]posix.fd_t {
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &fds) != 0) return error.SocketFailed;
+    return fds;
+}
+
+test "api request budget covers retained requests and releases on errors" {
+    const prior = routes.api_token;
+    routes.api_token = "admin";
+    defer routes.api_token = prior;
+    const Reader = struct {
+        data: []const u8,
+        fn read(self: *@This(), out: []u8) !usize {
+            const n = @min(out.len, self.data.len);
+            @memcpy(out[0..n], self.data[0..n]);
+            self.data = self.data[n..];
+            return n;
+        }
+    };
+    const raw = "POST /apps/apply HTTP/1.1\r\nAuthorization: Bearer admin\r\nContent-Length: 4\r\n\r\nbody";
+    var reader = Reader{ .data = raw };
+    const owned = try readRequestFrom(std.testing.allocator, &reader, &reader);
+    try std.testing.expectEqual(raw.len, request_bytes.load(.acquire));
+    owned.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), request_bytes.load(.acquire));
+
+    try std.testing.expect(reserveRequestBytes(max_request_bytes));
+    reader.data = raw;
+    const rejected = readRequestFrom(std.testing.allocator, &reader, &reader);
+    releaseRequestBytes(max_request_bytes);
+    try std.testing.expectError(error.BudgetExhausted, rejected);
+
+    reader.data = raw[0 .. raw.len - 2];
+    try std.testing.expectError(error.ReadIncomplete, readRequestFrom(std.testing.allocator, &reader, &reader));
+    var storage: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    reader.data = raw;
+    try std.testing.expectError(error.AllocFailed, readRequestFrom(fixed.allocator(), &reader, &reader));
+    try std.testing.expectEqual(@as(usize, 0), request_bytes.load(.acquire));
+
+    reader.data = "POST /apps/apply HTTP/1.1\r\nAuthorization: Bearer admin\r\nContent-Length: 1048577\r\n\r\n";
+    try std.testing.expectError(error.BodyTooLarge, readRequestFrom(fixed.allocator(), &reader, &reader));
+    reader.data = "GET /health HTTP/1.1\r\nHost: local\r\nContent-Length: 1\r\n\r\n";
+    try std.testing.expectError(error.BodyTooLarge, readRequestFrom(fixed.allocator(), &reader, &reader));
+}
+
+test "api request deadlines stop trickling uploads and nonreading response peers" {
+    const prior = routes.api_token;
+    routes.api_token = null;
+    defer routes.api_token = prior;
+    const prior_join = routes.join_token;
+    routes.join_token = null;
+    defer routes.join_token = prior_join;
+    const fds = try testSocketPair();
+    defer for (fds) |fd| linux_platform.posix.close(fd);
+    const Trickle = struct {
+        fn run(fd: posix.fd_t) void {
+            const wire = transport.Stream{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(1000) };
+            wire.writeAll("POST /apps/apply HTTP/1.1\r\nHost: local\r\nContent-Length: 100000\r\n\r\n") catch return;
+            while (true) {
+                wire.writeAll("x") catch return;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake) catch return;
+            }
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Trickle.run, .{fds[0]});
+    defer thread.join();
+    defer _ = std.os.linux.shutdown(fds[0], 2);
+    const wire = transport.Stream{ .fd = fds[1], .deadline = transport.Deadline.afterMilliseconds(50) };
+    try std.testing.expectError(error.ReadIncomplete, readRequestFrom(std.testing.allocator, wire, wire));
+    try std.testing.expectEqual(@as(usize, 0), request_bytes.load(.acquire));
+
+    const size: c_int = 4096;
+    try posix.setsockopt(fds[1], posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&size));
+    const body = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(body);
+    @memset(body, 'r');
+    const output = transport.Stream{ .fd = fds[1], .deadline = transport.Deadline.afterMilliseconds(50) };
+    try std.testing.expectError(error.TimedOut, writeResponseTo(output, .ok, "application/octet-stream", body, false));
+}
+
+test "api request authorization enforces join tokens and named scopes before uploads" {
+    const store = @import("../../state/store.zig");
+    const auth = @import("../auth.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const hash = auth.hashSecretHex("reader");
+    try store.createToken("read-only", &hash, "apps:read", 0, null);
+    const prior = routes.api_token;
+    const prior_join = routes.join_token;
+    routes.api_token = "admin";
+    routes.join_token = "join";
+    defer routes.api_token = prior;
+    defer routes.join_token = prior_join;
+
+    const cases = [_]struct { raw: []const u8, expected: ReadRequestError }{
+        .{ .raw = "POST /apps/apply HTTP/1.1\r\nAuthorization: Bearer reader\r\nContent-Length: 10\r\n\r\n", .expected = error.Forbidden },
+        .{ .raw = "POST /agents/register HTTP/1.1\r\nAuthorization: Bearer admin\r\nContent-Length: 10\r\n\r\n", .expected = error.Unauthorized },
+        .{ .raw = "POST /apps/apply HTTP/1.1\r\nAuthorization: Bearer join\r\nContent-Length: 10\r\n\r\n", .expected = error.Unauthorized },
+        .{ .raw = "POST /apps/apply HTTP/1.1\r\nAuthorization: Bearer admin\r\nTransfer-Encoding: chunked\r\n\r\n", .expected = error.MalformedRequest },
+    };
+    for (cases) |case| {
+        const fds = try testSocketPair();
+        defer for (fds) |fd| linux_platform.posix.close(fd);
+        const send = transport.Stream{ .fd = fds[0], .deadline = transport.Deadline.afterMilliseconds(1000) };
+        try send.writeAll(case.raw);
+        const receive = transport.Stream{ .fd = fds[1], .deadline = transport.Deadline.afterMilliseconds(1000) };
+        try std.testing.expectError(case.expected, readRequestFrom(std.testing.allocator, receive, receive));
+        try std.testing.expectEqual(@as(usize, 0), request_bytes.load(.acquire));
+    }
 }

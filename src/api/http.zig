@@ -96,29 +96,38 @@ pub const Request = struct {
 /// returns an error if the request is malformed.
 /// on success, all slices in the returned Request point into `buf`.
 pub fn parseRequest(buf: []const u8) HttpError!?Request {
-    const header_end = findHeaderEnd(buf) orelse return null;
-    if (header_end > max_header_bytes) return HttpError.HeadersTooLarge;
-    const body_start = header_end + 4; // include the \r\n\r\n
+    var request = (try parseRequestHead(buf)) orelse return null;
+    const body_start = findHeaderEnd(buf).? + 4;
+    if (request.content_length > buf.len - body_start) return null;
+    request.body = buf[body_start..][0..request.content_length];
+    return request;
+}
 
+/// Parse bounded headers without waiting for, or allocating, the declared body.
+pub fn parseRequestHead(buf: []const u8) HttpError!?Request {
+    const header_end = findHeaderEnd(buf) orelse {
+        if (buf.len > max_header_bytes + 4) return HttpError.HeadersTooLarge;
+        return null;
+    };
+    if (header_end > max_header_bytes) return HttpError.HeadersTooLarge;
     const line = try parseRequestLine(buf);
     const uri_parts = splitUri(line.uri);
-
-    // request line must end before the header terminator
     if (line.headers_start > header_end) return HttpError.BadRequest;
     const headers_raw = buf[line.headers_start..header_end];
-    const content_length = findContentLength(headers_raw) catch return HttpError.BadRequest;
+    var headers = std.mem.splitSequence(u8, headers_raw, "\r\n");
+    while (headers.next()) |header| {
+        const colon = std.mem.indexOfScalar(u8, header, ':') orelse return HttpError.BadRequest;
+        if (std.ascii.eqlIgnoreCase(header[0..colon], "transfer-encoding")) return HttpError.BadRequest;
+    }
+    const content_length = try findContentLength(headers_raw);
     if (content_length > max_body_bytes) return HttpError.BodyTooLarge;
-    if (body_start + content_length > buf.len) return null;
-
-    const body = buf[body_start .. body_start + content_length];
-
-    return Request{
+    return .{
         .method = line.method,
         .path = line.uri,
         .path_only = uri_parts.path_only,
         .query = uri_parts.query,
         .headers_raw = headers_raw,
-        .body = body,
+        .body = "",
         .content_length = content_length,
     };
 }
