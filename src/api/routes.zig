@@ -23,35 +23,8 @@ pub var api_token: ?[]const u8 = null;
 pub const Response = common.Response;
 
 pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
-    const is_public = std.mem.eql(u8, request.path_only, "/health") or
-        std.mem.eql(u8, request.path_only, "/version");
-    const is_join_route = isJoinTokenRoute(&request);
-    const has_any_auth = api_token != null or join_token != null;
-
-    // worker threads are reused, so reset the audit actor after each request.
     defer audit.resetActor();
-
-    var auth_result = auth.AuthResult{};
-    defer auth_result.deinit(alloc);
-
-    if (has_any_auth and !is_public) {
-        if (is_join_route) {
-            // cluster join routes are gated by the join token only.
-            const has_join_auth = if (join_token) |jt| common.hasValidBearerToken(&request, jt) else false;
-            if (!has_join_auth) return common.unauthorized();
-            audit.setActorName("join-token");
-        } else {
-            // operator routes: a legacy admin token or a named, scoped token.
-            auth_result = auth.authorize(alloc, &request, api_token);
-            if (!auth_result.ok) return common.unauthorized();
-            if (auth.requiredScope(request.method, request.path_only)) |scope| {
-                if (!auth_result.allows(scope)) return common.forbidden();
-            }
-            audit.setActorName(auth_result.actor_name);
-        }
-    } else {
-        audit.setActor(.unauthenticated);
-    }
+    if (authorizeRequest(request, alloc)) |denied| return denied;
 
     if (request.method == .GET) {
         if (std.mem.eql(u8, request.path_only, "/health")) {
@@ -77,6 +50,39 @@ pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
     if (security.route(request, alloc)) |resp| return resp;
 
     return common.notFound();
+}
+
+/// Shared by header admission and dispatch so body intake cannot bypass scope checks.
+/// Callers reset the thread-local audit actor after checking or dispatching.
+pub fn authorizeRequest(request: http.Request, alloc: std.mem.Allocator) ?Response {
+    const is_public = std.mem.eql(u8, request.path_only, "/health") or
+        std.mem.eql(u8, request.path_only, "/version");
+    const is_join_route = isJoinTokenRoute(&request);
+    const has_any_auth = api_token != null or join_token != null;
+
+    var auth_result = auth.AuthResult{};
+    defer auth_result.deinit(alloc);
+
+    if (has_any_auth and !is_public) {
+        if (is_join_route) {
+            // cluster join routes are gated by the join token only.
+            const has_join_auth = if (join_token) |jt| common.hasValidBearerToken(&request, jt) else false;
+            if (!has_join_auth) return common.unauthorized();
+            audit.setActorName("join-token");
+        } else {
+            // operator routes: a legacy admin token or a named, scoped token.
+            auth_result = auth.authorize(alloc, &request, api_token);
+            if (!auth_result.ok) return common.unauthorized();
+            if (auth.requiredScope(request.method, request.path_only)) |scope| {
+                if (!auth_result.allows(scope)) return common.forbidden();
+            }
+            audit.setActorName(auth_result.actor_name);
+        }
+    } else {
+        audit.setActor(.unauthenticated);
+    }
+
+    return null;
 }
 
 fn isJoinTokenRoute(request: *const http.Request) bool {
