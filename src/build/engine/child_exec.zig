@@ -43,27 +43,33 @@ pub fn spawn(child_fn: *const fn (?*anyopaque) callconv(.c) u8, arg: ?*anyopaque
 pub fn buildChildMain(arg: ?*anyopaque) callconv(.c) u8 {
     const ctx: *const BuildChildContext = @ptrCast(@alignCast(arg));
 
-    if (linux.errno(linux.mount(null, "/", null, linux.MS.REC | linux.MS.PRIVATE, 0)) != .SUCCESS) return 1;
+    const root = mountRoot(ctx) catch return 1;
+    return executeInRoot(ctx, root);
+}
+
+fn mountRoot(ctx: *const BuildChildContext) ![]const u8 {
+    if (linux.errno(linux.mount(null, "/", null, linux.MS.REC | linux.MS.PRIVATE, 0)) != .SUCCESS) return error.MountFailed;
     if (ctx.layer_dirs.len > 0) {
-        filesystem.mountOverlay(.{
+        try filesystem.mountOverlay(.{
             .lower_dirs = ctx.layer_dirs,
             .upper_dir = ctx.upper_dir,
             .work_dir = ctx.work_dir,
             .merged_dir = ctx.merged_dir,
-        }) catch return 1;
-
-        filesystem.pivotRoot(ctx.merged_dir) catch return 1;
-    } else {
-        // Even an empty image must execute inside its own root.
-        filesystem.pivotRoot(ctx.upper_dir) catch return 1;
+        });
     }
+    return if (ctx.layer_dirs.len > 0) ctx.merged_dir else ctx.upper_dir;
+}
+
+fn executeInRoot(ctx: *const BuildChildContext, root: []const u8) u8 {
+    if (!ctx.create_workdir) @import("../../runtime/filesystem/build_mounts.zig").mountAt(root) catch return 1;
+    // Even an empty image must execute inside its own root.
+    filesystem.pivotRoot(root) catch return 1;
 
     const account = identity.resolve(ctx.user) catch return 1;
     if (ctx.create_workdir) {
         createWorkdir(ctx.workdir, account) catch return 1;
         return 0;
     }
-    filesystem.mountEssential() catch return 1;
     identity.apply(account, ctx.rootless and ctx.user == null) catch return 1;
     linux_platform.posix.chdir(ctx.workdir) catch return 1;
 
@@ -174,7 +180,7 @@ test "build child kernel applies image USER WORKDIR and refuses invalid executio
     ctx.create_workdir = false;
     // Keep the identity and pwd assertions separate from the deliberately
     // failing redirection, so a failed assertion cannot be hidden by it.
-    ctx.command = "test \"$(id -u)\" = 12345 || exit 91; test \"$(id -g)\" = 23456 || exit 92; test \"$(id -G)\" = 23456 || exit 95; test \"$(pwd -P)\" = /workspace/src || exit 93; if (echo denied > /protected/file) 2>/dev/null; then exit 94; fi; echo success > result";
+    ctx.command = "test -r /proc/self/status || exit 98; test -c /dev/null || exit 96; echo device > /dev/null || exit 99; test -c /dev/zero || exit 97; test \"$(id -u)\" = 12345 || exit 91; test \"$(id -g)\" = 23456 || exit 92; test \"$(id -G)\" = 23456 || exit 95; test \"$(pwd -P)\" = /workspace/src || exit 93; if (echo denied > /protected/file) 2>/dev/null; then exit 94; fi; echo success > result";
     try expectBuildChild(&ctx, 0);
     const contents = try tmp.dir.readFileAlloc(io, "upper/workspace/src/result", alloc, .limited(100));
     defer alloc.free(contents);
@@ -195,6 +201,12 @@ test "build child kernel applies image USER WORKDIR and refuses invalid executio
     ctx.workdir = "/escape/outside-created";
     try expectBuildChild(&ctx, 1);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "outside-created", .{}));
+    try tmp.dir.deleteDir(io, "upper/proc");
+    try tmp.dir.symLink(io, root_buf[0..len], "upper/proc", .{});
+    ctx.create_workdir = false;
+    ctx.workdir = "/";
+    ctx.command = "exit 0";
+    try expectBuildChild(&ctx, 1);
 }
 
 fn expectBuildChild(ctx: *BuildChildContext, expected: u8) !void {
@@ -208,10 +220,10 @@ fn expectBuildChild(ctx: *BuildChildContext, expected: u8) !void {
             // CAP_SYS_ADMIN. This check fails if NEWUSER is ever omitted.
             if (linux.errno(linux.setns(self.parent_userns, linux.CLONE.NEWUSER)) != .PERM) return 80;
             linux_platform.posix.close(self.parent_userns);
-            if (linux.errno(linux.mount(null, "/", null, linux.MS.REC | linux.MS.PRIVATE, 0)) != .SUCCESS) return 81;
+            const root = mountRoot(self.ctx) catch return 81;
             // Read-only userspace supplies a real shell, loader and id utility.
-            filesystem.bindMount(self.ctx.upper_dir, "/usr", "/usr", true) catch return 82;
-            return buildChildMain(@ptrCast(self.ctx));
+            filesystem.bindMount(root, "/usr", "/usr", true) catch return 82;
+            return executeInRoot(self.ctx, root);
         }
     };
     const fd = try linux_platform.posix.open("/proc/self/ns/user", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
