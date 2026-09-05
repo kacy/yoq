@@ -1232,13 +1232,13 @@ fn readResponse(
     max_bytes: usize,
     head_request: bool,
 ) !UpstreamResponse {
-    return readResponseFrom(alloc, transport.stream(socket), max_bytes, head_request);
+    return readHttp1ResponseFrom(alloc, transport.stream(socket), max_bytes, head_request);
 }
 
 /// Buffered HTTP/2 forwarding retains its bounded, connection-close exchange.
 /// Streaming HTTP/2 connections are handled separately by http2_connection.
 fn readProtocolResponse(alloc: std.mem.Allocator, wire: anytype, max_bytes: usize, options: PeerTimeouts) !UpstreamResponse {
-    if (options.protocol == .http1) return readResponseFrom(alloc, wire, max_bytes, options.head);
+    if (options.protocol == .http1) return readHttp1ResponseFrom(alloc, wire, max_bytes, options.head);
     const response = try alloc.alloc(u8, max_bytes);
     errdefer alloc.free(response);
     var total: usize = 0;
@@ -1257,7 +1257,7 @@ fn readProtocolResponse(alloc: std.mem.Allocator, wire: anytype, max_bytes: usiz
 
 /// TLS and plaintext use the same bounded framing rules. Keep interim bytes
 /// for forwarding, but only the final response controls body framing and reuse.
-fn readResponseFrom(alloc: std.mem.Allocator, wire: anytype, max_bytes: usize, head_request: bool) !UpstreamResponse {
+fn readHttp1ResponseFrom(alloc: std.mem.Allocator, wire: anytype, max_bytes: usize, head_request: bool) !UpstreamResponse {
     var response = try alloc.alloc(u8, max_bytes);
     errdefer alloc.free(response);
     var total: usize = 0;
@@ -1282,7 +1282,7 @@ fn readResponseFrom(alloc: std.mem.Allocator, wire: anytype, max_bytes: usize, h
         total += n;
     };
     const headers = response[final_start..headers_end];
-    const wants_close = http1ResponseWantsClose(headers, headers);
+    const wants_close = http1ResponseWantsClose(headers);
     const framing = responseBodyFraming(headers, status, head_request);
 
     switch (framing) {
@@ -1375,8 +1375,8 @@ fn responseBodyFraming(headers: []const u8, status: u16, head_request: bool) Bod
 
 /// true when the upstream signalled the connection should close (explicit
 /// `Connection: close`, or an HTTP/1.0 response which defaults to close).
-fn http1ResponseWantsClose(response: []const u8, headers: []const u8) bool {
-    if (std.mem.startsWith(u8, response, "HTTP/1.0")) return true;
+fn http1ResponseWantsClose(headers: []const u8) bool {
+    if (std.mem.startsWith(u8, headers, "HTTP/1.0")) return true;
     if (http.findHeaderValue(headers, "Connection")) |conn| {
         return headerListContains(conn, "close");
     }
@@ -1453,9 +1453,9 @@ test "responseBodyFraming treats HEAD, 204, 304, and 1xx specially" {
 }
 
 test "http1ResponseWantsClose honors Connection header and HTTP/1.0" {
-    try std.testing.expect(http1ResponseWantsClose("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"));
-    try std.testing.expect(http1ResponseWantsClose("HTTP/1.0 200 OK\r\n\r\n", "HTTP/1.0 200 OK\r\n\r\n"));
-    try std.testing.expect(!http1ResponseWantsClose("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n\r\n", "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n\r\n"));
+    try std.testing.expect(http1ResponseWantsClose("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"));
+    try std.testing.expect(http1ResponseWantsClose("HTTP/1.0 200 OK\r\n\r\n"));
+    try std.testing.expect(!http1ResponseWantsClose("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n\r\n"));
 }
 
 test "chunkedBodyEnd finds the end of a complete chunked body" {
@@ -4947,7 +4947,7 @@ const FakeSession = struct {
 
 test "response framing TLS reader stops at a complete response without EOF" {
     var sess = FakeSession{ .chunks = &.{ "HTTP/1.1 103 Early Hints\r\nLink: /style.css\r\n\r\nHTTP/1.1 200 OK\r\n", "Content-Length: 2\r\n\r\nok", "unread" } };
-    const result = try readResponseFrom(std.testing.allocator, &sess, 64 * 1024, false);
+    const result = try readHttp1ResponseFrom(std.testing.allocator, &sess, 64 * 1024, false);
     defer std.testing.allocator.free(result.bytes);
     try std.testing.expectEqual(@as(usize, 2), sess.index);
     try std.testing.expectEqual(@as(u16, 200), try parseUpstreamStatusCode(result.bytes));
@@ -4956,9 +4956,9 @@ test "response framing TLS reader stops at a complete response without EOF" {
 
 test "response framing TLS reader rejects oversized and empty responses" {
     var sess = FakeSession{ .chunks = &.{ "AAAA", "BBBB", "CCCC" } };
-    try std.testing.expectError(error.ResponseTooLarge, readResponseFrom(std.testing.allocator, &sess, 6, false));
+    try std.testing.expectError(error.ResponseTooLarge, readHttp1ResponseFrom(std.testing.allocator, &sess, 6, false));
     var empty = FakeSession{ .chunks = &.{} };
-    try std.testing.expectError(error.ReceiveFailed, readResponseFrom(std.testing.allocator, &empty, 64, false));
+    try std.testing.expectError(error.ReceiveFailed, readHttp1ResponseFrom(std.testing.allocator, &empty, 64, false));
 }
 
 const PeerForwardFixture = struct {
@@ -5177,7 +5177,7 @@ test "response framing preserves informational blocks and completes on a persist
     try std.testing.expectEqual(@as(u16, 200), try parseUpstreamStatusCode(result.bytes));
 
     var fragments = FakeSession{ .chunks = &.{ "HTTP/1.1 10", "0 Continue\r\n\r", "\nHTTP/1.1 103 Early Hints\r\nLink: /style.css\r\n\r\nHTTP/1.1 503 Unavailable\r\nContent-Length: 2\r\n\r\nx", "x", "unread" } };
-    const final = try readResponseFrom(std.testing.allocator, &fragments, 4096, false);
+    const final = try readHttp1ResponseFrom(std.testing.allocator, &fragments, 4096, false);
     defer std.testing.allocator.free(final.bytes);
     try std.testing.expectEqual(@as(u16, 503), try parseUpstreamStatusCode(final.bytes));
     try std.testing.expectEqual(@as(usize, 4), fragments.index);
@@ -5189,13 +5189,13 @@ test "response framing bounds interim floods and separates unsupported upgrades"
     var flood: [max_informational_responses + 2][]const u8 = @splat(interim);
     flood[flood.len - 1] = "unread";
     var reader = FakeSession{ .chunks = &flood };
-    try std.testing.expectError(error.InvalidResponse, readResponseFrom(std.testing.allocator, &reader, 4096, false));
+    try std.testing.expectError(error.InvalidResponse, readHttp1ResponseFrom(std.testing.allocator, &reader, 4096, false));
     try std.testing.expectEqual(@as(usize, max_informational_responses + 1), reader.index);
     var upgrade = FakeSession{ .chunks = &.{ "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", "unread" } };
-    try std.testing.expectError(error.UnsupportedUpgrade, readResponseFrom(std.testing.allocator, &upgrade, 4096, false));
+    try std.testing.expectError(error.UnsupportedUpgrade, readHttp1ResponseFrom(std.testing.allocator, &upgrade, 4096, false));
     try std.testing.expectEqual(@as(usize, 1), upgrade.index);
     var truncated = FakeSession{ .chunks = &.{"HTTP/1.1 103 Early Hints\r\n\r\n"} };
-    try std.testing.expectError(error.InvalidResponse, readResponseFrom(std.testing.allocator, &truncated, 4096, false));
+    try std.testing.expectError(error.InvalidResponse, readHttp1ResponseFrom(std.testing.allocator, &truncated, 4096, false));
 }
 
 test "response framing keeps binary HTTP2 separate on TLS readers" {
