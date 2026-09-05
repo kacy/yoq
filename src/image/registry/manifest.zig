@@ -99,7 +99,9 @@ fn resolve(alloc: std.mem.Allocator, client: *std.http.Client, host: []const u8,
 
 fn enqueue(pending: *[8]Pending, count: *usize, visited: []const blob_store.Digest, reference: []const u8, depth: usize, require_index: bool) common.ManifestError!void {
     const digest = blob_store.Digest.parse(reference) orelse return error.DigestMismatch;
-    for (visited) |prior| if (digest.eql(prior)) return error.ParseError;
+    // A shared index may already have been searched through another branch.
+    // Reusing that completed search must not discard the remaining siblings.
+    for (visited) |prior| if (digest.eql(prior)) return;
     for (pending[0..count.*]) |prior| if (digest.eql(prior.digest)) return;
     if (count.* == pending.len) return error.ResponseTooLarge;
     pending[count.*] = .{ .digest = digest, .depth = depth, .require_index = require_index };
@@ -400,7 +402,9 @@ test "image resolution bounds repeated descriptors before another request" {
     try enqueue(&pending, &count, &.{}, digest.string(&ref), 1, true);
     try enqueue(&pending, &count, &.{}, digest.string(&ref), 1, true);
     try std.testing.expectEqual(@as(usize, 1), count);
-    try std.testing.expectError(error.ParseError, enqueue(&pending, &count, &.{digest}, digest.string(&ref), 2, true));
+    count = 0; // The previously queued index has now been searched.
+    try enqueue(&pending, &count, &.{digest}, digest.string(&ref), 2, true);
+    try std.testing.expectEqual(@as(usize, 0), count);
 }
 
 test "image resolution deduplicates repeated nested descriptors over HTTP" {
@@ -450,4 +454,50 @@ test "image resolution stops an overdeep HTTP index chain at the fixed request c
     server.worker.?.join();
     server.worker = null;
     try std.testing.expectEqual(@as(usize, 8), server.requests);
+}
+
+fn testNestedIndices(alloc: std.mem.Allocator, children: []const []const u8) ![]u8 {
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    defer output.deinit();
+    try output.writer.writeAll("{\"schemaVersion\":2,\"manifests\":[");
+    for (children, 0..) |child, i| {
+        var digest_buf: [71]u8 = undefined;
+        try output.writer.print("{s}{{\"mediaType\":\"{s}\",\"digest\":\"{s}\",\"size\":{d}}}", .{ if (i == 0) "" else ",", spec.media_type.oci_index, blob_store.computeDigest(child).string(&digest_buf), child.len });
+    }
+    try output.writer.writeAll("]}");
+    return alloc.dupe(u8, output.written());
+}
+
+test "image resolution searches siblings after a shared nested index over HTTP" {
+    const Server = @import("test_support.zig").Server;
+    const alloc = std.testing.allocator;
+    const leaf = "{\"schemaVersion\":2}";
+    const shared = "{\"schemaVersion\":2,\"manifests\":[]}";
+    const target = try testIndex(alloc, leaf, false);
+    defer alloc.free(target);
+    const left = try testNestedIndices(alloc, &.{shared});
+    defer alloc.free(left);
+    const right = try testNestedIndices(alloc, &.{ shared, target });
+    defer alloc.free(right);
+    const root = try testNestedIndices(alloc, &.{ left, right });
+    defer alloc.free(root);
+    // DFS visits root -> left -> shared -> right -> target -> leaf. The
+    // second edge to shared consumes no request and cannot hide target.
+    const replies = [_]Server.Reply{
+        .{ .body = root },  .{ .body = left },   .{ .body = shared },
+        .{ .body = right }, .{ .body = target }, .{ .body = leaf },
+    };
+    var server = try Server.init(&replies);
+    defer server.deinit();
+    try server.start();
+    var client: std.http.Client = .{ .io = std.testing.io, .allocator = alloc };
+    defer client.deinit();
+    var host: [64]u8 = undefined;
+    const result = try resolve(alloc, &client, try server.host(&host), "image", "latest", .{ .value = "" }, "http", .{ .os = "linux", .architecture = "amd64" }, .{});
+    defer alloc.free(result.body);
+    defer alloc.free(result.digest);
+    try std.testing.expectEqualStrings(leaf, result.body);
+    server.worker.?.join();
+    server.worker = null;
+    try std.testing.expectEqual(@as(usize, 6), server.requests);
 }

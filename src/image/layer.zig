@@ -525,7 +525,7 @@ test "extract layer concurrent callers publish one complete immutable directory"
             self.result = path;
             var dir = try cwd().openDir(std.testing.io, path, .{ .iterate = true });
             defer dir.close(std.testing.io);
-            self.inode = @intCast((try @import("linux_platform").posix.fstat(dir.handle)).ino);
+            self.inode = @intCast((try dir.stat(std.testing.io)).inode);
             var buf: [64]u8 = undefined;
             try std.testing.expectEqualStrings("complete first file", try dir.readFile(std.testing.io, "first", &buf));
             try std.testing.expectEqualStrings("complete last file", try dir.readFile(std.testing.io, "last", &buf));
