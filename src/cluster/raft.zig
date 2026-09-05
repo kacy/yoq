@@ -2590,3 +2590,240 @@ test "snapshot reply does not regress match_index" {
         alloc.free(actions);
     }
 }
+
+fn expectVerifiedPrefixCommit(raft: *Raft, expected: ?LogIndex) !void {
+    const actions = try raft.drainActions();
+    defer test_support.deinitOwnedActions(Action, testing.allocator, actions);
+    var commits: usize = 0;
+    for (actions) |action| {
+        if (action == .commit_entries) {
+            const index = expected orelse return error.UnexpectedCommit;
+            try testing.expectEqual(index, action.commit_entries.up_to);
+            commits += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, if (expected != null) 1 else 0), commits);
+}
+
+test "verified prefix bounds follower progress across actual 64-entry replication batches" {
+    const alloc = testing.allocator;
+    var leader_log = try Log.initMemory();
+    defer leader_log.deinit();
+    var follower_log = try Log.initMemory();
+    defer follower_log.deinit();
+    try testing.expect(leader_log.setCurrentTerm(3));
+    try testing.expect(follower_log.setCurrentTerm(3));
+    for (1..131) |index| {
+        try leader_log.append(.{
+            .index = index,
+            .term = if (index <= 64) 1 else 3,
+            .data = if (index <= 64) "shared" else "leader suffix",
+        });
+    }
+    for (1..161) |index| {
+        try follower_log.append(.{
+            .index = index,
+            .term = if (index <= 64) 1 else 2,
+            .data = if (index <= 64) "shared" else "divergent suffix",
+        });
+    }
+    var leader = try setupTestRaft(alloc, 1, &.{ 2, 3 }, &leader_log);
+    defer leader.deinit();
+    leader.role = .leader;
+    // Another quorum member has already replicated the leader's entire log.
+    leader.commit_index = 130;
+    leader.match_index[1] = 130;
+    var follower = try setupTestRaft(alloc, 2, &.{ 1, 3 }, &follower_log);
+    defer follower.deinit();
+
+    for ([_]LogIndex{ 64, 128, 130 }, [_]usize{ 64, 64, 2 }) |verified_end, batch_len| {
+        leader.sendAppendEntries(0);
+        const actions = try leader.drainActions();
+        defer test_support.deinitOwnedActions(Action, alloc, actions);
+        try testing.expectEqual(@as(usize, 1), actions.len);
+        const request = actions[0].send_append_entries;
+        try testing.expectEqual(@as(NodeId, 2), request.target);
+        try testing.expectEqual(batch_len, request.args.entries.len);
+        const reply = follower.handleAppendEntries(request.args);
+        try testing.expect(reply.success);
+        try testing.expectEqual(verified_end, reply.match_index);
+        try testing.expectEqual(verified_end, follower.commit_index);
+        try expectVerifiedPrefixCommit(&follower, verified_end);
+        leader.handleAppendEntriesReply(2, reply);
+        try testing.expectEqual(verified_end, leader.match_index[0]);
+        try testing.expectEqual(verified_end + 1, leader.next_index[0]);
+        if (verified_end == 64) {
+            // This suffix still exists, but the matching first batch says
+            // nothing about whether it matches the leader or can be applied.
+            try testing.expectEqual(@as(LogIndex, 160), follower_log.lastIndex());
+            try testing.expectEqual(@as(Term, 2), follower_log.termAt(65));
+        }
+    }
+    try testing.expectEqual(@as(LogIndex, 130), follower_log.lastIndex());
+    try testing.expectEqual(@as(Term, 3), follower_log.termAt(65));
+    try testing.expectEqual(@as(Term, 3), follower_log.termAt(130));
+}
+
+test "verified prefix empty heartbeat acknowledges only its previous index" {
+    const alloc = testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+    try testing.expect(log.setCurrentTerm(3));
+    for (1..81) |index| {
+        try log.append(.{ .index = index, .term = if (index <= 8) 1 else 2, .data = "old entry" });
+    }
+    var follower = try setupTestRaft(alloc, 2, &.{ 1, 3 }, &log);
+    defer follower.deinit();
+    const reply = follower.handleAppendEntries(.{
+        .term = 3,
+        .leader_id = 1,
+        .prev_log_index = 8,
+        .prev_log_term = 1,
+        .entries = &.{},
+        .leader_commit = 80,
+    });
+    try testing.expect(reply.success);
+    try testing.expectEqual(@as(LogIndex, 8), reply.match_index);
+    try testing.expectEqual(@as(LogIndex, 8), follower.commit_index);
+    try testing.expectEqual(@as(LogIndex, 80), log.lastIndex());
+    try expectVerifiedPrefixCommit(&follower, 8);
+
+    const empty_prefix_reply = follower.handleAppendEntries(.{
+        .term = 3,
+        .leader_id = 1,
+        .prev_log_index = 0,
+        .prev_log_term = 0,
+        .entries = &.{},
+        .leader_commit = 80,
+    });
+    try testing.expect(empty_prefix_reply.success);
+    try testing.expectEqual(@as(LogIndex, 0), empty_prefix_reply.match_index);
+    try testing.expectEqual(@as(LogIndex, 8), follower.commit_index);
+    try expectVerifiedPrefixCommit(&follower, null);
+
+    // The verified prefix can end at a compacted snapshot boundary even
+    // though no ordinary log entry remains at that index.
+    var compacted_log = try Log.initMemory();
+    defer compacted_log.deinit();
+    try testing.expect(compacted_log.setCurrentTerm(3));
+    try testing.expect(compacted_log.setSnapshotMeta(.{
+        .last_included_index = 100,
+        .last_included_term = 2,
+        .data_len = 0,
+    }));
+    var compacted = try setupTestRaft(alloc, 2, &.{ 1, 3 }, &compacted_log);
+    defer compacted.deinit();
+    const snapshot_heartbeat = compacted.handleAppendEntries(.{
+        .term = 3,
+        .leader_id = 1,
+        .prev_log_index = 100,
+        .prev_log_term = 2,
+        .entries = &.{},
+        .leader_commit = 150,
+    });
+    try testing.expect(snapshot_heartbeat.success);
+    try testing.expectEqual(@as(LogIndex, 100), snapshot_heartbeat.match_index);
+    try testing.expectEqual(@as(LogIndex, 100), compacted.commit_index);
+    try expectVerifiedPrefixCommit(&compacted, null);
+}
+
+test "verified prefix reordered requests and replies preserve established progress" {
+    const alloc = testing.allocator;
+    var leader_log = try Log.initMemory();
+    defer leader_log.deinit();
+    var follower_log = try Log.initMemory();
+    defer follower_log.deinit();
+    try testing.expect(leader_log.setCurrentTerm(3));
+    try testing.expect(follower_log.setCurrentTerm(3));
+    var entries: [80]LogEntry = undefined;
+    for (&entries, 1..) |*entry, index| {
+        entry.* = .{ .index = index, .term = 3, .data = "matching entry" };
+        try leader_log.append(entry.*);
+        try follower_log.append(entry.*);
+    }
+    var leader = try setupTestRaft(alloc, 1, &.{ 2, 3 }, &leader_log);
+    defer leader.deinit();
+    leader.role = .leader;
+    var follower = try setupTestRaft(alloc, 2, &.{ 1, 3 }, &follower_log);
+    defer follower.deinit();
+    const newer_reply = follower.handleAppendEntries(.{
+        .term = 3,
+        .leader_id = 1,
+        .prev_log_index = 64,
+        .prev_log_term = 3,
+        .entries = entries[64..],
+        .leader_commit = 80,
+    });
+    try testing.expect(newer_reply.success);
+    try testing.expectEqual(@as(LogIndex, 80), newer_reply.match_index);
+    try expectVerifiedPrefixCommit(&follower, 80);
+    leader.handleAppendEntriesReply(2, newer_reply);
+    try expectVerifiedPrefixCommit(&leader, 80);
+
+    const older_reply = follower.handleAppendEntries(.{
+        .term = 3,
+        .leader_id = 1,
+        .prev_log_index = 0,
+        .prev_log_term = 0,
+        .entries = entries[0..32],
+        .leader_commit = 80,
+    });
+    try testing.expect(older_reply.success);
+    try testing.expectEqual(@as(LogIndex, 32), older_reply.match_index);
+    try testing.expectEqual(@as(LogIndex, 80), follower.commit_index);
+    try expectVerifiedPrefixCommit(&follower, null);
+    leader.handleAppendEntriesReply(2, older_reply);
+    leader.handleAppendEntriesReply(2, .{ .term = 3, .success = false, .match_index = 0 });
+    try testing.expectEqual(@as(LogIndex, 80), leader.commit_index);
+    try testing.expectEqual(@as(LogIndex, 80), leader.match_index[0]);
+    try testing.expectEqual(@as(LogIndex, 81), leader.next_index[0]);
+    try expectVerifiedPrefixCommit(&leader, null);
+}
+
+test "verified prefix rejects noncontiguous batches before changing the log" {
+    const alloc = testing.allocator;
+    // The first entry would overwrite index 2 and truncate index 3 if the
+    // request were applied before its complete index sequence was checked.
+    const cases = [_][2]LogEntry{
+        .{
+            .{ .index = 2, .term = 3, .data = "replacement" },
+            .{ .index = 4, .term = 3, .data = "gap" },
+        },
+        .{
+            .{ .index = 2, .term = 3, .data = "replacement" },
+            .{ .index = 2, .term = 3, .data = "duplicate" },
+        },
+        .{
+            .{ .index = 3, .term = 3, .data = "wrong start" },
+            .{ .index = 4, .term = 3, .data = "next" },
+        },
+    };
+    for (cases) |entries| {
+        var log = try Log.initMemory();
+        defer log.deinit();
+        try testing.expect(log.setCurrentTerm(3));
+        for (1..4) |index| {
+            try log.append(.{ .index = index, .term = 1, .data = "original" });
+        }
+        var follower = try setupTestRaft(alloc, 2, &.{ 1, 3 }, &log);
+        defer follower.deinit();
+        const reply = follower.handleAppendEntries(.{
+            .term = 3,
+            .leader_id = 1,
+            .prev_log_index = 1,
+            .prev_log_term = 1,
+            .entries = &entries,
+            .leader_commit = 4,
+        });
+        try testing.expect(!reply.success);
+        try testing.expectEqual(@as(LogIndex, 0), follower.commit_index);
+        try testing.expectEqual(@as(LogIndex, 3), log.lastIndex());
+        for (1..4) |index| {
+            const entry = (try log.getEntry(alloc, index)) orelse return error.ExpectedLogEntry;
+            defer alloc.free(entry.data);
+            try testing.expectEqual(@as(Term, 1), entry.term);
+            try testing.expectEqualStrings("original", entry.data);
+        }
+        try expectVerifiedPrefixCommit(&follower, null);
+    }
+}
