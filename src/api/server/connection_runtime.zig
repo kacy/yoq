@@ -448,3 +448,34 @@ test "api request deadlines stop trickling uploads and nonreading response peers
     const output = transport.Stream{ .fd = fds[1], .deadline = transport.Deadline.afterMilliseconds(50) };
     try std.testing.expectError(error.TimedOut, writeResponseTo(output, .ok, "application/octet-stream", body, false));
 }
+
+test "api request authorization enforces join tokens and named scopes before uploads" {
+    const store = @import("../../state/store.zig");
+    const auth = @import("../auth.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const hash = auth.hashSecretHex("reader");
+    try store.createToken("read-only", &hash, "apps:read", 0, null);
+    const prior = routes.api_token;
+    const prior_join = routes.join_token;
+    routes.api_token = "admin";
+    routes.join_token = "join";
+    defer routes.api_token = prior;
+    defer routes.join_token = prior_join;
+
+    const cases = [_]struct { raw: []const u8, expected: ReadRequestError }{
+        .{ .raw = "POST /apps/apply HTTP/1.1\r\nAuthorization: Bearer reader\r\nContent-Length: 10\r\n\r\n", .expected = error.Forbidden },
+        .{ .raw = "POST /agents/register HTTP/1.1\r\nAuthorization: Bearer admin\r\nContent-Length: 10\r\n\r\n", .expected = error.Unauthorized },
+        .{ .raw = "POST /apps/apply HTTP/1.1\r\nAuthorization: Bearer join\r\nContent-Length: 10\r\n\r\n", .expected = error.Unauthorized },
+        .{ .raw = "POST /apps/apply HTTP/1.1\r\nAuthorization: Bearer admin\r\nTransfer-Encoding: chunked\r\n\r\n", .expected = error.MalformedRequest },
+    };
+    for (cases) |case| {
+        const fds = try testSocketPair();
+        defer for (fds) |fd| linux_platform.posix.close(fd);
+        const send = transport.Stream{ .fd = fds[0], .deadline = transport.Deadline.afterMilliseconds(1000) };
+        try send.writeAll(case.raw);
+        const receive = transport.Stream{ .fd = fds[1], .deadline = transport.Deadline.afterMilliseconds(1000) };
+        try std.testing.expectError(case.expected, readRequestFrom(std.testing.allocator, receive, receive));
+        try std.testing.expectEqual(@as(usize, 0), request_bytes.load(.acquire));
+    }
+}
