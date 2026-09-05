@@ -25,7 +25,12 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
+      commit: ${{ steps.tag.outputs.commit }}
     steps:
+      - name: check out workflow repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: resolve tag
         id: tag
         shell: bash
@@ -43,8 +48,19 @@ jobs:
             exit 1
           fi
 
+          tag_refs=$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")
+          commit=$(printf '%s\n' "$tag_refs" | awk '$2 == "refs/tags/'"$tag"'^{}" {print $1; exit}')
+          if [ -z "$commit" ]; then
+            commit=$(printf '%s\n' "$tag_refs" | awk '$2 == "refs/tags/'"$tag"'" {print $1; exit}')
+          fi
+          if [ -z "$commit" ]; then
+            echo "release tag does not resolve to a remote tag: $tag" >&2
+            exit 1
+          fi
+
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
   fmt-check:
     name: fmt-check
@@ -54,6 +70,8 @@ jobs:
     steps:
       - name: check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.commit }}
 
       - name: set up zig
         uses: ./.github/actions/setup-zig
@@ -64,6 +82,14 @@ jobs:
         shell: bash
         run: zig fmt --check src/ tools/ build.zig
 
+      - name: verify source version
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          actual=$(sed -n 's/.*pub const string = "\([^"]*\)".*/\1/p' src/lib/version.zig)
+          test "$actual" = "$EXPECTED_VERSION"
+
   build-debug:
     name: build-debug
     needs:
@@ -72,6 +98,7 @@ jobs:
     with:
       job-name: build-debug
       command: zig build
+      ref: ${{ needs.validate-tag.outputs.commit }}
       failure-artifact-name: release-build-debug-log
 
   docker-build:
@@ -82,6 +109,8 @@ jobs:
     steps:
       - name: check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.commit }}
 
       - name: build Docker image
         shell: bash
@@ -95,6 +124,8 @@ jobs:
     steps:
       - name: check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.commit }}
 
       - name: set up zig
         uses: ./.github/actions/setup-zig
@@ -135,6 +166,8 @@ jobs:
     steps:
       - name: check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.commit }}
 
       - name: set up zig
         uses: ./.github/actions/setup-zig
@@ -198,6 +231,8 @@ jobs:
     steps:
       - name: check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.commit }}
 
       - name: download packaged artifacts
         uses: actions/download-artifact@v4
