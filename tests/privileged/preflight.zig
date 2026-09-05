@@ -10,10 +10,14 @@ pub const PortRange = struct {
     count: usize,
 };
 
-pub fn requireRuntimeCore() !void {
+pub fn requireMountNamespace() !void {
     try requireLinux();
     try requireOptIn();
     try requireRoot();
+}
+
+pub fn requireRuntimeCore() !void {
+    try requireMountNamespace();
     try requireYoqBinary();
     try requireCgroupV2();
     try requireOverlayfs();

@@ -1524,13 +1524,19 @@ test "split vote resolves in subsequent election" {
     var r4 = try setupTestRaft(alloc, 4, &.{ 1, 2, 3 }, &log4);
     defer r4.deinit();
 
-    // step 1: r1 and r3 both time out simultaneously → both become candidates at same term
-    for (0..max_election_ticks + 1) |_| {
+    // Force the intended simultaneous election, stopping exactly at its
+    // boundary. max_election_ticks + 1 can cross two randomized deadlines
+    // and silently put these candidates in different terms.
+    r1.election_timeout = min_election_ticks;
+    r3.election_timeout = min_election_ticks;
+    for (0..min_election_ticks) |_| {
         r1.tick();
         r3.tick();
     }
     try testing.expectEqual(Role.candidate, r1.role);
     try testing.expectEqual(Role.candidate, r3.role);
+    try testing.expectEqual(@as(Term, 1), log1.getCurrentTerm());
+    try testing.expectEqual(@as(Term, 1), log3.getCurrentTerm());
 
     // step 2: split the votes — r2 votes for r1, r4 votes for r3
     const v1 = try r1.drainActions();
@@ -1561,14 +1567,21 @@ test "split vote resolves in subsequent election" {
     }
 
     // neither has quorum of 3 (each has 2: self + one peer)
-    try testing.expect(r1.role != .leader);
-    try testing.expect(r3.role != .leader);
+    try testing.expectEqual(Role.candidate, r1.role);
+    try testing.expectEqual(Role.candidate, r3.role);
+    try testing.expectEqual(@as(u32, 2), r1.votes_received);
+    try testing.expectEqual(@as(u32, 2), r3.votes_received);
 
-    // step 3: tick r1 past another election timeout — new term
-    for (0..max_election_ticks + 1) |_| {
+    // Advance only r1 to its next deadline. The sampled timeout determines
+    // how many ticks to deliver, never how many elections the test starts.
+    const remaining_ticks = r1.election_timeout - r1.ticks_since_event;
+    for (0..remaining_ticks) |_| {
         r1.tick();
     }
     try testing.expectEqual(Role.candidate, r1.role);
+
+    try testing.expectEqual(@as(Term, 2), log1.getCurrentTerm());
+    try testing.expectEqual(@as(Term, 1), log3.getCurrentTerm());
 
     const v1b = try r1.drainActions();
     defer alloc.free(v1b);
@@ -1599,6 +1612,9 @@ test "split vote resolves in subsequent election" {
     if (r3.role == .leader) leader_count += 1;
     if (r4.role == .leader) leader_count += 1;
     try testing.expectEqual(@as(u32, 1), leader_count);
+    for ([_]*Log{ &log1, &log2, &log3, &log4 }) |log| {
+        try testing.expectEqual(@as(Term, 2), log.getCurrentTerm());
+    }
 
     // drain the new leader's actions
     const fla = try r1.drainActions();

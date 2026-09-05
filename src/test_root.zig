@@ -9,9 +9,11 @@ comptime {
     _ = @import("runtime/container.zig");
     _ = @import("runtime/container/startup_channel.zig");
     _ = @import("runtime/container/start_support.zig");
+    _ = @import("runtime/container/source_policy.zig");
     _ = @import("runtime/cgroups.zig");
     _ = @import("runtime/namespaces.zig");
     _ = @import("runtime/filesystem.zig");
+    _ = @import("runtime/filesystem/mount_ops.zig");
     _ = @import("runtime/security.zig");
     _ = @import("runtime/process.zig");
     _ = @import("runtime/exec.zig");
