@@ -119,6 +119,10 @@ pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8
 }
 
 const OpenHow = extern struct { flags: u64, mode: u64 = 0, resolve: u64 };
+const resolve_no_symlinks: u64 = 0x04;
+const resolve_in_root: u64 = 0x10;
+const resolve_no_magiclinks: u64 = 0x02;
+const mount_attr_readonly: u64 = 1;
 const at_empty_path: usize = 0x1000;
 const at_recursive: usize = 0x8000;
 const open_tree_clone: usize = 1;
@@ -144,11 +148,11 @@ fn openResolved(root_fd: posix.fd_t, path: []const u8, directory: bool, resolve:
 fn openSource(source: []const u8) !posix.fd_t {
     // Reject intermediate symlinks too: a prior realpath check cannot protect
     // a later pathname open from concurrent link replacement.
-    return openResolved(posix.AT.FDCWD, source, false, 0x04); // RESOLVE_NO_SYMLINKS
+    return openResolved(posix.AT.FDCWD, source, false, resolve_no_symlinks);
 }
 
 fn openTarget(root_fd: posix.fd_t, path: []const u8, directory: bool) !posix.fd_t {
-    return openResolved(root_fd, path, directory, 0x10 | 0x02); // IN_ROOT | NO_MAGICLINKS
+    return openResolved(root_fd, path, directory, resolve_in_root | resolve_no_magiclinks);
 }
 
 fn ensureDirectory(root_fd: posix.fd_t, path: []const u8) !posix.fd_t {
@@ -195,7 +199,7 @@ fn attachTree(source_fd: posix.fd_t, target_fd: posix.fd_t, read_only: bool) Fil
     const tree_fd: posix.fd_t = @intCast(opened);
     defer linux_platform.posix.close(tree_fd);
     if (read_only) {
-        const attrs = MountAttr{ .attr_set = 1 }; // MOUNT_ATTR_RDONLY
+        const attrs = MountAttr{ .attr_set = mount_attr_readonly };
         const changed = linux.syscall5(.mount_setattr, @intCast(tree_fd), @intFromPtr(empty), at_empty_path | at_recursive, @intFromPtr(&attrs), @sizeOf(MountAttr));
         if (linux.errno(changed) != .SUCCESS) return error.MountFailed;
     }

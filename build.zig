@@ -452,7 +452,7 @@ pub fn build(b: *std.Build) void {
             });
             priv_mod.root_module.addImport("linux_platform", linux_mod);
             const mount_ops_mod = b.createModule(.{
-                .root_source_file = b.path("src/runtime/filesystem/mount_ops.zig"),
+                .root_source_file = b.path("src/test_mount_support.zig"),
                 .target = target,
                 .optimize = optimize,
             });
