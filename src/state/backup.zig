@@ -116,16 +116,28 @@ fn decodeArtifact(alloc: std.mem.Allocator, artifact: []const u8, key: [secrets.
 /// replacing the active database. with verify_only=true, performs every check
 /// but does not touch the live database.
 pub fn restore(alloc: std.mem.Allocator, input_path: [:0]const u8, verify_only: bool) BackupError!void {
+    return restoreWithOptions(alloc, input_path, .{ .verify_only = verify_only });
+}
+
+const RestoreOptions = struct {
+    verify_only: bool = false,
+    destination: ?[:0]const u8 = null,
+    key: ?[secrets.key_length]u8 = null,
+};
+
+// Explicit destinations and keys keep restore tests away from the user's
+// database and secrets key. Production callers use the defaults above.
+fn restoreWithOptions(alloc: std.mem.Allocator, input_path: [:0]const u8, options: RestoreOptions) BackupError!void {
     const contents = readWholeFile(alloc, input_path) catch return BackupError.RestoreFailed;
     defer alloc.free(contents);
 
     // raw SQLite file (legacy / --plain): no magic header.
     if (!std.mem.startsWith(u8, contents, magic)) {
-        if (verify_only) return validateDbFile(input_path);
-        return restoreDbFrom(input_path);
+        if (options.verify_only) return validateDbFile(input_path);
+        return restoreDbFrom(input_path, options.destination);
     }
 
-    const key = secrets.loadOrCreateKey() catch return BackupError.KeyUnavailable;
+    const key = options.key orelse (secrets.loadOrCreateKey() catch return BackupError.KeyUnavailable);
     const plaintext = try decodeArtifact(alloc, contents, key);
     defer alloc.free(plaintext);
 
@@ -135,8 +147,8 @@ pub fn restore(alloc: std.mem.Allocator, input_path: [:0]const u8, verify_only: 
     writeFileBytes(tmp_path, plaintext) catch return BackupError.IoFailed;
     defer deleteFileQuiet(tmp_path);
 
-    if (verify_only) return validateDbFile(tmp_path);
-    return restoreDbFrom(tmp_path);
+    if (options.verify_only) return validateDbFile(tmp_path);
+    return restoreDbFrom(tmp_path, options.destination);
 }
 
 // -- internal sqlite helpers --
@@ -171,9 +183,9 @@ fn snapshotDbTo(output_path: [:0]const u8) BackupError!void {
 }
 
 /// validate and restore a SQLite file at src_path into the live database.
-fn restoreDbFrom(input_path: [:0]const u8) BackupError!void {
+fn restoreDbFrom(input_path: [:0]const u8, destination: ?[:0]const u8) BackupError!void {
     var dest_path_buf: [paths.max_path]u8 = undefined;
-    const dest_path = schema.defaultDbPath(&dest_path_buf) catch return BackupError.PathError;
+    const dest_path = destination orelse (schema.defaultDbPath(&dest_path_buf) catch return BackupError.PathError);
 
     var src_db: ?*c.sqlite3 = null;
     if (c.sqlite3_open_v2(input_path.ptr, &src_db, c.SQLITE_OPEN_READONLY, null) != c.SQLITE_OK or src_db == null) {
@@ -189,11 +201,7 @@ fn restoreDbFrom(input_path: [:0]const u8) BackupError!void {
         return BackupError.RestoreFailed;
     }
     defer _ = c.sqlite3_close(dest_db);
-    try beginExclusiveRestore(dest_db.?);
-    var transaction_open = true;
-    defer {
-        if (transaction_open) _ = c.sqlite3_exec(dest_db, "ROLLBACK;", null, null, null);
-    }
+    try lockForRestore(dest_db.?);
 
     const bk = c.sqlite3_backup_init(dest_db, "main", src_db, "main");
     if (bk == null) return BackupError.RestoreFailed;
@@ -203,10 +211,6 @@ fn restoreDbFrom(input_path: [:0]const u8) BackupError!void {
 
     if (step_rc != c.SQLITE_DONE) return BackupError.RestoreFailed;
     if (finish_rc != c.SQLITE_OK) return BackupError.RestoreFailed;
-    if (c.sqlite3_exec(dest_db, "COMMIT;", null, null, null) != c.SQLITE_OK) {
-        return BackupError.RestoreFailed;
-    }
-    transaction_open = false;
 }
 
 /// open a SQLite file read-only and validate its schema without restoring.
@@ -220,14 +224,25 @@ fn validateDbFile(path: [:0]const u8) BackupError!void {
     try validateBackupSchema(db.?);
 }
 
-fn beginExclusiveRestore(db: *c.sqlite3) BackupError!void {
+fn lockForRestore(db: *c.sqlite3) BackupError!void {
     _ = c.sqlite3_busy_timeout(db, 0);
     if (c.sqlite3_exec(db, "PRAGMA locking_mode=EXCLUSIVE;", null, null, null) != c.SQLITE_OK) {
         return BackupError.RestoreFailed;
     }
-    const rc = c.sqlite3_exec(db, "BEGIN IMMEDIATE;", null, null, null);
+    const rc = c.sqlite3_exec(db, "BEGIN EXCLUSIVE;", null, null, null);
     if (rc == c.SQLITE_BUSY or rc == c.SQLITE_LOCKED) return BackupError.ServerRunning;
     if (rc != c.SQLITE_OK) return BackupError.RestoreFailed;
+
+    // The backup API owns its destination transaction and refuses to start
+    // inside an existing one. EXCLUSIVE locking mode retains the file lock
+    // after this transaction ends, until restore closes the connection. This
+    // excludes other database users without leaving a transaction open.
+    const commit_rc = c.sqlite3_exec(db, "COMMIT;", null, null, null);
+    if (commit_rc != c.SQLITE_OK) {
+        _ = c.sqlite3_exec(db, "ROLLBACK;", null, null, null);
+        if (commit_rc == c.SQLITE_BUSY or commit_rc == c.SQLITE_LOCKED) return BackupError.ServerRunning;
+        return BackupError.RestoreFailed;
+    }
 }
 
 fn validateBackupSchema(db: *c.sqlite3) BackupError!void {
@@ -352,4 +367,142 @@ test "decodeArtifact rejects a too-short or unmagicked buffer" {
     const key = [_]u8{7} ** secrets.key_length;
     try std.testing.expectError(BackupError.IntegrityCheckFailed, decodeArtifact(alloc, magic ++ "tooshort", key));
     try std.testing.expectError(BackupError.IntegrityCheckFailed, decodeArtifact(alloc, "not a backup at all", key));
+}
+
+fn restoreTestPath(tmp: std.testing.TmpDir, name: []const u8) ![:0]u8 {
+    var root_buf: [paths.max_path]u8 = undefined;
+    const root_len = try tmp.dir.realPathFile(std.testing.io, ".", &root_buf);
+    return std.fmt.allocPrintSentinel(std.testing.allocator, "{s}/{s}", .{ root_buf[0..root_len], name }, 0);
+}
+
+fn createRestoreTestDb(path: [:0]const u8, container_id: []const u8) !void {
+    var db = try sqlite.Db.init(.{ .mode = .{ .File = path }, .open_flags = .{ .write = true, .create = true } });
+    defer db.deinit();
+    try schema.init(&db);
+    try db.exec(
+        "INSERT INTO containers (id, rootfs, command, created_at) VALUES (?, '/rootfs', '/bin/sh', 123);",
+        .{},
+        .{container_id},
+    );
+}
+
+fn expectRestoreTestContents(db: *sqlite.Db, expected_id: []const u8) !void {
+    const Count = struct { count: i64 };
+    const count = (try db.one(Count, "SELECT count(*) AS count FROM containers;", .{}, .{})) orelse
+        return error.ExpectedContainerCount;
+    try std.testing.expectEqual(@as(i64, 1), count.count);
+    const Row = struct { id: sqlite.Text };
+    const row = (try db.oneAlloc(Row, std.testing.allocator, "SELECT id FROM containers;", .{}, .{})) orelse
+        return error.ExpectedContainer;
+    defer std.testing.allocator.free(row.id.data);
+    try std.testing.expectEqualStrings(expected_id, row.id.data);
+}
+
+fn expectReopenedRestoreContents(path: [:0]const u8, expected_id: []const u8) !void {
+    var db = try sqlite.Db.init(.{ .mode = .{ .File = path }, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try validateBackupSchema(db.db);
+    try expectRestoreTestContents(&db, expected_id);
+}
+
+test "restore locking restores raw databases and persists replacement contents on reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source = try restoreTestPath(tmp, "source.db");
+    defer std.testing.allocator.free(source);
+    const destination = try restoreTestPath(tmp, "destination.db");
+    defer std.testing.allocator.free(destination);
+    try createRestoreTestDb(source, "backup-container");
+    try createRestoreTestDb(destination, "live-container");
+    try restoreWithOptions(std.testing.allocator, source, .{ .destination = destination });
+    try expectReopenedRestoreContents(destination, "backup-container");
+    try expectReopenedRestoreContents(source, "backup-container");
+}
+
+test "restore locking verifies and restores encrypted real databases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source = try restoreTestPath(tmp, "source.db");
+    defer std.testing.allocator.free(source);
+    const destination = try restoreTestPath(tmp, "destination.db");
+    defer std.testing.allocator.free(destination);
+    const artifact_path = try restoreTestPath(tmp, "encrypted.backup");
+    defer std.testing.allocator.free(artifact_path);
+    try createRestoreTestDb(source, "encrypted-container");
+    try createRestoreTestDb(destination, "live-container");
+    const plaintext = try readWholeFile(std.testing.allocator, source);
+    defer std.testing.allocator.free(plaintext);
+    const key = [_]u8{23} ** secrets.key_length;
+    const artifact = try encodeArtifact(std.testing.allocator, plaintext, key);
+    defer std.testing.allocator.free(artifact);
+    try writeFileBytes(artifact_path, artifact);
+
+    try restoreWithOptions(std.testing.allocator, artifact_path, .{
+        .destination = destination,
+        .key = key,
+        .verify_only = true,
+    });
+    try expectReopenedRestoreContents(destination, "live-container");
+    try restoreWithOptions(std.testing.allocator, artifact_path, .{ .destination = destination, .key = key });
+    try expectReopenedRestoreContents(destination, "encrypted-container");
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "encrypted.backup.restore.tmp", .{}));
+}
+
+test "restore locking rejects idle and active WAL users without changing their database" {
+    const Usage = enum { idle, reader, writer };
+    for ([_]Usage{ .idle, .reader, .writer }) |usage| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const source = try restoreTestPath(tmp, "source.db");
+        defer std.testing.allocator.free(source);
+        const destination = try restoreTestPath(tmp, "destination.db");
+        defer std.testing.allocator.free(destination);
+        try createRestoreTestDb(source, "backup-container");
+        try createRestoreTestDb(destination, "live-container");
+        {
+            var live = try sqlite.Db.init(.{ .mode = .{ .File = destination }, .open_flags = .{ .write = true } });
+            defer live.deinit();
+            if (usage == .reader) try live.exec("BEGIN;", .{}, .{});
+            if (usage == .writer) try live.exec("BEGIN IMMEDIATE;", .{}, .{});
+            // Even the idle case has accessed the WAL, like a running server
+            // between requests. A merely unopened SQLite handle owns no lock.
+            try expectRestoreTestContents(&live, "live-container");
+            try std.testing.expectError(BackupError.ServerRunning, restoreWithOptions(
+                std.testing.allocator,
+                source,
+                .{ .destination = destination },
+            ));
+            try expectRestoreTestContents(&live, "live-container");
+            if (usage != .idle) try live.exec("ROLLBACK;", .{}, .{});
+        }
+        // Releasing the competing connection must permit the same restore.
+        try restoreWithOptions(std.testing.allocator, source, .{ .destination = destination });
+        try expectReopenedRestoreContents(destination, "backup-container");
+    }
+}
+
+test "restore locking retains exclusion in autocommit until its connection closes" {
+    // Cover both the application's WAL mode and legacy rollback-journal
+    // databases. The backup API must see autocommit while other readers and
+    // writers still cannot access the destination.
+    for ([_]bool{ false, true }) |rollback_journal| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const destination = try restoreTestPath(tmp, "destination.db");
+        defer std.testing.allocator.free(destination);
+        try createRestoreTestDb(destination, "live-container");
+        {
+            var exclusive = try sqlite.Db.init(.{ .mode = .{ .File = destination }, .open_flags = .{ .write = true } });
+            defer exclusive.deinit();
+            if (rollback_journal) try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_exec(exclusive.db, "PRAGMA journal_mode=DELETE;", null, null, null));
+            try lockForRestore(exclusive.db);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(exclusive.db));
+            var competitor: ?*c.sqlite3 = null;
+            try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_open(destination.ptr, &competitor));
+            defer _ = c.sqlite3_close(competitor);
+            try std.testing.expectEqual(@as(c_int, c.SQLITE_BUSY), c.sqlite3_exec(competitor, "SELECT count(*) FROM containers;", null, null, null));
+            try std.testing.expectEqual(@as(c_int, c.SQLITE_BUSY), c.sqlite3_exec(competitor, "BEGIN IMMEDIATE;", null, null, null));
+        }
+        try expectReopenedRestoreContents(destination, "live-container");
+    }
 }
