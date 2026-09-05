@@ -3,6 +3,7 @@ const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const linux = std.os.linux;
 
+const namespaces = @import("../../runtime/namespaces.zig");
 const filesystem = @import("../../runtime/filesystem.zig");
 const identity = @import("identity.zig");
 const exec_helpers = @import("../../lib/exec_helpers.zig");
@@ -24,6 +25,19 @@ pub const BuildChildContext = struct {
     user: ?[]const u8 = null,
     create_workdir: bool = false,
 };
+
+/// Build root always belongs to a new user namespace. A privileged launcher
+/// can map every usable image ID while retaining only namespace-local caps.
+pub fn spawn(child_fn: *const fn (?*anyopaque) callconv(.c) u8, arg: ?*anyopaque) namespaces.NamespaceError!namespaces.SpawnResult {
+    const mapping: ?namespaces.UserMapping = if (linux.geteuid() == 0) .{
+        .outer_uid = 0,
+        .outer_gid = 0,
+        .count = std.math.maxInt(u32),
+        .gid_count = std.math.maxInt(u32),
+        .allow_setgroups = true,
+    } else null;
+    return namespaces.spawn(.{ .net = false, .cgroup = false }, mapping, child_fn, arg);
+}
 
 pub fn buildChildMain(arg: ?*anyopaque) callconv(.c) u8 {
     const ctx: *const BuildChildContext = @ptrCast(@alignCast(arg));
@@ -159,7 +173,7 @@ test "build child kernel applies image USER WORKDIR and refuses invalid executio
     ctx.create_workdir = false;
     // Keep the identity and pwd assertions separate from the deliberately
     // failing redirection, so a failed assertion cannot be hidden by it.
-    ctx.command = "test \"$(id -u)\" = 12345 || exit 91; test \"$(id -g)\" = 23456 || exit 92; test \"$(pwd -P)\" = /workspace/src || exit 93; if (echo denied > /protected/file) 2>/dev/null; then exit 94; fi; echo success > result";
+    ctx.command = "test \"$(id -u)\" = 12345 || exit 91; test \"$(id -g)\" = 23456 || exit 92; test \"$(id -G)\" = 23456 || exit 95; test \"$(pwd -P)\" = /workspace/src || exit 93; if (echo denied > /protected/file) 2>/dev/null; then exit 94; fi; echo success > result";
     try expectBuildChild(&ctx, 0);
     const contents = try tmp.dir.readFileAlloc(io, "upper/workspace/src/result", alloc, .limited(100));
     defer alloc.free(contents);
@@ -183,16 +197,29 @@ test "build child kernel applies image USER WORKDIR and refuses invalid executio
 }
 
 fn expectBuildChild(ctx: *BuildChildContext, expected: u8) !void {
-    const rc = linux.fork();
-    if (linux.errno(rc) != .SUCCESS) return error.ForkFailed;
-    if (rc == 0) {
-        if (linux.errno(linux.unshare(linux.CLONE.NEWNS)) != .SUCCESS) linux.exit_group(80);
-        if (linux.errno(linux.mount(null, "/", null, linux.MS.REC | linux.MS.PRIVATE, 0)) != .SUCCESS) linux.exit_group(81);
-        // A read-only userspace supplies a real shell, loader and id utility.
-        // All writable fixture files remain in the disposable image root.
-        filesystem.bindMount(ctx.upper_dir, "/usr", "/usr", true) catch linux.exit_group(82);
-        linux.exit_group(buildChildMain(@ptrCast(ctx)));
-    }
-    const result = try @import("../../runtime/process.zig").wait(@intCast(rc), false);
+    const Fixture = struct {
+        ctx: *BuildChildContext,
+        parent_userns: posix.fd_t,
+
+        fn run(arg: ?*anyopaque) callconv(.c) u8 {
+            const self: *@This() = @ptrCast(@alignCast(arg));
+            // Root in the build namespace must not regain the launcher's
+            // CAP_SYS_ADMIN. This check fails if NEWUSER is ever omitted.
+            if (linux.errno(linux.setns(self.parent_userns, linux.CLONE.NEWUSER)) != .PERM) return 80;
+            linux_platform.posix.close(self.parent_userns);
+            if (linux.errno(linux.mount(null, "/", null, linux.MS.REC | linux.MS.PRIVATE, 0)) != .SUCCESS) return 81;
+            // Read-only userspace supplies a real shell, loader and id utility.
+            filesystem.bindMount(self.ctx.upper_dir, "/usr", "/usr", true) catch return 82;
+            return buildChildMain(@ptrCast(self.ctx));
+        }
+    };
+    const fd = try linux_platform.posix.open("/proc/self/ns/user", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    defer linux_platform.posix.close(fd);
+    var fixture: Fixture = .{ .ctx = ctx, .parent_userns = fd };
+    var child = try spawn(Fixture.run, @ptrCast(&fixture));
+    defer linux_platform.posix.close(child.stdout_fd);
+    defer linux_platform.posix.close(child.stderr_fd);
+    child.signalReady();
+    const result = try @import("../../runtime/process.zig").wait(child.pid, false);
     try std.testing.expectEqual(@import("../../runtime/process.zig").ExitStatus{ .exited = expected }, result.status);
 }

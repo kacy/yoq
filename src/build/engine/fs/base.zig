@@ -8,7 +8,6 @@ const spec = @import("../../../image/spec.zig");
 const registry = @import("../../../image/registry.zig");
 const state_store = @import("../../../state/store.zig");
 const container = @import("../../../runtime/container.zig");
-const namespaces = @import("../../../runtime/namespaces.zig");
 const process = @import("../../../runtime/process.zig");
 const log = @import("../../../lib/log.zig");
 const config_inherit = @import("../config_inherit.zig");
@@ -122,9 +121,7 @@ fn executeStep(alloc: std.mem.Allocator, state: *types.BuildState, args: []const
         .shell = state.shell,
     };
 
-    var spawn_result = namespaces.spawn(
-        .{ .net = false, .cgroup = false, .user = std.os.linux.geteuid() != 0 },
-        null,
+    var spawn_result = child_exec.spawn(
         child_exec.buildChildMain,
         @ptrCast(&child_ctx),
     ) catch return types.BuildError.RunStepFailed;
