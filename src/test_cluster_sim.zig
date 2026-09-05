@@ -19,19 +19,30 @@ const SimNode = struct {
         log.* = try Log.initMemory();
         errdefer log.deinit();
 
-        return .{
+        var node = SimNode{
             .id = id,
             .raft = try Raft.init(alloc, id, peers, log),
             .log = log,
         };
+        node.setElectionRng(std.Random.DefaultPrng.init(id));
+        return node;
     }
 
     fn restart(self: *SimNode, peers: []const NodeId) !void {
         const alloc = self.raft.alloc;
         const pending_actions = try self.raft.drainActions();
         freeActions(alloc, pending_actions);
+        const rng = self.raft.rng;
         self.raft.deinit();
         self.raft = try Raft.init(alloc, self.id, peers, self.log);
+        self.setElectionRng(rng);
+    }
+
+    fn setElectionRng(self: *SimNode, rng: std.Random.DefaultPrng) void {
+        // Replace both clock-derived values from Raft.init. Later elections
+        // and simulated restarts continue this deterministic random stream.
+        self.raft.rng = rng;
+        self.raft.election_timeout = self.raft.rng.random().intRangeAtMost(u32, 30, 60);
     }
 
     fn deinit(self: *SimNode) void {
@@ -445,6 +456,9 @@ fn tickAll(nodes: []const *SimNode, count: usize) void {
     }
 }
 
+// Allow several 30–60 tick election periods, including split-vote retries.
+const election_settle_ticks = 180;
+
 fn settleCluster(nodes: []const *SimNode, faults: *RandomFaultPlan, rounds: usize) !void {
     faults.clear();
     for (0..rounds) |_| {
@@ -503,7 +517,11 @@ fn runRandomSeed(seed: u64, trace: *std.ArrayList(u8)) !void {
     var prev_commit: [8]u64 = [_]u64{0} ** 8;
     var command_seq: usize = 0;
 
-    try settleCluster(&nodes, &faults, 24);
+    for (nodes) |node| {
+        node.setElectionRng(std.Random.DefaultPrng.init(seed *% 0x9e3779b97f4a7c15 +% node.id));
+    }
+    try settleCluster(&nodes, &faults, election_settle_ticks);
+    if (currentLeader(&nodes) == null) return error.NoInitialLeader;
     try ensureRandomSimInvariants(&nodes, &prev_commit);
 
     for (0..32) |step| {
@@ -566,7 +584,7 @@ fn runRandomSeed(seed: u64, trace: *std.ArrayList(u8)) !void {
     }
 
     try appendTrace(trace, "final: heal and settle\n", .{});
-    try settleCluster(&nodes, &faults, 48);
+    try settleCluster(&nodes, &faults, election_settle_ticks);
     try ensureRandomSimInvariants(&nodes, &prev_commit);
 
     const leader = currentLeader(&nodes) orelse return error.NoLeaderAfterHeal;
@@ -1212,5 +1230,26 @@ test "sim: randomized fixed seeds preserve raft invariants under transport fault
             std.debug.print("random sim seed {d} failed with {} trace:\n{s}", .{ seed, err, trace.items });
             return err;
         };
+
+        var replay = std.ArrayList(u8).empty;
+        defer replay.deinit(std.testing.allocator);
+        try runRandomSeed(seed, &replay);
+        try std.testing.expectEqualStrings(trace.items, replay.items);
     }
+}
+
+test "sim: healing allows a full election timeout" {
+    const alloc = std.testing.allocator;
+    var node1 = try SimNode.init(alloc, 1, &.{ 2, 3 });
+    defer node1.deinit();
+    var node2 = try SimNode.init(alloc, 2, &.{ 1, 3 });
+    defer node2.deinit();
+    var node3 = try SimNode.init(alloc, 3, &.{ 1, 2 });
+    defer node3.deinit();
+    const nodes = [_]*SimNode{ &node1, &node2, &node3 };
+    // All are valid production timeouts, but exceed the old 48-tick wait.
+    for (nodes, 0..) |node, index| node.raft.election_timeout = @intCast(58 + index);
+    var faults = RandomFaultPlan{};
+    try settleCluster(&nodes, &faults, election_settle_ticks);
+    try std.testing.expect(currentLeader(&nodes) != null);
 }

@@ -39,6 +39,17 @@ pub fn handleAppendEntries(
         }
     }
 
+    // Only this request's contiguous prefix is verified. A follower may still
+    // have a longer, divergent suffix until a later batch replaces it.
+    var verified_index = args.prev_log_index;
+    for (args.entries) |entry| {
+        const next = @addWithOverflow(verified_index, 1);
+        if (next[1] != 0 or entry.index != next[0]) {
+            return .{ .term = self.log.getCurrentTerm(), .success = false, .match_index = 0 };
+        }
+        verified_index = entry.index;
+    }
+
     for (args.entries) |entry| {
         const existing_term = self.log.termAt(entry.index);
         if (existing_term != 0 and existing_term != entry.term) {
@@ -56,8 +67,7 @@ pub fn handleAppendEntries(
     }
 
     if (args.leader_commit > self.commit_index) {
-        const last = self.log.lastIndex();
-        const new_commit = @min(args.leader_commit, last);
+        const new_commit = @min(args.leader_commit, verified_index);
         if (new_commit > self.commit_index) {
             self.actions.append(self.alloc, .{
                 .commit_entries = .{ .up_to = new_commit },
@@ -72,7 +82,7 @@ pub fn handleAppendEntries(
     return .{
         .term = self.log.getCurrentTerm(),
         .success = true,
-        .match_index = self.log.lastIndex(),
+        .match_index = verified_index,
     };
 }
 
