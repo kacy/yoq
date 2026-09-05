@@ -48,7 +48,11 @@ jobs:
             exit 1
           fi
 
-          commit=$(git ls-remote --refs origin "refs/tags/$tag" "refs/tags/$tag^{}" | awk 'END {print $1}')
+          tag_refs=$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")
+          commit=$(printf '%s\n' "$tag_refs" | awk '$2 == "refs/tags/'"$tag"'^{}" {print $1; exit}')
+          if [ -z "$commit" ]; then
+            commit=$(printf '%s\n' "$tag_refs" | awk '$2 == "refs/tags/'"$tag"'" {print $1; exit}')
+          fi
           if [ -z "$commit" ]; then
             echo "release tag does not resolve to a remote tag: $tag" >&2
             exit 1
