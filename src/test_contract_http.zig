@@ -7,26 +7,32 @@ const s3 = @import("storage/s3.zig");
 const support = @import("test_contract_support.zig");
 
 fn runHandleConnectionRaw(alloc: std.mem.Allocator, raw_request: []const u8) ![]u8 {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+    var fds: [2]std.posix.fd_t = undefined;
+    if (std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0, &fds) != 0) return error.SocketFailed;
+    defer linux_platform.posix.close(fds[0]);
+    const worker = std.Thread.spawn(.{}, connection_runtime.handleConnection, .{ alloc, fds[1] }) catch |err| {
+        linux_platform.posix.close(fds[1]);
+        return err;
+    };
+    defer worker.join();
+    defer _ = std.os.linux.shutdown(fds[0], 2);
 
-    var file = try tmp.dir.createFile(std.testing.io, "raw-http.txt", .{ .read = true });
-    defer file.close(std.testing.io);
-
-    try file.writeStreamingAll(std.testing.io, raw_request);
-    _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
-
-    const dup_fd = try linux_platform.posix.dup(file.handle);
-    connection_runtime.handleConnection(alloc, dup_fd);
-
-    _ = try linux_platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
-    const contents = try tmp.dir.readFileAlloc(std.testing.io, "raw-http.txt", alloc, .limited(raw_request.len + 16 * 1024));
-    errdefer alloc.free(contents);
-
-    if (contents.len < raw_request.len) return error.ResponseMissing;
-    const response = try alloc.dupe(u8, contents[raw_request.len..]);
-    alloc.free(contents);
-    return response;
+    const transport = @import("lib/socket_stream.zig");
+    const wire = transport.Stream{ .fd = fds[0], .deadline = transport.Deadline.afterMilliseconds(5000) };
+    try wire.writeAll(raw_request);
+    // EOF makes intentionally incomplete bodies deterministic while preserving
+    // the response direction of the socket.
+    _ = std.os.linux.shutdown(fds[0], 1);
+    var response: std.ArrayList(u8) = .empty;
+    errdefer response.deinit(alloc);
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        const n = try wire.read(&buffer);
+        if (n == 0) break;
+        if (response.items.len + n > 16 * 1024) return error.ResponseTooLarge;
+        try response.appendSlice(alloc, buffer[0..n]);
+    }
+    return response.toOwnedSlice(alloc);
 }
 
 fn responseBody(response: []const u8) ![]const u8 {
