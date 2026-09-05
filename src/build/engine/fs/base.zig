@@ -215,7 +215,7 @@ test "build base gzip diff IDs survive exported config and reject invalid metada
     var tar: std.tar.Writer = .{ .underlying_writer = &tar_bytes.writer };
     try tar.writeFileBytes("base-file", "gzip base contents", .{});
     try tar.finishPedantically();
-    var compressed: std.Io.Writer.Allocating = .init(alloc);
+    var compressed: std.Io.Writer.Allocating = try .initCapacity(alloc, 4096);
     defer compressed.deinit();
     const compressor = try alloc.create(std.compress.flate.Compress);
     defer alloc.destroy(compressor);
