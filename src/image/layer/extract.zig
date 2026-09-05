@@ -35,6 +35,7 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
             blob_store.removeBlob(digest);
             return error.BlobNotFound;
         }
+        (platform.File{ .handle = parent.handle }).sync() catch return error.ExtractionFailed;
         return alloc.dupe(u8, dest_path) catch error.ExtractionFailed;
     }
     // Only unpublished/stale entries are removed, while holding the same lock
