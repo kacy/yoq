@@ -606,7 +606,6 @@ test "startup refuses filesystem setup in the host mount namespace" {
 
 test "startup poll finalizes exited child before another start can replace handles" {
     const platform = @import("linux_platform");
-    const logs = @import("logs.zig");
     try store.initTestDb();
     defer store.deinitTestDb();
     var tmp = std.testing.tmpDir(.{});
