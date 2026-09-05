@@ -79,6 +79,10 @@ pub fn getInDb(db: *sqlite.Db, alloc: Allocator, service_name: []const u8) Store
     const key = try buildKey(alloc, service_name);
     defer alloc.free(key);
 
+    return getByDomain(db, alloc, key);
+}
+
+fn getByDomain(db: *sqlite.Db, alloc: Allocator, key: []const u8) StoreError!?Record {
     var stmt = db.prepare(
         "SELECT domain, cert_pem, encrypted_key, key_nonce, key_tag, not_after, created_at, updated_at FROM certificates WHERE domain = ? AND source = ?;",
     ) catch return StoreError.ReadFailed;
@@ -90,12 +94,45 @@ pub fn getInDb(db: *sqlite.Db, alloc: Allocator, service_name: []const u8) Store
     return null;
 }
 
+/// Reserved outside the service namespace, so manifests cannot claim it.
+pub fn getProxy(alloc: Allocator) StoreError!?Record {
+    var lease = try common.leaseDb();
+    defer lease.deinit();
+    return getByDomain(lease.db, alloc, "proxy:ingress");
+}
+
 /// build the raft-replicated upsert. blobs go in as sqlite x'..' hex
 /// literals; raft.propose() takes raw SQL with no bindings. `domain` is
 /// quoted because service names are ascii and the schema PK matches on
 /// the exact string we wrote.
 pub fn buildUpsertSql(
     alloc: Allocator,
+    service_name: []const u8,
+    cert_pem: []const u8,
+    encrypted_key: []const u8,
+    key_nonce: []const u8,
+    key_tag: []const u8,
+    not_after: i64,
+    issued_at: i64,
+) StoreError![]u8 {
+    return buildIdentityUpsertSql(alloc, key_prefix, service_name, cert_pem, encrypted_key, key_nonce, key_tag, not_after, issued_at);
+}
+
+pub fn buildProxyUpsertSql(
+    alloc: Allocator,
+    cert_pem: []const u8,
+    encrypted_key: []const u8,
+    key_nonce: []const u8,
+    key_tag: []const u8,
+    not_after: i64,
+    issued_at: i64,
+) StoreError![]u8 {
+    return buildIdentityUpsertSql(alloc, "proxy:", "ingress", cert_pem, encrypted_key, key_nonce, key_tag, not_after, issued_at);
+}
+
+fn buildIdentityUpsertSql(
+    alloc: Allocator,
+    prefix: []const u8,
     service_name: []const u8,
     cert_pem: []const u8,
     encrypted_key: []const u8,
@@ -118,7 +155,7 @@ pub fn buildUpsertSql(
     return std.fmt.allocPrint(
         alloc,
         "INSERT OR REPLACE INTO certificates (domain, cert_pem, encrypted_key, key_nonce, key_tag, not_after, source, created_at, updated_at) VALUES ('{s}{s}', x'{s}', x'{s}', x'{s}', x'{s}', {d}, '{s}', {d}, {d});",
-        .{ key_prefix, service_name, cert_hex, key_hex, nonce_hex, tag_hex, not_after, source_label, issued_at, issued_at },
+        .{ prefix, service_name, cert_hex, key_hex, nonce_hex, tag_hex, not_after, source_label, issued_at, issued_at },
     ) catch return StoreError.WriteFailed;
 }
 
@@ -203,4 +240,23 @@ test "unsafe service names are rejected" {
     try std.testing.expectError(StoreError.WriteFailed, buildUpsertSql(alloc, "bad name", "c", "k", "n", "t", 1, 1));
     try std.testing.expectError(StoreError.WriteFailed, buildUpsertSql(alloc, "evil'); DROP TABLE", "c", "k", "n", "t", 1, 1));
     try std.testing.expectError(StoreError.WriteFailed, buildUpsertSql(alloc, "", "c", "k", "n", "t", 1, 1));
+}
+
+test "proxy mtls certificate namespace cannot collide with a service" {
+    const alloc = std.testing.allocator;
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+    const service_sql = try buildUpsertSql(alloc, "ingress", "service certificate", "k", "n", "t", 200, 100);
+    defer alloc.free(service_sql);
+    const proxy_sql = try buildProxyUpsertSql(alloc, "proxy certificate", "k", "n", "t", 200, 100);
+    defer alloc.free(proxy_sql);
+    try db.execDynamic(service_sql, .{}, .{});
+    try db.execDynamic(proxy_sql, .{}, .{});
+    const service_cert = (try getInDb(&db, alloc, "ingress")).?;
+    defer service_cert.deinit(alloc);
+    const proxy_cert = (try getByDomain(&db, alloc, "proxy:ingress")).?;
+    defer proxy_cert.deinit(alloc);
+    try std.testing.expectEqualStrings("service certificate", service_cert.cert_pem);
+    try std.testing.expectEqualStrings("proxy certificate", proxy_cert.cert_pem);
 }

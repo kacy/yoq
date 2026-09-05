@@ -203,6 +203,8 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
     }
 
     log.setFormat(log_fmt);
+    listener_runtime.configurePeerKey(join_token);
+    defer listener_runtime.configurePeerKey(null);
     listener_runtime.configure(http_proxy_bind, http_proxy_port);
     service_rollout.logStartupSummary();
     service_reconciler.ensureDataPlaneReadyIfEnabled();

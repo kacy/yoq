@@ -39,7 +39,9 @@ pub const leaf_validity_secs: i64 = 24 * 60 * 60; // 24h leaf TTL
 /// this means we issue a new leaf around the 16h mark, leaving ~8h of
 /// headroom for raft replication + reconciliation on every follower.
 pub const rotation_fraction_remaining: f64 = 1.0 / 3.0;
-pub const identity_cluster_label = "yoq-cluster";
+const peer_identity = @import("../tls/peer_identity.zig");
+const mtls_store = @import("../state/store/certificates_mtls.zig");
+pub const identity_cluster_label = peer_identity.cluster_label;
 pub const ca_common_name = "yoq-cluster-ca";
 
 /// per-service failure counters; reset only on success. snapshotted by the
@@ -120,8 +122,6 @@ fn tick(ctx: *Ctx) !void {
         services.deinit(ctx.alloc);
     }
 
-    if (services.items.len == 0) return;
-
     var loaded = ca_access.load(ctx.alloc, ctx.join_token_owned) catch |err| {
         log.warn("cert issuer: failed to load CA: {}", .{err});
         return;
@@ -129,6 +129,10 @@ fn tick(ctx: *Ctx) !void {
     defer loaded.deinit(ctx.alloc);
 
     const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+
+    ensureProxyCert(ctx, &loaded, now) catch |err| {
+        log.warn("cert issuer: ingress proxy: {}", .{err});
+    };
 
     for (services.items) |service| {
         ensureCertForService(ctx, &loaded, service.service_name, now) catch |err| {
@@ -149,6 +153,14 @@ fn ensureCertForService(ctx: *Ctx, loaded: *ca_access.Loaded, service_name: []co
     try issueAndPropose(ctx, loaded, service_name, now);
 }
 
+fn ensureProxyCert(ctx: *Ctx, loaded: *ca_access.Loaded, now: i64) !void {
+    if (try mtls_store.getProxy(ctx.alloc)) |rec| {
+        defer rec.deinit(ctx.alloc);
+        if (!shouldRotate(rec.created_at, rec.not_after, now)) return;
+    }
+    try issueIdentity(ctx, loaded, "ingress", peer_identity.proxy_identity, true, now);
+}
+
 /// decide whether a cert with the given lifetime needs rotation now.
 /// `created_at` and `not_after` are unix seconds; `now` is the current
 /// wall-clock second. exported for tests.
@@ -163,13 +175,12 @@ pub fn shouldRotate(created_at: i64, not_after: i64, now: i64) bool {
 }
 
 fn issueAndPropose(ctx: *Ctx, loaded: *ca_access.Loaded, service_name: []const u8, now: i64) !void {
-    const identity = try std.fmt.allocPrint(
-        ctx.alloc,
-        "spiffe://{s}/service/{s}",
-        .{ identity_cluster_label, service_name },
-    );
+    const identity = try peer_identity.service(ctx.alloc, service_name);
     defer ctx.alloc.free(identity);
+    try issueIdentity(ctx, loaded, service_name, identity, false, now);
+}
 
+fn issueIdentity(ctx: *Ctx, loaded: *ca_access.Loaded, service_name: []const u8, identity: []const u8, proxy: bool, now: i64) !void {
     const not_after = now + leaf_validity_secs;
     var minted = try x509_gen.issueLeaf(
         std.Options.debug_io,
@@ -187,11 +198,20 @@ fn issueAndPropose(ctx: *Ctx, loaded: *ca_access.Loaded, service_name: []const u
     // uses, so any node decrypts identically when reading the row back.
     var raw_key = minted.key_pair.secret_key.toBytes();
     defer std.crypto.secureZero(u8, &raw_key);
-    const derived = deriveKey(ctx.join_token_owned);
+    var derived = deriveKey(ctx.join_token_owned);
+    defer std.crypto.secureZero(u8, &derived);
     var enc = try secrets.encrypt(ctx.alloc, &raw_key, derived);
     defer ctx.alloc.free(enc.ciphertext);
 
-    const sql = try store.buildMtlsCertUpsertSql(
+    const sql = if (proxy) try mtls_store.buildProxyUpsertSql(
+        ctx.alloc,
+        minted.cert_pem,
+        enc.ciphertext,
+        &enc.nonce,
+        &enc.tag,
+        not_after,
+        now,
+    ) else try store.buildMtlsCertUpsertSql(
         ctx.alloc,
         service_name,
         minted.cert_pem,
@@ -204,7 +224,7 @@ fn issueAndPropose(ctx: *Ctx, loaded: *ca_access.Loaded, service_name: []const u
     defer ctx.alloc.free(sql);
 
     _ = try ctx.node.propose(sql);
-    clearFailureLocked(ctx.alloc, service_name);
+    if (!proxy) clearFailureLocked(ctx.alloc, service_name);
     log.info("cert issuer: issued mtls leaf for {s} (valid through unix {d})", .{ service_name, not_after });
 }
 
