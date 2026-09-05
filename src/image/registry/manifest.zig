@@ -18,11 +18,29 @@ pub fn fetchManifest(
     reference: []const u8,
     token: common.Token,
 ) common.ManifestError!ManifestFetchResult {
+    return fetchManifestWithScheme(alloc, client, host, repository, reference, token, "https");
+}
+
+fn fetchManifestWithScheme(
+    alloc: std.mem.Allocator,
+    client: *std.http.Client,
+    host: []const u8,
+    repository: []const u8,
+    reference: []const u8,
+    token: common.Token,
+    comptime scheme: []const u8,
+) common.ManifestError!ManifestFetchResult {
+    // Colons are not legal in a tag. A digest-valued reference must parse
+    // successfully, and its hash is authoritative even without a header.
+    const requested_digest: ?blob_store.Digest = if (std.mem.indexOfScalar(u8, reference, ':') != null)
+        blob_store.Digest.parse(reference) orelse return error.DigestMismatch
+    else
+        null;
     var url_buf: [1024]u8 = undefined;
     const url = std.fmt.bufPrint(
         &url_buf,
-        "https://{s}/v2/{s}/manifests/{s}",
-        .{ host, repository, reference },
+        "{s}://{s}/v2/{s}/manifests/{s}",
+        .{ scheme, host, repository, reference },
     ) catch return error.ManifestNotFound;
 
     const accept_header = std.http.Header{
@@ -67,24 +85,23 @@ pub fn fetchManifest(
     var header_it = response.head.iterateHeaders();
     while (header_it.next()) |header| {
         if (!std.ascii.eqlIgnoreCase(header.name, "docker-content-digest")) continue;
-        expected_digest = blob_store.Digest.parse(header.value);
+        expected_digest = blob_store.Digest.parse(header.value) orelse return error.DigestMismatch;
         break;
     }
 
     var transfer_buf: [8192]u8 = undefined;
     const body_reader = response.reader(&transfer_buf);
 
-    var aw_body: std.Io.Writer.Allocating = .init(alloc);
-    defer aw_body.deinit();
-
-    _ = body_reader.streamRemaining(&aw_body.writer) catch return error.NetworkError;
-
-    const raw_body = aw_body.writer.buffer[0..aw_body.writer.end];
-    if (raw_body.len > common.max_manifest_size) return error.ResponseTooLarge;
+    const raw_body = try http_helpers.readBody(alloc, body_reader, common.max_manifest_size);
+    defer alloc.free(raw_body);
 
     const computed = blob_store.computeDigest(raw_body);
     var computed_str_buf: [71]u8 = undefined;
     const computed_str = computed.string(&computed_str_buf);
+
+    if (requested_digest) |expected| {
+        if (!computed.eql(expected)) return error.DigestMismatch;
+    }
 
     if (expected_digest) |header_digest| {
         var header_digest_buf: [71]u8 = undefined;
@@ -96,14 +113,14 @@ pub fn fetchManifest(
     }
 
     if (spec.isIndexMediaType(content_type)) {
-        return resolveImageIndex(alloc, client, host, repository, raw_body, token);
+        return resolveImageIndex(alloc, client, host, repository, raw_body, token, scheme);
     }
 
     var parsed_index = spec.parseImageIndex(alloc, raw_body) catch null;
     if (parsed_index) |*index| {
         defer index.deinit();
         if (index.value.manifests.len > 0) {
-            return resolveImageIndex(alloc, client, host, repository, raw_body, token);
+            return resolveImageIndex(alloc, client, host, repository, raw_body, token, scheme);
         }
     }
 
@@ -126,6 +143,7 @@ fn resolveImageIndex(
     repository: []const u8,
     index_bytes: []const u8,
     token: common.Token,
+    comptime scheme: []const u8,
 ) common.ManifestError!ManifestFetchResult {
     var parsed = spec.parseImageIndex(alloc, index_bytes) catch return error.ParseError;
     defer parsed.deinit();
@@ -153,5 +171,101 @@ fn resolveImageIndex(
     }
 
     const digest = target_digest orelse return error.PlatformNotFound;
-    return fetchManifest(alloc, client, host, repository, digest, token);
+    _ = blob_store.Digest.parse(digest) orelse return error.DigestMismatch;
+    return fetchManifestWithScheme(alloc, client, host, repository, digest, token, scheme);
+}
+
+test "registry transfer verifies pinned manifests with and without server digest headers" {
+    const Server = @import("test_support.zig").Server;
+    const alloc = std.testing.allocator;
+    const body = "{\"schemaVersion\":2}";
+    var digest_buf: [71]u8 = undefined;
+    const digest = blob_store.computeDigest(body).string(&digest_buf);
+    const wrong = "sha256:" ++ "0" ** 64;
+    var headers_buf: [128]u8 = undefined;
+    const headers = try std.fmt.bufPrint(&headers_buf, "Docker-Content-Digest: {s}\r\n", .{digest});
+    for ([_]bool{ false, true }) |has_header| {
+        for ([_]bool{ false, true }) |wrong_pin| {
+            const replies = [_]Server.Reply{.{ .body = body, .headers = if (has_header) headers else "" }};
+            var server = try Server.init(&replies);
+            defer server.deinit();
+            try server.start();
+            var client: std.http.Client = .{ .io = std.testing.io, .allocator = alloc };
+            defer client.deinit();
+            var host_buf: [64]u8 = undefined;
+            const result = fetchManifestWithScheme(alloc, &client, try server.host(&host_buf), "test", if (wrong_pin) wrong else digest, .{ .value = "" }, "http");
+            if (wrong_pin) {
+                try std.testing.expectError(error.DigestMismatch, result);
+            } else {
+                const fetched = try result;
+                defer alloc.free(fetched.body);
+                defer alloc.free(fetched.digest);
+                try std.testing.expectEqualStrings(body, fetched.body);
+                try std.testing.expectEqualStrings(digest, fetched.digest);
+            }
+        }
+    }
+}
+
+test "registry transfer validates selected index descriptor syntax and content" {
+    const Server = @import("test_support.zig").Server;
+    const alloc = std.testing.allocator;
+    const body = "{\"schemaVersion\":2}";
+    var digest_buf: [71]u8 = undefined;
+    const digest = blob_store.computeDigest(body).string(&digest_buf);
+    const descriptors = [_][]const u8{ digest, "sha256:" ++ "0" ** 64, "latest" };
+    for (descriptors, 0..) |descriptor, index| {
+        const index_body = try std.fmt.allocPrint(
+            alloc,
+            "{{\"schemaVersion\":2,\"manifests\":[{{\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"digest\":\"{s}\",\"size\":19,\"platform\":{{\"os\":\"linux\",\"architecture\":\"amd64\"}}}}]}}",
+            .{descriptor},
+        );
+        defer alloc.free(index_body);
+        var headers_buf: [128]u8 = undefined;
+        const child_headers = try std.fmt.bufPrint(&headers_buf, "Docker-Content-Digest: {s}\r\n", .{digest});
+        const replies = [_]Server.Reply{
+            .{ .body = index_body, .headers = "Content-Type: application/vnd.oci.image.index.v1+json\r\n" },
+            .{ .body = body, .headers = child_headers },
+        };
+        var server = try Server.init(replies[0..if (index == 2) @as(usize, 1) else 2]);
+        defer server.deinit();
+        try server.start();
+        var client: std.http.Client = .{ .io = std.testing.io, .allocator = alloc };
+        defer client.deinit();
+        var host_buf: [64]u8 = undefined;
+        const result = fetchManifestWithScheme(alloc, &client, try server.host(&host_buf), "test", "latest", .{ .value = "" }, "http");
+        if (index != 0) {
+            try std.testing.expectError(error.DigestMismatch, result);
+        } else {
+            const fetched = try result;
+            defer alloc.free(fetched.body);
+            defer alloc.free(fetched.digest);
+            try std.testing.expectEqualStrings(body, fetched.body);
+        }
+    }
+}
+
+test "registry transfer caps chunked and unknown length manifests before allocating the whole body" {
+    const Server = @import("test_support.zig").Server;
+    for ([_]Server.Reply{ .{ .framing = .chunked }, .{ .framing = .close } }) |framing| {
+        const replies = [_]Server.Reply{.{ .framing = framing.framing, .repeated_bytes = common.max_manifest_size * 3 }};
+        var server = try Server.init(&replies);
+        defer server.deinit();
+        try server.start();
+        var client: std.http.Client = .{ .io = std.testing.io, .allocator = std.testing.allocator };
+        defer client.deinit();
+        const memory = try std.testing.allocator.alloc(u8, common.max_manifest_size * 2);
+        defer std.testing.allocator.free(memory);
+        var bounded = std.heap.FixedBufferAllocator.init(memory);
+        var host_buf: [64]u8 = undefined;
+        try std.testing.expectError(error.ResponseTooLarge, fetchManifestWithScheme(
+            bounded.allocator(),
+            &client,
+            try server.host(&host_buf),
+            "test",
+            "latest",
+            .{ .value = "" },
+            "http",
+        ));
+    }
 }

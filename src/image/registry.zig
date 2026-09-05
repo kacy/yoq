@@ -19,6 +19,8 @@ pub const PushResult = common.PushResult;
 /// uses errdefer chains so each allocation is automatically cleaned up
 /// on any subsequent failure — no manual cleanup blocks needed.
 pub fn pull(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.ImageRef) RegistryError!PullResult {
+    if (image_ref.digest_reference and blob_store.Digest.parse(image_ref.reference) == null)
+        return RegistryError.DigestMismatch;
     var client: std.http.Client = .{ .io = io, .allocator = alloc };
     defer client.deinit();
 
@@ -65,15 +67,9 @@ pub fn pull(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.ImageRef) Regi
             error.BlobNotFound => RegistryError.BlobNotFound,
             error.NetworkError => RegistryError.NetworkError,
             error.ResponseTooLarge => RegistryError.ResponseTooLarge,
+            error.DigestMismatch => RegistryError.DigestMismatch,
         };
     errdefer alloc.free(config_bytes);
-
-    const config_computed = blob_store.computeDigest(config_bytes);
-    if (blob_store.Digest.parse(manifest.config.digest)) |expected| {
-        if (!config_computed.eql(expected)) {
-            return RegistryError.DigestMismatch;
-        }
-    }
 
     var layer_digests: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
@@ -611,4 +607,12 @@ test "registry batch waits for workers before reporting their failure after fall
     try std.testing.expectError(error.NetworkError, downloadBatch(DownloadBatchFixture, &fixture, 3));
     try std.testing.expect(fixture.joined[0]);
     try std.testing.expect(fixture.joined[2]);
+}
+
+test "registry transfer rejects malformed caller pins before authentication" {
+    for ([_][]const u8{ "test@invalid", "test@sha512:abc", "test@sha256:short", "test@", "alpine@sha256:bad/path", "alpine@bad.example/path", "registry.example:5000/team/image@sha256:bad/path" }) |reference| {
+        const parsed = spec.parseImageRef(reference);
+        try std.testing.expect(parsed.digest_reference);
+        try std.testing.expectError(error.DigestMismatch, pull(std.testing.io, std.testing.allocator, parsed));
+    }
 }

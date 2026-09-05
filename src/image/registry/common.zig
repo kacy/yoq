@@ -36,6 +36,7 @@ pub const ManifestError = error{
 
 pub const max_manifest_size: usize = 10 * 1024 * 1024;
 pub const max_auth_response_size: usize = 64 * 1024;
+pub const max_config_size: usize = 4 * 1024 * 1024;
 pub const max_blob_size: usize = 512 * 1024 * 1024;
 pub const max_parallel_downloads = 4;
 pub const registry_timeout_sec = 30;

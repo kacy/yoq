@@ -207,35 +207,35 @@ pub const ImageRef = struct {
     repository: []const u8,
     /// the tag or digest (e.g. "latest")
     reference: []const u8,
+    /// Preserve whether the caller used @, including malformed digests.
+    digest_reference: bool = false,
 };
 
 pub fn parseImageRef(ref: []const u8) ImageRef {
-    // check for explicit host (contains '.' or ':' before first '/')
-    var host: []const u8 = "registry-1.docker.io";
-    var remainder = ref;
+    // Split the digest first: malformed suffixes may contain '/' or ':',
+    // which must never be interpreted as part of a registry hostname.
+    const at = std.mem.indexOfScalar(u8, ref, '@');
+    const name = if (at) |index| ref[0..index] else ref;
+    var reference: []const u8 = if (at) |index| ref[index + 1 ..] else "latest";
 
-    if (std.mem.indexOfScalar(u8, ref, '/')) |slash_idx| {
-        const prefix = ref[0..slash_idx];
-        // if prefix contains a dot or colon, it's a hostname
+    // Check for an explicit host (contains '.' or ':' before first '/').
+    var host: []const u8 = "registry-1.docker.io";
+    var remainder = name;
+    if (std.mem.indexOfScalar(u8, name, '/')) |slash_idx| {
+        const prefix = name[0..slash_idx];
         if (std.mem.indexOfScalar(u8, prefix, '.') != null or
             std.mem.indexOfScalar(u8, prefix, ':') != null)
         {
             host = prefix;
-            remainder = ref[slash_idx + 1 ..];
+            remainder = name[slash_idx + 1 ..];
         }
     }
 
-    // split repository:tag
     var repository = remainder;
-    var reference: []const u8 = "latest";
-
-    // check for @sha256: digest reference first
-    if (std.mem.indexOf(u8, remainder, "@sha256:")) |at_idx| {
-        repository = remainder[0..at_idx];
-        reference = remainder[at_idx + 1 ..]; // include "sha256:..."
-    } else if (std.mem.lastIndexOfScalar(u8, remainder, ':')) |colon_idx| {
+    if (std.mem.lastIndexOfScalar(u8, remainder, ':')) |colon_idx| {
         repository = remainder[0..colon_idx];
-        reference = remainder[colon_idx + 1 ..];
+        // A supplied digest takes precedence over an optional tag.
+        if (at == null) reference = remainder[colon_idx + 1 ..];
     }
 
     // docker hub: bare names get "library/" prefix.
@@ -246,6 +246,7 @@ pub fn parseImageRef(ref: []const u8) ImageRef {
         .host = host,
         .repository = repository,
         .reference = reference,
+        .digest_reference = at != null,
     };
 }
 
@@ -573,4 +574,20 @@ test "parse image config with labels" {
     defer result.deinit();
 
     try std.testing.expect(result.value.config.?.Labels != null);
+}
+
+test "parse image ref preserves registry ports and namespaces before digest suffix" {
+    const digest = "sha256:" ++ "a" ** 64;
+    const cases = [_]struct { input: []const u8, host: []const u8, repository: []const u8 }{
+        .{ .input = "registry.example:5000/team/image@" ++ digest, .host = "registry.example:5000", .repository = "team/image" },
+        .{ .input = "team/image@" ++ digest, .host = "registry-1.docker.io", .repository = "team/image" },
+        .{ .input = "registry.example:5000/team/image:stable@" ++ digest, .host = "registry.example:5000", .repository = "team/image" },
+    };
+    for (cases) |case| {
+        const parsed = parseImageRef(case.input);
+        try std.testing.expectEqualStrings(case.host, parsed.host);
+        try std.testing.expectEqualStrings(case.repository, parsed.repository);
+        try std.testing.expectEqualStrings(digest, parsed.reference);
+        try std.testing.expect(parsed.digest_reference);
+    }
 }

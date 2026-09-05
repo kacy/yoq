@@ -13,14 +13,30 @@ pub fn fetchBlob(
     digest: []const u8,
     token: common.Token,
 ) ![]u8 {
+    return fetchBlobWithScheme(alloc, client, host, repository, digest, token, "https");
+}
+
+fn fetchBlobWithScheme(
+    alloc: std.mem.Allocator,
+    client: *std.http.Client,
+    host: []const u8,
+    repository: []const u8,
+    digest: []const u8,
+    token: common.Token,
+    comptime scheme: []const u8,
+) ![]u8 {
+    const expected = blob_store.Digest.parse(digest) orelse return error.DigestMismatch;
     var url_buf: [1024]u8 = undefined;
     const url = std.fmt.bufPrint(
         &url_buf,
-        "https://{s}/v2/{s}/blobs/{s}",
-        .{ host, repository, digest },
+        "{s}://{s}/v2/{s}/blobs/{s}",
+        .{ scheme, host, repository, digest },
     ) catch return error.BlobNotFound;
 
-    return fetchBlobFromUrl(alloc, client, host, url, token, true, 0);
+    const body = try fetchBlobFromUrl(alloc, client, host, url, token, true, 0);
+    errdefer alloc.free(body);
+    if (!blob_store.computeDigest(body).eql(expected)) return error.DigestMismatch;
+    return body;
 }
 
 pub fn downloadLayerWorker(
@@ -142,22 +158,12 @@ fn fetchBlobFromUrl(
     }
 
     if (response.head.content_length) |content_length| {
-        if (content_length > common.max_blob_size) return error.ResponseTooLarge;
+        if (content_length > common.max_config_size) return error.ResponseTooLarge;
     }
 
     var transfer_buf: [8192]u8 = undefined;
     const body_reader = response.reader(&transfer_buf);
-    var aw: std.Io.Writer.Allocating = .init(alloc);
-    defer aw.deinit();
-
-    _ = body_reader.streamRemaining(&aw.writer) catch |err| {
-        log.warn("blob fetch: body read failed for {s}: {}", .{ url_summary, err });
-        return error.NetworkError;
-    };
-
-    const raw_body = aw.writer.buffer[0..aw.writer.end];
-    if (raw_body.len > common.max_blob_size) return error.ResponseTooLarge;
-    return alloc.dupe(u8, raw_body) catch return error.NetworkError;
+    return http_helpers.readBody(alloc, body_reader, common.max_config_size);
 }
 
 fn downloadBlobToStore(
@@ -297,4 +303,60 @@ fn verifyFileDigest(path: []const u8, expected: blob_store.Digest) !void {
 
     const computed = blob_store.Digest{ .hash = hasher.finalResult() };
     if (!computed.eql(expected)) return error.DigestMismatch;
+}
+
+test "registry transfer verifies config digests before returning downloaded bytes" {
+    const Server = @import("test_support.zig").Server;
+    const alloc = std.testing.allocator;
+    const body = "{\"architecture\":\"amd64\"}";
+    var digest_buf: [71]u8 = undefined;
+    const digest = blob_store.computeDigest(body).string(&digest_buf);
+    for ([_]bool{ false, true }) |wrong_pin| {
+        const replies = [_]Server.Reply{.{ .body = body }};
+        var server = try Server.init(&replies);
+        defer server.deinit();
+        try server.start();
+        var client: std.http.Client = .{ .io = std.testing.io, .allocator = alloc };
+        defer client.deinit();
+        var host_buf: [64]u8 = undefined;
+        const result = fetchBlobWithScheme(alloc, &client, try server.host(&host_buf), "test", if (wrong_pin) "sha256:" ++ "0" ** 64 else digest, .{ .value = "" }, "http");
+        if (wrong_pin) {
+            try std.testing.expectError(error.DigestMismatch, result);
+        } else {
+            const fetched = try result;
+            defer alloc.free(fetched);
+            try std.testing.expectEqualStrings(body, fetched);
+        }
+    }
+    var client: std.http.Client = .{ .io = std.testing.io, .allocator = alloc };
+    defer client.deinit();
+    for ([_][]const u8{ "not-a-digest", "sha256:short", "sha256:" ++ ("+a" ** 32) }) |malformed| {
+        // Public path must reject before opening any network connection.
+        try std.testing.expectError(error.DigestMismatch, fetchBlob(alloc, &client, "unused.invalid", "test", malformed, .{ .value = "" }));
+    }
+}
+
+test "registry transfer uses the small config cap for chunked and unknown length bodies" {
+    const Server = @import("test_support.zig").Server;
+    for ([_]Server.Reply{ .{ .framing = .chunked }, .{ .framing = .close } }) |framing| {
+        const replies = [_]Server.Reply{.{ .framing = framing.framing, .repeated_bytes = common.max_config_size * 3 }};
+        var server = try Server.init(&replies);
+        defer server.deinit();
+        try server.start();
+        var client: std.http.Client = .{ .io = std.testing.io, .allocator = std.testing.allocator };
+        defer client.deinit();
+        const memory = try std.testing.allocator.alloc(u8, common.max_config_size * 2);
+        defer std.testing.allocator.free(memory);
+        var bounded = std.heap.FixedBufferAllocator.init(memory);
+        var host_buf: [64]u8 = undefined;
+        try std.testing.expectError(error.ResponseTooLarge, fetchBlobWithScheme(
+            bounded.allocator(),
+            &client,
+            try server.host(&host_buf),
+            "test",
+            "sha256:" ++ "0" ** 64,
+            .{ .value = "" },
+            "http",
+        ));
+    }
 }
