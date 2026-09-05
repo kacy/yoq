@@ -108,11 +108,14 @@ fn hasCompleteCacheMarker(dest_path: []const u8) bool {
 }
 
 fn createCompleteCacheMarker(dest_path: []const u8) !void {
-    var marker_buf: [max_path]u8 = undefined;
-    const marker_path = try cacheMarkerPath(&marker_buf, dest_path);
-    var file = try cwd().createFile(std.Options.debug_io, marker_path, .{ .truncate = true });
-    defer file.close(std.Options.debug_io);
-    try file.writeStreamingAll(std.Options.debug_io, "ok\n");
+    var dir = try cwd().openDir(std.Options.debug_io, dest_path, .{});
+    defer dir.close(std.Options.debug_io);
+    // The archive may contain this name as a symlink. Replace the entry,
+    // never open its target when publishing completion.
+    var file = try dir.createFileAtomic(std.Options.debug_io, cache_marker_name, .{ .replace = true });
+    defer file.deinit(std.Options.debug_io);
+    try file.file.writeStreamingAll(std.Options.debug_io, "ok\n");
+    try file.replace(std.Options.debug_io);
 }
 
 fn cacheMarkerPath(buf: *[max_path]u8, dest_path: []const u8) ![]const u8 {

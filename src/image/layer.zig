@@ -277,6 +277,40 @@ test "create layer then extract layer preserves file contents" {
     try std.testing.expectEqualStrings("hello.txt", link_buf[0..link_len]);
 }
 
+test "extract layer replaces an archive symlink at the cache marker without following it" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+
+    var outside = std.testing.tmpDir(.{});
+    defer outside.cleanup();
+    try outside.dir.writeFile(std.testing.io, .{ .sub_path = "sentinel", .data = "untouched" });
+    var outside_buf: [max_path]u8 = undefined;
+    const outside_len = try outside.dir.realPathFile(std.testing.io, "sentinel", &outside_buf);
+
+    var tar_bytes = std.Io.Writer.Allocating.init(alloc);
+    defer tar_bytes.deinit();
+    var writer: std.tar.Writer = .{ .underlying_writer = &tar_bytes.writer };
+    try writer.writeLink(".yoq_complete", outside_buf[0..outside_len], .{});
+    try writer.finishPedantically();
+    const gzip = try gzipBytes(alloc, tar_bytes.written());
+    defer alloc.free(gzip);
+    const digest = try blob_store.putBlob(gzip);
+    defer blob_store.deleteBlob(digest) catch {};
+    defer deleteExtractedLayerForDigest(digest);
+
+    var digest_buf: [71]u8 = undefined;
+    const extracted_path = try extractLayer(alloc, digestString(digest, &digest_buf));
+    defer alloc.free(extracted_path);
+    var extracted = try cwd().openDir(std.testing.io, extracted_path, .{});
+    defer extracted.close(std.testing.io);
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("untouched", try outside.dir.readFile(std.testing.io, "sentinel", &buf));
+    const stat = try extracted.statFile(std.testing.io, ".yoq_complete", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(.file, stat.kind);
+    try std.testing.expectEqualStrings("ok\n", try extracted.readFile(std.testing.io, ".yoq_complete", &buf));
+}
+
 test "create layer from dir — deterministic digest" {
     try requireLayerCreationTestHost();
     if (!hasHomeEnv()) return;

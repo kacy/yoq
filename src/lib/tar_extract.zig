@@ -1,6 +1,9 @@
 const std = @import("std");
 
+const linux = std.os.linux;
+
 const log = @import("log.zig");
+const syscall = @import("syscall.zig");
 
 pub const max_file_size: u64 = 10 * 1024 * 1024 * 1024;
 
@@ -44,43 +47,65 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
 
     var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
     var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var normalized_buffer: [std.fs.max_path_bytes]u8 = undefined;
     var it: std.tar.Iterator = .init(reader, .{
         .file_name_buffer = &file_name_buffer,
         .link_name_buffer = &link_name_buffer,
     });
 
     while (try it.next()) |entry| {
-        if (!isSafeTarPath(entry.name)) {
-            log.warn("{s}: skipping unsafe archive path '{s}'", .{ context, entry.name });
-            continue;
+        const name = normalizeTarPath(entry.name, &normalized_buffer) catch |err| {
+            log.warn("{s}: rejecting unsafe archive path '{s}'", .{ context, entry.name });
+            return err;
+        };
+
+        // Empty names and './' describe the archive root, never a file.
+        if (name.len == 0) {
+            if (entry.kind == .directory) continue;
+            return error.UnsafeArchivePath;
         }
 
         switch (entry.kind) {
             .directory => {
-                if (entry.name.len > 0) try dest_dir.createDirPath(std.Options.debug_io, entry.name);
+                var dir = try ensureDirectory(dest_dir, name);
+                dir.close(std.Options.debug_io);
             },
             .file => {
+                if (entry.size > max_file_size) return error.FileTooBig;
                 const permissions = std.Io.File.Permissions.fromMode(@intCast(entry.mode & 0o777));
-                var fs_file = try createNestedFile(dest_dir, entry.name, permissions);
-                defer fs_file.close(std.Options.debug_io);
-                try copyTarEntryToFile(&it, entry, fs_file);
+                var parent = try ensureParentDir(dest_dir, name);
+                defer parent.close(std.Options.debug_io);
+
+                // Never truncate an existing inode: it may be a symlink or a
+                // hardlink to a file outside the extraction directory. Rename
+                // replaces only the directory entry after a complete write.
+                var file = try parent.createFileAtomic(std.Options.debug_io, std.fs.path.basename(name), .{
+                    .permissions = permissions,
+                    .replace = true,
+                });
+                defer file.deinit(std.Options.debug_io);
+                try copyTarEntryToFile(&it, entry, file.file);
+                try file.replace(std.Options.debug_io);
             },
             .sym_link => {
-                if (!isSafeSymlinkTarget(entry.name, entry.link_name)) {
-                    log.warn("{s}: skipping unsafe symlink '{s}' -> '{s}'", .{
+                if (!isSafeSymlinkTarget(name, entry.link_name)) {
+                    log.warn("{s}: rejecting unsafe symlink '{s}' -> '{s}'", .{
                         context,
                         entry.name,
                         entry.link_name,
                     });
-                    continue;
+                    return error.UnsafeArchivePath;
                 }
-                try createNestedSymlink(dest_dir, entry.link_name, entry.name);
+                var parent = try ensureParentDir(dest_dir, name);
+                defer parent.close(std.Options.debug_io);
+                try parent.symLink(std.Options.debug_io, entry.link_name, std.fs.path.basename(name), .{});
             },
         }
     }
 }
 
 pub fn isSafeTarPath(name: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, name, 0) != null) return false;
     if (name.len == 0) return true;
     if (name[0] == '/') return false;
 
@@ -93,12 +118,17 @@ pub fn isSafeTarPath(name: []const u8) bool {
 }
 
 pub fn isSafeSymlinkTarget(entry_path: []const u8, link_target: []const u8) bool {
+    if (!isSafeTarPath(entry_path)) return false;
+    if (link_target.len == 0 or std.mem.indexOfScalar(u8, link_target, 0) != null) return false;
+    // Absolute links are normal in container images. Only rooted directory
+    // resolution below may follow them, so '/' means the extraction root.
     if (link_target.len > 0 and link_target[0] == '/') return true;
 
     var parent_depth: isize = 0;
     var entry_it = std.mem.splitScalar(u8, entry_path, '/');
     var component_count: usize = 0;
-    while (entry_it.next()) |_| {
+    while (entry_it.next()) |component| {
+        if (component.len == 0 or std.mem.eql(u8, component, ".")) continue;
         component_count += 1;
     }
     if (component_count > 0) {
@@ -121,11 +151,6 @@ pub fn isSafeSymlinkTarget(entry_path: []const u8, link_target: []const u8) bool
 }
 
 fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_file: std.Io.File) !void {
-    if (entry.size > max_file_size) {
-        log.warn("tar entry exceeds max file size ({d} bytes): skipping", .{entry.size});
-        return error.FileTooBig;
-    }
-
     var remaining = entry.size;
     var buf: [8192]u8 = undefined;
     while (remaining > 0) {
@@ -138,27 +163,87 @@ fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_fi
     it.unread_file_bytes = 0;
 }
 
-fn createNestedFile(dir: std.Io.Dir, name: []const u8, permissions: std.Io.File.Permissions) !std.Io.File {
-    return dir.createFile(std.Options.debug_io, name, .{ .permissions = permissions }) catch |err| {
-        if (err == error.FileNotFound) {
-            try ensureParentDir(dir, name);
-            return try dir.createFile(std.Options.debug_io, name, .{ .permissions = permissions });
+fn normalizeTarPath(name: []const u8, buffer: []u8) ![]const u8 {
+    if (!isSafeTarPath(name)) return error.UnsafeArchivePath;
+    var len: usize = 0;
+    var components = std.mem.tokenizeScalar(u8, name, '/');
+    while (components.next()) |component| {
+        if (std.mem.eql(u8, component, ".")) continue;
+        const separator: usize = if (len == 0) 0 else 1;
+        if (component.len + separator > buffer.len - len) return error.NameTooLong;
+        if (separator != 0) {
+            buffer[len] = '/';
+            len += 1;
         }
-        return err;
-    };
+        @memcpy(buffer[len..][0..component.len], component);
+        len += component.len;
+    }
+    return buffer[0..len];
 }
 
-fn createNestedSymlink(dir: std.Io.Dir, link_name: []const u8, file_name: []const u8) !void {
-    dir.symLink(std.Options.debug_io, link_name, file_name, .{}) catch |err| {
-        if (err == error.FileNotFound) {
-            try ensureParentDir(dir, file_name);
-            return try dir.symLink(std.Options.debug_io, link_name, file_name, .{});
-        }
-        return err;
-    };
+fn ensureParentDir(root: std.Io.Dir, name: []const u8) !std.Io.Dir {
+    return ensureDirectory(root, std.fs.path.dirname(name) orelse "");
 }
 
-fn ensureParentDir(dir: std.Io.Dir, path: []const u8) !void {
-    const parent = std.fs.path.dirname(path) orelse return error.FileNotFound;
-    try dir.createDirPath(std.Options.debug_io, parent);
+/// All paths here are normalized archive paths. Resolve each prefix against
+/// the original root, not the previous directory: relative symlinks containing
+/// '..' must keep their meaning, and absolute links must stay inside the root.
+fn ensureDirectory(root: std.Io.Dir, path: []const u8) !std.Io.Dir {
+    if (openRootedDir(root, if (path.len == 0) "." else path)) |dir| {
+        return dir;
+    } else |err| {
+        if (err != error.FileNotFound) return err;
+    }
+
+    var dir = try openRootedDir(root, ".");
+    errdefer dir.close(std.Options.debug_io);
+
+    var components = std.mem.tokenizeScalar(u8, path, '/');
+    while (components.next()) |component| {
+        const prefix = path[0..components.index];
+        const next = openRootedDir(root, prefix) catch |err| blk: {
+            if (err != error.FileNotFound) return err;
+            // mkdir receives a basename and a pinned parent, never an
+            // unchecked multi-component archive path. A dangling symlink
+            // causes the following rooted open to fail safely.
+            dir.createDir(std.Options.debug_io, component, .default_dir) catch |mkdir_err| {
+                if (mkdir_err != error.PathAlreadyExists) return mkdir_err;
+            };
+            break :blk try openRootedDir(root, prefix);
+        };
+        dir.close(std.Options.debug_io);
+        dir = next;
+    }
+    return dir;
+}
+
+/// Linux 6.1+ is required by the runtime. Do not fall back to ordinary openat:
+/// it would follow archive-controlled symlinks against the host filesystem.
+fn openRootedDir(root: std.Io.Dir, path: []const u8) !std.Io.Dir {
+    if (@import("builtin").os.tag != .linux) return error.OperationUnsupported;
+
+    const OpenHow = extern struct { flags: u64, mode: u64 = 0, resolve: u64 };
+    const resolve_no_magiclinks = 0x02;
+    const resolve_in_root = 0x10;
+    const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
+    const how: OpenHow = .{
+        .flags = @as(u32, @bitCast(flags)),
+        .resolve = resolve_in_root | resolve_no_magiclinks,
+    };
+    const path_z = try std.posix.toPosixPath(path);
+    while (true) {
+        const rc = linux.syscall4(.openat2, @intCast(root.handle), @intFromPtr(&path_z), @intFromPtr(&how), @sizeOf(OpenHow));
+        if (!syscall.isError(rc)) return .{ .handle = @intCast(rc) };
+        switch (@as(linux.E, @enumFromInt(syscall.getErrno(rc)))) {
+            .INTR => continue,
+            .NOENT => return error.FileNotFound,
+            .LOOP, .XDEV, .AGAIN => return error.UnsafeArchivePath,
+            .NOSYS, .INVAL => return error.OperationUnsupported,
+            else => return error.DirectoryOpenFailed,
+        }
+    }
+}
+
+test {
+    _ = @import("tar_extract_tests.zig");
 }
