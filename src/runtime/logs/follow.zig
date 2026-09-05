@@ -1,8 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
-const linux = std.os.linux;
 const paths = @import("../../lib/paths.zig");
-const syscall = @import("../../lib/syscall.zig");
 const container = @import("../container.zig");
 const process = @import("../process.zig");
 const common = @import("common.zig");
@@ -31,27 +29,37 @@ pub fn followLogsWithIo(io: std.Io, container_id: []const u8, tail_lines: usize,
         if (data.len > 0) try common.writeToStdoutWithIo(io, data);
     }
 
-    const fd = @as(posix.fd_t, @intCast(syscall.unwrap(linux.inotify_init1(linux.IN.CLOEXEC)) catch return LogError.ReadFailed));
-
-    var watch_path_buf: [paths.max_path]u8 = undefined;
-    const watch_path = sentinelizePath(&watch_path_buf, file_path) catch return LogError.PathTooLong;
-    const wd = linux.inotify_add_watch(fd, watch_path, linux.IN.MODIFY | linux.IN.CLOSE_WRITE | linux.IN.MOVE_SELF);
-    _ = syscall.unwrap(wd) catch return LogError.ReadFailed;
-
-    defer {
-        _ = linux.inotify_rm_watch(fd, @intCast(wd));
-        _ = linux.close(fd);
-    }
-
-    var event_buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
     var read_buf: [4096]u8 = undefined;
-
     while (true) {
-        if (drainNewBytes(io, &file_reader, &read_buf) == false and !isContainerPidRunning(io, container_id, pid)) break;
-        _ = posix.read(fd, &event_buf) catch break;
+        var saw_bytes = drainNewBytes(io, &file_reader, &read_buf);
+        if (try openReplacement(io, file_path, file)) |replacement| {
+            // Rotation may finish between draining and opening the live path.
+            // Drain the old inode again before moving to the new generation.
+            _ = drainNewBytes(io, &file_reader, &read_buf);
+            file.close(io);
+            file = replacement;
+            file_reader = file.reader(io, &file_buffer);
+            saw_bytes = drainNewBytes(io, &file_reader, &read_buf) or saw_bytes;
+        }
+        if (!saw_bytes and !isContainerPidRunning(io, container_id, pid)) break;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch return LogError.ReadFailed;
     }
+}
 
-    _ = drainNewBytes(io, &file_reader, &read_buf);
+fn openReplacement(io: std.Io, path: []const u8, current: std.Io.File) LogError!?std.Io.File {
+    const replacement = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        // The sink briefly has no live pathname while renaming generations.
+        error.FileNotFound => return null,
+        else => return LogError.ReadFailed,
+    };
+    errdefer replacement.close(io);
+    const old_stat = current.stat(io) catch return LogError.ReadFailed;
+    const new_stat = replacement.stat(io) catch return LogError.ReadFailed;
+    if (old_stat.inode == new_stat.inode) {
+        replacement.close(io);
+        return null;
+    }
+    return replacement;
 }
 
 fn prepareFollowStart(io: std.Io, file_reader: *std.Io.File.Reader, container_id: []const u8, tail_lines: usize) LogError!?[]const u8 {
@@ -125,13 +133,6 @@ fn procCgroupContentMatchesContainer(content: []const u8, container_id: []const 
     return false;
 }
 
-fn sentinelizePath(buf: *[paths.max_path]u8, path: []const u8) ![:0]const u8 {
-    if (path.len >= buf.len) return error.PathTooLong;
-    @memcpy(buf[0..path.len], path);
-    buf[path.len] = 0;
-    return buf[0..path.len :0];
-}
-
 test "procCgroupContentMatchesContainer matches exact yoq cgroup path" {
     try std.testing.expect(procCgroupContentMatchesContainer("0::/yoq/deadbeefcafe\n", "deadbeefcafe"));
     try std.testing.expect(procCgroupContentMatchesContainer("0::/system.slice/yoq/deadbeefcafe/inner\n", "deadbeefcafe"));
@@ -157,4 +158,30 @@ test "seekToEnd moves watched file to end" {
 
 test "followLogs validates container ID" {
     try std.testing.expectError(LogError.InvalidId, followLogs("../etc/passwd", 0, null));
+}
+
+test "log follow detects replacement even when the live file grows past the old offset" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &path_buf);
+    const path = try std.fmt.allocPrint(alloc, "{s}/capture.log", .{path_buf[0..len]});
+    defer alloc.free(path);
+    var sink = try @import("sink.zig").Sink.init(try tmp.dir.createFile(io, "capture.log", .{ .read = true }), path);
+    defer sink.close();
+    sink.max_size = 100;
+    try sink.write("stdout", "old");
+    const old = try tmp.dir.openFile(io, "capture.log", .{});
+    defer old.close(io);
+    try std.testing.expect(try openReplacement(io, path, old) == null);
+    try sink.write("stdout", "this new record is longer than the complete old record");
+    const replacement = (try openReplacement(io, path, old)).?;
+    defer replacement.close(io);
+    try std.testing.expect((try replacement.length(io)) > (try old.length(io)));
+    var reader = replacement.reader(io, &.{});
+    var data: [100]u8 = undefined;
+    const count = try reader.interface.readSliceShort(&data);
+    try std.testing.expect(std.mem.indexOf(u8, data[0..count], "this new record") != null);
 }

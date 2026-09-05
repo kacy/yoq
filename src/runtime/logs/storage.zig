@@ -19,7 +19,7 @@ pub fn createLogFile(container_id: []const u8) LogError!std.Io.File {
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try logPath(&path_buf, container_id);
 
-    return std.Io.Dir.cwd().createFile(std.Options.debug_io, file_path, .{}) catch
+    return std.Io.Dir.cwd().createFile(std.Options.debug_io, file_path, .{ .read = true, .truncate = false }) catch
         return LogError.CreateFailed;
 }
 
@@ -132,6 +132,9 @@ pub fn deleteLogFile(container_id: []const u8) void {
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = logPath(&path_buf, container_id) catch return;
     std.Io.Dir.cwd().deleteFile(std.Options.debug_io, file_path) catch {};
+    var previous_buf: [paths.max_path]u8 = undefined;
+    const previous = std.fmt.bufPrint(&previous_buf, "{s}.1", .{file_path}) catch return;
+    std.Io.Dir.cwd().deleteFile(std.Options.debug_io, previous) catch {};
 }
 
 test "logPath validates container ID" {
