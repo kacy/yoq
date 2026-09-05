@@ -1,6 +1,7 @@
 const std = @import("std");
 const linux_platform = @import("linux_platform");
 const posix = std.posix;
+const transport = @import("../../tls/client_transport.zig");
 const ip = @import("../ip.zig");
 const log = @import("../../lib/log.zig");
 const upstream_mod = @import("upstream.zig");
@@ -69,10 +70,32 @@ pub fn setSocketTimeoutMs(fd: linux_platform.posix.socket_t, timeout_ms: u32) vo
 pub fn writeAll(fd: linux_platform.posix.socket_t, data: []const u8) !void {
     var written: usize = 0;
     while (written < data.len) {
-        const bytes_written = linux_platform.posix.write(fd, data[written..]) catch return error.WriteFailed;
+        const bytes_written = linux_platform.posix.send(fd, data[written..], posix.MSG.NOSIGNAL) catch return error.WriteFailed;
         if (bytes_written == 0) return error.WriteFailed;
         written += bytes_written;
     }
+}
+
+/// Dial within the smaller connect budget without resetting the operation's
+/// deadline. The returned socket is consumed through a nonblocking Stream.
+pub fn connectToUpstreamUntil(connect_timeout_ms: u32, deadline: transport.Deadline, upstream: *const upstream_mod.Upstream) !linux_platform.posix.socket_t {
+    _ = try deadline.remaining();
+    const upstream_ip = ip.parseIp(upstream.address) orelse return error.InvalidUpstreamAddress;
+    const fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
+    errdefer linux_platform.posix.close(fd);
+    var connect_deadline = transport.Deadline.afterMilliseconds(connect_timeout_ms);
+    connect_deadline.expires_ns = @min(connect_deadline.expires_ns, deadline.expires_ns);
+    const wire = transport.Stream{ .fd = fd, .deadline = connect_deadline };
+    const addr = linux_platform.net.Address.initIp4(upstream_ip, upstream.port);
+    linux_platform.posix.connect(fd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+        error.WouldBlock, error.ConnectionPending => {
+            try wire.wait(posix.POLL.OUT);
+            try linux_platform.posix.getsockoptError(fd);
+        },
+        else => return error.ConnectFailed,
+    };
+    _ = try deadline.remaining();
+    return fd;
 }
 
 pub fn connectToUpstream(connect_timeout_ms: u32, request_timeout_ms: u32, upstream: *const upstream_mod.Upstream) !linux_platform.posix.socket_t {
