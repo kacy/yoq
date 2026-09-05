@@ -705,7 +705,7 @@ pub const ReverseProxy = struct {
                 }
 
                 _ = sess.write(request) catch return error.SendFailed;
-                return try readResponseFromSession(self.allocator, sess, self.max_response_bytes);
+                return (try readResponseFrom(self.allocator, sess, self.max_response_bytes, timeouts.head)).bytes;
             },
         }
     }
@@ -753,33 +753,6 @@ pub const ReverseProxy = struct {
         return result.bytes;
     }
 };
-
-/// drain an mTLS session into a single buffer up to `max_bytes`. mTLS
-/// connections aren't pooled, so we don't need the framing-aware "is
-/// this connection still reusable" logic that the bare-fd readResponse
-/// provides — we just read until the peer closes (or `PeerClosed`
-/// surfaces via the session) and hand back the bytes. PeerClosed is
-/// the orderly EOF signal; any other read error propagates.
-fn readResponseFromSession(
-    alloc: std.mem.Allocator,
-    sess: anytype,
-    max_bytes: usize,
-) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-
-    var chunk: [8192]u8 = undefined;
-    while (true) {
-        const n = sess.read(&chunk) catch |err| {
-            if (err == error.PeerClosed) break;
-            return err;
-        };
-        if (n == 0) break;
-        if (out.items.len + n > max_bytes) return error.ResponseTooLarge;
-        try out.appendSlice(alloc, chunk[0..n]);
-    }
-    return try out.toOwnedSlice(alloc);
-}
 
 fn cloneMirrorTask(
     alloc: std.mem.Allocator,
@@ -1193,7 +1166,23 @@ fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64
     return hasher.final();
 }
 
+const max_informational_responses = 16;
+
+/// Response accounting and retries use the final status, not an interim hint.
 fn parseUpstreamStatusCode(response: []const u8) !u16 {
+    var start: usize = 0;
+    var interim: usize = 0;
+    while (true) {
+        const status = try parseResponseStatusLine(response[start..]);
+        if (status < 100 or status >= 200 or status == 101) return status;
+        if (interim == max_informational_responses) return error.InvalidResponse;
+        interim += 1;
+        const end = std.mem.indexOfPos(u8, response, start, "\r\n\r\n") orelse return error.InvalidResponse;
+        start = end + 4;
+    }
+}
+
+fn parseResponseStatusLine(response: []const u8) !u16 {
     if (response.len < 12) return error.InvalidResponse;
     if (!std.mem.startsWith(u8, response, "HTTP/")) return error.InvalidResponse;
 
@@ -1221,8 +1210,10 @@ const UpstreamResponse = struct {
 
 /// how the upstream response body is delimited.
 const BodyFraming = union(enum) {
-    /// no body at all (HEAD, 1xx, 204, 304).
+    /// no body at all (HEAD, interim responses, 204, 304).
     empty,
+    /// A protocol switch needs a tunnel, which this buffered path does not own.
+    upgrade,
     /// exactly `len` bytes of body.
     fixed: usize,
     /// chunked transfer-encoding, terminated by the zero-length chunk.
@@ -1242,36 +1233,41 @@ fn readResponse(
     max_bytes: usize,
     head_request: bool,
 ) !UpstreamResponse {
-    const wire = transport.stream(socket);
+    return readResponseFrom(alloc, transport.stream(socket), max_bytes, head_request);
+}
+
+/// TLS and plaintext use the same bounded framing rules. Keep interim bytes
+/// for forwarding, but only the final response controls body framing and reuse.
+fn readResponseFrom(alloc: std.mem.Allocator, wire: anytype, max_bytes: usize, head_request: bool) !UpstreamResponse {
     var response = try alloc.alloc(u8, max_bytes);
     errdefer alloc.free(response);
-
     var total: usize = 0;
-
-    // phase 1: read until the response headers are complete.
-    var header_end: ?usize = null;
-    while (header_end == null and total < response.len) {
-        const bytes_read = wire.read(response[total..]) catch |err| return if (err == error.TimedOut) err else error.ReceiveFailed;
-        if (bytes_read == 0) break;
-        total += bytes_read;
-        if (std.mem.indexOf(u8, response[0..total], "\r\n\r\n")) |idx| {
-            header_end = idx + 4;
+    var final_start: usize = 0;
+    var interim: usize = 0;
+    var status: u16 = 0;
+    const headers_end = while (true) {
+        if (std.mem.indexOfPos(u8, response[0..total], final_start, "\r\n\r\n")) |idx| {
+            const end = idx + 4;
+            status = try parseResponseStatusLine(response[final_start..end]);
+            if (status >= 100 and status < 200 and status != 101) {
+                if (interim == max_informational_responses) return error.InvalidResponse;
+                interim += 1;
+                final_start = end;
+                continue;
+            }
+            break end;
         }
-    }
-    if (total == 0) return error.ReceiveFailed;
-    const headers_end = header_end orelse {
-        // peer closed (or the buffer filled) before we saw a full header block.
-        // hand back whatever we have; it cannot be reused.
-        return try shrinkResponse(alloc, response, total, false);
+        if (total == response.len) return error.ResponseTooLarge;
+        const n = try readUpstream(wire, response[total..]);
+        if (n == 0) return if (total == 0) error.ReceiveFailed else error.InvalidResponse;
+        total += n;
     };
-
-    // phase 2: decide how the body is framed, then read exactly that much.
-    const headers = response[0..headers_end];
-    const status = parseUpstreamStatusCode(response[0..total]) catch 0;
-    const wants_close = http1ResponseWantsClose(response[0..total], headers);
+    const headers = response[final_start..headers_end];
+    const wants_close = http1ResponseWantsClose(headers, headers);
     const framing = responseBodyFraming(headers, status, head_request);
 
     switch (framing) {
+        .upgrade => return error.UnsupportedUpgrade,
         .empty => {
             // any bytes past the headers are unexpected for a bodiless response.
             const reusable = !wants_close and total == headers_end;
@@ -1281,10 +1277,9 @@ fn readResponse(
             const target = std.math.add(usize, headers_end, body_len) catch return error.ResponseTooLarge;
             if (target > response.len) return error.ResponseTooLarge;
             while (total < target) {
-                const bytes_read = wire.read(response[total..]) catch |err| return if (err == error.TimedOut) err else error.ReceiveFailed;
+                const bytes_read = try readUpstream(wire, response[total..]);
                 if (bytes_read == 0) {
-                    // upstream closed mid-body: incomplete, not reusable.
-                    return try shrinkResponse(alloc, response, total, false);
+                    return error.InvalidResponse;
                 }
                 total += bytes_read;
             }
@@ -1293,34 +1288,44 @@ fn readResponse(
         },
         .chunked => {
             while (true) {
-                if (chunkedBodyEnd(response[headers_end..total])) |body_len| {
+                if (try chunkedBodyEnd(response[headers_end..total])) |body_len| {
                     const target = headers_end + body_len;
                     const reusable = !wants_close and total == target;
                     return try shrinkResponse(alloc, response, target, reusable);
                 }
                 if (total == response.len) return error.ResponseTooLarge;
-                const bytes_read = wire.read(response[total..]) catch |err| return if (err == error.TimedOut) err else error.ReceiveFailed;
+                const bytes_read = try readUpstream(wire, response[total..]);
                 if (bytes_read == 0) {
-                    // closed before the terminating chunk arrived.
-                    return try shrinkResponse(alloc, response, total, false);
+                    return error.InvalidResponse;
                 }
                 total += bytes_read;
             }
         },
         .eof => {
             while (total < response.len) {
-                const bytes_read = wire.read(response[total..]) catch |err| return if (err == error.TimedOut) err else error.ReceiveFailed;
+                const bytes_read = try readUpstream(wire, response[total..]);
                 if (bytes_read == 0) break;
                 total += bytes_read;
             }
             if (total == response.len) {
                 var extra_buf: [1]u8 = undefined;
-                const extra = try wire.read(&extra_buf);
+                const extra = try readUpstream(wire, &extra_buf);
                 if (extra > 0) return error.ResponseTooLarge;
             }
             return try shrinkResponse(alloc, response, total, false);
         },
     }
+}
+
+fn readUpstream(reader: anytype, buffer: []u8) !usize {
+    return reader.read(buffer) catch |err| {
+        const failure: anyerror = err;
+        return switch (failure) {
+            error.PeerClosed => 0,
+            error.TimedOut => error.TimedOut,
+            else => error.ReceiveFailed,
+        };
+    };
 }
 
 /// shrink the over-allocated read buffer down to the bytes actually used and
@@ -1335,8 +1340,8 @@ fn shrinkResponse(alloc: std.mem.Allocator, response: []u8, len: usize, reusable
 /// body rules for the cases we care about; anything we cannot classify becomes
 /// connection-close (EOF) delimited so we never misframe.
 fn responseBodyFraming(headers: []const u8, status: u16, head_request: bool) BodyFraming {
-    // 1xx are interim and may be followed by another response — never pool them.
-    if (status >= 100 and status < 200) return .eof;
+    if (status == 101) return .upgrade;
+    if (status >= 100 and status < 200) return .empty;
     if (head_request or status == 204 or status == 304) return .empty;
 
     if (http.findHeaderValue(headers, "Transfer-Encoding")) |te| {
@@ -1371,16 +1376,18 @@ fn headerListContains(value: []const u8, token: []const u8) bool {
 
 /// given the bytes received after the header block, return the offset at which
 /// a complete chunked body ends, or null if more data is still needed. handles
-/// chunk extensions and trailer fields. a malformed length stalls (returns
-/// null) and is eventually surfaced as ResponseTooLarge by the caller.
-fn chunkedBodyEnd(body: []const u8) ?usize {
+/// chunk extensions and trailer fields. Invalid framing is distinct from an
+/// incomplete body, so malformed sizes never wait for more network data.
+fn chunkedBodyEnd(body: []const u8) error{InvalidResponse}!?usize {
     var pos: usize = 0;
     while (true) {
         const line_end = std.mem.indexOfPos(u8, body, pos, "\r\n") orelse return null;
         var size_field = body[pos..line_end];
         if (std.mem.indexOfScalar(u8, size_field, ';')) |semi| size_field = size_field[0..semi];
         size_field = std.mem.trim(u8, size_field, " \t");
-        const size = std.fmt.parseInt(usize, size_field, 16) catch return null;
+        if (size_field.len == 0) return error.InvalidResponse;
+        for (size_field) |digit| _ = std.fmt.charToDigit(digit, 16) catch return error.InvalidResponse;
+        const size = std.fmt.parseInt(usize, size_field, 16) catch return error.InvalidResponse;
 
         const data_start = line_end + 2;
         if (size == 0) {
@@ -1393,8 +1400,10 @@ fn chunkedBodyEnd(body: []const u8) ?usize {
             }
         }
 
-        const next = std.math.add(usize, data_start, size + 2) catch return null;
+        const size_with_terminator = std.math.add(usize, size, 2) catch return error.InvalidResponse;
+        const next = std.math.add(usize, data_start, size_with_terminator) catch return error.InvalidResponse;
         if (next > body.len) return null;
+        if (!std.mem.eql(u8, body[next - 2 .. next], "\r\n")) return error.InvalidResponse;
         pos = next;
     }
 }
@@ -1421,7 +1430,7 @@ test "responseBodyFraming treats HEAD, 204, 304, and 1xx specially" {
     try std.testing.expect(responseBodyFraming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", 200, true) == .empty);
     try std.testing.expect(responseBodyFraming("HTTP/1.1 204 No Content\r\n\r\n", 204, false) == .empty);
     try std.testing.expect(responseBodyFraming("HTTP/1.1 304 Not Modified\r\n\r\n", 304, false) == .empty);
-    try std.testing.expect(responseBodyFraming("HTTP/1.1 100 Continue\r\n\r\n", 100, false) == .eof);
+    try std.testing.expect(responseBodyFraming("HTTP/1.1 100 Continue\r\n\r\n", 100, false) == .empty);
 }
 
 test "http1ResponseWantsClose honors Connection header and HTTP/1.0" {
@@ -1432,14 +1441,14 @@ test "http1ResponseWantsClose honors Connection header and HTTP/1.0" {
 
 test "chunkedBodyEnd finds the end of a complete chunked body" {
     const body = "5\r\nhello\r\n0\r\n\r\n";
-    try std.testing.expectEqual(@as(?usize, body.len), chunkedBodyEnd(body));
+    try std.testing.expectEqual(@as(?usize, body.len), try chunkedBodyEnd(body));
 
     // incomplete: terminating chunk not yet received.
-    try std.testing.expectEqual(@as(?usize, null), chunkedBodyEnd("5\r\nhello\r\n"));
+    try std.testing.expectEqual(@as(?usize, null), try chunkedBodyEnd("5\r\nhello\r\n"));
 
     // trailers before the final blank line.
     const with_trailers = "0\r\nX-Trace: abc\r\n\r\n";
-    try std.testing.expectEqual(@as(?usize, with_trailers.len), chunkedBodyEnd(with_trailers));
+    try std.testing.expectEqual(@as(?usize, with_trailers.len), try chunkedBodyEnd(with_trailers));
 }
 
 fn readResponseTestPair() ![2]i32 {
@@ -4897,53 +4906,40 @@ test "handleConnection rejects looped request after listener restart" {
     server_thread.join();
 }
 
-// --- readResponseFromSession ---
-//
-// the mTLS read loop drains a session-shaped reader until either the peer
-// closes (surfaced as ClientSession.read's `PeerClosed`) or `max_bytes` is
-// exceeded. exercised here via a small fake session that implements the
-// duck-typed `.read([]u8) !usize` shape — keeps the test independent of
-// the live TLS stack while still proving the loop's framing.
-
+// A session-shaped reader verifies TLS framing without requiring EOF.
 const FakeSession = struct {
     chunks: []const []const u8,
     index: usize = 0,
-    closed: bool = false,
+    offset: usize = 0,
 
     fn read(self: *FakeSession, buf: []u8) !usize {
-        if (self.closed) return error.PeerClosed;
-        if (self.index >= self.chunks.len) {
-            self.closed = true;
-            return error.PeerClosed;
-        }
-        const chunk = self.chunks[self.index];
-        self.index += 1;
+        if (self.index == self.chunks.len) return error.PeerClosed;
+        const chunk = self.chunks[self.index][self.offset..];
         const n = @min(buf.len, chunk.len);
         @memcpy(buf[0..n], chunk[0..n]);
+        self.offset += n;
+        if (self.offset == self.chunks[self.index].len) {
+            self.index += 1;
+            self.offset = 0;
+        }
         return n;
     }
 };
 
-test "readResponseFromSession concatenates chunks until peer closes" {
-    var sess = FakeSession{ .chunks = &.{ "HTTP/1.1 200 OK\r\n", "Content-Length: 2\r\n\r\nok" } };
-    const body = try readResponseFromSession(std.testing.allocator, &sess, 64 * 1024);
-    defer std.testing.allocator.free(body);
-    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", body);
+test "response framing TLS reader stops at a complete response without EOF" {
+    var sess = FakeSession{ .chunks = &.{ "HTTP/1.1 103 Early Hints\r\nLink: /style.css\r\n\r\nHTTP/1.1 200 OK\r\n", "Content-Length: 2\r\n\r\nok", "unread" } };
+    const result = try readResponseFrom(std.testing.allocator, &sess, 64 * 1024, false);
+    defer std.testing.allocator.free(result.bytes);
+    try std.testing.expectEqual(@as(usize, 2), sess.index);
+    try std.testing.expectEqual(@as(u16, 200), try parseUpstreamStatusCode(result.bytes));
+    try std.testing.expect(result.reusable);
 }
 
-test "readResponseFromSession returns ResponseTooLarge when max_bytes is exceeded" {
+test "response framing TLS reader rejects oversized and empty responses" {
     var sess = FakeSession{ .chunks = &.{ "AAAA", "BBBB", "CCCC" } };
-    try std.testing.expectError(
-        error.ResponseTooLarge,
-        readResponseFromSession(std.testing.allocator, &sess, 6),
-    );
-}
-
-test "readResponseFromSession returns empty buffer on immediate close" {
-    var sess = FakeSession{ .chunks = &.{} };
-    const body = try readResponseFromSession(std.testing.allocator, &sess, 64);
-    defer std.testing.allocator.free(body);
-    try std.testing.expectEqual(@as(usize, 0), body.len);
+    try std.testing.expectError(error.ResponseTooLarge, readResponseFrom(std.testing.allocator, &sess, 6, false));
+    var empty = FakeSession{ .chunks = &.{} };
+    try std.testing.expectError(error.ReceiveFailed, readResponseFrom(std.testing.allocator, &empty, 64, false));
 }
 
 const PeerForwardFixture = struct {
@@ -5127,4 +5123,58 @@ test "listener lifecycle exchange deadline is reported as a receive timeout" {
     const response = proxyFailureResponse(error.TimedOut);
     try std.testing.expectEqual(http.StatusCode.bad_gateway, response.status);
     try std.testing.expectEqualStrings("{\"error\":\"upstream request timed out\"}", response.body);
+}
+
+test "response framing rejects overflowing chunk sizes before waiting for payload" {
+    for ([_]usize{ std.math.maxInt(usize), std.math.maxInt(usize) - 1, std.math.maxInt(usize) - 2 }) |size| {
+        var chunk_buf: [64]u8 = undefined;
+        const chunk = try std.fmt.bufPrint(&chunk_buf, "{x}\r\n", .{size});
+        try std.testing.expectError(error.InvalidResponse, chunkedBodyEnd(chunk));
+        const fds = try readResponseTestPair();
+        defer for (fds) |fd| linux_platform.posix.close(fd);
+        try socket_helpers.writeAll(fds[1], "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+        try socket_helpers.writeAll(fds[1], chunk);
+        const wire = transport.Stream{ .fd = fds[0], .deadline = transport.Deadline.afterMilliseconds(1000) };
+        // Peer stays open with no payload. Malformed framing must fail now.
+        try std.testing.expectError(error.InvalidResponse, readResponse(std.testing.allocator, wire, 4096, false));
+    }
+    try std.testing.expectEqual(http.StatusCode.bad_gateway, proxyFailureResponse(error.InvalidResponse).status);
+    try std.testing.expectError(error.InvalidResponse, chunkedBodyEnd("1\r\nxZZ"));
+    try std.testing.expectError(error.InvalidResponse, chunkedBodyEnd("+1\r\nx\r\n"));
+    try std.testing.expectError(error.InvalidResponse, chunkedBodyEnd("ffffffffffffffffffffffffffffffff\r\n"));
+    try std.testing.expectEqual(@as(?usize, null), try chunkedBodyEnd("5\r\nhel"));
+}
+
+test "response framing preserves informational blocks and completes on a persistent socket" {
+    const raw = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: /style.css\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+    const fds = try readResponseTestPair();
+    defer for (fds) |fd| linux_platform.posix.close(fd);
+    try socket_helpers.writeAll(fds[1], raw);
+    const wire = transport.Stream{ .fd = fds[0], .deadline = transport.Deadline.afterMilliseconds(1000) };
+    const result = try readResponse(std.testing.allocator, wire, 4096, false);
+    defer std.testing.allocator.free(result.bytes);
+    try std.testing.expectEqualStrings(raw, result.bytes);
+    try std.testing.expect(result.reusable);
+    try std.testing.expectEqual(@as(u16, 200), try parseUpstreamStatusCode(result.bytes));
+
+    var fragments = FakeSession{ .chunks = &.{ "HTTP/1.1 10", "0 Continue\r\n\r", "\nHTTP/1.1 103 Early Hints\r\nLink: /style.css\r\n\r\nHTTP/1.1 503 Unavailable\r\nContent-Length: 2\r\n\r\nx", "x", "unread" } };
+    const final = try readResponseFrom(std.testing.allocator, &fragments, 4096, false);
+    defer std.testing.allocator.free(final.bytes);
+    try std.testing.expectEqual(@as(u16, 503), try parseUpstreamStatusCode(final.bytes));
+    try std.testing.expectEqual(@as(usize, 4), fragments.index);
+    try std.testing.expect(final.reusable);
+}
+
+test "response framing bounds interim floods and separates unsupported upgrades" {
+    const interim = "HTTP/1.1 103 Early Hints\r\nLink: /style.css\r\n\r\n";
+    var flood: [max_informational_responses + 2][]const u8 = @splat(interim);
+    flood[flood.len - 1] = "unread";
+    var reader = FakeSession{ .chunks = &flood };
+    try std.testing.expectError(error.InvalidResponse, readResponseFrom(std.testing.allocator, &reader, 4096, false));
+    try std.testing.expectEqual(@as(usize, max_informational_responses + 1), reader.index);
+    var upgrade = FakeSession{ .chunks = &.{ "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", "unread" } };
+    try std.testing.expectError(error.UnsupportedUpgrade, readResponseFrom(std.testing.allocator, &upgrade, 4096, false));
+    try std.testing.expectEqual(@as(usize, 1), upgrade.index);
+    var truncated = FakeSession{ .chunks = &.{"HTTP/1.1 103 Early Hints\r\n\r\n"} };
+    try std.testing.expectError(error.InvalidResponse, readResponseFrom(std.testing.allocator, &truncated, 4096, false));
 }
