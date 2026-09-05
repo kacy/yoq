@@ -834,42 +834,76 @@ test "leader sends install_snapshot when entries are truncated" {
     try testing.expect(found_snapshot);
 }
 
-test "handleInstallSnapshotReply updates peer tracking" {
+test "reply term snapshot verifies the current boundary before counting progress" {
     const alloc = testing.allocator;
-    var log = try Log.initMemory();
-    defer log.deinit();
-
-    const peers: []const NodeId = &.{ 2, 3 };
-    var leader = try setupTestRaft(alloc, 1, peers, &log);
+    var leader_log = try Log.initMemory();
+    defer leader_log.deinit();
+    var follower_log = try Log.initMemory();
+    defer follower_log.deinit();
+    try testing.expect(leader_log.setCurrentTerm(3));
+    try testing.expect(follower_log.setCurrentTerm(3));
+    var leader = try setupTestRaft(alloc, 1, &.{ 2, 3 }, &leader_log);
     defer leader.deinit();
-
-    // force leader
-    for (0..max_election_ticks + 1) |_| {
-        leader.tick();
-    }
-    const ea = try leader.drainActions();
-    defer alloc.free(ea);
-    leader.handleRequestVoteReply(2, .{
-        .term = leader.currentTerm(),
-        .vote_granted = true,
-    });
-    const la = try leader.drainActions();
-    defer test_support.deinitOwnedActions(Action, alloc, la);
-
-    leader.snapshot_meta = .{
+    defer freeActionEntries(alloc, leader.actions.items);
+    var follower = try setupTestRaft(alloc, 2, &.{ 1, 3 }, &follower_log);
+    defer follower.deinit();
+    defer freeActionEntries(alloc, follower.actions.items);
+    leader.role = .leader;
+    const old_meta = SnapshotMeta{ .last_included_index = 50, .last_included_term = 2, .data_len = 0 };
+    const new_meta = SnapshotMeta{ .last_included_index = 100, .last_included_term = 2, .data_len = 0 };
+    try testing.expect(leader.onSnapshotComplete(old_meta));
+    const delayed_reply = follower.handleInstallSnapshot(.{
+        .term = 3,
+        .leader_id = 1,
         .last_included_index = 50,
-        .last_included_term = 3,
-        .data_len = 1024,
-    };
-
-    // peer 2 accepted our snapshot
-    leader.handleInstallSnapshotReply(2, .{
-        .term = leader.currentTerm(),
+        .last_included_term = 2,
+        .data = @constCast(&.{}),
     });
+    try testing.expect(follower.finishInstallSnapshot(old_meta));
 
-    // next_index for peer 2 should be 51 (snapshot index + 1)
-    try testing.expectEqual(@as(LogIndex, 51), leader.next_index[0]);
-    try testing.expectEqual(@as(LogIndex, 50), leader.match_index[0]);
+    // Compaction advances while the old snapshot acknowledgement is delayed.
+    try testing.expect(leader.onSnapshotComplete(new_meta));
+    leader.commit_index = 100;
+    leader.handleInstallSnapshotReply(2, delayed_reply);
+    try testing.expectEqual(@as(LogIndex, 0), leader.match_index[0]);
+    try testing.expectEqual(@as(LogIndex, 101), leader.next_index[0]);
+    const probes = try leader.drainActions();
+    defer test_support.deinitOwnedActions(Action, alloc, probes);
+    try testing.expectEqual(@as(usize, 1), probes.len);
+    const probe = probes[0].send_append_entries;
+    try testing.expectEqual(@as(LogIndex, 100), probe.args.prev_log_index);
+    try testing.expectEqual(@as(Term, 2), probe.args.prev_log_term);
+    const rejection = follower.handleAppendEntries(probe.args);
+    try testing.expect(!rejection.success);
+    leader.handleAppendEntriesReply(2, rejection);
+    try testing.expectEqual(@as(LogIndex, 0), leader.match_index[0]);
+    const retries = try leader.drainActions();
+    defer test_support.deinitOwnedActions(Action, alloc, retries);
+    try testing.expectEqual(@as(usize, 1), retries.len);
+    const snapshot = retries[0].send_install_snapshot;
+    try testing.expectEqual(@as(LogIndex, 100), snapshot.args.last_included_index);
+
+    const reply = follower.handleInstallSnapshot(snapshot.args);
+    try testing.expect(follower.finishInstallSnapshot(new_meta));
+    leader.handleInstallSnapshotReply(2, reply);
+    try testing.expectEqual(@as(LogIndex, 0), leader.match_index[0]);
+    const confirmed_probes = try leader.drainActions();
+    defer test_support.deinitOwnedActions(Action, alloc, confirmed_probes);
+    try testing.expectEqual(@as(usize, 1), confirmed_probes.len);
+    const confirmation = follower.handleAppendEntries(confirmed_probes[0].send_append_entries.args);
+    try testing.expect(confirmation.success);
+    leader.handleAppendEntriesReply(2, confirmation);
+    try testing.expectEqual(@as(LogIndex, 100), leader.match_index[0]);
+    try testing.expectEqual(@as(LogIndex, 101), leader.next_index[0]);
+
+    // Duplicates and delayed failures cannot undo the verified boundary.
+    leader.handleInstallSnapshotReply(2, delayed_reply);
+    leader.handleAppendEntriesReply(2, rejection);
+    try testing.expectEqual(@as(LogIndex, 100), leader.match_index[0]);
+    try testing.expectEqual(@as(LogIndex, 101), leader.next_index[0]);
+    const remaining = try leader.drainActions();
+    defer test_support.deinitOwnedActions(Action, alloc, remaining);
+    try testing.expectEqual(@as(usize, 0), remaining.len);
 }
 
 test "leader steps down on higher term in install_snapshot_reply" {
@@ -2826,4 +2860,164 @@ test "verified prefix rejects noncontiguous batches before changing the log" {
         }
         try expectVerifiedPrefixCommit(&follower, null);
     }
+}
+
+fn discardReplyTestActions(raft: *Raft) !void {
+    const actions = try raft.drainActions();
+    defer test_support.deinitOwnedActions(Action, testing.allocator, actions);
+}
+
+fn expectNoReplyTestActions(raft: *Raft) !void {
+    const actions = try raft.drainActions();
+    defer test_support.deinitOwnedActions(Action, testing.allocator, actions);
+    try testing.expectEqual(@as(usize, 0), actions.len);
+}
+
+fn electReplyTestLeader(raft: *Raft) !void {
+    raft.startElection();
+    try discardReplyTestActions(raft);
+    raft.handleRequestVoteReply(2, .{ .term = raft.currentTerm(), .vote_granted = true });
+    try testing.expectEqual(Role.leader, raft.role);
+    try discardReplyTestActions(raft);
+}
+
+fn stepDownReplyTestLeader(raft: *Raft) !void {
+    const next_term = raft.currentTerm() + 1;
+    const reply = raft.handleAppendEntries(.{
+        .term = next_term,
+        .leader_id = 3,
+        .prev_log_index = 0,
+        .prev_log_term = 0,
+        .entries = &.{},
+        .leader_commit = 0,
+    });
+    try testing.expect(reply.success);
+    try testing.expectEqual(Role.follower, raft.role);
+    try testing.expectEqual(next_term, raft.currentTerm());
+    try discardReplyTestActions(raft);
+}
+
+test "reply term isolates votes across elections and higher terms override the role guard" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+    var raft = try setupTestRaft(testing.allocator, 1, &.{ 2, 3 }, &log);
+    defer raft.deinit();
+    defer freeActionEntries(testing.allocator, raft.actions.items);
+    raft.startElection();
+    const old_term = raft.currentTerm();
+    try discardReplyTestActions(&raft);
+    // The first campaign times out; a reply from it arrives during the next.
+    raft.startElection();
+    try discardReplyTestActions(&raft);
+    try testing.expectEqual(old_term + 1, raft.currentTerm());
+    raft.handleRequestVoteReply(2, .{ .term = old_term, .vote_granted = true });
+    try testing.expectEqual(Role.candidate, raft.role);
+    try testing.expectEqual(@as(u32, 1), raft.votes_received);
+    try testing.expect(!raft.votes_granted[0]);
+    try expectNoReplyTestActions(&raft);
+    raft.handleRequestVoteReply(2, .{ .term = raft.currentTerm(), .vote_granted = true });
+    try testing.expectEqual(Role.leader, raft.role);
+    try discardReplyTestActions(&raft);
+
+    // A leader no longer collects votes, but must still learn a newer term
+    // from a delayed vote reply rather than discard it by role first.
+    const higher_term = raft.currentTerm() + 1;
+    raft.handleRequestVoteReply(3, .{ .term = higher_term, .vote_granted = false });
+    try testing.expectEqual(Role.follower, raft.role);
+    try testing.expectEqual(higher_term, log.getCurrentTerm());
+    try testing.expectEqual(@as(?NodeId, null), log.getVotedFor());
+    try expectNoReplyTestActions(&raft);
+}
+
+test "reply term isolates append successes and failures after reelection" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+    var raft = try setupTestRaft(testing.allocator, 1, &.{ 2, 3 }, &log);
+    defer raft.deinit();
+    defer freeActionEntries(testing.allocator, raft.actions.items);
+    try electReplyTestLeader(&raft);
+    const old_term = raft.currentTerm();
+    const old_index = try raft.propose("old leader command");
+    try discardReplyTestActions(&raft);
+    try stepDownReplyTestLeader(&raft);
+    try electReplyTestLeader(&raft);
+    const current_term = raft.currentTerm();
+    const current_index = try raft.propose("new leader command");
+    try discardReplyTestActions(&raft);
+    const next_before = raft.next_index[0];
+
+    // next_index is above match_index+1, so an unguarded stale failure really
+    // would backtrack and schedule a resend; this is not a floor-only case.
+    try testing.expect(next_before > raft.match_index[0] + 1);
+    raft.handleAppendEntriesReply(2, .{ .term = old_term, .success = false, .match_index = 0 });
+    try testing.expectEqual(next_before, raft.next_index[0]);
+    try testing.expectEqual(@as(LogIndex, 0), raft.match_index[0]);
+    try expectNoReplyTestActions(&raft);
+    raft.handleAppendEntriesReply(2, .{ .term = old_term, .success = true, .match_index = old_index });
+    try testing.expectEqual(next_before, raft.next_index[0]);
+    try testing.expectEqual(@as(LogIndex, 0), raft.match_index[0]);
+    try testing.expectEqual(@as(LogIndex, 0), raft.commit_index);
+    try expectNoReplyTestActions(&raft);
+
+    raft.handleAppendEntriesReply(2, .{ .term = current_term, .success = true, .match_index = current_index });
+    try testing.expectEqual(current_index, raft.match_index[0]);
+    try testing.expectEqual(current_index + 1, raft.next_index[0]);
+    try testing.expectEqual(current_index, raft.commit_index);
+    try expectVerifiedPrefixCommit(&raft, current_index);
+
+    try stepDownReplyTestLeader(&raft);
+    raft.startElection();
+    try discardReplyTestActions(&raft);
+    const higher_term = raft.currentTerm() + 1;
+    raft.handleAppendEntriesReply(3, .{ .term = higher_term, .success = false, .match_index = 0 });
+    try testing.expectEqual(Role.follower, raft.role);
+    try testing.expectEqual(higher_term, log.getCurrentTerm());
+    try testing.expectEqual(@as(?NodeId, null), log.getVotedFor());
+    try expectNoReplyTestActions(&raft);
+}
+
+test "reply term isolates snapshot completion after reelection and still probes current replies" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+    var raft = try setupTestRaft(testing.allocator, 1, &.{ 2, 3 }, &log);
+    defer raft.deinit();
+    defer freeActionEntries(testing.allocator, raft.actions.items);
+    try electReplyTestLeader(&raft);
+    const old_term = raft.currentTerm();
+    const snapshot_index = try raft.propose("snapshot command");
+    try discardReplyTestActions(&raft);
+    try testing.expect(raft.onSnapshotComplete(.{
+        .last_included_index = snapshot_index,
+        .last_included_term = old_term,
+        .data_len = 0,
+    }));
+    try stepDownReplyTestLeader(&raft);
+    try electReplyTestLeader(&raft);
+    // The lagging peer needs the snapshot again in this leadership term.
+    raft.next_index[0] = snapshot_index;
+    raft.handleInstallSnapshotReply(2, .{ .term = old_term });
+    try testing.expectEqual(@as(LogIndex, 0), raft.match_index[0]);
+    try testing.expectEqual(snapshot_index, raft.next_index[0]);
+    try expectNoReplyTestActions(&raft);
+
+    raft.handleInstallSnapshotReply(2, .{ .term = raft.currentTerm() });
+    try testing.expectEqual(@as(LogIndex, 0), raft.match_index[0]);
+    try testing.expectEqual(snapshot_index + 1, raft.next_index[0]);
+    const actions = try raft.drainActions();
+    defer test_support.deinitOwnedActions(Action, testing.allocator, actions);
+    try testing.expectEqual(@as(usize, 1), actions.len);
+    try testing.expect(actions[0] == .send_append_entries);
+    try testing.expectEqual(@as(NodeId, 2), actions[0].send_append_entries.target);
+    try testing.expectEqual(snapshot_index, actions[0].send_append_entries.args.prev_log_index);
+    try testing.expectEqual(old_term, actions[0].send_append_entries.args.prev_log_term);
+
+    try stepDownReplyTestLeader(&raft);
+    raft.startElection();
+    try discardReplyTestActions(&raft);
+    const higher_term = raft.currentTerm() + 1;
+    raft.handleInstallSnapshotReply(3, .{ .term = higher_term });
+    try testing.expectEqual(Role.follower, raft.role);
+    try testing.expectEqual(higher_term, log.getCurrentTerm());
+    try testing.expectEqual(@as(?NodeId, null), log.getVotedFor());
+    try expectNoReplyTestActions(&raft);
 }
