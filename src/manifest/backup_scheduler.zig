@@ -15,6 +15,8 @@
 
 const std = @import("std");
 const spec = @import("spec.zig");
+const retention = @import("backup_retention.zig");
+const backup_metrics = @import("backup_metrics.zig");
 const backup_mod = @import("../state/backup.zig");
 const linux_platform = @import("linux_platform");
 const cli = @import("../lib/cli.zig");
@@ -32,6 +34,7 @@ pub const BackupScheduler = struct {
     next_run: i64,
     thread: ?std.Thread,
     running: std.atomic.Value(bool),
+    metrics: *backup_metrics.Metrics = &backup_metrics.global,
 
     pub fn init(alloc: std.mem.Allocator, backup_spec: spec.BackupSpec) BackupScheduler {
         return .{
@@ -51,6 +54,7 @@ pub const BackupScheduler = struct {
         self.thread = std.Thread.spawn(.{}, schedulerLoop, .{self}) catch |e| {
             writeErr("failed to start backup scheduler: {}\n", .{e});
             self.running.store(false, .release);
+            _ = self.metrics.failures.fetchAdd(1, .monotonic);
             return;
         };
     }
@@ -88,24 +92,39 @@ pub const BackupScheduler = struct {
     }
 
     fn runBackupOnce(self: *BackupScheduler) void {
-        linux_platform.cwd().makePath(self.spec.output_dir) catch |e| {
-            writeErr("backup: cannot create output dir {s}: {}\n", .{ self.spec.output_dir, e });
-            return;
+        self.runOnceWith(nowRealSeconds(), backup_mod.backup) catch |err| {
+            writeErr("backup: scheduled backup failed: {}\n", .{err});
         };
+    }
 
-        const ts = nowRealSeconds();
+    fn runOnceWith(self: *BackupScheduler, now: i64, comptime writeBackup: anytype) !void {
+        errdefer _ = self.metrics.failures.fetchAdd(1, .monotonic);
+        try linux_platform.cwd().makePath(self.spec.output_dir);
+        var dir = try std.Io.Dir.cwd().openDir(std.Options.debug_io, self.spec.output_dir, .{ .iterate = true });
+        defer dir.close(std.Options.debug_io);
+        // Serialize scheduled writers/pruning in this output directory. A
+        // concurrent scheduler skips this attempt instead of blocking stop().
+        const linux = std.os.linux;
+        const rc = linux.openat(dir.handle, ".yoq-backup.lock", .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600);
+        if (linux.errno(rc) != .SUCCESS) return error.LockFailed;
+        const lock_fd: std.posix.fd_t = @intCast(rc);
+        defer linux_platform.posix.close(lock_fd);
+        if (linux.errno(linux.flock(lock_fd, 2 | 4)) != .SUCCESS) return error.BackupBusy; // LOCK_EX | LOCK_NB
+
+        var random: [16]u8 = undefined;
+        linux_platform.randomBytes(&random);
         const ext = if (self.spec.encrypt) "yoqbackup" else "db";
-        const path = std.fmt.allocPrintSentinel(self.alloc, "{s}/yoq-backup-{d}.{s}", .{ self.spec.output_dir, ts, ext }, 0) catch {
-            writeErr("backup: out of memory building output path\n", .{});
-            return;
-        };
+        const path = try std.fmt.allocPrintSentinel(self.alloc, "{s}/yoq-backup-{d}-{s}.{s}", .{ self.spec.output_dir, now, std.fmt.bytesToHex(random, .lower), ext }, 0);
         defer self.alloc.free(path);
+        try writeBackup(self.alloc, path, self.spec.encrypt);
+        _ = self.metrics.successes.fetchAdd(1, .monotonic);
+        self.metrics.last_success.store(now, .release);
 
-        backup_mod.backup(self.alloc, path, self.spec.encrypt) catch |e| {
-            writeErr("backup: scheduled backup failed: {}\n", .{e});
-            return;
+        // A failed or disk-full backup never removes an older recovery point.
+        retention.prune(self.alloc, dir, std.fs.path.basename(path), now, self.spec.retention) catch |err| {
+            _ = self.metrics.retention_failures.fetchAdd(1, .monotonic);
+            writeErr("backup: artifact saved, but retention failed: {}\n", .{err});
         };
-        writeErr("backup: wrote {s}\n", .{path});
     }
 };
 
@@ -137,4 +156,38 @@ test "BackupScheduler starts and stops" {
     sched.stop();
     try std.testing.expect(!sched.running.load(.acquire));
     try std.testing.expect(sched.thread == null);
+}
+
+test "backup scheduler preserves recovery points on disk full and prunes only after success" {
+    const Fixture = struct {
+        fn full(_: std.mem.Allocator, _: [:0]const u8, _: bool) !void {
+            return error.NoSpaceLeft;
+        }
+        fn complete(_: std.mem.Allocator, path: [:0]const u8, _: bool) !void {
+            try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = "complete backup" });
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "yoq-backup-10.db", .data = "old valid backup" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "yoq-backup-15.db.partial", .data = "in progress" });
+    var path: [4096]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &path);
+    var metrics: backup_metrics.Metrics = .{};
+    var scheduler = BackupScheduler.init(std.testing.allocator, .{ .every = 100, .output_dir = path[0..len], .encrypt = false, .retention = .{ .keep_count = 1 } });
+    scheduler.metrics = &metrics;
+    try std.testing.expectError(error.NoSpaceLeft, scheduler.runOnceWith(20, Fixture.full));
+    try tmp.dir.access(std.testing.io, "yoq-backup-10.db", .{});
+    try std.testing.expectEqual(@as(u64, 1), metrics.failures.load(.monotonic));
+    try std.testing.expectEqual(@as(i64, 0), metrics.last_success.load(.acquire));
+    try scheduler.runOnceWith(30, Fixture.complete);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "yoq-backup-10.db", .{}));
+    try tmp.dir.access(std.testing.io, "yoq-backup-15.db.partial", .{});
+    try std.testing.expectEqual(@as(u64, 1), metrics.successes.load(.monotonic));
+    try std.testing.expectEqual(@as(i64, 30), metrics.last_success.load(.acquire));
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try metrics.writePrometheus(&out.writer, 45);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "yoq_backup_last_success_age_seconds 15\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "yoq_backup_failures_total 1\n") != null);
 }

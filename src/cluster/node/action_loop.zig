@@ -194,6 +194,10 @@ pub fn handleMessage(self: anytype, received: transport_mod.ReceivedMessage) voi
 
             const commit_before = self.raft.commit_index;
             const reply = self.raft.handleInstallSnapshot(args);
+            if (self.raft.storage_failed) {
+                self.alloc.free(args.data);
+                return;
+            }
 
             // A lower returned term means adopting the leader's term failed
             // to persist. Do not install data or acknowledge that RPC.

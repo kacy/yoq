@@ -217,6 +217,7 @@ fn writeStorageIoMetricsJson(writer: *std.Io.Writer, ctx: StorageIoContext) !voi
 }
 
 fn writeMetricsPrometheus(writer: *std.Io.Writer, _: void) !void {
+    try @import("../../../manifest/backup_metrics.zig").global.writePrometheus(writer, std.Io.Clock.real.now(std.Options.debug_io).toSeconds());
     try writeServiceRolloutPrometheus(writer);
 
     if (ebpf.getMetricsCollector()) |collector| {

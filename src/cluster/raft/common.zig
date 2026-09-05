@@ -4,8 +4,8 @@ const NodeId = types.NodeId;
 const Term = types.Term;
 
 pub fn stepDown(self: anytype, new_term: Term, min_election_ticks: u32, max_election_ticks: u32) bool {
-    if (!self.log.setCurrentTerm(new_term)) return false;
-    if (!self.log.setVotedFor(null)) return false;
+    if (!self.persistTerm(new_term)) return false;
+    if (!self.persistVote(null)) return false;
     self.role = .follower;
     self.ticks_since_event = 0;
     resetElectionTimeout(self, min_election_ticks, max_election_ticks);

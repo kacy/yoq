@@ -70,6 +70,8 @@ pub const Raft = struct {
     id: NodeId,
     role: Role,
     log: *persistent_log.Log,
+    persistent_state: persistent_log.State,
+    storage_failed: bool = false,
     peers: []const NodeId,
 
     // volatile state. on restart we recover the snapshot boundary,
@@ -125,7 +127,8 @@ pub const Raft = struct {
         const seed = @as(u64, @truncate(@as(u128, @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds())))) ^ id;
 
         // load snapshot metadata from persistent storage
-        const snap_meta = log.getSnapshotMeta();
+        const state = try log.readState();
+        const snap_meta = try log.readSnapshotMeta();
 
         const recovered_index: LogIndex = if (snap_meta) |meta|
             meta.last_included_index
@@ -137,6 +140,7 @@ pub const Raft = struct {
             .id = id,
             .role = .follower,
             .log = log,
+            .persistent_state = state,
             .peers = owned_peers,
             .commit_index = recovered_index,
             .last_applied = recovered_index,
@@ -167,16 +171,19 @@ pub const Raft = struct {
     /// call periodically (every ~100ms). drives election timeouts
     /// and heartbeats.
     pub fn tick(self: *Raft) void {
+        if (!self.refreshPersistentState()) return;
         election_runtime.tick(self, heartbeat_interval, min_election_ticks, max_election_ticks);
     }
 
     // -- RPC handlers --
 
     pub fn handleRequestVote(self: *Raft, args: RequestVoteArgs) RequestVoteReply {
+        if (!self.refreshPersistentState()) return .{ .term = self.persistent_state.current_term, .vote_granted = false };
         return election_runtime.handleRequestVote(self, args, min_election_ticks, max_election_ticks);
     }
 
     pub fn handleAppendEntries(self: *Raft, args: AppendEntriesArgs) AppendEntriesReply {
+        if (!self.refreshPersistentState()) return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
         return replication_runtime.handleAppendEntries(self, args, min_election_ticks, max_election_ticks);
     }
 
@@ -185,18 +192,22 @@ pub const Raft = struct {
     /// snapshot bytes synchronously and then call finishInstallSnapshot()
     /// before acknowledging success back to the leader.
     pub fn handleInstallSnapshot(self: *Raft, args: InstallSnapshotArgs) InstallSnapshotReply {
+        if (!self.refreshPersistentState()) return .{ .term = self.persistent_state.current_term };
         return snapshot_runtime.handleInstallSnapshot(self, args, min_election_ticks, max_election_ticks);
     }
 
     pub fn finishInstallSnapshot(self: *Raft, meta: SnapshotMeta) bool {
+        if (!self.refreshPersistentState()) return false;
         return snapshot_runtime.finishInstallSnapshot(self, meta);
     }
 
     pub fn handleRequestVoteReply(self: *Raft, from: NodeId, reply: RequestVoteReply) void {
+        if (!self.refreshPersistentState()) return;
         election_runtime.handleRequestVoteReply(self, from, reply, min_election_ticks, max_election_ticks);
     }
 
     pub fn handleAppendEntriesReply(self: *Raft, from: NodeId, reply: AppendEntriesReply) void {
+        if (!self.refreshPersistentState()) return;
         replication_runtime.handleAppendEntriesReply(self, from, reply, min_election_ticks, max_election_ticks);
     }
 
@@ -204,16 +215,18 @@ pub const Raft = struct {
     /// if the follower's term is higher, step down. otherwise,
     /// update next_index and match_index for that peer.
     pub fn handleInstallSnapshotReply(self: *Raft, from: NodeId, reply: InstallSnapshotReply) void {
+        if (!self.refreshPersistentState()) return;
         snapshot_runtime.handleInstallSnapshotReply(self, from, reply, min_election_ticks, max_election_ticks);
     }
 
     /// submit a new command through the leader.
     /// returns the log index where the entry will be placed.
     pub fn propose(self: *Raft, data: []const u8) !LogIndex {
+        if (!self.refreshPersistentState()) return error.ReadFailed;
         if (self.role != .leader) return error.NotLeader;
 
         const index = self.log.lastIndex() + 1;
-        const term = self.log.getCurrentTerm();
+        const term = self.persistent_state.current_term;
 
         try self.log.append(.{
             .index = index,
@@ -233,6 +246,7 @@ pub const Raft = struct {
     /// caller owns the returned slice and must free it with self.alloc.free(actions).
     /// on allocation failure, queued actions remain pending for a later drain.
     pub fn drainActions(self: *Raft) ![]Action {
+        if (!self.refreshPersistentState()) return error.ReadFailed;
         return action_queue.drainOwned(Action, self.alloc, &self.actions);
     }
 
@@ -240,6 +254,7 @@ pub const Raft = struct {
     /// in-memory snapshot metadata so the leader knows it can send
     /// snapshots to lagging followers.
     pub fn onSnapshotComplete(self: *Raft, meta: SnapshotMeta) bool {
+        if (!self.refreshPersistentState()) return false;
         return snapshot_runtime.onSnapshotComplete(self, meta);
     }
 
@@ -257,6 +272,7 @@ pub const Raft = struct {
     /// returns true if the node was leader and stepped down,
     /// false if the node was not leader.
     pub fn transferLeadership(self: *Raft) bool {
+        if (!self.refreshPersistentState()) return false;
         return election_runtime.transferLeadership(self, min_election_ticks, max_election_ticks);
     }
 
@@ -270,6 +286,7 @@ pub const Raft = struct {
     // -- internal --
 
     fn startElection(self: *Raft) void {
+        if (!self.refreshPersistentState()) return;
         election_runtime.startElection(self, min_election_ticks, max_election_ticks);
     }
 
@@ -308,9 +325,46 @@ pub const Raft = struct {
         common.resetElectionTimeout(self, min_election_ticks, max_election_ticks);
     }
 
+    /// Load term and vote together before participating. A fault demotes the
+    /// node and discards pending outbound work; later events retry the read.
+    fn refreshPersistentState(self: *Raft) bool {
+        self.persistent_state = self.log.readState() catch {
+            self.storage_failed = true;
+            self.role = .follower;
+            self.discardActions();
+            return false;
+        };
+        self.storage_failed = false;
+        return true;
+    }
+
+    fn discardActions(self: *Raft) void {
+        for (self.actions.items) |action| switch (action) {
+            .send_append_entries => |send| {
+                for (send.args.entries) |entry| self.alloc.free(entry.data);
+                if (send.args.entries.len > 0) self.alloc.free(send.args.entries);
+            },
+            .apply_snapshot => |snapshot| self.alloc.free(snapshot.data),
+            else => {},
+        };
+        self.actions.clearRetainingCapacity();
+    }
+
+    pub fn persistTerm(self: *Raft, term: Term) bool {
+        if (!self.log.setCurrentTerm(term)) return false;
+        self.persistent_state.current_term = term;
+        return true;
+    }
+
+    pub fn persistVote(self: *Raft, vote: ?NodeId) bool {
+        if (!self.log.setVotedFor(vote)) return false;
+        self.persistent_state.voted_for = vote;
+        return true;
+    }
+
     /// get current term (convenience for external callers)
     pub fn currentTerm(self: *Raft) Term {
-        return self.log.getCurrentTerm();
+        return self.persistent_state.current_term;
     }
 };
 
@@ -1535,8 +1589,8 @@ test "split vote resolves in subsequent election" {
     }
     try testing.expectEqual(Role.candidate, r1.role);
     try testing.expectEqual(Role.candidate, r3.role);
-    try testing.expectEqual(@as(Term, 1), log1.getCurrentTerm());
-    try testing.expectEqual(@as(Term, 1), log3.getCurrentTerm());
+    try testing.expectEqual(@as(Term, 1), (try log1.getCurrentTerm()));
+    try testing.expectEqual(@as(Term, 1), (try log3.getCurrentTerm()));
 
     // step 2: split the votes — r2 votes for r1, r4 votes for r3
     const v1 = try r1.drainActions();
@@ -1580,8 +1634,8 @@ test "split vote resolves in subsequent election" {
     }
     try testing.expectEqual(Role.candidate, r1.role);
 
-    try testing.expectEqual(@as(Term, 2), log1.getCurrentTerm());
-    try testing.expectEqual(@as(Term, 1), log3.getCurrentTerm());
+    try testing.expectEqual(@as(Term, 2), (try log1.getCurrentTerm()));
+    try testing.expectEqual(@as(Term, 1), (try log3.getCurrentTerm()));
 
     const v1b = try r1.drainActions();
     defer alloc.free(v1b);
@@ -1613,7 +1667,7 @@ test "split vote resolves in subsequent election" {
     if (r4.role == .leader) leader_count += 1;
     try testing.expectEqual(@as(u32, 1), leader_count);
     for ([_]*Log{ &log1, &log2, &log3, &log4 }) |log| {
-        try testing.expectEqual(@as(Term, 2), log.getCurrentTerm());
+        try testing.expectEqual(@as(Term, 2), (try log.getCurrentTerm()));
     }
 
     // drain the new leader's actions
@@ -2940,8 +2994,8 @@ test "reply term isolates votes across elections and higher terms override the r
     const higher_term = raft.currentTerm() + 1;
     raft.handleRequestVoteReply(3, .{ .term = higher_term, .vote_granted = false });
     try testing.expectEqual(Role.follower, raft.role);
-    try testing.expectEqual(higher_term, log.getCurrentTerm());
-    try testing.expectEqual(@as(?NodeId, null), log.getVotedFor());
+    try testing.expectEqual(higher_term, (try log.getCurrentTerm()));
+    try testing.expectEqual(@as(?NodeId, null), (try log.getVotedFor()));
     try expectNoReplyTestActions(&raft);
 }
 
@@ -2987,8 +3041,8 @@ test "reply term isolates append successes and failures after reelection" {
     const higher_term = raft.currentTerm() + 1;
     raft.handleAppendEntriesReply(3, .{ .term = higher_term, .success = false, .match_index = 0 });
     try testing.expectEqual(Role.follower, raft.role);
-    try testing.expectEqual(higher_term, log.getCurrentTerm());
-    try testing.expectEqual(@as(?NodeId, null), log.getVotedFor());
+    try testing.expectEqual(higher_term, (try log.getCurrentTerm()));
+    try testing.expectEqual(@as(?NodeId, null), (try log.getVotedFor()));
     try expectNoReplyTestActions(&raft);
 }
 
@@ -3033,7 +3087,43 @@ test "reply term isolates snapshot completion after reelection and still probes 
     const higher_term = raft.currentTerm() + 1;
     raft.handleInstallSnapshotReply(3, .{ .term = higher_term });
     try testing.expectEqual(Role.follower, raft.role);
-    try testing.expectEqual(higher_term, log.getCurrentTerm());
-    try testing.expectEqual(@as(?NodeId, null), log.getVotedFor());
+    try testing.expectEqual(higher_term, (try log.getCurrentTerm()));
+    try testing.expectEqual(@as(?NodeId, null), (try log.getVotedFor()));
     try expectNoReplyTestActions(&raft);
+}
+
+test "durable state read faults suspend consensus until the persisted vote is readable" {
+    const sqlite = @import("sqlite");
+    const Fault = struct {
+        fn deny(_: ?*anyopaque, action: c_int, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+            return if (action == sqlite.c.SQLITE_READ) sqlite.c.SQLITE_DENY else sqlite.c.SQLITE_OK;
+        }
+    };
+    var log = try Log.initMemory();
+    defer log.deinit();
+    try testing.expect(log.setCurrentTerm(5));
+    try testing.expect(log.setVotedFor(2));
+    var raft = try Raft.init(testing.allocator, 1, &.{ 2, 3 }, &log);
+    defer raft.deinit();
+    raft.role = .leader;
+    try raft.actions.append(testing.allocator, .become_leader);
+    try testing.expectEqual(@as(c_int, sqlite.c.SQLITE_OK), sqlite.c.sqlite3_set_authorizer(log.db.db, Fault.deny, null));
+    defer _ = sqlite.c.sqlite3_set_authorizer(log.db.db, null, null);
+    try testing.expectError(error.ReadFailed, log.getCurrentTerm());
+    try testing.expectError(error.ReadFailed, log.getVotedFor());
+    try testing.expectError(error.ReadFailed, Raft.init(testing.allocator, 1, &.{2}, &log));
+    raft.tick();
+    try testing.expect(raft.storage_failed);
+    try testing.expectEqual(.follower, raft.role);
+    try testing.expectEqual(@as(usize, 0), raft.actions.items.len);
+    const vote = raft.handleRequestVote(.{ .term = 5, .candidate_id = 3, .last_log_index = 0, .last_log_term = 0 });
+    try testing.expect(!vote.vote_granted);
+    try testing.expectEqual(@as(Term, 5), vote.term);
+    try testing.expectError(error.ReadFailed, raft.propose("must not append"));
+    try testing.expectError(error.ReadFailed, raft.drainActions());
+    try testing.expectEqual(@as(c_int, sqlite.c.SQLITE_OK), sqlite.c.sqlite3_set_authorizer(log.db.db, null, null));
+    const restored = raft.handleRequestVote(.{ .term = 5, .candidate_id = 2, .last_log_index = 0, .last_log_term = 0 });
+    try testing.expect(restored.vote_granted);
+    try testing.expect(!raft.storage_failed);
+    try testing.expectEqual(@as(?NodeId, 2), try log.getVotedFor());
 }

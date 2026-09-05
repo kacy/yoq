@@ -1,6 +1,8 @@
 const sqlite = @import("sqlite");
 
 pub fn initSchema(db: *sqlite.Db) !void {
+    const existing_state = try db.one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'raft_state';", .{}, .{});
+
     db.exec(
         \\CREATE TABLE IF NOT EXISTS raft_state (
         \\    id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -9,8 +11,10 @@ pub fn initSchema(db: *sqlite.Db) !void {
         \\);
     , .{}, .{}) catch return error.InitFailed;
 
-    db.exec(
-        "INSERT OR IGNORE INTO raft_state (id, current_term) VALUES (1, 0);",
+    // Only a genuinely new database starts at term zero. Never reconstruct
+    // missing durable history in an existing raft_state table.
+    if (existing_state.?.count == 0) db.exec(
+        "INSERT INTO raft_state (id, current_term) VALUES (1, 0);",
         .{},
         .{},
     ) catch return error.InitFailed;
