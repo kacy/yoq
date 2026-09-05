@@ -70,10 +70,26 @@ fn executeInRoot(ctx: *const BuildChildContext, root: []const u8) u8 {
         createWorkdir(ctx.workdir, account) catch return 1;
         return 0;
     }
+    dropMountCapability() catch return 1;
     identity.apply(account, ctx.rootless and ctx.user == null) catch return 1;
     linux_platform.posix.chdir(ctx.workdir) catch return 1;
 
     return execShellCommand(ctx.command, ctx.env, ctx.shell);
+}
+
+/// Mount setup is complete. Remove this capability from every set, including
+/// the bounding set, so exec as UID 0 cannot restore writable host binds.
+pub fn dropMountCapability() !void {
+    if (linux.errno(linux.prctl(@intFromEnum(linux.PR.CAPBSET_DROP), linux.CAP.SYS_ADMIN, 0, 0, 0)) != .SUCCESS) return error.CapabilityFailed;
+    var header = linux.cap_user_header_t{ .version = 0x20080522, .pid = 0 };
+    var data: [2]linux.cap_user_data_t = undefined;
+    if (linux.errno(linux.syscall2(.capget, @intFromPtr(&header), @intFromPtr(&data))) != .SUCCESS) return error.CapabilityFailed;
+    const index = linux.CAP.TO_INDEX(linux.CAP.SYS_ADMIN);
+    const mask = linux.CAP.TO_MASK(linux.CAP.SYS_ADMIN);
+    data[index].effective &= ~mask;
+    data[index].permitted &= ~mask;
+    data[index].inheritable &= ~mask;
+    if (linux.errno(linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&data))) != .SUCCESS) return error.CapabilityFailed;
 }
 
 pub fn execShellCommand(command: []const u8, env: []const []const u8, shell: ?[]const u8) u8 {
@@ -180,13 +196,50 @@ test "build child kernel applies image USER WORKDIR and refuses invalid executio
     ctx.create_workdir = false;
     // Keep the identity and pwd assertions separate from the deliberately
     // failing redirection, so a failed assertion cannot be hidden by it.
-    ctx.command = "test -r /proc/self/status || exit 98; test -c /dev/null || exit 96; echo device > /dev/null || exit 99; test -c /dev/zero || exit 97; test \"$(id -u)\" = 12345 || exit 91; test \"$(id -g)\" = 23456 || exit 92; test \"$(id -G)\" = 23456 || exit 95; test \"$(pwd -P)\" = /workspace/src || exit 93; if (echo denied > /protected/file) 2>/dev/null; then exit 94; fi; echo success > result";
+    ctx.command = "test -r /proc/self/status || exit 98; test -c /dev/null || exit 96; echo device > /dev/null || exit 99; test -c /dev/zero || exit 97; test \"$(id -u)\" = 12345 || exit 91; test \"$(id -g)\" = 23456 || exit 92; test \"$(id -G)\" = 23456 || exit 95; test \"$(pwd -P)\" = /workspace/src || exit 93; if (echo denied > /protected/file) 2>/dev/null; then exit 94; fi; echo success > result; printf '#!/bin/sh\\nexit 0\\n' > tool && chmod 755 tool";
     try expectBuildChild(&ctx, 0);
     const contents = try tmp.dir.readFileAlloc(io, "upper/workspace/src/result", alloc, .limited(100));
     defer alloc.free(contents);
     try std.testing.expectEqualStrings("success\n", contents);
     ctx.user = "12345:23456";
     ctx.command = "test \"$(id -u)\" = 12345 && test \"$(id -g)\" = 23456";
+    try expectBuildChild(&ctx, 0);
+    // Exercise a real layer boundary: ownership and executable mode must
+    // survive tar/gzip creation, extraction and a fresh overlay-backed RUN.
+    const layer = @import("../../image/layer.zig");
+    const blobs = @import("../../image/store.zig");
+    const created = (try layer.createLayerFromDir(alloc, upper)).?;
+    defer blobs.deleteBlob(created.compressed_digest) catch {};
+    const hex = created.compressed_digest.hex();
+    defer layer.deleteExtractedLayer(&hex);
+    var digest_buf: [71]u8 = undefined;
+    const extracted = try layer.extractLayer(alloc, created.compressed_digest.string(&digest_buf));
+    defer alloc.free(extracted);
+    for ([_][]const u8{ "upper2", "work2", "merged2" }) |dir| try tmp.dir.createDir(io, dir, .default_dir);
+    const upper2 = try std.fmt.allocPrint(alloc, "{s}/upper2", .{root_buf[0..len]});
+    defer alloc.free(upper2);
+    const work2 = try std.fmt.allocPrint(alloc, "{s}/work2", .{root_buf[0..len]});
+    defer alloc.free(work2);
+    const merged2 = try std.fmt.allocPrint(alloc, "{s}/merged2", .{root_buf[0..len]});
+    defer alloc.free(merged2);
+    ctx.layer_dirs = &.{extracted};
+    ctx.upper_dir = upper2;
+    ctx.work_dir = work2;
+    ctx.merged_dir = merged2;
+    ctx.command = "./tool && echo second >> result";
+    try expectBuildChild(&ctx, 0);
+    const second = try tmp.dir.readFileAlloc(io, "upper2/workspace/src/result", alloc, .limited(100));
+    defer alloc.free(second);
+    try std.testing.expectEqualStrings("success\nsecond\n", second);
+    ctx.layer_dirs = &.{};
+    ctx.upper_dir = upper;
+    ctx.work_dir = work;
+    ctx.merged_dir = merged;
+    ctx.user = null;
+    ctx.workdir = "/";
+    // These attempts run after shell exec as UID 0, so the bounding-set
+    // restriction must survive exec rather than just clearing effective caps.
+    ctx.command = "command -v mount >/dev/null || exit 89; if mount -o remount,bind,rw /sys 2>/dev/null; then exit 90; fi; if mount -o remount,bind,rw /dev/null 2>/dev/null; then exit 91; fi; echo usable > /dev/null";
     try expectBuildChild(&ctx, 0);
     ctx.workdir = "/missing";
     ctx.command = "exit 0";
