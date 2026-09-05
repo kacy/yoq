@@ -95,49 +95,19 @@ pub fn pull(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.ImageRef) Regi
             total_size += layer.size;
         }
     } else {
-        var err_flag = std.atomic.Value(bool).init(false);
         var batch_start: usize = 0;
-
         while (batch_start < layer_count) {
             const batch_end = @min(batch_start + common.max_parallel_downloads, layer_count);
-            const batch_size = batch_end - batch_start;
-
-            var threads: [common.max_parallel_downloads]?std.Thread = .{null} ** common.max_parallel_downloads;
-            var thread_errors: [common.max_parallel_downloads]?RegistryError = .{null} ** common.max_parallel_downloads;
-
-            for (0..batch_size) |i| {
-                const layer = manifest.layers[batch_start + i];
-                threads[i] = std.Thread.spawn(.{}, blob_transfer.downloadLayerWorker, .{
-                    io,
-                    alloc,
-                    image_ref.host,
-                    repository,
-                    layer.digest,
-                    token,
-                    &err_flag,
-                    &thread_errors[i],
-                }) catch null; // fallback to sequential below
-            }
-
-            for (0..batch_size) |i| {
-                if (threads[i]) |t| {
-                    t.join();
-                } else {
-                    const layer = manifest.layers[batch_start + i];
-                    blob_transfer.downloadLayerBlob(alloc, &client, image_ref.host, repository, layer.digest, token) catch |e|
-                        return switch (e) {
-                            error.BlobNotFound => RegistryError.BlobNotFound,
-                            error.NetworkError => RegistryError.NetworkError,
-                            error.ResponseTooLarge => RegistryError.ResponseTooLarge,
-                            error.DigestMismatch => RegistryError.DigestMismatch,
-                        };
-                }
-            }
-
-            for (thread_errors[0..batch_size]) |maybe_err| {
-                if (maybe_err) |e| return e;
-            }
-
+            var downloads = LayerDownloads{
+                .io = io,
+                .alloc = alloc,
+                .client = &client,
+                .host = image_ref.host,
+                .repository = repository,
+                .token = token,
+                .layers = manifest.layers[batch_start..batch_end],
+            };
+            try downloadBatch(LayerDownloads, &downloads, downloads.layers.len);
             batch_start = batch_end;
         }
 
@@ -164,6 +134,55 @@ pub fn pull(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.ImageRef) Regi
         .total_size = total_size,
         .alloc = alloc,
     };
+}
+
+const LayerDownloads = struct {
+    const Thread = std.Thread;
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    client: *std.http.Client,
+    host: []const u8,
+    repository: []const u8,
+    token: common.Token,
+    layers: []const spec.Descriptor,
+
+    fn spawn(self: *LayerDownloads, index: usize, failed: *std.atomic.Value(bool), result: *?RegistryError) !Thread {
+        return std.Thread.spawn(.{}, blob_transfer.downloadLayerWorker, .{
+            self.io, self.alloc, self.host, self.repository, self.layers[index].digest, self.token, failed, result,
+        });
+    }
+
+    fn download(self: *LayerDownloads, index: usize) RegistryError!void {
+        return blob_transfer.downloadLayerBlob(self.alloc, self.client, self.host, self.repository, self.layers[index].digest, self.token);
+    }
+};
+
+/// Own all workers until they finish, including when a failed spawn falls
+/// back to a download that also fails. Workers borrow the caller's layer and
+/// token data as well as this batch's error slots.
+fn downloadBatch(comptime Downloads: type, downloads: *Downloads, count: usize) RegistryError!void {
+    std.debug.assert(count <= common.max_parallel_downloads);
+    var threads: [common.max_parallel_downloads]?Downloads.Thread = .{null} ** common.max_parallel_downloads;
+    var thread_errors: [common.max_parallel_downloads]?RegistryError = .{null} ** common.max_parallel_downloads;
+    var failed: std.atomic.Value(bool) = .init(false);
+    defer for (&threads) |*thread| {
+        if (thread.*) |worker| worker.join();
+    };
+
+    for (0..count) |index| {
+        threads[index] = downloads.spawn(index, &failed, &thread_errors[index]) catch null;
+    }
+    for (0..count) |index| {
+        if (threads[index]) |worker| {
+            worker.join();
+            threads[index] = null;
+        } else {
+            try downloads.download(index);
+        }
+    }
+    for (thread_errors[0..count]) |result| {
+        if (result) |err| return err;
+    }
 }
 
 pub fn push(
@@ -524,4 +543,72 @@ test "uploadManifest — URL format is correct" {
         "https://registry.example.io/v2/myuser/myapp/manifests/v1.0",
         url,
     );
+}
+
+const DownloadBatchFixture = struct {
+    const Thread = struct {
+        worker: std.Thread,
+        owner: *DownloadBatchFixture,
+        index: usize,
+
+        fn join(self: Thread) void {
+            self.worker.join();
+            self.owner.joined[self.index] = true;
+        }
+    };
+    workers: [3]?Thread = .{null} ** 3,
+    joined: [3]bool = .{false} ** 3,
+    released: std.atomic.Value(bool) = .init(false),
+    fallback_error: ?RegistryError,
+    worker_error: ?RegistryError = null,
+
+    fn spawn(self: *DownloadBatchFixture, index: usize, _: *std.atomic.Value(bool), result: *?RegistryError) !Thread {
+        if (index == 1) return error.ThreadQuotaExceeded;
+        const thread = Thread{
+            .worker = try std.Thread.spawn(.{}, work, .{ self, index, result }),
+            .owner = self,
+            .index = index,
+        };
+        self.workers[index] = thread;
+        return thread;
+    }
+
+    fn work(self: *DownloadBatchFixture, index: usize, result: *?RegistryError) void {
+        if (index == 2) {
+            while (!self.released.load(.acquire)) std.atomic.spinLoopHint();
+        }
+        if (self.worker_error) |err| result.* = err;
+    }
+
+    fn download(self: *DownloadBatchFixture, _: usize) RegistryError!void {
+        self.released.store(true, .release);
+        if (self.fallback_error) |err| return err;
+    }
+
+    fn deinit(self: *DownloadBatchFixture) void {
+        // The fixture also cleans up if the regression fails against a batch
+        // implementation that returns without joining its remaining worker.
+        self.released.store(true, .release);
+        for (self.workers, 0..) |thread, index| {
+            if (thread) |worker| if (!self.joined[index]) worker.join();
+        }
+    }
+};
+
+test "registry batch joins later workers when spawn and fallback both fail" {
+    var fixture = DownloadBatchFixture{ .fallback_error = error.DigestMismatch };
+    defer fixture.deinit();
+    try std.testing.expectError(error.DigestMismatch, downloadBatch(DownloadBatchFixture, &fixture, 3));
+    try std.testing.expect(fixture.workers[0] != null);
+    try std.testing.expect(fixture.workers[2] != null);
+    try std.testing.expect(fixture.joined[0]);
+    try std.testing.expect(fixture.joined[2]);
+}
+
+test "registry batch waits for workers before reporting their failure after fallback" {
+    var fixture = DownloadBatchFixture{ .fallback_error = null, .worker_error = error.NetworkError };
+    defer fixture.deinit();
+    try std.testing.expectError(error.NetworkError, downloadBatch(DownloadBatchFixture, &fixture, 3));
+    try std.testing.expect(fixture.joined[0]);
+    try std.testing.expect(fixture.joined[2]);
 }
