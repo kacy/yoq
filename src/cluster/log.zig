@@ -71,6 +71,14 @@ pub const Log = struct {
         return snapshot_support.getSnapshotMeta(&self.db);
     }
 
+    pub fn readSnapshotMeta(self: *Log) LogError!?SnapshotMeta {
+        return snapshot_support.readSnapshotMeta(&self.db);
+    }
+
+    pub fn activateSnapshot(self: *Log, meta: SnapshotMeta) LogError!void {
+        return snapshot_support.activateSnapshot(&self.db, meta);
+    }
+
     pub fn setSnapshotMeta(self: *Log, meta: SnapshotMeta) bool {
         snapshot_support.setSnapshotMeta(&self.db, meta) catch |e| {
             logger.warn("raft_log: failed to set snapshot metadata: {}", .{e});
@@ -467,4 +475,30 @@ test "truncateUpTo all entries with snapshot" {
     // log is empty but snapshot provides the answer
     try std.testing.expectEqual(@as(LogIndex, 2), log.lastIndex());
     try std.testing.expectEqual(@as(Term, 1), log.lastTerm());
+}
+
+test "snapshot activation keeps suffix only behind a matching boundary" {
+    for ([_]?u64{ 2, 9, null }) |boundary_term| {
+        var log = try Log.initMemory();
+        defer log.deinit();
+        if (boundary_term) |term| try log.append(.{ .index = 5, .term = term, .data = "boundary" });
+        try log.append(.{ .index = 6, .term = 9, .data = "suffix" });
+        try log.activateSnapshot(.{ .last_included_index = 5, .last_included_term = 2, .data_len = 4096 });
+        const suffix = try log.getEntry(std.testing.allocator, 6);
+        defer if (suffix) |entry| std.testing.allocator.free(entry.data);
+        try std.testing.expectEqual(boundary_term != null and boundary_term.? == 2, suffix != null);
+        try std.testing.expectEqual(@as(u64, 2), log.termAt(5));
+    }
+}
+
+test "snapshot activation rolls back metadata and deletion together" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+    try log.append(.{ .index = 5, .term = 2, .data = "boundary" });
+    try log.append(.{ .index = 6, .term = 9, .data = "suffix" });
+    try log.db.exec("CREATE TRIGGER refuse_snapshot BEFORE UPDATE ON snapshot_meta BEGIN SELECT RAISE(ABORT, 'injected snapshot metadata failure'); END;", .{}, .{});
+    try std.testing.expectError(error.WriteFailed, log.activateSnapshot(.{ .last_included_index = 5, .last_included_term = 2, .data_len = 4096 }));
+    try std.testing.expect((try log.readSnapshotMeta()) == null);
+    try std.testing.expectEqual(@as(u64, 2), log.termAt(5));
+    try std.testing.expectEqual(@as(u64, 6), log.lastIndex());
 }

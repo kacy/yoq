@@ -113,6 +113,7 @@ pub const Node = struct {
     // the commit index at the time of the last snapshot.
     // used to decide when a new snapshot is needed.
     last_snapshot_index: LogIndex,
+    snapshot_failed: std.atomic.Value(bool) = .init(false),
 
     /// SWIM gossip state machine for scalable agent failure detection.
     /// null when gossip failed to initialize (node falls back to
@@ -154,6 +155,8 @@ pub const Node = struct {
             break :blk StateMachine.init(sm_path) catch return NodeError.InitFailed;
         };
         errdefer sm.deinit();
+
+        if (!skip_transport_bind) try snapshot_support.recover(alloc, config.data_dir, &log, &sm);
 
         // collect peer IDs for raft
         const peer_ids = try alloc.alloc(NodeId, config.peers.len);
@@ -315,7 +318,8 @@ pub const Node = struct {
     }
 
     pub fn stop(self: *Node) void {
-        if (!self.running.load(.acquire)) return;
+        // A worker may have requested shutdown after a failed snapshot restore.
+        // The running flag is not proof that its thread has finished.
         self.running.store(false, .release);
 
         if (self.tick_thread) |t| {
@@ -334,6 +338,7 @@ pub const Node = struct {
         self.mu.lockUncancelable(std.Options.debug_io);
         defer self.mu.unlock(std.Options.debug_io);
 
+        if (self.snapshot_failed.load(.acquire)) return error.SnapshotRecoveryRequired;
         return self.raft.propose(data) catch return NodeError.NotLeader;
     }
 
@@ -380,7 +385,7 @@ pub const Node = struct {
             .commit_index = self.raft.commit_index,
             .last_applied = self.state_machine.last_applied,
             .backlog = backlog,
-            .healthy = backlog == 0,
+            .healthy = backlog == 0 and !self.snapshot_failed.load(.acquire),
         };
     }
 
@@ -872,16 +877,17 @@ test "processActions snapshot restart preserves last_applied continuity" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
     {
-        var node = Node.init(alloc, .{
+        var node = try Node.init(alloc, .{
             .id = 1,
             .port = 0,
             .peers = &.{},
             .data_dir = tmp_path,
-        }) catch return;
+        });
         defer node.deinit();
+        node.fixPointers();
 
         try node.log.append(.{
             .index = 1,
@@ -905,13 +911,14 @@ test "processActions snapshot restart preserves last_applied continuity" {
         try std.testing.expectEqual(@as(LogIndex, 1), node.raft.snapshot_meta.?.last_included_index);
     }
 
-    var restarted = Node.init(alloc, .{
+    var restarted = try Node.init(alloc, .{
         .id = 1,
         .port = 0,
         .peers = &.{},
         .data_dir = tmp_path,
-    }) catch return;
+    });
     defer restarted.deinit();
+    restarted.fixPointers();
 
     try std.testing.expectEqual(@as(LogIndex, 1), restarted.last_snapshot_index);
     try std.testing.expect(restarted.raft.snapshot_meta != null);
@@ -944,40 +951,43 @@ test "install_snapshot restart preserves recovered state and future applies" {
     var snapshot_dir = std.testing.tmpDir(.{});
     defer snapshot_dir.cleanup();
     var snapshot_root_buf: [512]u8 = undefined;
-    const snapshot_root = testDirPath(snapshot_dir.dir, &snapshot_root_buf) catch return;
+    const snapshot_root = try testDirPath(snapshot_dir.dir, &snapshot_root_buf);
 
     var snapshot_path_buf: [640]u8 = undefined;
-    const snapshot_path = std.fmt.bufPrint(&snapshot_path_buf, "{s}/cluster-snapshot.dat", .{snapshot_root}) catch return;
+    const snapshot_path = try std.fmt.bufPrint(&snapshot_path_buf, "{s}/cluster-snapshot.dat", .{snapshot_root});
 
-    var source_sm = StateMachine.initMemory() catch return;
+    var source_sm = try StateMachine.initMemory();
     defer source_sm.deinit();
     try insertAgentForTest(&source_sm.db, "snapmsg", "active");
+    try advanceSnapshotFixture(&source_sm, 5);
     try source_sm.takeSnapshot(snapshot_path, .{
         .last_included_index = 5,
         .last_included_term = 2,
         .data_len = 0,
     });
 
-    const snapshot_bytes = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, snapshot_path, alloc, .limited(1024 * 1024)) catch return;
+    const snapshot_bytes = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, snapshot_path, alloc, .limited(1024 * 1024));
     defer alloc.free(snapshot_bytes);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
     const peers = &[_]PeerConfig{
-        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+        .{ .id = 2, .addr = .{ 127, 0, 0, 2 }, .port = 9700 },
     };
 
     {
-        var node = Node.init(alloc, .{
+        var node = try Node.init(alloc, .{
             .id = 1,
             .port = 0,
             .peers = peers,
+            .shared_key = [_]u8{7} ** 32,
             .data_dir = tmp_path,
-        }) catch return;
+        });
         defer node.deinit();
+        node.fixPointers();
 
         try node.log.append(.{
             .index = 1,
@@ -990,7 +1000,7 @@ test "install_snapshot restart preserves recovered state and future applies" {
         node.mu.unlock(std.Options.debug_io);
 
         node.handleMessage(.{
-            .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+            .from_addr = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 2 }, 9700),
             .sender_id = 2,
             .message = .{ .install_snapshot = .{
                 .term = 2,
@@ -1012,13 +1022,15 @@ test "install_snapshot restart preserves recovered state and future applies" {
         try std.testing.expectEqualStrings("active", restored_status);
     }
 
-    var restarted = Node.init(alloc, .{
+    var restarted = try Node.init(alloc, .{
         .id = 1,
         .port = 0,
         .peers = peers,
+        .shared_key = [_]u8{7} ** 32,
         .data_dir = tmp_path,
-    }) catch return;
+    });
     defer restarted.deinit();
+    restarted.fixPointers();
 
     try std.testing.expectEqual(@as(LogIndex, 5), restarted.last_snapshot_index);
     try std.testing.expect(restarted.raft.snapshot_meta != null);
@@ -1047,56 +1059,60 @@ test "install_snapshot restart ignores stale snapshot older than recovered bound
     var snapshot_dir = std.testing.tmpDir(.{});
     defer snapshot_dir.cleanup();
     var snapshot_root_buf: [512]u8 = undefined;
-    const snapshot_root = testDirPath(snapshot_dir.dir, &snapshot_root_buf) catch return;
+    const snapshot_root = try testDirPath(snapshot_dir.dir, &snapshot_root_buf);
 
     var newer_path_buf: [640]u8 = undefined;
-    const newer_path = std.fmt.bufPrint(&newer_path_buf, "{s}/snapshot-newer.dat", .{snapshot_root}) catch return;
+    const newer_path = try std.fmt.bufPrint(&newer_path_buf, "{s}/snapshot-newer.dat", .{snapshot_root});
     var older_path_buf: [640]u8 = undefined;
-    const older_path = std.fmt.bufPrint(&older_path_buf, "{s}/snapshot-older.dat", .{snapshot_root}) catch return;
+    const older_path = try std.fmt.bufPrint(&older_path_buf, "{s}/snapshot-older.dat", .{snapshot_root});
 
-    var newer_sm = StateMachine.initMemory() catch return;
+    var newer_sm = try StateMachine.initMemory();
     defer newer_sm.deinit();
     try insertAgentForTest(&newer_sm.db, "snapstale", "active");
+    try advanceSnapshotFixture(&newer_sm, 5);
     try newer_sm.takeSnapshot(newer_path, .{
         .last_included_index = 5,
         .last_included_term = 2,
         .data_len = 0,
     });
 
-    var older_sm = StateMachine.initMemory() catch return;
+    var older_sm = try StateMachine.initMemory();
     defer older_sm.deinit();
     try insertAgentForTest(&older_sm.db, "snapstale", "draining");
+    try advanceSnapshotFixture(&older_sm, 4);
     try older_sm.takeSnapshot(older_path, .{
         .last_included_index = 4,
         .last_included_term = 2,
         .data_len = 0,
     });
 
-    const newer_bytes = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, newer_path, alloc, .limited(1024 * 1024)) catch return;
+    const newer_bytes = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, newer_path, alloc, .limited(1024 * 1024));
     defer alloc.free(newer_bytes);
-    const older_bytes = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, older_path, alloc, .limited(1024 * 1024)) catch return;
+    const older_bytes = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, older_path, alloc, .limited(1024 * 1024));
     defer alloc.free(older_bytes);
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
     const peers = &[_]PeerConfig{
-        .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+        .{ .id = 2, .addr = .{ 127, 0, 0, 2 }, .port = 9700 },
     };
 
     {
-        var node = Node.init(alloc, .{
+        var node = try Node.init(alloc, .{
             .id = 1,
             .port = 0,
             .peers = peers,
+            .shared_key = [_]u8{7} ** 32,
             .data_dir = tmp_path,
-        }) catch return;
+        });
         defer node.deinit();
+        node.fixPointers();
 
         node.handleMessage(.{
-            .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+            .from_addr = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 2 }, 9700),
             .sender_id = 2,
             .message = .{ .install_snapshot = .{
                 .term = 2,
@@ -1113,19 +1129,21 @@ test "install_snapshot restart ignores stale snapshot older than recovered bound
         try std.testing.expectEqualStrings("active", initial_status);
     }
 
-    var restarted = Node.init(alloc, .{
+    var restarted = try Node.init(alloc, .{
         .id = 1,
         .port = 0,
         .peers = peers,
+        .shared_key = [_]u8{7} ** 32,
         .data_dir = tmp_path,
-    }) catch return;
+    });
     defer restarted.deinit();
+    restarted.fixPointers();
 
     try std.testing.expectEqual(@as(LogIndex, 5), restarted.raft.commit_index);
     try std.testing.expectEqual(@as(LogIndex, 5), restarted.state_machine.last_applied);
 
     restarted.handleMessage(.{
-        .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
+        .from_addr = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 2 }, 9700),
         .sender_id = 2,
         .message = .{ .install_snapshot = .{
             .term = 2,
@@ -1225,7 +1243,7 @@ test "applied snapshot retries failed commits without compacting unapplied entri
     try std.testing.expectEqual(@as(LogIndex, 1), node.applyStatus().backlog);
 
     var snapshot_path_buf: [512]u8 = undefined;
-    const snapshot_path = bootstrap.snapshotPath(&snapshot_path_buf, root) orelse return error.ExpectedSnapshotPath;
+    const snapshot_path = try snapshot_support.generationPath(&snapshot_path_buf, root, node.log.getSnapshotMeta().?);
     var restored = try StateMachine.initMemory();
     defer restored.deinit();
     const meta = try restored.restoreFromSnapshot(snapshot_path);
@@ -1280,7 +1298,7 @@ test "applied snapshot rejects queued boundaries that do not describe the databa
     }
     try std.testing.expectEqual(@as(LogIndex, 1), node.last_snapshot_index);
     var snapshot_path_buf: [512]u8 = undefined;
-    const snapshot_path = bootstrap.snapshotPath(&snapshot_path_buf, root) orelse return error.ExpectedSnapshotPath;
+    const snapshot_path = try snapshot_support.generationPath(&snapshot_path_buf, root, node.log.getSnapshotMeta().?);
     const original = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, snapshot_path, alloc, .limited(1024 * 1024));
     defer alloc.free(original);
 
@@ -1312,7 +1330,113 @@ test "applied snapshot rejects queued boundaries that do not describe the databa
     try expectSnapshotLogEntry(&node, 3);
     var restored = try StateMachine.initMemory();
     defer restored.deinit();
-    const meta = try restored.restoreFromSnapshot(snapshot_path);
+    const latest_path = try snapshot_support.generationPath(&snapshot_path_buf, root, node.log.getSnapshotMeta().?);
+    const meta = try restored.restoreFromSnapshot(latest_path);
     try std.testing.expectEqual(@as(LogIndex, 2), meta.last_included_index);
     try std.testing.expectEqual(@as(i64, 2), try snapshotCounterForTest(&restored.db));
+}
+
+test "snapshot recovery quarantine blocks apply retries and reports unhealthy status" {
+    var node = try Node.initForTests(std.testing.allocator, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = "/tmp",
+    });
+    defer node.deinit();
+    node.snapshot_failed.store(true, .release);
+    try std.testing.expect(!node.applyStatus().healthy);
+    try node.log.append(.{ .index = 1, .term = 1, .data = "UPDATE agents SET cpu_used = 0;" });
+    node.raft.commit_index = 1;
+    action_loop.retryCommittedEntries(&node);
+    try std.testing.expectEqual(@as(LogIndex, 0), node.state_machine.last_applied);
+    try std.testing.expectError(error.SnapshotRecoveryRequired, node.propose("UPDATE agents SET cpu_used = 0;"));
+}
+
+fn snapshotShutdownWorker(running: *std.atomic.Value(bool), done: *std.atomic.Value(bool)) void {
+    while (running.load(.acquire)) std.Thread.yield() catch {};
+    done.store(true, .release);
+}
+
+test "snapshot recovery shutdown joins workers after they request exit" {
+    var node = try Node.initForTests(std.testing.allocator, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = "/tmp",
+    });
+    defer node.deinit();
+    var tick_done: std.atomic.Value(bool) = .init(false);
+    var recv_done: std.atomic.Value(bool) = .init(false);
+    // Cleanup also joins on an assertion or spawn failure, so the regression
+    // remains safe against the old early-return implementation of stop().
+    defer {
+        node.running.store(false, .release);
+        if (node.tick_thread) |thread| thread.join();
+        if (node.recv_thread) |thread| thread.join();
+        node.tick_thread = null;
+        node.recv_thread = null;
+    }
+    node.running.store(true, .release);
+    node.tick_thread = try std.Thread.spawn(.{}, snapshotShutdownWorker, .{ &node.running, &tick_done });
+    node.recv_thread = try std.Thread.spawn(.{}, snapshotShutdownWorker, .{ &node.running, &recv_done });
+    node.running.store(false, .release);
+    node.stop();
+    try std.testing.expect(node.tick_thread == null);
+    try std.testing.expect(node.recv_thread == null);
+    try std.testing.expect(tick_done.load(.acquire));
+    try std.testing.expect(recv_done.load(.acquire));
+}
+
+fn advanceSnapshotFixture(state: *StateMachine, index: LogIndex) !void {
+    while (state.last_applied < index) {
+        const next = state.last_applied + 1;
+        state.apply(.{ .index = next, .term = 2, .data = "UPDATE agents SET cpu_used = cpu_used;" });
+        try std.testing.expectEqual(next, state.last_applied);
+    }
+}
+
+test "snapshot installation refuses an unpersisted leader term" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [512]u8 = undefined;
+    const root = try testDirPath(tmp.dir, &root_buf);
+    var source = try StateMachine.initMemory();
+    defer source.deinit();
+    try advanceSnapshotFixture(&source, 1);
+    var path_buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/incoming.dat", .{root});
+    try source.takeSnapshot(path, .{ .last_included_index = 1, .last_included_term = 2, .data_len = 0 });
+    const bytes = try @import("state_machine/snapshot_support.zig").readBytes(alloc, path);
+    defer alloc.free(bytes);
+    var node = try Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{.{ .id = 2, .addr = .{ 127, 0, 0, 2 }, .port = 9700 }},
+        .data_dir = root,
+        .shared_key = [_]u8{7} ** 32,
+    });
+    defer node.deinit();
+    node.fixPointers();
+    try std.testing.expect(node.log.setCurrentTerm(1));
+    try node.log.append(.{ .index = 1, .term = 1, .data = "unchanged" });
+    try node.log.db.exec("CREATE TRIGGER refuse_term BEFORE UPDATE ON raft_state BEGIN SELECT RAISE(ABORT, 'injected term write failure'); END;", .{}, .{});
+    node.handleMessage(.{
+        .from_addr = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 2 }, 9700),
+        .sender_id = 2,
+        .message = .{ .install_snapshot = .{
+            .term = 2,
+            .leader_id = 2,
+            .last_included_index = 1,
+            .last_included_term = 2,
+            .data = try alloc.dupe(u8, bytes),
+        } },
+    });
+    try std.testing.expectEqual(@as(types.Term, 1), node.log.getCurrentTerm());
+    try std.testing.expectEqual(@as(LogIndex, 0), node.state_machine.last_applied);
+    try std.testing.expectEqual(@as(LogIndex, 0), node.last_snapshot_index);
+    try std.testing.expect((try node.log.readSnapshotMeta()) == null);
+    try std.testing.expectEqual(@as(types.Term, 1), node.log.termAt(1));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "snapshot-1-2.dat", .{}));
 }
