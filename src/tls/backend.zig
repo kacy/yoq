@@ -52,11 +52,12 @@ pub const BackendRegistry = struct {
         self.mutex.lockUncancelable(std.Options.debug_io);
         defer self.mutex.unlock(std.Options.debug_io);
 
-        // if domain already exists, free old values
+        // Allocate before replacing the owned address so failure preserves routing.
         if (self.backends.getEntry(domain)) |entry| {
-            self.allocator.free(entry.value_ptr.ip);
             const new_ip = try self.allocator.dupe(u8, ip);
+            const old_ip = entry.value_ptr.ip;
             entry.value_ptr.* = .{ .ip = new_ip, .port = port, .peer_mode = peer_mode };
+            self.allocator.free(old_ip);
             return;
         }
 
@@ -214,4 +215,18 @@ test "lookupOwned returns stable backend copy" {
     reg.unregister("example.com");
     try std.testing.expectEqualStrings("10.42.0.5", owned.ip);
     try std.testing.expectEqual(@as(u16, 8080), owned.port);
+}
+
+test "backend replacement allocation failure preserves original routing" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var registry = BackendRegistry.init(failing.allocator());
+    defer registry.deinit();
+    try registry.register("api.example", "10.0.0.1", 8443, .require);
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, registry.register("api.example", "10.0.0.2", 80, .off));
+    const backend = (try registry.lookupOwned(std.testing.allocator, "api.example")).?;
+    defer std.testing.allocator.free(backend.ip);
+    try std.testing.expectEqualStrings("10.0.0.1", backend.ip);
+    try std.testing.expectEqual(@as(u16, 8443), backend.port);
+    try std.testing.expectEqual(spec.TlsConfig.PeerMode.require, backend.peer_mode);
 }

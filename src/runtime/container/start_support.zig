@@ -79,7 +79,7 @@ test "gatewayForNode returns bridge gateway for single-node containers" {
 }
 
 pub fn startLogCapture(config: anytype, runtime: anytype, spawn_result: *namespaces.SpawnResult) !void {
-    runtime.log_file = try logs.createLogFile(config.id);
+    runtime.log_file = try logs.createLogSink(config.id);
     try startCaptureWorkers(config, runtime, spawn_result, CaptureThreads{});
 }
 
@@ -90,7 +90,7 @@ const CaptureThreads = struct {
 };
 
 fn startCaptureWorkers(config: anytype, runtime: anytype, child: *namespaces.SpawnResult, threads: anytype) !void {
-    const log_file = runtime.log_file.?;
+    const log_file = &runtime.log_file.?;
     runtime.stdout_thread = try threads.spawn(.{ log_file, child.stdout_fd, "stdout", config.dev_service_name, config.dev_color_idx, runtime.mirror_output });
     child.stdout_fd = -1;
     runtime.stderr_thread = try threads.spawn(.{ log_file, child.stderr_fd, "stderr", config.dev_service_name, config.dev_color_idx, runtime.mirror_output });
@@ -147,7 +147,7 @@ fn finishCapture(runtime: anytype) void {
     runtime.stdout_thread = null;
     if (runtime.stderr_thread) |thread| thread.join();
     runtime.stderr_thread = null;
-    if (runtime.log_file) |file| file.close(std.Options.debug_io);
+    if (runtime.log_file) |*file| file.close();
     runtime.log_file = null;
 }
 
@@ -268,7 +268,11 @@ test "startup rollback reaps child and joins partial or complete capture ownersh
         };
         var active = std.atomic.Value(i32).init(pid);
         defer cleanupFailedStart(&container, &child, null, &active);
-        container.runtime.log_file = try tmp.dir.createFile(std.testing.io, "capture.log", .{});
+        var capture_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const capture_root_len = try tmp.dir.realPath(std.testing.io, &capture_path_buf);
+        const capture_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/capture.log", .{capture_path_buf[0..capture_root_len]});
+        defer std.testing.allocator.free(capture_path);
+        container.runtime.log_file = try logs.LogSink.init(try tmp.dir.createFile(std.testing.io, "capture.log", .{ .read = true }), capture_path);
         var factory = Factory{ .fail_after = fail_after };
         const result = startCaptureWorkers(container.config, &container.runtime, &child.?, &factory);
         if (fail_after < 2) try std.testing.expectError(error.InjectedFailure, result) else try result;

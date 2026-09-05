@@ -1,119 +1,43 @@
 const std = @import("std");
 const posix = std.posix;
 const log_mux = @import("../../dev/log_mux.zig");
-const common = @import("common.zig");
+const Sink = @import("sink.zig").Sink;
 
-pub fn writeLogLine(log_file: std.Io.File, stream: []const u8, line: []const u8) void {
-    const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toSeconds();
-    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(ts) };
-    const day_seconds = epoch_seconds.getDaySeconds();
-    const year_day = epoch_seconds.getEpochDay().calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-
-    var buf: [8192]u8 = undefined;
-    var pos: usize = 0;
-
-    const header = std.fmt.bufPrint(buf[pos..], "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z {s} | ", .{
-        year_day.year,
-        @as(u32, @intFromEnum(month_day.month)),
-        @as(u32, month_day.day_index) + 1,
-        day_seconds.getHoursIntoDay(),
-        day_seconds.getMinutesIntoHour(),
-        day_seconds.getSecondsIntoMinute(),
-        stream,
-    }) catch return;
-    pos += header.len;
-
-    const copy_len = @min(line.len, buf.len - pos - 1);
-    @memcpy(buf[pos..][0..copy_len], line[0..copy_len]);
-    pos += copy_len;
-
-    if (copy_len == 0 or line[copy_len - 1] != '\n') {
-        buf[pos] = '\n';
-        pos += 1;
-    }
-
-    const end_pos = log_file.length(io) catch return;
-    var writer = log_file.writer(io, &.{});
-
-    if (end_pos > common.max_log_size) {
-        writer.seekTo(0) catch return;
-        log_file.setLength(io, 0) catch return;
-        writer.interface.writeAll("--- log truncated (exceeded 50 MB) ---\n") catch return;
-    } else {
-        writer.seekTo(end_pos) catch return;
-    }
-
-    writer.interface.writeAll(buf[0..pos]) catch return;
-    writer.interface.flush() catch {};
+pub fn writeLogLine(sink: *Sink, stream: []const u8, line: []const u8) void {
+    sink.write(stream, line) catch {};
 }
 
-pub fn captureStream(
-    log_file: std.Io.File,
-    pipe_fd: posix.fd_t,
-    stream_label: []const u8,
-    dev_service: ?[]const u8,
-    dev_color: usize,
-    mirror_output: bool,
-) void {
+pub fn captureStream(sink: *Sink, pipe_fd: posix.fd_t, stream_label: []const u8, dev_service: ?[]const u8, dev_color: usize, mirror_output: bool) void {
+    defer _ = std.os.linux.close(pipe_fd);
     var buf: [4096]u8 = undefined;
-    var leftover: [4096]u8 = undefined;
-    var leftover_len: usize = 0;
-
+    var pending: [Sink.chunk_size]u8 = undefined;
+    var len: usize = 0;
     while (true) {
-        const bytes_read = posix.read(pipe_fd, &buf) catch break;
-        if (bytes_read == 0) break;
-
-        var start: usize = 0;
-        var i: usize = 0;
-        while (i < bytes_read) : (i += 1) {
-            if (buf[i] == '\n') {
-                if (leftover_len > 0) {
-                    const chunk_len = i - start;
-                    if (chunk_len > 0 and leftover_len + chunk_len <= leftover.len) {
-                        @memcpy(leftover[leftover_len .. leftover_len + chunk_len], buf[start..i]);
-                        const line = leftover[0 .. leftover_len + chunk_len];
-                        writeLogLine(log_file, stream_label, line);
-                        if (mirror_output) writeTerminalLine(stream_label, line);
-                        if (dev_service) |svc| log_mux.writeLine(svc, dev_color, line);
-                    } else {
-                        writeLogLine(log_file, stream_label, leftover[0..leftover_len]);
-                        if (mirror_output) writeTerminalLine(stream_label, leftover[0..leftover_len]);
-                        if (dev_service) |svc| log_mux.writeLine(svc, dev_color, leftover[0..leftover_len]);
-                        if (chunk_len > 0) {
-                            writeLogLine(log_file, stream_label, buf[start..i]);
-                            if (mirror_output) writeTerminalLine(stream_label, buf[start..i]);
-                            if (dev_service) |svc| log_mux.writeLine(svc, dev_color, buf[start..i]);
-                        }
-                    }
-                    leftover_len = 0;
-                } else {
-                    const line = buf[start..i];
-                    writeLogLine(log_file, stream_label, line);
-                    if (mirror_output) writeTerminalLine(stream_label, line);
-                    if (dev_service) |svc| log_mux.writeLine(svc, dev_color, line);
+        const count = posix.read(pipe_fd, &buf) catch break;
+        if (count == 0) break;
+        for (buf[0..count]) |byte| {
+            if (byte == '\n') {
+                emit(sink, stream_label, pending[0..len], false, dev_service, dev_color, mirror_output);
+                len = 0;
+            } else {
+                // Wait for the next byte before splitting, so a 4 KiB line
+                // followed by LF still produces exactly one ordinary record.
+                if (len == pending.len) {
+                    emit(sink, stream_label, &pending, true, dev_service, dev_color, mirror_output);
+                    len = 0;
                 }
-                start = i + 1;
-            }
-        }
-
-        if (start < bytes_read) {
-            const remaining = bytes_read - start;
-            if (leftover_len + remaining <= leftover.len) {
-                @memcpy(leftover[leftover_len .. leftover_len + remaining], buf[start..bytes_read]);
-                leftover_len += remaining;
+                pending[len] = byte;
+                len += 1;
             }
         }
     }
+    if (len != 0) emit(sink, stream_label, pending[0..len], false, dev_service, dev_color, mirror_output);
+}
 
-    if (leftover_len > 0) {
-        writeLogLine(log_file, stream_label, leftover[0..leftover_len]);
-        if (mirror_output) writeTerminalLine(stream_label, leftover[0..leftover_len]);
-        if (dev_service) |svc| log_mux.writeLine(svc, dev_color, leftover[0..leftover_len]);
-    }
-
-    _ = std.os.linux.close(pipe_fd);
+fn emit(sink: *Sink, stream: []const u8, line: []const u8, continued: bool, service: ?[]const u8, color: usize, mirror: bool) void {
+    sink.writeChunk(stream, line, continued) catch {};
+    if (mirror) writeTerminalLine(stream, line);
+    if (service) |name| log_mux.writeLine(name, color, line);
 }
 
 fn writeTerminalLine(stream_label: []const u8, line: []const u8) void {
@@ -131,54 +55,40 @@ fn writeTerminalLine(stream_label: []const u8, line: []const u8) void {
     writer.interface.flush() catch {};
 }
 
-test "write and read log line" {
-    var tmp_dir = std.testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-    var file = tmp_dir.dir.createFile(std.testing.io, "test.log", .{ .read = true }) catch unreachable;
-    defer file.close(std.testing.io);
-
-    writeLogLine(file, "stdout", "hello world");
-    writeLogLine(file, "stderr", "something broke");
-
-    const content = try tmp_dir.dir.readFileAlloc(std.testing.io, "test.log", std.testing.allocator, .limited(1024));
-    defer std.testing.allocator.free(content);
-
-    try std.testing.expect(std.mem.indexOf(u8, content, "stdout | hello world\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "stderr | something broke\n") != null);
-}
-
-test "log file truncated when exceeding max size" {
-    var tmp_dir = std.testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-    var file = tmp_dir.dir.createFile(std.testing.io, "test_trunc.log", .{ .read = true }) catch unreachable;
-    defer file.close(std.testing.io);
-
-    var writer = file.writer(std.testing.io, &.{});
-    try writer.seekTo(common.max_log_size + 1);
-    try writer.interface.writeAll("x");
-    try writer.interface.flush();
-
-    writeLogLine(file, "stdout", "after truncation");
-
-    const end = file.length(std.testing.io) catch unreachable;
-    try std.testing.expect(end < 1024);
-
-    const content = try tmp_dir.dir.readFileAlloc(std.testing.io, "test_trunc.log", std.testing.allocator, .limited(512));
-    defer std.testing.allocator.free(content);
-    try std.testing.expect(std.mem.startsWith(u8, content, "--- log truncated"));
-}
-
-test "write log line adds newline" {
-    var tmp_dir = std.testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-    var file = tmp_dir.dir.createFile(std.testing.io, "test.log", .{ .read = true }) catch unreachable;
-    defer file.close(std.testing.io);
-
-    writeLogLine(file, "stdout", "no newline");
-
-    const content = try tmp_dir.dir.readFileAlloc(std.testing.io, "test.log", std.testing.allocator, .limited(512));
-    defer std.testing.allocator.free(content);
-
-    try std.testing.expect(content[content.len - 1] == '\n');
-    try std.testing.expect(content[content.len - 2] != '\n');
+test "log capture preserves oversized lines and unterminated tails from a real pipe" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &path_buf);
+    const path = try std.fmt.allocPrint(alloc, "{s}/capture.log", .{path_buf[0..len]});
+    defer alloc.free(path);
+    var sink = try Sink.init(try tmp.dir.createFile(std.testing.io, "capture.log", .{ .read = true }), path);
+    defer sink.close();
+    const pipes = try @import("linux_platform").posix.pipe();
+    var read_owned = true;
+    defer if (read_owned) @import("linux_platform").posix.close(pipes[0]);
+    const Producer = struct {
+        fn run(fd: posix.fd_t, failed: *std.atomic.Value(bool)) void {
+            const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+            defer file.close(std.Options.debug_io);
+            const input = "x" ** (Sink.chunk_size * 3 + 71) ++ "\n\nlast-byte";
+            file.writeStreamingAll(std.Options.debug_io, input) catch failed.store(true, .release);
+        }
+    };
+    var failed = std.atomic.Value(bool).init(false);
+    const producer = std.Thread.spawn(.{}, Producer.run, .{ pipes[1], &failed }) catch |err| {
+        @import("linux_platform").posix.close(pipes[1]);
+        return err;
+    };
+    captureStream(&sink, pipes[0], "stdout", null, 0, false);
+    read_owned = false;
+    producer.join();
+    try std.testing.expect(!failed.load(.acquire));
+    const data = try tmp.dir.readFileAlloc(std.testing.io, "capture.log", alloc, .limited(32 * 1024));
+    defer alloc.free(data);
+    try std.testing.expectEqual(@as(usize, Sink.chunk_size * 3 + 71), std.mem.count(u8, data, "x"));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, data, "stdout [continued] | "));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, data, "stdout | \n"));
+    try std.testing.expect(std.mem.endsWith(u8, data, "stdout | last-byte\n"));
 }

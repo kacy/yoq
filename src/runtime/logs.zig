@@ -10,6 +10,15 @@ const capture = @import("logs/capture.zig");
 const follow = @import("logs/follow.zig");
 
 pub const LogError = common.LogError;
+pub const LogSink = @import("logs/sink.zig").Sink;
+
+pub fn createLogSink(container_id: []const u8) !LogSink {
+    var buf: [@import("../lib/paths.zig").max_path]u8 = undefined;
+    const path = try storage.logPath(&buf, container_id);
+    const file = try storage.createLogFile(container_id);
+    errdefer file.close(std.Options.debug_io);
+    return LogSink.init(file, path);
+}
 
 pub fn createLogFile(container_id: []const u8) LogError!std.Io.File {
     return storage.createLogFile(container_id);
@@ -35,12 +44,12 @@ pub fn deleteLogFile(container_id: []const u8) void {
     storage.deleteLogFile(container_id);
 }
 
-pub fn writeLogLine(log_file: std.Io.File, stream: []const u8, line: []const u8) void {
+pub fn writeLogLine(log_file: *LogSink, stream: []const u8, line: []const u8) void {
     capture.writeLogLine(log_file, stream, line);
 }
 
 pub fn captureStream(
-    log_file: std.Io.File,
+    log_file: *LogSink,
     pipe_fd: std.posix.fd_t,
     stream_label: []const u8,
     dev_service: ?[]const u8,
@@ -56,4 +65,10 @@ pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?std.posix.p
 
 pub fn followLogsWithIo(io: std.Io, container_id: []const u8, tail_lines: usize, pid: ?std.posix.pid_t) LogError!void {
     return follow.followLogsWithIo(io, container_id, tail_lines, pid);
+}
+
+test {
+    _ = @import("logs/sink.zig");
+    _ = @import("logs/capture.zig");
+    _ = @import("logs/follow.zig");
 }

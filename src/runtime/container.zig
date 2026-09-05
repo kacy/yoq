@@ -125,7 +125,7 @@ pub const ContainerConfig = struct {
 pub const Container = struct {
     const RuntimeHandles = struct {
         cgroup: ?cgroups.Cgroup = null,
-        log_file: ?std.Io.File = null,
+        log_file: ?logs.LogSink = null,
         stdout_thread: ?std.Thread = null,
         stderr_thread: ?std.Thread = null,
         mirror_output: bool = false,
@@ -632,8 +632,12 @@ test "startup poll finalizes exited child before another start can replace handl
         if (read_fd >= 0) platform.posix.close(read_fd);
         instance.finalize(instance.exit_code orelse 255);
     }
-    instance.runtime.log_file = try tmp.dir.createFile(std.testing.io, "capture", .{});
-    instance.runtime.stdout_thread = try std.Thread.spawn(.{}, logs.captureStream, .{ instance.runtime.log_file.?, read_fd, "stdout", @as(?[]const u8, null), @as(usize, 0), false });
+    var capture_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const capture_root_len = try tmp.dir.realPath(std.testing.io, &capture_path_buf);
+    const capture_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/capture", .{capture_path_buf[0..capture_root_len]});
+    defer std.testing.allocator.free(capture_path);
+    instance.runtime.log_file = try logs.LogSink.init(try tmp.dir.createFile(std.testing.io, "capture", .{ .read = true }), capture_path);
+    instance.runtime.stdout_thread = try std.Thread.spawn(.{}, logs.captureStream, .{ &instance.runtime.log_file.?, read_fd, "stdout", @as(?[]const u8, null), @as(usize, 0), false });
     read_fd = -1;
     for (0..2000) |_| {
         try instance.poll();
