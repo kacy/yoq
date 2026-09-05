@@ -403,6 +403,7 @@ pub fn build(b: *std.Build) void {
         "tests/privileged/test_container.zig",
         "tests/privileged/test_errors.zig",
         "tests/privileged/test_limits.zig",
+        "tests/privileged/test_mounts.zig",
     };
     const runtime_network_tests = [_][]const u8{
         "tests/privileged/test_networking.zig",
@@ -450,6 +451,13 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             });
             priv_mod.root_module.addImport("linux_platform", linux_mod);
+            const mount_ops_mod = b.createModule(.{
+                .root_source_file = b.path("src/runtime/filesystem/mount_ops.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            mount_ops_mod.addImport("linux_platform", linux_mod);
+            priv_mod.root_module.addImport("mount_ops", mount_ops_mod);
             const runtime_preflight_mod = b.createModule(.{
                 .root_source_file = b.path("tests/privileged/preflight.zig"),
                 .target = target,

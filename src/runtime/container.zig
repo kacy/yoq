@@ -434,16 +434,9 @@ test "bind mount rejects sensitive source paths" {
     }
 }
 
-test "bind mount allows yoq-managed paths under home" {
-    const yoq_paths = [_][]const u8{
-        "/home/user/.local/share/yoq/volumes/myapp/data",
-        "/home/user/.local/share/yoq/mounts/nfs/myapp/shared",
-    };
-
-    for (yoq_paths) |source| {
-        const m = BindMount{ .source = source, .target = "/mnt" };
-        try std.testing.expect(m.isSourceAllowed());
-    }
+test "bind mount denies unconfigured managed-looking home paths" {
+    const m = BindMount{ .source = "/home/user/.local/share/yoq/volumes/myapp/data", .target = "/mnt" };
+    try std.testing.expect(!m.isSourceAllowed());
 }
 
 test "bind mount allows safe source paths" {

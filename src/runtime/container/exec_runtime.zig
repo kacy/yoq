@@ -29,30 +29,7 @@ pub const BindMount = struct {
     read_only: bool = true,
 
     pub fn isSourceAllowed(self: BindMount) bool {
-        if (std.mem.indexOf(u8, self.source, "/.local/share/yoq/")) |pos| {
-            if (pos > 0 and std.mem.indexOf(u8, self.source, "..") == null) return true;
-        }
-
-        const blocked = [_][]const u8{
-            "/etc",
-            "/root",
-            "/var/lib",
-            "/home",
-            "/proc",
-            "/sys",
-            "/dev",
-            "/boot",
-            "/usr/sbin",
-            "/sbin",
-        };
-        for (blocked) |prefix| {
-            if (std.mem.startsWith(u8, self.source, prefix)) {
-                if (self.source.len == prefix.len or self.source[prefix.len] == '/') {
-                    return false;
-                }
-            }
-        }
-        return true;
+        return @import("source_policy.zig").isAllowed(self.source);
     }
 };
 
