@@ -57,6 +57,7 @@ comptime {
     _ = @import("lib/log.zig");
     _ = @import("lib/runtime_wait.zig");
     _ = @import("lib/paths.zig");
+    _ = @import("lib/master_key.zig");
     _ = @import("lib/tar_extract.zig");
     _ = @import("lib/toml.zig");
     _ = @import("lib/json_helpers.zig");
