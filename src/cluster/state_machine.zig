@@ -2,7 +2,9 @@
 //
 // the state machine sits between the raft consensus layer and the
 // application database (yoq.db). when raft commits entries, the node
-// calls apply() to execute each entry's data as a SQL statement.
+// calls apply() to execute each entry's data as a batch of SQL statements.
+// the batch and its applied index commit in one transaction, so replay cannot
+// repeat a partial batch after a failure or restart.
 //
 // this gives us replicated SQLite — the same sequence of SQL statements
 // applied to every node produces identical databases.
@@ -467,7 +469,7 @@ test "apply with failing SQL does not advance last_applied" {
 
     // this SQL is allowed by the prefix check but references a
     // non-existent column, which fails at prepare time. the state
-    // machine must still advance last_applied past the failed entry.
+    // machine must leave last_applied before the failed entry.
     sm.apply(.{
         .index = 1,
         .term = 1,
@@ -763,4 +765,202 @@ test "isAllowedStatement rejects injection via semicolon outside quotes" {
 
 test "isAllowedStatement rejects whitespace-only input" {
     try std.testing.expect(!isAllowedStatement("   \n\t  "));
+}
+
+const batch_test_insert =
+    "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) " ++
+    "VALUES (?, 'localhost', 'active', 4, 8192, 0, 0, 0, 100, 100);";
+
+const batch_test_increment =
+    "UPDATE agents SET cpu_used = cpu_used + 1 WHERE id = 'abcdef000001'; " ++
+    "UPDATE agents SET cpu_used = cpu_used + 2 WHERE id = 'abcdef000002';";
+
+fn seedBatchTestAgents(sm: *StateMachine) !void {
+    try sm.db.exec(batch_test_insert, .{}, .{"abcdef000001"});
+    try sm.db.exec(batch_test_insert, .{}, .{"abcdef000002"});
+}
+
+fn expectBatchTestState(sm: *StateMachine, index: LogIndex, first_cpu: i64, second_cpu: i64) !void {
+    try std.testing.expectEqual(index, sm.last_applied);
+    try std.testing.expectEqual(index, try db_runtime.getLastApplied(&sm.db));
+    try std.testing.expectEqual(@as(c_int, 1), sqlite.c.sqlite3_get_autocommit(sm.db.db));
+    const Row = struct { cpu_used: i64 };
+    for ([_][]const u8{ "abcdef000001", "abcdef000002" }, [_]i64{ first_cpu, second_cpu }) |id, expected| {
+        const row = (try sm.db.one(Row, "SELECT cpu_used FROM agents WHERE id = ?;", .{}, .{id})) orelse
+            return error.ExpectedAgent;
+        try std.testing.expectEqual(expected, row.cpu_used);
+    }
+}
+
+test "replicated batch applies every heartbeat emitted by the real batcher" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+    try seedBatchTestAgents(&sm);
+    const batcher_mod = @import("heartbeat_batcher.zig");
+    var batcher = batcher_mod.HeartbeatBatcher.init(std.testing.allocator);
+    defer batcher.deinit();
+    batcher.record("abcdef000001", .{
+        .cpu_cores = 4,
+        .memory_mb = 8192,
+        .cpu_used = 1,
+        .memory_used_mb = 1024,
+        .containers = 3,
+    }, 200);
+    batcher.record("abcdef000002", .{
+        .cpu_cores = 8,
+        .memory_mb = 16384,
+        .cpu_used = 2,
+        .memory_used_mb = 2048,
+        .containers = 4,
+    }, 300);
+    const batch = (try batcher.flush(std.testing.allocator)) orelse return error.ExpectedHeartbeatBatch;
+    defer std.testing.allocator.free(batch);
+    sm.apply(.{ .index = 1, .term = 1, .data = batch });
+    try expectBatchTestState(&sm, 1, 1, 2);
+    const Row = struct { memory_used_mb: i64, containers: i64, last_heartbeat: i64 };
+    const expected = [_]Row{
+        .{ .memory_used_mb = 1024, .containers = 3, .last_heartbeat = 200 },
+        .{ .memory_used_mb = 2048, .containers = 4, .last_heartbeat = 300 },
+    };
+    for ([_][]const u8{ "abcdef000001", "abcdef000002" }, expected) |id, wanted| {
+        const row = (try sm.db.one(Row, "SELECT memory_used_mb, containers, last_heartbeat FROM agents WHERE id = ?;", .{}, .{id})) orelse
+            return error.ExpectedAgent;
+        try std.testing.expectEqualDeep(wanted, row);
+    }
+}
+
+test "replicated batch rolls back earlier writes when a later constraint fails and permits retry" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+    try seedBatchTestAgents(&sm);
+    const batch =
+        "UPDATE agents SET cpu_used = cpu_used + 1 WHERE id = 'abcdef000001'; " ++
+        "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) " ++
+        "VALUES ('abcdef000002', 'localhost', 'active', 4, 8192, 5, 0, 0, 100, 100);";
+    const entry: LogEntry = .{ .index = 1, .term = 1, .data = batch };
+    sm.apply(entry);
+    try expectBatchTestState(&sm, 0, 0, 0);
+
+    // Remove the conflicting row locally, then retry the exact same entry.
+    // Its increment must happen once, not accumulate across failed attempts.
+    try sm.db.exec("DELETE FROM agents WHERE id = 'abcdef000002';", .{}, .{});
+    sm.apply(entry);
+    try expectBatchTestState(&sm, 1, 1, 5);
+}
+
+test "replicated batch rolls back data when persisting its applied index fails" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+    try seedBatchTestAgents(&sm);
+    try sm.db.exec(
+        "CREATE TRIGGER reject_applied_index BEFORE UPDATE ON state_machine_meta " ++
+            "BEGIN SELECT RAISE(ABORT, 'injected metadata failure'); END;",
+        .{},
+        .{},
+    );
+    const entry: LogEntry = .{ .index = 1, .term = 1, .data = batch_test_increment };
+    sm.apply(entry);
+    try expectBatchTestState(&sm, 0, 0, 0);
+    try sm.db.exec("DROP TRIGGER reject_applied_index;", .{}, .{});
+    sm.apply(entry);
+    try expectBatchTestState(&sm, 1, 1, 2);
+}
+
+test "replicated batch leaves data and index unchanged when SQLite rejects commit" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+    try seedBatchTestAgents(&sm);
+    const CommitHook = struct {
+        fn reject(context: ?*anyopaque) callconv(.c) c_int {
+            const calls: *usize = @ptrCast(@alignCast(context.?));
+            calls.* += 1;
+            return 1;
+        }
+    };
+    var calls: usize = 0;
+    _ = sqlite.c.sqlite3_commit_hook(sm.db.db, CommitHook.reject, &calls);
+    defer _ = sqlite.c.sqlite3_commit_hook(sm.db.db, null, null);
+    const entry: LogEntry = .{ .index = 1, .term = 1, .data = batch_test_increment };
+    sm.apply(entry);
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    try expectBatchTestState(&sm, 0, 0, 0);
+    _ = sqlite.c.sqlite3_commit_hook(sm.db.db, null, null);
+    sm.apply(entry);
+    try expectBatchTestState(&sm, 1, 1, 2);
+}
+
+test "replicated batch survives reopening with its applied index and replay is a no-op" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPathFile(std.testing.io, ".", &root_buf);
+    const path = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}/batch.db", .{root_buf[0..root_len]}, 0);
+    defer std.testing.allocator.free(path);
+    const entry: LogEntry = .{ .index = 1, .term = 1, .data = batch_test_increment };
+    {
+        var sm = try StateMachine.init(path);
+        defer sm.deinit();
+        try seedBatchTestAgents(&sm);
+        sm.apply(entry);
+        try expectBatchTestState(&sm, 1, 1, 2);
+    }
+    var reopened = try StateMachine.init(path);
+    defer reopened.deinit();
+    try expectBatchTestState(&reopened, 1, 1, 2);
+    reopened.apply(entry);
+    try expectBatchTestState(&reopened, 1, 1, 2);
+    reopened.apply(.{ .index = 2, .term = 1, .data = batch_test_increment });
+    try expectBatchTestState(&reopened, 2, 2, 4);
+}
+
+test "replicated batch rejects forbidden trailing SQL and scanner ambiguities before any mutation" {
+    const bad_batches = [_][]const u8{
+        batch_test_increment ++ " DROP TABLE agents;",
+        batch_test_increment ++ " COMMIT;",
+        // Quotes inside comments used to hide the real statement boundary
+        // from the guard, although SQLite still recognized the COMMIT.
+        "UPDATE agents SET cpu_used = 99 WHERE id = 'abcdef000001' -- '\n; COMMIT; -- '\n" ++
+            "UPDATE agents SET cpu_used = 99 WHERE id = 'abcdef000002';",
+        batch_test_increment ++ " UPDATE agents SET cpu_used = 99 /* comment */;",
+        batch_test_increment ++ " UPDATE agents SET \"cpu_used\" = 99;",
+        batch_test_increment ++ " UPDATE agents SET `cpu_used` = 99;",
+        batch_test_increment ++ " UPDATE agents SET [cpu_used] = 99;",
+        batch_test_increment ++ "\x00 UPDATE agents SET cpu_used = 99;",
+        batch_test_increment ++ " UPDATE agents SET address = 'unterminated;",
+    };
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+    try seedBatchTestAgents(&sm);
+    for (bad_batches) |batch| {
+        try std.testing.expect(!isAllowedStatement(batch));
+        sm.apply(.{ .index = 1, .term = 1, .data = batch });
+        try expectBatchTestState(&sm, 0, 0, 0);
+    }
+    // A rejected entry does not leave the connection stuck in a transaction.
+    sm.apply(.{ .index = 1, .term = 1, .data = batch_test_increment });
+    try expectBatchTestState(&sm, 1, 1, 2);
+}
+
+test "replicated batch respects bounded slices and quoted SQL punctuation" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+    try seedBatchTestAgents(&sm);
+    const batch =
+        "UPDATE agents SET address = 'it''s; -- literal /* text */ \"q\" `q` [q]' WHERE id = 'abcdef000001'; " ++
+        "UPDATE agents SET cpu_used = 2 WHERE id = 'abcdef000002';";
+    const poison = " DROP TABLE agents;\x00";
+    var backing: [batch.len + poison.len]u8 = undefined;
+    @memcpy(backing[0..batch.len], batch);
+    @memcpy(backing[batch.len..], poison);
+    // The byte following the slice is a space, not a NUL sentinel. Neither
+    // the guard nor SQLite may inspect/execute the trailing poison statement.
+    const bounded: []const u8 = backing[0..batch.len];
+    try std.testing.expect(isAllowedStatement(bounded));
+    sm.apply(.{ .index = 1, .term = 1, .data = bounded });
+    try expectBatchTestState(&sm, 1, 0, 2);
+    const Row = struct { address: sqlite.Text };
+    const row = (try sm.db.oneAlloc(Row, std.testing.allocator, "SELECT address FROM agents WHERE id = 'abcdef000001';", .{}, .{})) orelse
+        return error.ExpectedAgent;
+    defer std.testing.allocator.free(row.address.data);
+    try std.testing.expectEqualStrings("it's; -- literal /* text */ \"q\" `q` [q]", row.address.data);
 }

@@ -60,10 +60,10 @@ pub fn initMemory() StateMachineError!sqlite.Db {
 }
 
 pub fn initMeta(db: *sqlite.Db) MetaError!void {
-    db.exec(meta_create_table_sql, .{}, .{}) catch return MetaError.WriteFailed;
-    db.exec(
+    execStatement(db, meta_create_table_sql, .{}) catch return MetaError.WriteFailed;
+    execStatement(
+        db,
         "INSERT OR IGNORE INTO state_machine_meta (id, last_applied) VALUES (1, 0);",
-        .{},
         .{},
     ) catch return MetaError.WriteFailed;
 }
@@ -81,9 +81,21 @@ pub fn getLastApplied(db: *sqlite.Db) MetaError!u64 {
 
 pub fn setLastApplied(db: *sqlite.Db, last_applied: u64) MetaError!void {
     try initMeta(db);
-    db.exec(
+    execStatement(
+        db,
         "UPDATE state_machine_meta SET last_applied = ? WHERE id = 1;",
-        .{},
         .{@as(i64, @intCast(last_applied))},
     ) catch return MetaError.WriteFailed;
+}
+
+/// Execute one statement and leave error reporting to the caller. Reset a
+/// failed statement before finalization so the wrapper does not report the
+/// same failure again during cleanup. This also applies to COMMIT failures.
+pub fn execStatement(db: *sqlite.Db, sql: []const u8, values: anytype) !void {
+    var stmt = try db.prepareDynamic(sql);
+    defer stmt.deinit();
+    stmt.exec(.{}, values) catch |err| {
+        _ = sqlite.c.sqlite3_reset(stmt.stmt);
+        return err;
+    };
 }

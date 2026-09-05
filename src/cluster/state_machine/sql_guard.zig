@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn isAllowedStatement(sql: []const u8) bool {
-    var scanner = SqlStatementScanner{ .sql = sql };
+    var scanner = StatementIterator{ .sql = sql };
     var saw_statement = false;
 
     while (scanner.next()) |statement| {
@@ -57,13 +57,19 @@ fn isAllowedSingleStatement(sql: []const u8) bool {
     return false;
 }
 
-const SqlStatementScanner = struct {
+/// Replicated SQL uses bare identifiers and single-quoted values. Reject
+/// comments and other quotation forms so validation and execution agree on
+/// statement boundaries. Semicolons and doubled apostrophes inside values
+/// remain ordinary data.
+pub const StatementIterator = struct {
     sql: []const u8,
     pos: usize = 0,
     valid: bool = true,
 
-    fn next(self: *SqlStatementScanner) ?[]const u8 {
-        while (self.pos < self.sql.len and std.ascii.isWhitespace(self.sql[self.pos])) {
+    pub fn next(self: *StatementIterator) ?[]const u8 {
+        while (self.pos < self.sql.len and
+            (std.ascii.isWhitespace(self.sql[self.pos]) or self.sql[self.pos] == ';'))
+        {
             self.pos += 1;
         }
         if (self.pos >= self.sql.len or !self.valid) return null;
@@ -73,6 +79,10 @@ const SqlStatementScanner = struct {
 
         while (self.pos < self.sql.len) : (self.pos += 1) {
             const ch = self.sql[self.pos];
+            if (ch == 0) {
+                self.valid = false;
+                return null;
+            }
             if (ch == '\'') {
                 if (in_quote and self.pos + 1 < self.sql.len and self.sql[self.pos + 1] == '\'') {
                     self.pos += 1;
@@ -82,10 +92,20 @@ const SqlStatementScanner = struct {
                 continue;
             }
 
+            if (!in_quote) {
+                const next_ch = if (self.pos + 1 < self.sql.len) self.sql[self.pos + 1] else 0;
+                if (ch == '"' or ch == '`' or ch == '[' or
+                    (ch == '-' and next_ch == '-') or (ch == '/' and next_ch == '*'))
+                {
+                    self.valid = false;
+                    return null;
+                }
+            }
+
             if (!in_quote and ch == ';') {
                 const statement = std.mem.trim(u8, self.sql[start..self.pos], " \t\r\n");
                 self.pos += 1;
-                return if (statement.len == 0) self.next() else statement;
+                return statement;
             }
         }
 
@@ -98,7 +118,7 @@ const SqlStatementScanner = struct {
         return if (statement.len == 0) null else statement;
     }
 
-    fn isValid(self: *const SqlStatementScanner) bool {
+    pub fn isValid(self: *const StatementIterator) bool {
         return self.valid;
     }
 };
