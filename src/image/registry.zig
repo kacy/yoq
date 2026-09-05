@@ -610,7 +610,7 @@ test "registry batch waits for workers before reporting their failure after fall
 }
 
 test "registry transfer rejects malformed caller pins before authentication" {
-    for ([_][]const u8{ "test@invalid", "test@sha512:abc", "test@sha256:short", "test@" }) |reference| {
+    for ([_][]const u8{ "test@invalid", "test@sha512:abc", "test@sha256:short", "test@", "alpine@sha256:bad/path", "alpine@bad.example/path", "registry.example:5000/team/image@sha256:bad/path" }) |reference| {
         const parsed = spec.parseImageRef(reference);
         try std.testing.expect(parsed.digest_reference);
         try std.testing.expectError(error.DigestMismatch, pull(std.testing.io, std.testing.allocator, parsed));
