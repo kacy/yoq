@@ -39,7 +39,9 @@ pub const leaf_validity_secs: i64 = 24 * 60 * 60; // 24h leaf TTL
 /// this means we issue a new leaf around the 16h mark, leaving ~8h of
 /// headroom for raft replication + reconciliation on every follower.
 pub const rotation_fraction_remaining: f64 = 1.0 / 3.0;
-pub const identity_cluster_label = "yoq-cluster";
+const peer_identity = @import("../tls/peer_identity.zig");
+const mtls_store = @import("../state/store/certificates_mtls.zig");
+pub const identity_cluster_label = peer_identity.cluster_label;
 pub const ca_common_name = "yoq-cluster-ca";
 
 /// per-service failure counters; reset only on success. snapshotted by the
@@ -107,6 +109,10 @@ fn run(ctx: *Ctx) void {
 }
 
 fn tick(ctx: *Ctx) !void {
+    return tickAt(ctx, std.Io.Clock.real.now(std.Options.debug_io).toSeconds());
+}
+
+fn tickAt(ctx: *Ctx, now: i64) !void {
     if (!rollout.current().service_mtls) return;
     if (!ctx.node.isLeader()) return;
     if (!store.clusterCaExistsInDb(ctx.node.stateMachineDb())) return;
@@ -120,15 +126,15 @@ fn tick(ctx: *Ctx) !void {
         services.deinit(ctx.alloc);
     }
 
-    if (services.items.len == 0) return;
-
     var loaded = ca_access.load(ctx.alloc, ctx.join_token_owned) catch |err| {
         log.warn("cert issuer: failed to load CA: {}", .{err});
         return;
     };
     defer loaded.deinit(ctx.alloc);
 
-    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+    ensureProxyCert(ctx, &loaded, now) catch |err| {
+        log.warn("cert issuer: ingress proxy: {}", .{err});
+    };
 
     for (services.items) |service| {
         ensureCertForService(ctx, &loaded, service.service_name, now) catch |err| {
@@ -149,6 +155,14 @@ fn ensureCertForService(ctx: *Ctx, loaded: *ca_access.Loaded, service_name: []co
     try issueAndPropose(ctx, loaded, service_name, now);
 }
 
+fn ensureProxyCert(ctx: *Ctx, loaded: *ca_access.Loaded, now: i64) !void {
+    if (try mtls_store.getProxy(ctx.alloc)) |rec| {
+        defer rec.deinit(ctx.alloc);
+        if (!shouldRotate(rec.created_at, rec.not_after, now)) return;
+    }
+    try issueIdentity(ctx, loaded, "ingress", peer_identity.proxy_identity, true, now);
+}
+
 /// decide whether a cert with the given lifetime needs rotation now.
 /// `created_at` and `not_after` are unix seconds; `now` is the current
 /// wall-clock second. exported for tests.
@@ -163,13 +177,12 @@ pub fn shouldRotate(created_at: i64, not_after: i64, now: i64) bool {
 }
 
 fn issueAndPropose(ctx: *Ctx, loaded: *ca_access.Loaded, service_name: []const u8, now: i64) !void {
-    const identity = try std.fmt.allocPrint(
-        ctx.alloc,
-        "spiffe://{s}/service/{s}",
-        .{ identity_cluster_label, service_name },
-    );
+    const identity = try peer_identity.service(ctx.alloc, service_name);
     defer ctx.alloc.free(identity);
+    try issueIdentity(ctx, loaded, service_name, identity, false, now);
+}
 
+fn issueIdentity(ctx: *Ctx, loaded: *ca_access.Loaded, service_name: []const u8, identity: []const u8, proxy: bool, now: i64) !void {
     const not_after = now + leaf_validity_secs;
     var minted = try x509_gen.issueLeaf(
         std.Options.debug_io,
@@ -187,11 +200,20 @@ fn issueAndPropose(ctx: *Ctx, loaded: *ca_access.Loaded, service_name: []const u
     // uses, so any node decrypts identically when reading the row back.
     var raw_key = minted.key_pair.secret_key.toBytes();
     defer std.crypto.secureZero(u8, &raw_key);
-    const derived = deriveKey(ctx.join_token_owned);
+    var derived = deriveKey(ctx.join_token_owned);
+    defer std.crypto.secureZero(u8, &derived);
     var enc = try secrets.encrypt(ctx.alloc, &raw_key, derived);
     defer ctx.alloc.free(enc.ciphertext);
 
-    const sql = try store.buildMtlsCertUpsertSql(
+    const sql = if (proxy) try mtls_store.buildProxyUpsertSql(
+        ctx.alloc,
+        minted.cert_pem,
+        enc.ciphertext,
+        &enc.nonce,
+        &enc.tag,
+        not_after,
+        now,
+    ) else try store.buildMtlsCertUpsertSql(
         ctx.alloc,
         service_name,
         minted.cert_pem,
@@ -204,7 +226,7 @@ fn issueAndPropose(ctx: *Ctx, loaded: *ca_access.Loaded, service_name: []const u
     defer ctx.alloc.free(sql);
 
     _ = try ctx.node.propose(sql);
-    clearFailureLocked(ctx.alloc, service_name);
+    if (!proxy) clearFailureLocked(ctx.alloc, service_name);
     log.info("cert issuer: issued mtls leaf for {s} (valid through unix {d})", .{ service_name, not_after });
 }
 
@@ -320,4 +342,95 @@ test "failure counter increments and clears" {
     }
     try std.testing.expectEqual(@as(usize, 1), snap2.items.len);
     try std.testing.expectEqualStrings("checkout", snap2.items[0].service_name);
+}
+
+test "proxy issuer lifecycle issues and rotates with no registered services" {
+    const alloc = std.testing.allocator;
+    const db_runtime = @import("state_machine/db_runtime.zig");
+    const store_common = @import("../state/store/common.zig");
+    const credentials = @import("../tls/proxy_credentials.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    rollout.setForTest(.{ .service_registry_v2 = true, .service_mtls = true });
+    defer rollout.resetForTest();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+
+    var node = try cluster_node.Node.initForTests(alloc, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/tmp" });
+    defer node.deinit();
+    node.raft.log = &node.log;
+    node.raft.role = .leader;
+    try std.testing.expect(node.log.setCurrentTerm(1));
+
+    // The issuer checks the node DB but its store readers use the process DB.
+    // Share the test connection so real Raft apply publishes what readers see.
+    // Restore the node's owned connection before either owner closes its DB.
+    const owned_db = node.state_machine.db;
+    {
+        var lease = try store_common.leaseDb();
+        defer lease.deinit();
+        try db_runtime.initMeta(lease.db);
+        node.state_machine.db = lease.db.*;
+    }
+    defer node.state_machine.db = owned_db;
+
+    const now: i64 = 1_700_000_000;
+    const token = try alloc.dupe(u8, "issuer-lifecycle-token");
+    defer {
+        std.crypto.secureZero(u8, token);
+        alloc.free(token);
+    }
+    var key = deriveKey(token);
+    defer std.crypto.secureZero(u8, &key);
+    const ca = try x509_gen.generateCa(std.testing.io, alloc, ca_common_name, now - 60, now + 7 * leaf_validity_secs);
+    defer alloc.free(ca.cert_pem);
+    var ca_secret = ca.key_pair.secret_key.toBytes();
+    defer std.crypto.secureZero(u8, &ca_secret);
+    const encrypted = try secrets.encrypt(alloc, &ca_secret, key);
+    defer alloc.free(encrypted.ciphertext);
+    const seed = try store.buildClusterCaInsertSql(alloc, ca.cert_pem, encrypted.ciphertext, &encrypted.nonce, &encrypted.tag, now, now + 7 * leaf_validity_secs);
+    defer alloc.free(seed);
+    try node.state_machine.db.execDynamic(seed, .{}, .{});
+    var services = try service_registry_runtime.snapshotServices(alloc);
+    defer {
+        for (services.items) |entry| entry.deinit(alloc);
+        services.deinit(alloc);
+    }
+    try std.testing.expectEqual(@as(usize, 0), services.items.len);
+    try std.testing.expect((try mtls_store.getProxy(alloc)) == null);
+    var ctx = Ctx{ .node = &node, .alloc = alloc, .join_token_owned = token };
+
+    try tickAt(&ctx, now);
+    const first_index = node.log.lastIndex();
+    try std.testing.expectEqual(@as(u64, 1), first_index);
+    node.state_machine.applyUpTo(&node.log, alloc, first_index);
+    try std.testing.expectEqual(first_index, node.state_machine.last_applied);
+    const first = try credentials.load(alloc, key, ca.cert_pem, now);
+    defer first.deinit(alloc);
+    const issued = (try mtls_store.getProxy(alloc)).?;
+    defer issued.deinit(alloc);
+    try std.testing.expectEqualStrings("proxy:ingress", issued.domain);
+    try std.testing.expectEqual(now, issued.created_at);
+    try std.testing.expectEqual(now + leaf_validity_secs, issued.not_after);
+
+    const threshold = now + 16 * 3600;
+    try tickAt(&ctx, threshold - 1);
+    try std.testing.expectEqual(first_index, node.log.lastIndex());
+    const unchanged = try credentials.load(alloc, key, ca.cert_pem, threshold - 1);
+    defer unchanged.deinit(alloc);
+    try std.testing.expectEqualStrings(first.cert_pem, unchanged.cert_pem);
+
+    try tickAt(&ctx, threshold);
+    const rotated_index = node.log.lastIndex();
+    try std.testing.expectEqual(first_index + 1, rotated_index);
+    node.state_machine.applyUpTo(&node.log, alloc, rotated_index);
+    try std.testing.expectEqual(rotated_index, node.state_machine.last_applied);
+    const rotated = try credentials.load(alloc, key, ca.cert_pem, threshold);
+    defer rotated.deinit(alloc);
+    try std.testing.expect(!std.mem.eql(u8, first.cert_pem, rotated.cert_pem));
+    try std.testing.expect(!std.mem.eql(u8, first.key_pem, rotated.key_pem));
+    const record = (try mtls_store.getProxy(alloc)).?;
+    defer record.deinit(alloc);
+    try std.testing.expectEqual(threshold, record.created_at);
+    try std.testing.expectEqual(threshold + leaf_validity_secs, record.not_after);
 }

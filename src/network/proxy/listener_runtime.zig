@@ -40,6 +40,8 @@ pub const ConnectTarget = struct {
     port: u16,
 };
 
+const PeerKey = @import("../../tls/proxy_credentials.zig").Key;
+var peer_key: ?PeerKey = null;
 var mutex: std.Io.Mutex = .init;
 var listen_fd: ?posix.fd_t = null;
 var listener_thread: ?std.Thread = null;
@@ -52,8 +54,23 @@ var active_connections: u32 = 0;
 var last_error: ?[]u8 = null;
 var state_change_hook: ?StateChangeHook = null;
 
+/// Bootstrap copies only the decryption key; requests own snapshots of it.
+pub fn configurePeerKey(token: ?[]const u8) void {
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
+    if (peer_key) |*key| std.crypto.secureZero(u8, key);
+    peer_key = null;
+    if (token) |bytes| {
+        var key: PeerKey = undefined;
+        defer std.crypto.secureZero(u8, &key);
+        std.crypto.hash.sha2.Sha256.hash(bytes, &key, .{});
+        peer_key = key;
+    }
+}
+
 pub fn resetForTest() void {
     stop();
+    configurePeerKey(null);
 
     mutex.lockUncancelable(std.Options.debug_io);
     defer mutex.unlock(std.Options.debug_io);
@@ -356,6 +373,9 @@ fn connectionWorker(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
 
     var proxy = reverse_proxy.ReverseProxy.init(alloc, routes.items);
     defer proxy.deinit();
+    mutex.lockUncancelable(std.Options.debug_io);
+    proxy.peer_key = peer_key;
+    mutex.unlock(std.Options.debug_io);
     proxy.handleConnection(client_fd);
 }
 

@@ -67,6 +67,7 @@ pub const ForwardPlan = struct {
 };
 
 const MirrorTask = struct {
+    peer_key: ?proxy_credentials.Key = null,
     allocator: std.mem.Allocator,
     active_mirror_requests: *std.atomic.Value(usize),
     raw_request: []u8,
@@ -84,7 +85,8 @@ const MirrorTask = struct {
     max_response_bytes: usize,
     client_ip: ?[4]u8,
 
-    fn deinit(self: MirrorTask) void {
+    fn deinit(self: *MirrorTask) void {
+        if (self.peer_key) |*key| std.crypto.secureZero(u8, key);
         self.allocator.free(self.raw_request);
         self.allocator.free(self.path);
         self.allocator.free(self.outbound_path);
@@ -108,7 +110,13 @@ pub const HandleResult = union(enum) {
     }
 };
 
+const peer_identity = @import("../../tls/peer_identity.zig");
+const proxy_credentials = @import("../../tls/proxy_credentials.zig");
+
+const PeerTimeouts = struct { connect_timeout_ms: u32, request_timeout_ms: u32, head: bool = false };
+
 pub const ReverseProxy = struct {
+    peer_key: ?proxy_credentials.Key = null,
     allocator: std.mem.Allocator,
     routes: []const router.Route,
     running: bool = false,
@@ -123,6 +131,7 @@ pub const ReverseProxy = struct {
     }
 
     pub fn deinit(self: *ReverseProxy) void {
+        defer if (self.peer_key) |*key| std.crypto.secureZero(u8, key);
         while (self.active_mirror_requests.load(.acquire) != 0) {
             if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(1), "reverse proxy mirror drain")) break;
         }
@@ -398,6 +407,8 @@ pub const ReverseProxy = struct {
             _ = @constCast(&self.active_mirror_requests).fetchSub(1, .monotonic);
             return;
         };
+        task.peer_key = self.peer_key;
+        defer if (task.peer_key) |*key| std.crypto.secureZero(u8, key);
         const thread = std.Thread.spawn(.{}, runMirrorTask, .{task}) catch {
             _ = @constCast(&self.active_mirror_requests).fetchSub(1, .monotonic);
             task.deinit();
@@ -619,7 +630,7 @@ pub const ReverseProxy = struct {
         defer self.allocator.free(request);
 
         if (upstream.peer_mode != .off) {
-            return self.forwardSingleAttemptMtls(request, plan, upstream);
+            return self.forwardSingleAttemptMtls(request, .{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms, .head = plan.method == .HEAD }, upstream);
         }
 
         // prefer a pooled, kept-alive connection; dial a fresh one on a miss.
@@ -670,24 +681,47 @@ pub const ReverseProxy = struct {
     fn forwardSingleAttemptMtls(
         self: *const ReverseProxy,
         request: []const u8,
-        plan: *const ForwardPlan,
+        timeouts: PeerTimeouts,
         upstream: *const upstream_mod.Upstream,
     ) ![]u8 {
         const ca_rec_opt = store_mod.getClusterCa(self.allocator) catch null;
         const ca_rec = ca_rec_opt orelse {
             if (upstream.peer_mode == .require) return error.ClusterCaMissing;
             log.warn("mtls upstream {s}: cluster CA not seeded, downgrading to plain dial", .{upstream.address});
-            return self.forwardPlainAttempt(request, plan, upstream);
+            return self.forwardPlainAttempt(request, timeouts, upstream);
         };
         defer ca_rec.deinit(self.allocator);
+
+        const expected_identity = try peer_identity.service(self.allocator, upstream.service);
+        defer self.allocator.free(expected_identity);
+        const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+        const credentials: ?proxy_credentials.Credentials = credentials: {
+            const key = self.peer_key orelse {
+                if (upstream.peer_mode == .require) return error.ProxyCredentialsMissing;
+                log.warn("mtls upstream {s}: proxy credentials unavailable, continuing without client authentication", .{upstream.service});
+                break :credentials null;
+            };
+            break :credentials proxy_credentials.load(self.allocator, key, ca_rec.cert_pem, now) catch |err| switch (err) {
+                error.ProxyCredentialsMissing, error.ReadFailed, error.DbOpenFailed => {
+                    if (upstream.peer_mode == .require) return err;
+                    log.warn("mtls upstream {s}: proxy credentials unavailable ({}), continuing without client authentication", .{ upstream.service, err });
+                    break :credentials null;
+                },
+                else => return err,
+            };
+        };
+        defer if (credentials) |owned| owned.deinit(self.allocator);
 
         var outcome = client_dial.dial(std.Options.debug_io, self.allocator, .{
             .address = upstream.address,
             .port = upstream.port,
-            .connect_timeout_ms = plan.route.connect_timeout_ms,
-            .request_timeout_ms = plan.route.request_timeout_ms,
+            .connect_timeout_ms = timeouts.connect_timeout_ms,
+            .request_timeout_ms = timeouts.request_timeout_ms,
             .ca_cert_pem = ca_rec.cert_pem,
             .server_name = upstream.service,
+            .expected_server_identity = expected_identity,
+            .client_cert_pem = if (credentials) |owned| owned.cert_pem else null,
+            .client_key_pem = if (credentials) |owned| owned.key_pem else null,
             .now_unix = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
         }) catch |err| return err;
 
@@ -718,13 +752,13 @@ pub const ReverseProxy = struct {
     fn forwardPlainAttempt(
         self: *const ReverseProxy,
         request: []const u8,
-        plan: *const ForwardPlan,
+        timeouts: PeerTimeouts,
         upstream: *const upstream_mod.Upstream,
     ) ![]u8 {
         var from_pool = true;
         var fd = upstream_pool.checkout(upstream.endpoint_id, upstream.address, upstream.port) orelse blk: {
             from_pool = false;
-            const dialed = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
+            const dialed = try socket_helpers.connectToUpstream(timeouts.connect_timeout_ms, timeouts.request_timeout_ms, upstream);
             upstream_pool.noteDialed();
             break :blk dialed;
         };
@@ -733,7 +767,7 @@ pub const ReverseProxy = struct {
             upstream_pool.discard(fd);
             if (!from_pool) return error.SendFailed;
             from_pool = false;
-            fd = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
+            fd = try socket_helpers.connectToUpstream(timeouts.connect_timeout_ms, timeouts.request_timeout_ms, upstream);
             upstream_pool.noteDialed();
             socket_helpers.writeAll(fd, request) catch {
                 upstream_pool.discard(fd);
@@ -741,7 +775,7 @@ pub const ReverseProxy = struct {
             };
         };
 
-        const result = readResponse(self.allocator, fd, self.max_response_bytes, plan.method == .HEAD) catch |err| {
+        const result = readResponse(self.allocator, fd, self.max_response_bytes, timeouts.head) catch |err| {
             upstream_pool.discard(fd);
             return err;
         };
@@ -814,7 +848,8 @@ fn cloneMirrorTask(
     };
 }
 
-fn runMirrorTask(task: MirrorTask) void {
+fn runMirrorTask(input: MirrorTask) void {
+    var task = input;
     defer _ = task.active_mirror_requests.fetchSub(1, .release);
     defer task.deinit();
 
@@ -824,12 +859,6 @@ fn runMirrorTask(task: MirrorTask) void {
         return;
     };
     defer upstream.deinit(task.allocator);
-
-    const fd = socket_helpers.connectToUpstream(task.connect_timeout_ms, task.request_timeout_ms, &upstream) catch {
-        proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
-        return;
-    };
-    defer linux_platform.posix.close(fd);
 
     const request = ReverseProxy.buildForwardRequestBytes(task.allocator, task.raw_request, .{
         .protocol = task.protocol,
@@ -844,18 +873,21 @@ fn runMirrorTask(task: MirrorTask) void {
     };
     defer task.allocator.free(request);
 
-    socket_helpers.writeAll(fd, request) catch {
+    var proxy = ReverseProxy.init(task.allocator, &.{});
+    proxy.peer_key = task.peer_key;
+    proxy.max_response_bytes = task.max_response_bytes;
+    defer proxy.deinit();
+    const response = if (upstream.peer_mode != .off)
+        proxy.forwardSingleAttemptMtls(request, .{ .connect_timeout_ms = task.connect_timeout_ms, .request_timeout_ms = task.request_timeout_ms, .head = task.method == .HEAD }, &upstream)
+    else
+        proxy.forwardPlainAttempt(request, .{ .connect_timeout_ms = task.connect_timeout_ms, .request_timeout_ms = task.request_timeout_ms, .head = task.method == .HEAD }, &upstream);
+    const bytes = response catch {
         proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
         return;
     };
+    defer task.allocator.free(bytes);
 
-    const result = readResponse(task.allocator, fd, task.max_response_bytes, task.method == .HEAD) catch {
-        proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
-        return;
-    };
-    defer task.allocator.free(result.bytes);
-
-    const status_code = parseForwardedStatusCode(task.allocator, task.protocol, result.bytes) catch {
+    const status_code = parseForwardedStatusCode(task.allocator, task.protocol, bytes) catch {
         proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
         return;
     };
@@ -2370,7 +2402,7 @@ const TestUpstreamAction = union(enum) {
     respond: []const u8,
     stream_respond: struct {
         first: []const u8,
-        delay_ms: u32,
+        release: *std.Io.Semaphore,
         second: []const u8,
     },
     delayed_respond: struct {
@@ -2433,7 +2465,7 @@ const TestUpstreamServer = struct {
                 .respond => |response| _ = socket_helpers.writeAll(client_fd, response) catch {},
                 .stream_respond => |resp| {
                     _ = socket_helpers.writeAll(client_fd, resp.first) catch {};
-                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(resp.delay_ms)), .awake) catch unreachable;
+                    resp.release.waitUncancelable(std.Options.debug_io);
                     _ = socket_helpers.writeAll(client_fd, resp.second) catch {};
                 },
                 .delayed_respond => |resp| {
@@ -4439,15 +4471,17 @@ test "handleConnection streams HTTP/2 upstream frames before stream end" {
     const second_chunk = try std.testing.allocator.dupe(u8, upstream_response[split_at..]);
     defer std.testing.allocator.free(second_chunk);
 
+    var release_tail: std.Io.Semaphore = .{};
     const actions = [_]TestUpstreamAction{
         .{ .stream_respond = .{
             .first = first_chunk,
-            .delay_ms = 150,
+            .release = &release_tail,
             .second = second_chunk,
         } },
     };
     var upstream = try TestUpstreamServer.init(&actions);
     defer upstream.deinit();
+    defer release_tail.post(std.Options.debug_io);
     try upstream.start();
 
     try store.initTestDb();
@@ -4521,20 +4555,24 @@ test "handleConnection streams HTTP/2 upstream frames before stream end" {
     defer std.testing.allocator.free(request);
     try socket_helpers.writeAll(client_fd, request);
 
-    socket_helpers.setSocketTimeoutMs(client_fd, 75);
+    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
     const settings_ack = try buildHttp2SettingsAckFrame(std.testing.allocator);
     defer std.testing.allocator.free(settings_ack);
     var ack_read_buf: [1024]u8 = undefined;
-    const ack_read_len = try posix.read(client_fd, &ack_read_buf);
+    // TCP may split a frame or coalesce several frames into one read. Read
+    // only each expected prefix, leaving subsequent bytes for the next step.
+    const ack_read_len = readSocketBytes(client_fd, ack_read_buf[0..settings_ack.len]);
     try std.testing.expectEqualSlices(u8, settings_ack, ack_read_buf[0..ack_read_len]);
 
     var first_read_buf: [1024]u8 = undefined;
-    const first_read_len = readSocketBytes(client_fd, &first_read_buf);
+    const first_read_len = readSocketBytes(client_fd, first_read_buf[0..first_chunk.len]);
     try std.testing.expectEqualSlices(u8, first_chunk, first_read_buf[0..first_read_len]);
 
-    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
+    // The upstream cannot send END_STREAM until the forwarded headers were
+    // observed. This proves streaming without relying on a timing window.
+    release_tail.post(std.Options.debug_io);
     var second_read_buf: [1024]u8 = undefined;
-    const second_read_len = readSocketBytes(client_fd, &second_read_buf);
+    const second_read_len = readSocketBytes(client_fd, second_read_buf[0..second_chunk.len]);
     try std.testing.expectEqualSlices(u8, second_chunk, second_read_buf[0..second_read_len]);
 }
 
@@ -4936,4 +4974,179 @@ test "readResponseFromSession returns empty buffer on immediate close" {
     const body = try readResponseFromSession(std.testing.allocator, &sess, 64);
     defer std.testing.allocator.free(body);
     try std.testing.expectEqual(@as(usize, 0), body.len);
+}
+
+const PeerForwardFixture = struct {
+    const x509 = @import("../../tls/x509_gen.zig");
+    const csr = @import("../../tls/csr.zig");
+    const secrets = @import("../../state/secrets.zig");
+    const mtls_store = @import("../../state/store/certificates_mtls.zig");
+    const wire = @import("../../tls/client_transport.zig");
+    const session_runtime = @import("../../tls/proxy/session_runtime.zig");
+    const client_session = @import("../../tls/client_session.zig");
+    const record = @import("../../tls/record.zig");
+    const key = [_]u8{9} ** secrets.key_length;
+
+    fd: posix.fd_t,
+    ca: []const u8,
+    cert: []u8,
+    private_key: []u8,
+    now: i64,
+    failure: ?anyerror = null,
+    accepted: bool = false,
+    require_client: bool = true,
+
+    fn exec(sql: []const u8) !void {
+        var lease = try @import("../../state/store/common.zig").leaseDb();
+        defer lease.deinit();
+        try lease.db.execDynamic(sql, .{}, .{});
+    }
+
+    fn publish(cert: []const u8, raw_key: []const u8, now: i64) !void {
+        const alloc = std.testing.allocator;
+        const encrypted = try secrets.encrypt(alloc, raw_key, key);
+        defer alloc.free(encrypted.ciphertext);
+        const sql = try mtls_store.buildProxyUpsertSql(alloc, cert, encrypted.ciphertext, &encrypted.nonce, &encrypted.tag, now + 86400, now);
+        defer alloc.free(sql);
+        try exec(sql);
+    }
+
+    fn listen() !struct { fd: posix.fd_t, port: u16 } {
+        const fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
+        errdefer linux_platform.posix.close(fd);
+        var addr = posix.sockaddr.in{ .addr = std.mem.bytesToValue(u32, &[_]u8{ 127, 0, 0, 1 }), .port = 0 };
+        try linux_platform.posix.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr)));
+        try linux_platform.posix.listen(fd, 1);
+        var len: posix.socklen_t = @sizeOf(@TypeOf(addr));
+        try linux_platform.posix.getsockname(fd, @ptrCast(&addr), &len);
+        return .{ .fd = fd, .port = std.mem.bigToNative(u16, addr.port) };
+    }
+
+    fn serve(self: *PeerForwardFixture) void {
+        self.serveInner() catch |err| {
+            self.failure = err;
+        };
+    }
+
+    fn readExactly(socket: wire.Stream, bytes: []u8) !void {
+        var n: usize = 0;
+        while (n < bytes.len) {
+            const got = try socket.read(bytes[n..]);
+            if (got == 0) return error.UnexpectedEof;
+            n += got;
+        }
+    }
+
+    fn serveInner(self: *PeerForwardFixture) !void {
+        try (wire.Stream{ .fd = self.fd, .deadline = wire.Deadline.afterMilliseconds(2000) }).wait(posix.POLL.IN);
+        const fd = try linux_platform.posix.accept(self.fd, null, null, posix.SOCK.CLOEXEC);
+        defer linux_platform.posix.close(fd);
+        const timeout = posix.timeval{ .sec = 2, .usec = 0 };
+        try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+        try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout));
+        const socket = wire.Stream{ .fd = fd, .deadline = wire.Deadline.afterMilliseconds(2000) };
+        var hello: [4096]u8 = undefined;
+        try readExactly(socket, hello[0..5]);
+        const payload = std.mem.readInt(u16, hello[3..5], .big);
+        if (payload > hello.len - 5) return error.InvalidClientHello;
+        try readExactly(socket, hello[5..][0..payload]);
+        var complete = false;
+        var server = try session_runtime.acceptServerHandshake(std.testing.io, std.testing.allocator, fd, hello[0 .. 5 + payload], self.cert, self.private_key, .{
+            .require_client_cert = self.require_client,
+            .trust_ca_pem = self.ca,
+            .expected_identity = peer_identity.proxy_identity,
+            .now_unix = self.now,
+        }, &complete);
+        defer server.deinit(std.testing.allocator);
+        self.accepted = true;
+        var session = client_session.ClientSession{
+            .fd = fd,
+            .alloc = std.testing.allocator,
+            .client_app = server.app_keys.server,
+            .server_app = server.app_keys.client,
+            .deadline = socket.deadline,
+        };
+        defer session.deinit();
+        var request: [4096]u8 = undefined;
+        const n = try session.read(&request);
+        if (!std.mem.startsWith(u8, request[0..n], "GET /")) return error.InvalidRequest;
+        _ = try session.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        var encrypted: [64]u8 = undefined;
+        const size = try record.encryptRecord(session.client_app.key, session.client_app.iv, session.client_seq, &.{ 1, 0 }, .alert, encrypted[5..]);
+        try record.writeHeader(encrypted[0..5], .application_data, @intCast(size));
+        try socket.writeAll(encrypted[0 .. 5 + size]);
+    }
+
+    fn forward(proxy: *ReverseProxy, ca: []const u8, cert: []u8, private_key: []u8, now: i64, allowed: bool, mode: @import("../../manifest/spec.zig").TlsConfig.PeerMode) !void {
+        const listener = try listen();
+        defer linux_platform.posix.close(listener.fd);
+        var fixture = PeerForwardFixture{ .fd = listener.fd, .ca = ca, .cert = cert, .private_key = private_key, .now = now, .require_client = mode == .require };
+        const worker = try std.Thread.spawn(.{}, serve, .{&fixture});
+        var joined = false;
+        defer if (!joined) worker.join();
+        const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-1", .address = "127.0.0.1", .port = listener.port, .peer_mode = mode };
+        const result = proxy.forwardSingleAttemptMtls("GET / HTTP/1.1\r\nHost: untrusted.example\r\n\r\n", .{ .connect_timeout_ms = 1000, .request_timeout_ms = 1000 }, &upstream);
+        if (allowed) {
+            const response = try result;
+            defer std.testing.allocator.free(response);
+            try std.testing.expect(std.mem.endsWith(u8, response, "\r\n\r\nok"));
+        } else {
+            try std.testing.expectError(error.HandshakeFailed, result);
+        }
+        worker.join();
+        joined = true;
+        try std.testing.expectEqual(allowed, fixture.accepted);
+        if (allowed) try std.testing.expect(fixture.failure == null);
+    }
+};
+
+test "upstream peer identity authenticates proxy credentials and observes rotation" {
+    const f = PeerForwardFixture;
+    const alloc = std.testing.allocator;
+    try store_mod.initTestDb();
+    defer store_mod.deinitTestDb();
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+    const ca = try f.x509.generateCa(std.testing.io, alloc, "peer-ca", now - 60, now + 86400);
+    defer alloc.free(ca.cert_pem);
+    const ca_sql = try store_mod.buildClusterCaInsertSql(alloc, ca.cert_pem, "unused", "", "", now, now + 86400);
+    defer alloc.free(ca_sql);
+    try f.exec(ca_sql);
+    const server = try f.x509.issueLeaf(std.testing.io, alloc, ca.key_pair, "peer-ca", "api", "spiffe://yoq-cluster/service/api", now - 60, now + 86400);
+    defer alloc.free(server.cert_pem);
+    const server_key = try f.csr.derKeyToPem(alloc, &server.key_pair.secret_key.toBytes());
+    defer alloc.free(server_key);
+    var proxy = ReverseProxy.init(alloc, &.{});
+    defer proxy.deinit();
+    const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-1", .address = "127.0.0.1", .port = 1, .peer_mode = .require };
+    try std.testing.expectError(error.ProxyCredentialsMissing, proxy.forwardSingleAttemptMtls("GET / HTTP/1.1\r\n\r\n", .{ .connect_timeout_ms = 1, .request_timeout_ms = 1 }, &upstream));
+    try f.forward(&proxy, ca.cert_pem, server.cert_pem, server_key, now, true, .warn);
+    proxy.peer_key = f.key;
+
+    const first = try f.x509.issueLeaf(std.testing.io, alloc, ca.key_pair, "peer-ca", "proxy", peer_identity.proxy_identity, now - 60, now + 86400);
+    defer alloc.free(first.cert_pem);
+    try f.publish(first.cert_pem, &first.key_pair.secret_key.toBytes(), now);
+    const held = try proxy_credentials.load(alloc, f.key, ca.cert_pem, now);
+    defer held.deinit(alloc);
+    try f.forward(&proxy, ca.cert_pem, server.cert_pem, server_key, now, true, .require);
+
+    const rotated = try f.x509.issueLeaf(std.testing.io, alloc, ca.key_pair, "peer-ca", "proxy", peer_identity.proxy_identity, now - 60, now + 86400);
+    defer alloc.free(rotated.cert_pem);
+    try f.publish(rotated.cert_pem, &rotated.key_pair.secret_key.toBytes(), now);
+    const fresh = try proxy_credentials.load(alloc, f.key, ca.cert_pem, now);
+    defer fresh.deinit(alloc);
+    try std.testing.expectEqualStrings(first.cert_pem, held.cert_pem);
+    try std.testing.expectEqualStrings(rotated.cert_pem, fresh.cert_pem);
+    try std.testing.expect(!std.mem.eql(u8, held.key_pem, fresh.key_pem));
+    try f.forward(&proxy, ca.cert_pem, server.cert_pem, server_key, now, true, .require);
+
+    const wrong = try f.x509.issueLeaf(std.testing.io, alloc, ca.key_pair, "peer-ca", "billing", "spiffe://yoq-cluster/service/billing", now - 60, now + 86400);
+    defer alloc.free(wrong.cert_pem);
+    const wrong_key = try f.csr.derKeyToPem(alloc, &wrong.key_pair.secret_key.toBytes());
+    defer alloc.free(wrong_key);
+    try f.forward(&proxy, ca.cert_pem, wrong.cert_pem, wrong_key, now, false, .require);
+    proxy.peer_key = null;
+    try f.forward(&proxy, ca.cert_pem, wrong.cert_pem, wrong_key, now, false, .warn);
+    proxy.peer_key = f.key;
+    try f.publish(wrong.cert_pem, &wrong.key_pair.secret_key.toBytes(), now);
+    try std.testing.expectError(error.IdentityMismatch, proxy_credentials.load(alloc, f.key, ca.cert_pem, now));
 }
