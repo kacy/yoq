@@ -2402,7 +2402,7 @@ const TestUpstreamAction = union(enum) {
     respond: []const u8,
     stream_respond: struct {
         first: []const u8,
-        delay_ms: u32,
+        release: *std.Io.Semaphore,
         second: []const u8,
     },
     delayed_respond: struct {
@@ -2465,7 +2465,7 @@ const TestUpstreamServer = struct {
                 .respond => |response| _ = socket_helpers.writeAll(client_fd, response) catch {},
                 .stream_respond => |resp| {
                     _ = socket_helpers.writeAll(client_fd, resp.first) catch {};
-                    std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(@intCast(resp.delay_ms)), .awake) catch unreachable;
+                    resp.release.waitUncancelable(std.Options.debug_io);
                     _ = socket_helpers.writeAll(client_fd, resp.second) catch {};
                 },
                 .delayed_respond => |resp| {
@@ -4471,15 +4471,17 @@ test "handleConnection streams HTTP/2 upstream frames before stream end" {
     const second_chunk = try std.testing.allocator.dupe(u8, upstream_response[split_at..]);
     defer std.testing.allocator.free(second_chunk);
 
+    var release_tail: std.Io.Semaphore = .{};
     const actions = [_]TestUpstreamAction{
         .{ .stream_respond = .{
             .first = first_chunk,
-            .delay_ms = 150,
+            .release = &release_tail,
             .second = second_chunk,
         } },
     };
     var upstream = try TestUpstreamServer.init(&actions);
     defer upstream.deinit();
+    defer release_tail.post(std.Options.debug_io);
     try upstream.start();
 
     try store.initTestDb();
@@ -4553,20 +4555,24 @@ test "handleConnection streams HTTP/2 upstream frames before stream end" {
     defer std.testing.allocator.free(request);
     try socket_helpers.writeAll(client_fd, request);
 
-    socket_helpers.setSocketTimeoutMs(client_fd, 75);
+    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
     const settings_ack = try buildHttp2SettingsAckFrame(std.testing.allocator);
     defer std.testing.allocator.free(settings_ack);
     var ack_read_buf: [1024]u8 = undefined;
-    const ack_read_len = try posix.read(client_fd, &ack_read_buf);
+    // TCP may split a frame or coalesce several frames into one read. Read
+    // only each expected prefix, leaving subsequent bytes for the next step.
+    const ack_read_len = readSocketBytes(client_fd, ack_read_buf[0..settings_ack.len]);
     try std.testing.expectEqualSlices(u8, settings_ack, ack_read_buf[0..ack_read_len]);
 
     var first_read_buf: [1024]u8 = undefined;
-    const first_read_len = readSocketBytes(client_fd, &first_read_buf);
+    const first_read_len = readSocketBytes(client_fd, first_read_buf[0..first_chunk.len]);
     try std.testing.expectEqualSlices(u8, first_chunk, first_read_buf[0..first_read_len]);
 
-    socket_helpers.setSocketTimeoutMs(client_fd, 1000);
+    // The upstream cannot send END_STREAM until the forwarded headers were
+    // observed. This proves streaming without relying on a timing window.
+    release_tail.post(std.Options.debug_io);
     var second_read_buf: [1024]u8 = undefined;
-    const second_read_len = readSocketBytes(client_fd, &second_read_buf);
+    const second_read_len = readSocketBytes(client_fd, second_read_buf[0..second_chunk.len]);
     try std.testing.expectEqualSlices(u8, second_chunk, second_read_buf[0..second_read_len]);
 }
 
