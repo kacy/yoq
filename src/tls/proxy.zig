@@ -298,11 +298,12 @@ pub const TlsProxy = struct {
                     return;
                 },
             };
-            backoff.reset();
             self.workers.spawn(client_fd, handler, .{ self, client_fd }) catch |err| {
                 linux_platform.posix.close(client_fd);
                 if (err != error.ConnectionLimit and err != error.Stopping) backoff.pause();
+                continue;
             };
+            backoff.reset();
         }
     }
 

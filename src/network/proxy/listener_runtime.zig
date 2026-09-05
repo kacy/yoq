@@ -326,7 +326,6 @@ fn acceptLoop(alloc: std.mem.Allocator, comptime acceptFn: anytype) void {
                 return;
             },
         };
-        backoff.reset();
         mutex.lockUncancelable(std.Options.debug_io);
         accepted_connections_total += 1;
         mutex.unlock(std.Options.debug_io);
@@ -338,7 +337,9 @@ fn acceptLoop(alloc: std.mem.Allocator, comptime acceptFn: anytype) void {
                 mutex.unlock(std.Options.debug_io);
                 backoff.pause();
             }
+            continue;
         };
+        backoff.reset();
     }
 }
 
@@ -526,4 +527,122 @@ test "listener lifecycle retries temporary accept failures and reopens after fat
     defer recovered_state.deinit(std.testing.allocator);
     try std.testing.expect(recovered_state.running);
     try std.testing.expect(recovered_state.last_error == null);
+}
+
+test "listener lifecycle stop bounds trickling primary and mirror backends" {
+    const wire = @import("../../tls/client_transport.zig");
+    const sockets = @import("../../tls/proxy/socket_support.zig");
+    const Fixture = struct {
+        fd: posix.fd_t,
+        quit: std.atomic.Value(bool) = .init(false),
+        chunks: std.atomic.Value(usize) = .init(0),
+
+        fn run(self: *@This()) void {
+            self.serve() catch {};
+        }
+
+        fn serve(self: *@This()) !void {
+            try (wire.Stream{ .fd = self.fd, .deadline = wire.Deadline.afterMilliseconds(2000) }).wait(posix.POLL.IN);
+            const fd = try linux_platform.posix.accept(self.fd, null, null, posix.SOCK.CLOEXEC);
+            defer linux_platform.posix.close(fd);
+            const stream = wire.Stream{ .fd = fd, .deadline = wire.Deadline.afterMilliseconds(10000) };
+            var request: [4096]u8 = undefined;
+            var length: usize = 0;
+            while (std.mem.indexOf(u8, request[0..length], "\r\n\r\n") == null) {
+                const n = try stream.read(request[length..]);
+                if (n == 0) return error.UnexpectedEof;
+                length += n;
+                if (length == request.len) return error.RequestTooLarge;
+            }
+            try stream.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n");
+            while (!self.quit.load(.acquire)) {
+                try stream.writeAll("x");
+                _ = self.chunks.fetchAdd(1, .release);
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake);
+            }
+        }
+    };
+    const Stopper = struct {
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            stop();
+            self.done.store(true, .release);
+        }
+    };
+    const store = @import("../../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    @import("upstream_pool.zig").resetForTest();
+    defer @import("upstream_pool.zig").resetForTest();
+    service_rollout.setForTest(.{ .service_registry_v2 = true, .l7_proxy_http = true });
+    defer service_rollout.resetForTest();
+    resetForTest();
+    defer resetForTest();
+
+    const primary_fd = try sockets.createListenSocket(0);
+    defer linux_platform.posix.close(primary_fd);
+    const mirror_fd = try sockets.createListenSocket(0);
+    defer linux_platform.posix.close(mirror_fd);
+    var fixtures = [_]Fixture{ .{ .fd = primary_fd }, .{ .fd = mirror_fd } };
+    var threads: [2]?std.Thread = @splat(null);
+    var stopper = Stopper{};
+    var stopping: ?std.Thread = null;
+    // On assertion failure close the trickling peers before joining stop, so
+    // the original unbounded implementation fails without hanging the suite.
+    defer {
+        for (&fixtures) |*fixture| fixture.quit.store(true, .release);
+        for (threads) |thread| if (thread) |owned| owned.join();
+        if (stopping) |thread| thread.join();
+    }
+    for (&fixtures, 0..) |*fixture, index| threads[index] = try std.Thread.spawn(.{}, Fixture.run, .{fixture});
+    try store.createService(.{
+        .service_name = "drip",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "drip.internal",
+        .http_proxy_path_prefix = "/",
+        .http_proxy_mirror_service = "shadow",
+        .http_proxy_request_timeout_ms = 500,
+        .http_proxy_retries = 0,
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.createService(.{ .service_name = "shadow", .vip_address = "10.43.0.3", .lb_policy = "consistent_hash", .created_at = 1000, .updated_at = 1000 });
+    for ([_][]const u8{ "drip", "shadow" }, 0..) |name, index| {
+        try store.upsertServiceEndpoint(.{
+            .service_name = name,
+            .endpoint_id = name,
+            .container_id = name,
+            .node_id = null,
+            .ip_address = "127.0.0.1",
+            .port = try sockets.boundPort(fixtures[index].fd),
+            .weight = 1,
+            .admin_state = "active",
+            .generation = 1,
+            .registered_at = 1000,
+            .last_seen_at = 1000,
+        });
+    }
+    proxy_runtime.bootstrapIfEnabled();
+    startForTest(std.testing.allocator, 0);
+    const client = try LifecycleFixture.connect();
+    defer linux_platform.posix.close(client);
+    try (wire.Stream{ .fd = client, .deadline = wire.Deadline.afterMilliseconds(2000) }).writeAll("GET / HTTP/1.1\r\nHost: drip.internal\r\n\r\n");
+    const ready_deadline = wire.Deadline.afterMilliseconds(2000);
+    while (fixtures[0].chunks.load(.acquire) < 2 or fixtures[1].chunks.load(.acquire) < 2) {
+        _ = try ready_deadline.remaining();
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    stopping = try std.Thread.spawn(.{}, Stopper.run, .{&stopper});
+    const stop_deadline = wire.Deadline.afterMilliseconds(2500);
+    while (!stopper.done.load(.acquire)) {
+        _ = try stop_deadline.remaining();
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(u32, 0), activeConnectionCount());
+    try std.testing.expect(listener_thread == null);
 }

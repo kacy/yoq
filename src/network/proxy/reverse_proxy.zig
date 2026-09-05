@@ -20,6 +20,7 @@ const upstream_mod = @import("upstream.zig");
 const upstream_pool = @import("upstream_pool.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 const client_dial = @import("../../tls/client_dial.zig");
+const transport = @import("../../tls/client_transport.zig");
 const store_mod = @import("../../state/store.zig");
 
 const proxy_loop_header = "X-Yoq-Proxy";
@@ -633,42 +634,7 @@ pub const ReverseProxy = struct {
             return self.forwardSingleAttemptMtls(request, .{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms, .head = plan.method == .HEAD }, upstream);
         }
 
-        // prefer a pooled, kept-alive connection; dial a fresh one on a miss.
-        var from_pool = true;
-        var fd = upstream_pool.checkout(upstream.endpoint_id, upstream.address, upstream.port) orelse blk: {
-            from_pool = false;
-            const dialed = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
-            upstream_pool.noteDialed();
-            break :blk dialed;
-        };
-
-        socket_helpers.writeAll(fd, request) catch {
-            upstream_pool.discard(fd);
-            // a reused connection can race a peer close between our liveness
-            // check and the write. no request bytes were delivered, so it is
-            // safe to fall back to a fresh connection even for non-idempotent
-            // methods. a fresh-dialed connection failing is a real send error.
-            if (!from_pool) return error.SendFailed;
-            from_pool = false;
-            fd = try socket_helpers.connectToUpstream(plan.route.connect_timeout_ms, plan.route.request_timeout_ms, upstream);
-            upstream_pool.noteDialed();
-            socket_helpers.writeAll(fd, request) catch {
-                upstream_pool.discard(fd);
-                return error.SendFailed;
-            };
-        };
-
-        const result = readResponse(self.allocator, fd, self.max_response_bytes, plan.method == .HEAD) catch |err| {
-            upstream_pool.discard(fd);
-            return err;
-        };
-
-        if (result.reusable) {
-            upstream_pool.release(upstream.endpoint_id, upstream.address, upstream.port, fd);
-        } else {
-            upstream_pool.discard(fd);
-        }
-        return result.bytes;
+        return self.forwardPlainAttempt(request, .{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms, .head = plan.method == .HEAD }, upstream);
     }
 
     /// mTLS-specific dial + request/response. always opens a fresh
@@ -744,38 +710,37 @@ pub const ReverseProxy = struct {
         }
     }
 
-    /// fallback used by the mTLS `.warn` path when no cluster CA is
-    /// available — runs the plaintext dial/pool path so the connection
-    /// at least succeeds. equivalent to the legacy non-mTLS leg of
-    /// forwardSingleAttempt minus the request build (caller already has
-    /// the bytes).
+    /// Primary, mirror, and permissive fallback traffic share one plaintext
+    /// exchange budget, including any stale pooled-connection retry.
     fn forwardPlainAttempt(
         self: *const ReverseProxy,
         request: []const u8,
         timeouts: PeerTimeouts,
         upstream: *const upstream_mod.Upstream,
     ) ![]u8 {
+        const deadline = transport.Deadline.afterMilliseconds(timeouts.request_timeout_ms);
         var from_pool = true;
         var fd = upstream_pool.checkout(upstream.endpoint_id, upstream.address, upstream.port) orelse blk: {
             from_pool = false;
-            const dialed = try socket_helpers.connectToUpstream(timeouts.connect_timeout_ms, timeouts.request_timeout_ms, upstream);
+            const dialed = try socket_helpers.connectToUpstreamUntil(timeouts.connect_timeout_ms, deadline, upstream);
             upstream_pool.noteDialed();
             break :blk dialed;
         };
 
-        socket_helpers.writeAll(fd, request) catch {
+        (transport.Stream{ .fd = fd, .deadline = deadline }).writeAll(request) catch |err| {
             upstream_pool.discard(fd);
+            if (err == error.TimedOut) return err;
             if (!from_pool) return error.SendFailed;
             from_pool = false;
-            fd = try socket_helpers.connectToUpstream(timeouts.connect_timeout_ms, timeouts.request_timeout_ms, upstream);
+            fd = try socket_helpers.connectToUpstreamUntil(timeouts.connect_timeout_ms, deadline, upstream);
             upstream_pool.noteDialed();
-            socket_helpers.writeAll(fd, request) catch {
+            (transport.Stream{ .fd = fd, .deadline = deadline }).writeAll(request) catch |write_err| {
                 upstream_pool.discard(fd);
-                return error.SendFailed;
+                return if (write_err == error.TimedOut) write_err else error.SendFailed;
             };
         };
 
-        const result = readResponse(self.allocator, fd, self.max_response_bytes, timeouts.head) catch |err| {
+        const result = readResponse(self.allocator, transport.Stream{ .fd = fd, .deadline = deadline }, self.max_response_bytes, timeouts.head) catch |err| {
             upstream_pool.discard(fd);
             return err;
         };
@@ -1269,10 +1234,11 @@ const BodyFraming = union(enum) {
 /// reported as non-reusable.
 fn readResponse(
     alloc: std.mem.Allocator,
-    fd: linux_platform.posix.socket_t,
+    socket: anytype,
     max_bytes: usize,
     head_request: bool,
 ) !UpstreamResponse {
+    const wire = transport.stream(socket);
     var response = try alloc.alloc(u8, max_bytes);
     errdefer alloc.free(response);
 
@@ -1281,7 +1247,7 @@ fn readResponse(
     // phase 1: read until the response headers are complete.
     var header_end: ?usize = null;
     while (header_end == null and total < response.len) {
-        const bytes_read = posix.read(fd, response[total..]) catch return error.ReceiveFailed;
+        const bytes_read = wire.read(response[total..]) catch |err| return if (err == error.TimedOut) err else error.ReceiveFailed;
         if (bytes_read == 0) break;
         total += bytes_read;
         if (std.mem.indexOf(u8, response[0..total], "\r\n\r\n")) |idx| {
@@ -1311,7 +1277,7 @@ fn readResponse(
             const target = std.math.add(usize, headers_end, body_len) catch return error.ResponseTooLarge;
             if (target > response.len) return error.ResponseTooLarge;
             while (total < target) {
-                const bytes_read = posix.read(fd, response[total..]) catch return error.ReceiveFailed;
+                const bytes_read = wire.read(response[total..]) catch |err| return if (err == error.TimedOut) err else error.ReceiveFailed;
                 if (bytes_read == 0) {
                     // upstream closed mid-body: incomplete, not reusable.
                     return try shrinkResponse(alloc, response, total, false);
@@ -1329,7 +1295,7 @@ fn readResponse(
                     return try shrinkResponse(alloc, response, target, reusable);
                 }
                 if (total == response.len) return error.ResponseTooLarge;
-                const bytes_read = posix.read(fd, response[total..]) catch return error.ReceiveFailed;
+                const bytes_read = wire.read(response[total..]) catch |err| return if (err == error.TimedOut) err else error.ReceiveFailed;
                 if (bytes_read == 0) {
                     // closed before the terminating chunk arrived.
                     return try shrinkResponse(alloc, response, total, false);
@@ -1339,13 +1305,13 @@ fn readResponse(
         },
         .eof => {
             while (total < response.len) {
-                const bytes_read = posix.read(fd, response[total..]) catch return error.ReceiveFailed;
+                const bytes_read = wire.read(response[total..]) catch |err| return if (err == error.TimedOut) err else error.ReceiveFailed;
                 if (bytes_read == 0) break;
                 total += bytes_read;
             }
             if (total == response.len) {
                 var extra_buf: [1]u8 = undefined;
-                const extra = posix.read(fd, &extra_buf) catch 0;
+                const extra = try wire.read(&extra_buf);
                 if (extra > 0) return error.ResponseTooLarge;
             }
             return try shrinkResponse(alloc, response, total, false);
