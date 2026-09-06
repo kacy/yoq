@@ -109,7 +109,7 @@ fn createDevNode(root: []const u8, name: []const u8, required: bool) !void {
         ((@as(u64, stat.rdev_major) & ~@as(u64, 0xfff)) << 32);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrintZ(&path_buf, "{s}/dev/{s}", .{ root, name });
-    const rc = linux.syscall4(.mknodat, @as(usize, @bitCast(@as(isize, linux.AT.FDCWD))), @intFromPtr(path), 0o020666, @intCast(device));
+    const rc = linux.syscall4(.mknodat, @as(usize, @bitCast(@as(isize, linux.AT.FDCWD))), @intFromPtr(path.ptr), 0o020666, @intCast(device));
     if (linux.errno(rc) != .SUCCESS) return error.GpuDeviceCreateFailed;
 }
 
