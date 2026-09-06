@@ -521,3 +521,17 @@ test "durable state distinguishes initialized defaults from missing or malformed
     try @import("log/schema_support.zig").initSchema(&log.db);
     try std.testing.expectError(error.CorruptedLog, log.readState());
 }
+
+test "durable state refuses a missing state table alongside existing history" {
+    inline for (0..3) |history_case| {
+        var log = try Log.initMemory();
+        defer log.deinit();
+        try log.db.exec("DROP TABLE raft_state;", .{}, .{});
+        if (history_case == 0) try log.db.exec("DROP TABLE raft_log;", .{}, .{});
+        if (history_case == 1) try log.db.exec("DROP TABLE snapshot_meta;", .{}, .{});
+
+        try std.testing.expectError(error.CorruptedLog, @import("log/schema_support.zig").initSchema(&log.db));
+        const state_tables = try log.db.one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'raft_state';", .{}, .{});
+        try std.testing.expectEqual(@as(i64, 0), state_tables.?.count);
+    }
+}

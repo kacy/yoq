@@ -2,6 +2,12 @@ const sqlite = @import("sqlite");
 
 pub fn initSchema(db: *sqlite.Db) !void {
     const existing_state = try db.one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'raft_state';", .{}, .{});
+    if (existing_state.?.count == 0) {
+        const existing_history = try db.one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN ('raft_log', 'snapshot_meta');", .{}, .{});
+        // An existing log or snapshot proves this is not first initialization.
+        // Recreating term/vote state would forget election history.
+        if (existing_history.?.count != 0) return error.CorruptedLog;
+    }
 
     db.exec(
         \\CREATE TABLE IF NOT EXISTS raft_state (
