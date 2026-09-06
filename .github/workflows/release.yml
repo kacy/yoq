@@ -13,6 +13,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: release-${{ github.event.inputs.version || github.ref }}
@@ -215,9 +217,11 @@ jobs:
             (cd dist/out && sha256sum "${archive_name}" > "${checksum_name}")
           done
 
-          python3 - <<'PY'
+          RELEASE_TAG="$TAG" RELEASE_VERSION="${{ needs.validate-tag.outputs.version }}" RELEASE_COMMIT="${{ needs.validate-tag.outputs.commit }}" python3 - <<'PY'
           import hashlib
           import json
+          import os
+          from datetime import datetime, timezone
           from pathlib import Path
 
           output = Path("dist/out")
@@ -227,11 +231,11 @@ jobs:
               artifacts.append({"name": archive.name, "sha256": digest})
 
           provenance = {
-              "schema": "https://in-toto.io/Statement/v1",
+              "schema": "https://github.com/kacy/yoq/release-provenance/v1",
               "subject": artifacts,
               "buildType": "https://github.com/kacy/yoq/release",
-              "invocation": {"tag": "${TAG}", "commit": "${{ needs.validate-tag.outputs.commit }}"},
-              "metadata": {"version": "${{ needs.validate-tag.outputs.version }}"},
+              "invocation": {"tag": os.environ["RELEASE_TAG"], "commit": os.environ["RELEASE_COMMIT"]},
+              "metadata": {"version": os.environ["RELEASE_VERSION"], "generatedAt": datetime.now(timezone.utc).isoformat()},
           }
           (output / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
 
@@ -239,13 +243,15 @@ jobs:
               "spdxVersion": "SPDX-2.3",
               "dataLicense": "CC0-1.0",
               "SPDXID": "SPDXRef-DOCUMENT",
-              "name": "yoq-${TAG}",
-              "documentNamespace": "https://github.com/kacy/yoq/releases/${TAG}",
-              "creationInfo": {"created": "${{ github.run_started_at }}", "creators": ["Tool: yoq release workflow"]},
-              "packages": [{"SPDXID": "SPDXRef-Package-yoq", "name": "yoq", "versionInfo": "${{ needs.validate-tag.outputs.version }}", "downloadLocation": "NOASSERTION"}],
+              "name": "yoq-" + os.environ["RELEASE_TAG"],
+              "documentNamespace": "https://github.com/kacy/yoq/releases/" + os.environ["RELEASE_TAG"],
+              "creationInfo": {"created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "creators": ["Tool: yoq release workflow"]},
+              "packages": [{"SPDXID": "SPDXRef-Package-yoq", "name": "yoq", "versionInfo": os.environ["RELEASE_VERSION"], "downloadLocation": "NOASSERTION", "filesAnalyzed": False, "licenseConcluded": "NOASSERTION", "licenseDeclared": "NOASSERTION", "copyrightText": "NOASSERTION"}],
           }
           (output / "sbom.spdx.json").write_text(json.dumps(sbom, indent=2) + "\n")
           PY
+
+          test "$(python3 -c 'import json; d=json.load(open("dist/out/provenance.json")); print(d["invocation"]["tag"])')" = "$TAG"
 
       - name: upload packaged artifacts
         uses: actions/upload-artifact@v4
@@ -253,6 +259,11 @@ jobs:
           name: yoq-release-bundle
           path: dist/out/*
           retention-days: 14
+
+      - name: attest release archives
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/out/*.tar.gz
 
   publish-release:
     name: publish-release
