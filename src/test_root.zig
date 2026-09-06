@@ -197,6 +197,7 @@ comptime {
     _ = @import("cluster/scheduler/sql_support.zig");
     _ = @import("cluster/commands.zig");
     _ = @import("tls/commands.zig");
+    _ = @import("tls/cert_store/key_support.zig");
     _ = @import("tls/x509_gen.zig");
     _ = @import("tls/x509_verify.zig");
     _ = @import("tls/handshake/message_parse.zig");
