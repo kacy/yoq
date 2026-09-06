@@ -13,7 +13,7 @@ pub fn handleAppendEntries(
     min_election_ticks: u32,
     max_election_ticks: u32,
 ) AppendEntriesReply {
-    const current_term = self.log.getCurrentTerm();
+    const current_term = self.persistent_state.current_term;
     if (args.term < current_term) {
         return .{ .term = current_term, .success = false, .match_index = 0 };
     }
@@ -35,7 +35,7 @@ pub fn handleAppendEntries(
     if (args.prev_log_index > 0) {
         const prev_term = self.log.termAt(args.prev_log_index);
         if (prev_term == 0 or prev_term != args.prev_log_term) {
-            return .{ .term = self.log.getCurrentTerm(), .success = false, .match_index = 0 };
+            return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
         }
     }
 
@@ -45,7 +45,7 @@ pub fn handleAppendEntries(
     for (args.entries) |entry| {
         const next = @addWithOverflow(verified_index, 1);
         if (next[1] != 0 or entry.index != next[0]) {
-            return .{ .term = self.log.getCurrentTerm(), .success = false, .match_index = 0 };
+            return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
         }
         verified_index = entry.index;
     }
@@ -54,14 +54,14 @@ pub fn handleAppendEntries(
         const existing_term = self.log.termAt(entry.index);
         if (existing_term != 0 and existing_term != entry.term) {
             if (!self.log.truncateFrom(entry.index)) {
-                return .{ .term = self.log.getCurrentTerm(), .success = false, .match_index = 0 };
+                return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
             }
             self.log.append(entry) catch {
-                return .{ .term = self.log.getCurrentTerm(), .success = false, .match_index = 0 };
+                return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
             };
         } else if (existing_term == 0) {
             self.log.append(entry) catch {
-                return .{ .term = self.log.getCurrentTerm(), .success = false, .match_index = 0 };
+                return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
             };
         }
     }
@@ -73,14 +73,14 @@ pub fn handleAppendEntries(
                 .commit_entries = .{ .up_to = new_commit },
             }) catch |e| {
                 logger.warn("raft: failed to queue commit action: {}", .{e});
-                return .{ .term = self.log.getCurrentTerm(), .success = false, .match_index = 0 };
+                return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
             };
             self.commit_index = new_commit;
         }
     }
 
     return .{
-        .term = self.log.getCurrentTerm(),
+        .term = self.persistent_state.current_term,
         .success = true,
         .match_index = verified_index,
     };
@@ -93,7 +93,7 @@ pub fn handleAppendEntriesReply(
     min_election_ticks: u32,
     max_election_ticks: u32,
 ) void {
-    const current_term = self.log.getCurrentTerm();
+    const current_term = self.persistent_state.current_term;
     if (reply.term > current_term) {
         _ = common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
         return;
@@ -160,7 +160,7 @@ pub fn sendAppendEntries(self: anytype, peer_idx: usize) void {
         .send_append_entries = .{
             .target = self.peers[peer_idx],
             .args = .{
-                .term = self.log.getCurrentTerm(),
+                .term = self.persistent_state.current_term,
                 .leader_id = self.id,
                 .prev_log_index = prev_index,
                 .prev_log_term = prev_term,
@@ -177,7 +177,7 @@ pub fn sendAppendEntries(self: anytype, peer_idx: usize) void {
 }
 
 pub fn advanceCommitIndex(self: anytype) void {
-    const current_term = self.log.getCurrentTerm();
+    const current_term = self.persistent_state.current_term;
     const last = self.log.lastIndex();
 
     var candidate_index = last;

@@ -18,6 +18,7 @@ const LogEntry = common.LogEntry;
 const SnapshotMeta = common.SnapshotMeta;
 
 pub const LogError = common.LogError;
+pub const State = state_runtime.State;
 
 pub const Log = struct {
     db: sqlite.Db,
@@ -37,7 +38,11 @@ pub const Log = struct {
 
     // -- persistent state (survives restarts) --
 
-    pub fn getCurrentTerm(self: *Log) Term {
+    pub fn readState(self: *Log) LogError!State {
+        return state_runtime.readState(&self.db);
+    }
+
+    pub fn getCurrentTerm(self: *Log) LogError!Term {
         return state_runtime.getCurrentTerm(&self.db);
     }
 
@@ -49,7 +54,7 @@ pub const Log = struct {
         return true;
     }
 
-    pub fn getVotedFor(self: *Log) ?NodeId {
+    pub fn getVotedFor(self: *Log) LogError!?NodeId {
         return state_runtime.getVotedFor(&self.db);
     }
 
@@ -151,26 +156,26 @@ test "term persistence" {
     var log = try Log.initMemory();
     defer log.deinit();
 
-    try std.testing.expectEqual(@as(Term, 0), log.getCurrentTerm());
+    try std.testing.expectEqual(@as(Term, 0), (try log.getCurrentTerm()));
 
     _ = log.setCurrentTerm(5);
-    try std.testing.expectEqual(@as(Term, 5), log.getCurrentTerm());
+    try std.testing.expectEqual(@as(Term, 5), (try log.getCurrentTerm()));
 
     _ = log.setCurrentTerm(10);
-    try std.testing.expectEqual(@as(Term, 10), log.getCurrentTerm());
+    try std.testing.expectEqual(@as(Term, 10), (try log.getCurrentTerm()));
 }
 
 test "voted_for persistence" {
     var log = try Log.initMemory();
     defer log.deinit();
 
-    try std.testing.expect(log.getVotedFor() == null);
+    try std.testing.expect((try log.getVotedFor()) == null);
 
     _ = log.setVotedFor(42);
-    try std.testing.expectEqual(@as(?NodeId, 42), log.getVotedFor());
+    try std.testing.expectEqual(@as(?NodeId, 42), (try log.getVotedFor()));
 
     _ = log.setVotedFor(null);
-    try std.testing.expect(log.getVotedFor() == null);
+    try std.testing.expect((try log.getVotedFor()) == null);
 }
 
 test "log append and get" {
@@ -501,4 +506,32 @@ test "snapshot activation rolls back metadata and deletion together" {
     try std.testing.expect((try log.readSnapshotMeta()) == null);
     try std.testing.expectEqual(@as(u64, 2), log.termAt(5));
     try std.testing.expectEqual(@as(u64, 6), log.lastIndex());
+}
+
+test "durable state distinguishes initialized defaults from missing or malformed history" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+    try std.testing.expectEqual(State{ .current_term = 0, .voted_for = null }, try log.readState());
+    try log.db.exec("UPDATE raft_state SET current_term = -1;", .{}, .{});
+    try std.testing.expectError(error.CorruptedLog, log.readState());
+    try log.db.exec("UPDATE raft_state SET current_term = 7, voted_for = -1;", .{}, .{});
+    try std.testing.expectError(error.CorruptedLog, log.readState());
+    try log.db.exec("DELETE FROM raft_state;", .{}, .{});
+    try std.testing.expectError(error.CorruptedLog, log.readState());
+    try @import("log/schema_support.zig").initSchema(&log.db);
+    try std.testing.expectError(error.CorruptedLog, log.readState());
+}
+
+test "durable state refuses a missing state table alongside existing history" {
+    inline for (0..3) |history_case| {
+        var log = try Log.initMemory();
+        defer log.deinit();
+        try log.db.exec("DROP TABLE raft_state;", .{}, .{});
+        if (history_case == 0) try log.db.exec("DROP TABLE raft_log;", .{}, .{});
+        if (history_case == 1) try log.db.exec("DROP TABLE snapshot_meta;", .{}, .{});
+
+        try std.testing.expectError(error.CorruptedLog, @import("log/schema_support.zig").initSchema(&log.db));
+        const state_tables = try log.db.one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'raft_state';", .{}, .{});
+        try std.testing.expectEqual(@as(i64, 0), state_tables.?.count);
+    }
 }

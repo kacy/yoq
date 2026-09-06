@@ -13,7 +13,7 @@ pub fn handleInstallSnapshot(
     min_election_ticks: u32,
     max_election_ticks: u32,
 ) InstallSnapshotReply {
-    const current_term = self.log.getCurrentTerm();
+    const current_term = self.persistent_state.current_term;
     if (args.term < current_term) {
         return .{ .term = current_term };
     }
@@ -32,7 +32,7 @@ pub fn handleInstallSnapshot(
     }
 
     self.ticks_since_event = 0;
-    return .{ .term = self.log.getCurrentTerm() };
+    return .{ .term = self.persistent_state.current_term };
 }
 
 pub fn handleInstallSnapshotReply(
@@ -42,7 +42,7 @@ pub fn handleInstallSnapshotReply(
     min_election_ticks: u32,
     max_election_ticks: u32,
 ) void {
-    const current_term = self.log.getCurrentTerm();
+    const current_term = self.persistent_state.current_term;
     if (reply.term > current_term) {
         _ = common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
         return;
@@ -65,7 +65,7 @@ pub fn sendInstallSnapshot(self: anytype, peer_idx: usize, meta: SnapshotMeta) v
         .send_install_snapshot = .{
             .target = self.peers[peer_idx],
             .args = .{
-                .term = self.log.getCurrentTerm(),
+                .term = self.persistent_state.current_term,
                 .leader_id = self.id,
                 .last_included_index = meta.last_included_index,
                 .last_included_term = meta.last_included_term,

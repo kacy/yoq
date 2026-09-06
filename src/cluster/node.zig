@@ -674,7 +674,7 @@ test "handleMessage drops request_vote with mismatched sender id" {
         } },
     });
 
-    try std.testing.expect(node.log.getVotedFor() == null);
+    try std.testing.expect((try node.log.getVotedFor()) == null);
 }
 
 test "handleMessage accepts append_entries only from authenticated leader" {
@@ -1433,7 +1433,7 @@ test "snapshot installation refuses an unpersisted leader term" {
             .data = try alloc.dupe(u8, bytes),
         } },
     });
-    try std.testing.expectEqual(@as(types.Term, 1), node.log.getCurrentTerm());
+    try std.testing.expectEqual(@as(types.Term, 1), (try node.log.getCurrentTerm()));
     try std.testing.expectEqual(@as(LogIndex, 0), node.state_machine.last_applied);
     try std.testing.expectEqual(@as(LogIndex, 0), node.last_snapshot_index);
     try std.testing.expect((try node.log.readSnapshotMeta()) == null);

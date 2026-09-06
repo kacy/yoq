@@ -96,6 +96,7 @@ pub const BackupSpec = struct {
     output_dir: []const u8,
     /// encrypt the artifact at rest (default true); false writes a raw copy.
     encrypt: bool = true,
+    retention: @import("../backup_retention.zig").Policy = .{},
 
     pub fn deinit(self: BackupSpec, alloc: std.mem.Allocator) void {
         alloc.free(self.output_dir);

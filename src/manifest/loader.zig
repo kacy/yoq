@@ -2180,3 +2180,21 @@ test "training job — data sharding default" {
     try std.testing.expectEqualStrings("file", manifest.training_jobs[0].data.?.sharding);
     try std.testing.expect(manifest.training_jobs[0].data.?.preprocessing == null);
 }
+
+test "backup retention configuration parses count age and bytes" {
+    const input =
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\[backup]
+        \\every = "24h"
+        \\output_dir = "/backups"
+        \\keep_count = 3
+        \\max_age = "7d"
+        \\max_bytes = 1048576
+    ;
+    var manifest = try loadFromString(std.testing.allocator, input);
+    defer manifest.deinit();
+    try std.testing.expectEqual(@as(usize, 3), manifest.backup.?.retention.keep_count);
+    try std.testing.expectEqual(@as(u64, 7 * 24 * 3600), manifest.backup.?.retention.max_age);
+    try std.testing.expectEqual(@as(u64, 1048576), manifest.backup.?.retention.max_bytes);
+}

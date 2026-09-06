@@ -23,6 +23,10 @@ pub fn init(path: [:0]const u8) LogError!sqlite.Db {
         return LogError.DbOpenFailed;
     };
 
+    _ = readState(&db) catch |err| {
+        db.deinit();
+        return err;
+    };
     return db;
 }
 
@@ -37,18 +41,26 @@ pub fn initMemory() LogError!sqlite.Db {
         return LogError.DbOpenFailed;
     };
 
+    _ = readState(&db) catch |err| {
+        db.deinit();
+        return err;
+    };
     return db;
 }
 
-pub fn getCurrentTerm(db: *sqlite.Db) Term {
-    const Row = struct { current_term: i64 };
-    const row = (db.one(
-        Row,
-        "SELECT current_term FROM raft_state WHERE id = 1;",
-        .{},
-        .{},
-    ) catch return 0) orelse return 0;
-    return common.safeU64(row.current_term) catch 0;
+pub const State = struct { current_term: Term, voted_for: ?NodeId };
+
+pub fn readState(db: *sqlite.Db) LogError!State {
+    const Row = struct { current_term: i64, voted_for: ?i64 };
+    const row = (db.one(Row, "SELECT current_term, voted_for FROM raft_state WHERE id = 1;", .{}, .{}) catch return error.ReadFailed) orelse return error.CorruptedLog;
+    return .{
+        .current_term = try common.safeU64(row.current_term),
+        .voted_for = if (row.voted_for) |id| try common.safeU64(id) else null,
+    };
+}
+
+pub fn getCurrentTerm(db: *sqlite.Db) LogError!Term {
+    return (try readState(db)).current_term;
 }
 
 pub fn setCurrentTerm(db: *sqlite.Db, term: Term) LogError!void {
@@ -59,15 +71,8 @@ pub fn setCurrentTerm(db: *sqlite.Db, term: Term) LogError!void {
     ) catch return LogError.WriteFailed;
 }
 
-pub fn getVotedFor(db: *sqlite.Db) ?NodeId {
-    const Row = struct { voted_for: ?i64 };
-    const row = (db.one(
-        Row,
-        "SELECT voted_for FROM raft_state WHERE id = 1;",
-        .{},
-        .{},
-    ) catch return null) orelse return null;
-    return if (row.voted_for) |v| common.safeU64(v) catch null else null;
+pub fn getVotedFor(db: *sqlite.Db) LogError!?NodeId {
+    return (try readState(db)).voted_for;
 }
 
 pub fn setVotedFor(db: *sqlite.Db, id: ?NodeId) LogError!void {

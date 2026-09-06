@@ -33,7 +33,7 @@ pub fn handleRequestVote(
     min_election_ticks: u32,
     max_election_ticks: u32,
 ) RequestVoteReply {
-    const current_term = self.log.getCurrentTerm();
+    const current_term = self.persistent_state.current_term;
     if (args.term < current_term) {
         return .{ .term = current_term, .vote_granted = false };
     }
@@ -44,7 +44,7 @@ pub fn handleRequestVote(
         }
     }
 
-    const voted_for = self.log.getVotedFor();
+    const voted_for = self.persistent_state.voted_for;
     const can_vote = voted_for == null or voted_for.? == args.candidate_id;
 
     const our_last_term = self.log.lastTerm();
@@ -53,14 +53,14 @@ pub fn handleRequestVote(
         (args.last_log_term == our_last_term and args.last_log_index >= our_last_index);
 
     if (can_vote and log_ok) {
-        if (!self.log.setVotedFor(args.candidate_id)) {
-            return .{ .term = self.log.getCurrentTerm(), .vote_granted = false };
+        if (!self.persistVote(args.candidate_id)) {
+            return .{ .term = self.persistent_state.current_term, .vote_granted = false };
         }
         self.ticks_since_event = 0;
-        return .{ .term = self.log.getCurrentTerm(), .vote_granted = true };
+        return .{ .term = self.persistent_state.current_term, .vote_granted = true };
     }
 
-    return .{ .term = self.log.getCurrentTerm(), .vote_granted = false };
+    return .{ .term = self.persistent_state.current_term, .vote_granted = false };
 }
 
 pub fn handleRequestVoteReply(
@@ -70,7 +70,7 @@ pub fn handleRequestVoteReply(
     min_election_ticks: u32,
     max_election_ticks: u32,
 ) void {
-    const current_term = self.log.getCurrentTerm();
+    const current_term = self.persistent_state.current_term;
     if (reply.term > current_term) {
         _ = common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
         return;
@@ -93,7 +93,7 @@ pub fn handleRequestVoteReply(
 pub fn transferLeadership(self: anytype, min_election_ticks: u32, max_election_ticks: u32) bool {
     if (self.role != .leader) return false;
 
-    const new_term = self.log.getCurrentTerm() + 1;
+    const new_term = self.persistent_state.current_term + 1;
     logger.info("raft: leader {d} stepping down, advancing to term {d}", .{ self.id, new_term });
 
     if (!common.stepDown(self, new_term, min_election_ticks, max_election_ticks)) return false;
@@ -107,9 +107,9 @@ pub fn transferLeadership(self: anytype, min_election_ticks: u32, max_election_t
 }
 
 pub fn startElection(self: anytype, min_election_ticks: u32, max_election_ticks: u32) void {
-    const new_term = self.log.getCurrentTerm() + 1;
-    if (!self.log.setCurrentTerm(new_term)) return;
-    if (!self.log.setVotedFor(self.id)) return;
+    const new_term = self.persistent_state.current_term + 1;
+    if (!self.persistTerm(new_term)) return;
+    if (!self.persistVote(self.id)) return;
     self.role = .candidate;
     @memset(self.votes_granted, false);
     self.votes_received = 1;

@@ -227,10 +227,16 @@ pub fn parseBackup(alloc: std.mem.Allocator, table: ?*const toml.Table) common.L
     const output_dir = alloc.dupe(u8, output_dir_raw) catch return common.LoadError.OutOfMemory;
     errdefer alloc.free(output_dir);
 
+    const keep_count = backup_table.getInt("keep_count") orelse 7;
+    const max_bytes = backup_table.getInt("max_bytes") orelse 0;
+    const max_age = if (backup_table.getString("max_age")) |value| @import("../backup_retention.zig").parseAge(value) orelse return error.InvalidSchedule else 0;
+    if (keep_count < 1 or max_bytes < 0) return error.InvalidSchedule;
+
     return .{
         .every = every,
         .output_dir = output_dir,
         .encrypt = backup_table.getBool("encrypt") orelse true,
+        .retention = .{ .keep_count = @intCast(keep_count), .max_age = max_age, .max_bytes = @intCast(max_bytes) },
     };
 }
 
