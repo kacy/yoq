@@ -217,7 +217,7 @@ jobs:
             (cd dist/out && sha256sum "${archive_name}" > "${checksum_name}")
           done
 
-          RELEASE_TAG="$TAG" RELEASE_VERSION="${{ needs.validate-tag.outputs.version }}" RELEASE_COMMIT="${{ needs.validate-tag.outputs.commit }}" python3 - <<'PY'
+          RELEASE_TAG="$TAG" RELEASE_VERSION="${{ needs.validate-tag.outputs.version }}" RELEASE_COMMIT="${{ needs.validate-tag.outputs.commit }}" RELEASE_RUN="${{ github.run_id }}-${{ github.run_attempt }}" python3 - <<'PY'
           import hashlib
           import json
           import os
@@ -244,7 +244,7 @@ jobs:
               "dataLicense": "CC0-1.0",
               "SPDXID": "SPDXRef-DOCUMENT",
               "name": "yoq-" + os.environ["RELEASE_TAG"],
-              "documentNamespace": "https://github.com/kacy/yoq/releases/" + os.environ["RELEASE_TAG"],
+              "documentNamespace": "https://github.com/kacy/yoq/releases/" + os.environ["RELEASE_TAG"] + "/" + os.environ["RELEASE_RUN"],
               "creationInfo": {"created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "creators": ["Tool: yoq release workflow"]},
               "packages": [{"SPDXID": "SPDXRef-Package-yoq", "name": "yoq", "versionInfo": os.environ["RELEASE_VERSION"], "downloadLocation": "NOASSERTION", "filesAnalyzed": False, "licenseConcluded": "NOASSERTION", "licenseDeclared": "NOASSERTION", "copyrightText": "NOASSERTION"}],
           }
