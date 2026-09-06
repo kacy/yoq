@@ -122,13 +122,7 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
     var peers_buf: [16]net_setup.PeerInfo = undefined;
     var peer_count: usize = 0;
 
-    var resp = http_client.getWithAuth(
-        alloc,
-        agent.server_addr,
-        agent.server_port,
-        "/wireguard/peers",
-        agent.token,
-    ) catch |err| {
+    var resp = fetchInitialPeers(agent, alloc, http_client) catch |err| {
         writeErr("warning: failed to fetch wireguard peers: {}\n", .{err});
         net_setup.setupClusterNetworking(.{
             .node_id = node_id,
@@ -191,4 +185,44 @@ fn setupAgentWireguard(agent: *cluster_agent.Agent, alloc: std.mem.Allocator) vo
     };
 
     writeErr("wireguard mesh active (node_id={d}, {d} peers)\n", .{ node_id, peer_count });
+}
+
+/// Enrollment authorizes registration only. A rejected peer response must not
+/// be interpreted as an empty, successfully fetched mesh configuration.
+fn fetchInitialPeers(agent: anytype, alloc: std.mem.Allocator, client: type) !http_client.Response {
+    const secret = agent.worker_credential orelse return error.MissingWorkerCredential;
+    var response = try client.getWithAuth(alloc, agent.server_addr, agent.server_port, "/wireguard/peers", secret);
+    errdefer response.deinit(alloc);
+    if (response.status_code != 200) return error.PeerRequestRejected;
+    return response;
+}
+
+test "initial wireguard peers use worker credentials and reject unsuccessful responses" {
+    const Agent = struct {
+        server_addr: [4]u8 = .{ 127, 0, 0, 1 },
+        server_port: u16 = 7700,
+        token: []const u8 = "enrollment-only",
+        worker_credential: ?[]const u8 = "worker-only",
+    };
+    const body = "[{\"node_id\":2,\"public_key\":\"peer\",\"overlay_ip\":\"10.40.0.2\"}]";
+    inline for (.{ 200, 401, 403, 500 }) |status| {
+        const Client = struct {
+            fn getWithAuth(alloc: std.mem.Allocator, _: [4]u8, _: u16, path: []const u8, secret: ?[]const u8) !http_client.Response {
+                try std.testing.expectEqualStrings("/wireguard/peers", path);
+                try std.testing.expectEqualStrings("worker-only", secret.?);
+                const raw = try alloc.dupe(u8, body);
+                return .{ .status_code = status, .body = raw, .raw = raw };
+            }
+        };
+        var agent: Agent = .{};
+        if (status == 200) {
+            var response = try fetchInitialPeers(&agent, std.testing.allocator, Client);
+            defer response.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings(body, response.body);
+        } else {
+            try std.testing.expectError(error.PeerRequestRejected, fetchInitialPeers(&agent, std.testing.allocator, Client));
+        }
+        agent.worker_credential = null;
+        try std.testing.expectError(error.MissingWorkerCredential, fetchInitialPeers(&agent, std.testing.allocator, Client));
+    }
 }

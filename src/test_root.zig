@@ -18,6 +18,7 @@ comptime {
     _ = @import("runtime/process.zig");
     _ = @import("runtime/exec.zig");
     _ = @import("runtime/logs.zig");
+    _ = @import("cluster/cli/membership_command.zig");
     _ = @import("runtime/commands.zig");
     _ = @import("runtime/cli/status_command.zig");
     _ = @import("runtime/container_commands.zig");
