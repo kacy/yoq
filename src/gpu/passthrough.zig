@@ -1,7 +1,7 @@
 // passthrough — GPU device passthrough for containers
 //
 // makes NVIDIA GPUs accessible inside containers by:
-//   1. creating /dev/nvidia* device nodes (major 195)
+//   1. creating /dev/nvidia* nodes with the host device identities
 //   2. discovering and bind-mounting host NVIDIA libraries
 //   3. injecting GPU environment variables (CUDA_VISIBLE_DEVICES, etc.)
 //
@@ -10,7 +10,6 @@
 
 const std = @import("std");
 const log = @import("../lib/log.zig");
-const syscall_util = @import("../lib/syscall.zig");
 const env_buffer = @import("env_buffer.zig");
 const posix = std.posix;
 const linux = std.os.linux;
@@ -18,9 +17,6 @@ const detect_mod = @import("detect.zig");
 const SysfsContent = detect_mod.SysfsContent;
 const readSmallFile = detect_mod.readSysfsFile;
 pub const mps = @import("mps.zig");
-
-/// NVIDIA device major number
-const nvidia_major: u32 = 195;
 
 /// NVIDIA library names to bind-mount into containers
 const nvidia_libs = [_][]const u8{
@@ -59,88 +55,62 @@ pub fn setupGpuPassthrough(
     gpu_indices: []const u32,
     env_buf: *[4096]u8,
 ) ![]const u8 {
-    if (gpu_indices.len == 0) return env_buf[0..0];
-
-    // create device nodes
-    try createGpuDeviceNodes(merged_dir, gpu_indices);
-
-    // discover and bind-mount NVIDIA libraries
-    discoverAndMountLibs(merged_dir);
-
-    // generate environment variable string
-    return generateGpuEnv(gpu_indices, env_buf);
+    return setupWith(Operations{}, merged_dir, gpu_indices, env_buf);
 }
 
-/// create /dev/nvidia{N} device nodes plus control devices in the container rootfs.
-fn createGpuDeviceNodes(merged_dir: []const u8, gpu_indices: []const u32) !void {
-    try ensureContainerDevDir(merged_dir);
-
-    for (gpu_indices) |idx| {
+/// Requested GPUs require the compute/utility runtime. Extra driver libraries
+/// are optional when absent; a discovered library must be installed successfully.
+fn setupWith(operations: anytype, root: []const u8, indices: []const u32, env_buf: *[4096]u8) ![]const u8 {
+    if (indices.len == 0) return env_buf[0..0];
+    try operations.prepare(root);
+    for (indices) |index| {
         var name_buf: [32]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "nvidia{d}", .{idx}) catch continue;
-        createDevNode(merged_dir, name, nvidia_major, idx);
+        const name = try std.fmt.bufPrint(&name_buf, "nvidia{d}", .{index});
+        try operations.device(root, name, true);
     }
-
-    createCommonDeviceNodes(merged_dir);
+    try operations.device(root, "nvidiactl", true);
+    try operations.device(root, "nvidia-uvm", true);
+    try operations.device(root, "nvidia-uvm-tools", false);
+    for (nvidia_libs) |name| {
+        const required = std.mem.eql(u8, name, "libcuda.so.1") or std.mem.eql(u8, name, "libnvidia-ml.so.1");
+        try operations.library(root, name, required);
+    }
+    return generateGpuEnv(indices, env_buf);
 }
 
-/// create a single character device node in the container rootfs.
-fn createDevNode(merged_dir: []const u8, name: []const u8, major: u32, minor: u32) void {
-    var path_buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/dev/{s}", .{ merged_dir, name }) catch return;
-    // null-terminate for syscall
-    if (path.len >= path_buf.len) return;
-    path_buf[path.len] = 0;
-    const path_z: [*:0]const u8 = @ptrCast(path_buf[0..path.len :0]);
-
-    const device_num: u32 = (major << 8) | minor;
-    const mode: u32 = 0o020666; // S_IFCHR | rw-rw-rw-
-    const rc = linux.syscall4(
-        .mknodat,
-        @as(usize, @bitCast(@as(isize, linux.AT.FDCWD))),
-        @intFromPtr(path_z),
-        mode,
-        device_num,
-    );
-    if (syscall_util.isError(rc)) {
-        log.info("GPU device node skipped (no CAP_MKNOD?): /dev/{s}", .{name});
+const Operations = struct {
+    fn prepare(_: @This(), root: []const u8) !void {
+        try ensureContainerDevDir(root);
     }
-}
-
-/// discover NVIDIA libraries on the host and bind-mount them into the container.
-fn discoverAndMountLibs(merged_dir: []const u8) void {
-    ensureContainerLibDir(merged_dir) catch return;
-
-    for (nvidia_libs) |lib_name| {
-        mountFirstAvailableLib(merged_dir, lib_name);
+    fn device(_: @This(), root: []const u8, name: []const u8, required: bool) !void {
+        try createDevNode(root, name, required);
     }
-}
-
-/// perform a bind mount via syscall.
-fn bindMount(source: []const u8, target: []const u8) void {
-    var src_buf: [513]u8 = undefined;
-    var dst_buf: [513]u8 = undefined;
-
-    if (source.len >= src_buf.len or target.len >= dst_buf.len) return;
-    @memcpy(src_buf[0..source.len], source);
-    src_buf[source.len] = 0;
-    @memcpy(dst_buf[0..target.len], target);
-    dst_buf[target.len] = 0;
-
-    const src_z: [*:0]const u8 = @ptrCast(src_buf[0..source.len :0]);
-    const dst_z: [*:0]const u8 = @ptrCast(dst_buf[0..target.len :0]);
-
-    const rc = linux.syscall5(
-        .mount,
-        @intFromPtr(src_z),
-        @intFromPtr(dst_z),
-        0, // fstype (null for bind)
-        linux.MS.BIND | linux.MS.REC,
-        0, // data
-    );
-    if (syscall_util.isError(rc)) {
-        log.info("GPU lib bind mount failed: {s} -> {s}", .{ source, target });
+    fn library(_: @This(), root: []const u8, name: []const u8, required: bool) !void {
+        try mountFirstAvailableLib(root, name, required);
     }
+};
+
+fn createDevNode(root: []const u8, name: []const u8, required: bool) !void {
+    var host_buf: [64]u8 = undefined;
+    const host = try std.fmt.bufPrintZ(&host_buf, "/dev/{s}", .{name});
+    var stat: linux.Statx = undefined;
+    const result = linux.statx(linux.AT.FDCWD, host, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true }, &stat);
+    switch (linux.errno(result)) {
+        .SUCCESS => {},
+        .NOENT => if (required) return error.MissingGpuDevice else return,
+        else => return error.GpuDeviceStatFailed,
+    }
+    if (stat.mode & linux.S.IFMT != linux.S.IFCHR) return error.InvalidGpuDevice;
+    // UVM has a dynamically allocated major number; copying the host device
+    // identity avoids creating a superficially valid but unusable node.
+    const device = (@as(u64, stat.rdev_minor) & 0xff) |
+        ((@as(u64, stat.rdev_major) & 0xfff) << 8) |
+        ((@as(u64, stat.rdev_minor) & ~@as(u64, 0xff)) << 12) |
+        ((@as(u64, stat.rdev_major) & ~@as(u64, 0xfff)) << 32);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/dev/{s}", .{ root, name });
+    const rc = linux.syscall4(.mknodat, @as(usize, @bitCast(@as(isize, linux.AT.FDCWD))), @intFromPtr(path.ptr), 0o020666, @intCast(device));
+    if (linux.errno(rc) != .SUCCESS) return error.GpuDeviceCreateFailed;
 }
 
 /// generate GPU environment variables.
@@ -219,27 +189,19 @@ fn ensureContainerDevDir(merged_dir: []const u8) !void {
     };
 }
 
-fn createCommonDeviceNodes(merged_dir: []const u8) void {
-    createDevNode(merged_dir, "nvidiactl", nvidia_major, 255);
-    createDevNode(merged_dir, "nvidia-uvm", nvidia_major, 252);
-    createDevNode(merged_dir, "nvidia-uvm-tools", nvidia_major, 253);
-}
-
-fn ensureContainerLibDir(merged_dir: []const u8) !void {
-    var lib_dir_buf: [512]u8 = undefined;
-    const lib_dir = std.fmt.bufPrint(&lib_dir_buf, "{s}/usr/lib", .{merged_dir}) catch return error.PathTooLong;
-    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, lib_dir);
-}
-
-fn mountFirstAvailableLib(merged_dir: []const u8, lib_name: []const u8) void {
+fn mountFirstAvailableLib(merged_dir: []const u8, lib_name: []const u8, required: bool) !void {
     var source_buf: [512]u8 = undefined;
-    const source = findHostLibrary(&source_buf, lib_name) orelse return;
-
-    var target_buf: [512]u8 = undefined;
-    const target = std.fmt.bufPrint(&target_buf, "{s}/usr/lib/{s}", .{ merged_dir, lib_name }) catch return;
-
-    ensureMountTargetExists(target) catch return;
-    bindMount(source, target);
+    const source = findHostLibrary(&source_buf, lib_name) orelse {
+        if (required) return error.MissingGpuLibrary;
+        return;
+    };
+    // Host SONAMEs are normally symlinks. Resolve them once before the pinned,
+    // root-contained bind helper opens the source without symlink traversal.
+    var canonical_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const canonical_len = try std.Io.Dir.cwd().realPathFile(std.Options.debug_io, source, &canonical_buf);
+    var target_buf: [256]u8 = undefined;
+    const target = try std.fmt.bufPrint(&target_buf, "/usr/lib/{s}", .{lib_name});
+    try @import("../runtime/filesystem.zig").bindMount(merged_dir, canonical_buf[0..canonical_len], target, true);
 }
 
 fn findHostLibrary(buf: []u8, lib_name: []const u8) ?[]const u8 {
@@ -253,11 +215,6 @@ fn findHostLibraryInPaths(buf: []u8, lib_name: []const u8, search_paths: []const
         return src;
     }
     return null;
-}
-
-fn ensureMountTargetExists(target: []const u8) !void {
-    var file = try std.Io.Dir.cwd().createFile(std.Options.debug_io, target, .{});
-    file.close(std.Options.debug_io);
 }
 
 fn pathExists(path: []const u8) bool {
@@ -360,4 +317,60 @@ test "applyNumaAffinity with valid node but nonexistent paths does not crash" {
 test "writeCgroupFile on invalid path does not crash" {
     // should silently fail on openFile without panicking
     writeCgroupFile("/nonexistent/cgroup", "cpuset.mems", "0");
+}
+
+test "required GPU setup propagates every preparation device and library failure" {
+    const Faults = struct {
+        fail_at: usize,
+        calls: usize = 0,
+        fn step(self: *@This()) !void {
+            self.calls += 1;
+            if (self.calls == self.fail_at) return error.InjectedFailure;
+        }
+        fn prepare(self: *@This(), _: []const u8) !void {
+            try self.step();
+        }
+        fn device(self: *@This(), _: []const u8, _: []const u8, _: bool) !void {
+            try self.step();
+        }
+        fn library(self: *@This(), _: []const u8, _: []const u8, _: bool) !void {
+            try self.step();
+        }
+    };
+    var env: [4096]u8 = undefined;
+    const total = 1 + 1 + 3 + nvidia_libs.len;
+    for (1..total + 1) |fail_at| {
+        var faults = Faults{ .fail_at = fail_at };
+        try std.testing.expectError(error.InjectedFailure, setupWith(&faults, "/image", &.{0}, &env));
+        try std.testing.expectEqual(fail_at, faults.calls);
+    }
+    var unused = Faults{ .fail_at = 1 };
+    try std.testing.expectEqual(@as(usize, 0), (try setupWith(&unused, "/image", &.{}, &env)).len);
+    try std.testing.expectEqual(@as(usize, 0), unused.calls);
+}
+
+test "required GPU setup permits absent optional components but requires compute and utility" {
+    const Available = struct {
+        devices: usize = 0,
+        libraries: usize = 0,
+        fn prepare(_: *@This(), _: []const u8) !void {}
+        fn device(self: *@This(), _: []const u8, name: []const u8, required: bool) !void {
+            if (!required) {
+                try std.testing.expectEqualStrings("nvidia-uvm-tools", name);
+                return;
+            }
+            self.devices += 1;
+        }
+        fn library(self: *@This(), _: []const u8, name: []const u8, required: bool) !void {
+            if (!required) return;
+            try std.testing.expect(std.mem.eql(u8, name, "libcuda.so.1") or std.mem.eql(u8, name, "libnvidia-ml.so.1"));
+            self.libraries += 1;
+        }
+    };
+    var available = Available{};
+    var env: [4096]u8 = undefined;
+    const result = try setupWith(&available, "/image", &.{ 0, 2 }, &env);
+    try std.testing.expectEqual(@as(usize, 4), available.devices);
+    try std.testing.expectEqual(@as(usize, 2), available.libraries);
+    try std.testing.expect(std.mem.indexOf(u8, result, "CUDA_VISIBLE_DEVICES=0,2") != null);
 }

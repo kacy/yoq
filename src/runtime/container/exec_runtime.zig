@@ -119,7 +119,7 @@ fn completeFilesystem(ctx: *const ChildExecContext, files: startup.NetworkFiles,
     }
     filesystem.pivotRoot(root) catch return .filesystem_error;
     // Resolve image-provided /etc symlinks only within the container root.
-    if (files.enabled) net_setup.writeNetworkFiles("/", files.address, files.gateway, ctx.hostname);
+    if (files.enabled) net_setup.writeNetworkFiles("/", files.address, files.gateway, ctx.hostname) catch return .filesystem_error;
     return .success;
 }
 

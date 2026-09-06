@@ -6,6 +6,8 @@ test "smoke test" {
 
 // pull in tests from all modules
 comptime {
+    _ = @import("network/setup.zig");
+    _ = @import("network/setup/file_support.zig");
     _ = @import("runtime/container.zig");
     _ = @import("runtime/container/startup_channel.zig");
     _ = @import("runtime/container/start_support.zig");
