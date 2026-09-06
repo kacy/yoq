@@ -215,6 +215,38 @@ jobs:
             (cd dist/out && sha256sum "${archive_name}" > "${checksum_name}")
           done
 
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          output = Path("dist/out")
+          artifacts = []
+          for archive in sorted(output.glob("*.tar.gz")):
+              digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+              artifacts.append({"name": archive.name, "sha256": digest})
+
+          provenance = {
+              "schema": "https://in-toto.io/Statement/v1",
+              "subject": artifacts,
+              "buildType": "https://github.com/kacy/yoq/release",
+              "invocation": {"tag": "${TAG}", "commit": "${{ needs.validate-tag.outputs.commit }}"},
+              "metadata": {"version": "${{ needs.validate-tag.outputs.version }}"},
+          }
+          (output / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
+
+          sbom = {
+              "spdxVersion": "SPDX-2.3",
+              "dataLicense": "CC0-1.0",
+              "SPDXID": "SPDXRef-DOCUMENT",
+              "name": "yoq-${TAG}",
+              "documentNamespace": "https://github.com/kacy/yoq/releases/${TAG}",
+              "creationInfo": {"created": "${{ github.run_started_at }}", "creators": ["Tool: yoq release workflow"]},
+              "packages": [{"SPDXID": "SPDXRef-Package-yoq", "name": "yoq", "versionInfo": "${{ needs.validate-tag.outputs.version }}", "downloadLocation": "NOASSERTION"}],
+          }
+          (output / "sbom.spdx.json").write_text(json.dumps(sbom, indent=2) + "\n")
+          PY
+
       - name: upload packaged artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -249,3 +281,5 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.sha256
+            dist/provenance.json
+            dist/sbom.spdx.json
