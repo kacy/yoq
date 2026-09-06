@@ -106,7 +106,8 @@ pub const ContainerConfig = struct {
     working_dir: []const u8 = "/",
     /// image layer paths for overlayfs (bottom to top)
     lower_dirs: []const []const u8 = &.{},
-    /// network configuration (bridge, port maps)
+    /// Requested networking is required: any setup failure prevents execution.
+    /// Leave null to run without container networking.
     network: ?net_setup.NetworkConfig = null,
     /// bind mounts (host path -> container path)
     mounts: []const BindMount = &.{},
@@ -115,7 +116,8 @@ pub const ContainerConfig = struct {
     /// dev mode: color index for this service
     dev_color_idx: usize = 0,
     /// GPU indices to expose inside the container (e.g., [0, 1])
-    /// when non-empty, setupGpuPassthrough creates /dev/nvidia* and injects env vars
+    /// Nonempty GPU selection requires devices and compute/utility libraries.
+    /// Failure prevents execution; an empty selection disables passthrough.
     gpu_indices: []const u32 = &.{},
     /// when true, runs in host mode with reduced filesystem isolation
     /// this must be explicitly requested; isolation failures do not downgrade automatically
