@@ -285,7 +285,12 @@ fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignm
         self.alloc.free(layer_paths);
     }
 
-    const rootfs = if (layer_paths.len > 0) layer_paths[layer_paths.len - 1] else "/";
+    if (layer_paths.len == 0) {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "empty_image_rootfs");
+        return;
+    }
+    const rootfs = layer_paths[layer_paths.len - 1];
 
     var id_buf: [12]u8 = undefined;
     container.generateId(&id_buf) catch {
