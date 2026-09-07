@@ -48,7 +48,7 @@ pub fn followLogsWithIo(io: std.Io, container_id: []const u8, tail_lines: usize,
 
 fn openReplacement(io: std.Io, path: []const u8, current: std.Io.File) LogError!?std.Io.File {
     const replacement = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
-        // The sink briefly has no live pathname while renaming generations.
+        // Tolerate external removal while the current descriptor is readable.
         error.FileNotFound => return null,
         else => return LogError.ReadFailed,
     };

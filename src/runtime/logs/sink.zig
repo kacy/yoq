@@ -84,15 +84,30 @@ pub const Sink = struct {
         const replacement = try dir.createFile(io, next, .{ .read = true });
         errdefer replacement.close(io);
         defer dir.deleteFile(io, next) catch {};
-        try dir.rename(path, dir, previous, io);
-        dir.rename(next, dir, path, io) catch |err| {
-            dir.rename(previous, dir, path, io) catch {};
-            return err;
-        };
+        try retainCurrent(io, dir, path, previous);
+        // Replace the live directory entry atomically. Existing followers keep
+        // the old inode; new followers can always open a complete generation.
+        try dir.rename(next, dir, path, io);
         self.file.close(io);
         self.file = replacement;
     }
 };
+
+/// Preserve history without moving away the live pathname. If replacement
+/// later fails, the sink still owns the unchanged live descriptor and can retry.
+fn retainCurrent(io: std.Io, dir: std.Io.Dir, path: []const u8, previous: []const u8) !void {
+    var retained_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const retained = try std.fmt.bufPrint(&retained_buf, "{s}.prev", .{path});
+    // A crash can leave this unselected hardlink behind. Removing it cannot
+    // affect the live file or the previously published history.
+    dir.deleteFile(io, retained) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+    try dir.hardLink(path, dir, retained, io, .{});
+    defer dir.deleteFile(io, retained) catch {};
+    try dir.rename(retained, dir, previous, io);
+}
 
 test "log sink concurrent tagged records appear exactly once" {
     const alloc = std.testing.allocator;
@@ -178,4 +193,78 @@ test "log sink rotation retains one bounded previous generation" {
     const retained = try tmp.dir.readFileAlloc(std.testing.io, "capture.log.1", alloc, .limited(80));
     defer alloc.free(retained);
     try std.testing.expectEqualStrings(latest_previous, retained);
+}
+
+test "log sink history publication keeps the live pathname and follower inode" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &dir_buf);
+    const path = try std.fmt.allocPrint(alloc, "{s}/capture.log", .{dir_buf[0..len]});
+    defer alloc.free(path);
+    const previous = try std.fmt.allocPrint(alloc, "{s}.1", .{path});
+    defer alloc.free(previous);
+    var sink = try Sink.init(try tmp.dir.createFile(io, "capture.log", .{ .read = true }), path);
+    defer sink.close();
+    try sink.write("stdout", "retained record");
+    const follower = try tmp.dir.openFile(io, "capture.log", .{});
+    defer follower.close(io);
+    // Exercise the exact publication seam before replacing the live inode.
+    // An initial follower open must succeed even when rotation pauses here.
+    try retainCurrent(io, std.Io.Dir.cwd(), path, previous);
+    const joining_follower = try tmp.dir.openFile(io, "capture.log", .{});
+    defer joining_follower.close(io);
+    try std.testing.expectEqual((try follower.stat(io)).inode, (try joining_follower.stat(io)).inode);
+    const history = try tmp.dir.openFile(io, "capture.log.1", .{});
+    defer history.close(io);
+    try std.testing.expectEqual((try follower.stat(io)).inode, (try history.stat(io)).inode);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "capture.log.prev", .{}));
+
+    try sink.rotate();
+    try sink.write("stderr", "replacement record");
+    const current = try tmp.dir.openFile(io, "capture.log", .{});
+    defer current.close(io);
+    try std.testing.expect((try current.stat(io)).inode != (try follower.stat(io)).inode);
+    var buf: [128]u8 = undefined;
+    var reader = follower.reader(io, &.{});
+    const count = try reader.interface.readSliceShort(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..count], "retained record") != null);
+    const live = try tmp.dir.readFileAlloc(io, "capture.log", alloc, .limited(128));
+    defer alloc.free(live);
+    try std.testing.expect(std.mem.indexOf(u8, live, "replacement record") != null);
+}
+
+test "log sink failed history publication preserves the live descriptor and retries" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &dir_buf);
+    const path = try std.fmt.allocPrint(alloc, "{s}/capture.log", .{dir_buf[0..len]});
+    defer alloc.free(path);
+    var sink = try Sink.init(try tmp.dir.createFile(io, "capture.log", .{ .read = true }), path);
+    defer sink.close();
+    try sink.write("stdout", "before failure");
+    const inode = (try sink.file.stat(io)).inode;
+    try tmp.dir.createDir(io, "capture.log.1", .default_dir);
+    if (sink.rotate()) |_| return error.ExpectedRotationFailure else |_| {}
+    try std.testing.expectEqual(inode, (try sink.file.stat(io)).inode);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "capture.log.prev", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "capture.log.next", .{}));
+    try sink.write("stderr", "after failure");
+    const live = try tmp.dir.readFileAlloc(io, "capture.log", alloc, .limited(256));
+    defer alloc.free(live);
+    try std.testing.expect(std.mem.indexOf(u8, live, "before failure") != null);
+    try std.testing.expect(std.mem.indexOf(u8, live, "after failure") != null);
+    try tmp.dir.deleteDir(io, "capture.log.1");
+    // A stale temporary link from a crashed attempt is safe to replace.
+    try tmp.dir.hardLink("capture.log", tmp.dir, "capture.log.prev", io, .{});
+    try sink.rotate();
+    try std.testing.expect((try sink.file.stat(io)).inode != inode);
+    const retained = try tmp.dir.readFileAlloc(io, "capture.log.1", alloc, .limited(256));
+    defer alloc.free(retained);
+    try std.testing.expectEqualStrings(live, retained);
 }
