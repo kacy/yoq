@@ -44,6 +44,20 @@ const ClusterReleaseTracker = struct {
 
     pub fn begin(self: *const ClusterReleaseTracker) !?[]const u8 {
         if (self.context.continue_release_id) |existing_id| {
+            // The caller already holds the app lock. Recheck the durable row
+            // now: a recovery request may have waited behind a finishing apply.
+            const node = self.session.node;
+            node.mu.lockUncancelable(std.Options.debug_io);
+            defer node.mu.unlock(std.Options.debug_io);
+            try self.session.checkLocked();
+            const existing = store.getDeploymentInDb(node.stateMachineDb(), self.alloc, existing_id) catch |err| return switch (err) {
+                error.NotFound => error.Conflict,
+                else => error.InternalError,
+            };
+            defer existing.deinit(self.alloc);
+            if ((!std.mem.eql(u8, existing.status, "pending") and !std.mem.eql(u8, existing.status, "in_progress")) or
+                !std.mem.eql(u8, existing.app_name orelse "", self.app_name orelse "") or
+                !std.mem.eql(u8, existing.config_snapshot, self.config_snapshot)) return error.Conflict;
             const resumed_id = self.alloc.dupe(u8, existing_id) catch return ClusterApplyError.InternalError;
             errdefer self.alloc.free(resumed_id);
             markClusterRolloutActive(existing_id) catch return ClusterApplyError.InternalError;
@@ -450,6 +464,10 @@ test "cluster release progress and control survive replica promotion" {
     }
     try std.testing.expectEqual(@as(usize, 1), crons.items.len);
     try std.testing.expectEqualStrings("cleanup", crons.items[0].name);
+    tracker.context.continue_release_id = id;
+    const final_index = leader.log.lastIndex();
+    try std.testing.expectError(error.Conflict, tracker.begin());
+    try std.testing.expectEqual(final_index, leader.log.lastIndex());
 }
 
 test "cluster release completion rolls back when cron registration fails" {
