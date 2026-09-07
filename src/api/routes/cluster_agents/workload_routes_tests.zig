@@ -248,3 +248,24 @@ test "training logs route proxies logs from hosting agent" {
     try std.testing.expectEqual(http.StatusCode.ok, logs_resp.status);
     try std.testing.expectEqualStrings("proxied rank logs\n", logs_resp.body);
 }
+
+test "placement numbers reject invalid training scale then accept valid scale" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+    try harness.seedTrainingRelease("numeric-training", "train", 1);
+    const started = try harness.trainingStart("numeric-training", "train");
+    defer freeResponse(alloc, started);
+    try std.testing.expectEqual(http.StatusCode.ok, started.status);
+    for ([_][]const u8{ "4294967296", "184467440737095516160", "-1", "0", "1.5", "1e2", "null", "\"2\"" }) |value| {
+        const body = try std.fmt.allocPrint(alloc, "{{\"gpus\":{s}}}", .{value});
+        defer alloc.free(body);
+        const response = route(makeRequest(.POST, "/apps/numeric-training/training/train/scale", "", body), alloc, harness.ctx()).?;
+        defer freeResponse(alloc, response);
+        try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
+    }
+    const scaled = try harness.trainingScale("numeric-training", "train", 2);
+    defer freeResponse(alloc, scaled);
+    try std.testing.expectEqual(http.StatusCode.ok, scaled.status);
+    try expectJsonContains(scaled.body, "\"gpus\":2");
+}

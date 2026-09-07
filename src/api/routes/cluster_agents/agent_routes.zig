@@ -3,6 +3,7 @@ const http = @import("../../http.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
 const cluster_config = @import("../../../cluster/config.zig");
 const request_support = @import("../../../cluster/agent/request_support.zig");
+const numbers = @import("../../../lib/json_numbers.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const audit = @import("../../../state/audit.zig");
 const common = @import("../common.zig");
@@ -215,13 +216,15 @@ pub fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id:
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     if (request.body.len == 0) return common.badRequest("missing request body");
 
-    const cpu_used = extractJsonInt(request.body, "cpu_used") orelse 0;
-    const memory_used_mb = extractJsonInt(request.body, "memory_used_mb") orelse 0;
-    const containers = extractJsonInt(request.body, "containers") orelse 0;
-    const cpu_cores = extractJsonInt(request.body, "cpu_cores") orelse 0;
-    const memory_mb = extractJsonInt(request.body, "memory_mb") orelse 0;
-    const gpu_count = extractJsonInt(request.body, "gpu_count") orelse 0;
-    const gpu_used = extractJsonInt(request.body, "gpu_used") orelse 0;
+    const parsed = numbers.parse(alloc, request.body) catch return common.badRequest("invalid resource snapshot");
+    defer parsed.deinit();
+    const cpu_used = numbers.field(u32, parsed.value, "cpu_used", 0, std.math.maxInt(u32), 0) catch return common.badRequest("invalid cpu_used");
+    const memory_used_mb = numbers.field(u64, parsed.value, "memory_used_mb", 0, std.math.maxInt(i64), 0) catch return common.badRequest("invalid memory_used_mb");
+    const containers = numbers.field(u32, parsed.value, "containers", 0, std.math.maxInt(u32), 0) catch return common.badRequest("invalid containers");
+    const cpu_cores = numbers.field(u32, parsed.value, "cpu_cores", 0, 10000, 0) catch return common.badRequest("invalid cpu_cores");
+    const memory_mb = numbers.field(u64, parsed.value, "memory_mb", 0, 10_000_000, 0) catch return common.badRequest("invalid memory_mb");
+    const gpu_count = numbers.field(u32, parsed.value, "gpu_count", 0, std.math.maxInt(u32), 0) catch return common.badRequest("invalid gpu_count");
+    const gpu_used = numbers.field(u32, parsed.value, "gpu_used", 0, std.math.maxInt(u32), 0) catch return common.badRequest("invalid gpu_used");
     const gpu_health_str = extractJsonString(request.body, "gpu_health");
 
     const agent_types = @import("../../../cluster/agent_types.zig");
@@ -229,13 +232,13 @@ pub fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id:
     node.recordHeartbeat(
         id,
         .{
-            .cpu_cores = @intCast(@max(0, cpu_cores)),
-            .memory_mb = @intCast(@max(0, memory_mb)),
-            .cpu_used = @intCast(@max(0, cpu_used)),
-            .memory_used_mb = @intCast(@max(0, memory_used_mb)),
-            .containers = @intCast(@max(0, containers)),
-            .gpu_count = @intCast(@max(0, gpu_count)),
-            .gpu_used = @intCast(@max(0, gpu_used)),
+            .cpu_cores = cpu_cores,
+            .memory_mb = memory_mb,
+            .cpu_used = cpu_used,
+            .memory_used_mb = memory_used_mb,
+            .containers = containers,
+            .gpu_count = gpu_count,
+            .gpu_used = gpu_used,
             .gpu_health = if (gpu_health_str) |s| agent_types.AgentResources.GpuHealthBuf.fromSlice(s) else .{},
         },
         nowRealSeconds(),
@@ -468,4 +471,29 @@ test "registration returns credentials only after their row is applied" {
     try std.testing.expectEqual(@as(?i64, 1), json_helpers.extractJsonInt(gossip, "id"));
     try std.testing.expectEqual(@as(?i64, 19877), json_helpers.extractJsonInt(gossip, "port"));
     try std.testing.expectEqual(node.raft.commit_index, node.state_machine.last_applied);
+}
+
+test "placement numbers reject invalid heartbeat then accept valid resource snapshot" {
+    const support = @import("route_test_support.zig");
+    const alloc = std.testing.allocator;
+    var harness = try support.Harness.init(alloc);
+    defer harness.deinit();
+    for ([_][]const u8{
+        "\"cpu_cores\":4294967296",
+        "\"containers\":4294967296",
+        "\"gpu_count\":4294967296",
+        "\"cpu_used\":-1",
+        "\"memory_used_mb\":18446744073709551615",
+        "\"gpu_used\":1.5",
+        "\"memory_mb\":null",
+    }) |fields| {
+        const body = try std.fmt.allocPrint(alloc, "{{{s}}}", .{fields});
+        defer alloc.free(body);
+        const response = handleAgentHeartbeat(alloc, support.makeRequest(.POST, "/agents/abc123def456/heartbeat", body), "abc123def456", harness.ctx());
+        defer support.freeResponse(alloc, response);
+        try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
+    }
+    const response = handleAgentHeartbeat(alloc, support.makeRequest(.POST, "/agents/abc123def456/heartbeat", "{\"cpu_cores\":8,\"memory_mb\":16384,\"cpu_used\":1000}"), "abc123def456", harness.ctx());
+    defer support.freeResponse(alloc, response);
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
 }

@@ -63,7 +63,17 @@ pub fn scheduleGang(
     gang: GangSpec,
     agents: []const AgentRecord,
 ) !?[]GangPlacement {
-    if (gang.world_size == 0) return null;
+    if (gang.world_size == 0 or gang.gpus_per_rank == 0) return null;
+
+    // Check capacity before allocating one record per requested rank. A valid
+    // u32 request can still be far larger than the entire cluster.
+    var available_ranks: u64 = 0;
+    for (agents) |agent| {
+        if (!std.mem.eql(u8, agent.status, "active")) continue;
+        const free = std.math.sub(i64, agent.gpu_count, agent.gpu_used) catch continue;
+        if (free > 0) available_ranks +|= @as(u64, @intCast(free)) / gang.gpus_per_rank;
+    }
+    if (gang.world_size > available_ranks) return null;
 
     var placements = try alloc.alloc(GangPlacement, gang.world_size);
     errdefer alloc.free(placements);
@@ -387,4 +397,12 @@ test "scheduleGang falls back to other zones when needed" {
     defer alloc.free(placements);
 
     try std.testing.expectEqual(@as(usize, 6), placements.len);
+}
+
+test "placement numbers reject impossible gang size before allocation" {
+    // A zero-capacity allocator proves oversized requests never reach allocation.
+    var empty: [0]u8 = .{};
+    var alloc = std.heap.FixedBufferAllocator.init(&empty);
+    const result = try scheduleGang(alloc.allocator(), .{ .world_size = std.math.maxInt(u32) }, &.{});
+    try std.testing.expect(result == null);
 }

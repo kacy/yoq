@@ -1,4 +1,6 @@
 const std = @import("std");
+const numbers = @import("../lib/json_numbers.zig");
+const placement_numbers = @import("../cluster/placement_numbers.zig");
 const json_helpers = @import("../lib/json_helpers.zig");
 
 pub const Summary = struct {
@@ -68,15 +70,17 @@ pub fn findWorkerRunSpec(alloc: std.mem.Allocator, json: []const u8, name: []con
     const command = try extractCommandString(alloc, obj);
     errdefer alloc.free(command);
 
+    const numeric = try numbers.parse(alloc, obj);
+    defer numeric.deinit();
+    _ = try placement_numbers.Resources.parse(numeric.value, 256);
     var gpu_limit: i64 = 0;
     var gpu_model: ?[]const u8 = null;
     var gpu_vram_min_mb: ?u64 = null;
-    if (json_helpers.extractJsonObject(obj, "gpu")) |gpu| {
-        gpu_limit = json_helpers.extractJsonInt(gpu, "count") orelse 0;
-        gpu_model = json_helpers.extractJsonString(gpu, "model");
-        if (json_helpers.extractJsonInt(gpu, "vram_min_mb")) |v| {
-            gpu_vram_min_mb = @intCast(@max(@as(i64, 0), v));
-        }
+    if (numeric.value.object.get("gpu")) |gpu| {
+        gpu_limit = try numbers.field(i64, gpu, "count", 0, std.math.maxInt(u32), 0);
+        if (json_helpers.extractJsonObject(obj, "gpu")) |raw_gpu|
+            gpu_model = json_helpers.extractJsonString(raw_gpu, "model");
+        gpu_vram_min_mb = try numbers.optional(u64, gpu, "vram_min_mb", 0, std.math.maxInt(i64));
     }
 
     return .{
@@ -97,6 +101,9 @@ pub fn findTrainingJobSpec(alloc: std.mem.Allocator, json: []const u8, name: []c
     const command = try extractCommandString(alloc, obj);
     errdefer alloc.free(command);
 
+    const numeric = try numbers.parse(alloc, obj);
+    defer numeric.deinit();
+    const resources = try placement_numbers.Resources.parse(numeric.value, 65536);
     const checkpoint_path = if (json_helpers.extractJsonObject(obj, "checkpoint")) |checkpoint|
         json_helpers.extractJsonString(checkpoint, "path")
     else
@@ -106,10 +113,10 @@ pub fn findTrainingJobSpec(alloc: std.mem.Allocator, json: []const u8, name: []c
         .name = name,
         .image = image,
         .command = command,
-        .gpus = @intCast(@max(@as(i64, 0), json_helpers.extractJsonInt(obj, "gpus") orelse 0)),
+        .gpus = try numbers.field(u32, numeric.value, "gpus", 0, std.math.maxInt(u32), 0),
         .gpu_type = json_helpers.extractJsonString(obj, "gpu_type"),
-        .cpu_limit = json_helpers.extractJsonInt(obj, "cpu_limit") orelse 1000,
-        .memory_limit_mb = json_helpers.extractJsonInt(obj, "memory_limit_mb") orelse 65536,
+        .cpu_limit = resources.cpu,
+        .memory_limit_mb = resources.memory_mb,
         .checkpoint_path = checkpoint_path,
     };
 }
@@ -125,10 +132,12 @@ pub fn listCronSchedules(alloc: std.mem.Allocator, json: []const u8) !std.ArrayL
     var iter = json_helpers.extractJsonObjects(array);
     while (iter.next()) |obj| {
         const name = json_helpers.extractJsonString(obj, "name") orelse continue;
-        const every = json_helpers.extractJsonInt(obj, "every") orelse continue;
+        const numeric = try numbers.parse(alloc, obj);
+        defer numeric.deinit();
+        const every = (try numbers.optional(u64, numeric.value, "every", 1, std.math.maxInt(u32))) orelse continue;
         try specs.append(alloc, .{
             .name = try alloc.dupe(u8, name),
-            .every = @intCast(@max(@as(i64, 0), every)),
+            .every = every,
             .spec_json = try alloc.dupe(u8, obj),
         });
     }
