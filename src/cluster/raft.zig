@@ -173,6 +173,7 @@ pub const Raft = struct {
     pub fn tick(self: *Raft) void {
         if (!self.refreshPersistentState()) return;
         election_runtime.tick(self, heartbeat_interval, min_election_ticks, max_election_ticks);
+        if (self.role == .leader) self.advanceCommitIndex();
     }
 
     // -- RPC handlers --
@@ -233,6 +234,9 @@ pub const Raft = struct {
             .term = term,
             .data = data,
         });
+
+        // The durable local append counts toward the same quorum as peer replies.
+        self.advanceCommitIndex();
 
         // replicate to all peers
         for (0..self.peers.len) |i| {
@@ -1910,7 +1914,7 @@ test "stale leader cannot commit without quorum" {
     try testing.expectEqual(@as(LogIndex, 1), r1.commit_index);
 }
 
-test "single node propose succeeds without peers" {
+test "single node proposal commits without peer replies" {
     const alloc = testing.allocator;
     var log = try Log.initMemory();
     defer log.deinit();
@@ -1931,12 +1935,13 @@ test "single node propose succeeds without peers" {
     const idx = try raft.propose("test-cmd");
     try testing.expectEqual(@as(LogIndex, 1), idx);
 
-    // no append_entries actions since there are no peers
+    try testing.expectEqual(idx, raft.commit_index);
+
+    // The caller must receive an apply notification even without any peers.
     const actions = try raft.drainActions();
     defer alloc.free(actions);
-    for (actions) |action| {
-        try testing.expect(action != .send_append_entries);
-    }
+    try testing.expectEqual(@as(usize, 1), actions.len);
+    try testing.expectEqual(idx, actions[0].commit_entries.up_to);
 }
 
 test "2-node cluster cannot commit without follower ack" {
