@@ -197,7 +197,7 @@ fn startLocalHttpServer(env: *helpers.TestEnv, rootfs_path: []const u8, name: []
             "run", "-d", "--name", name, "-p", port_map, rootfs_path, "/bin/yoq-test-http-server", port_str, body,
         });
         defer run_result.deinit();
-        try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+        try run_result.expectExitCode(0);
         try std.testing.expect(trimOutput(run_result.stdout).len > 0);
         try waitForContainerRunning(env, name);
         return;
@@ -207,7 +207,7 @@ fn startLocalHttpServer(env: *helpers.TestEnv, rootfs_path: []const u8, name: []
         "run", "-d", "--name", name, rootfs_path, "/bin/yoq-test-http-server", port_str, body,
     });
     defer run_result.deinit();
-    try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+    try run_result.expectExitCode(0);
     try std.testing.expect(trimOutput(run_result.stdout).len > 0);
     try waitForContainerRunning(env, name);
 }

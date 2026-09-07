@@ -34,7 +34,7 @@ test "container with pids_max=1 can only run one process" {
     defer run_result.deinit();
 
     // should succeed with minimal processes
-    try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+    try run_result.expectExitCode(0);
 }
 
 test "container with memory limit can allocate within limit" {
@@ -55,7 +55,7 @@ test "container with memory limit can allocate within limit" {
     });
     defer run_result.deinit();
 
-    try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+    try run_result.expectExitCode(0);
     try helpers.expectContains(run_result.stdout, "ok");
 }
 
@@ -134,7 +134,7 @@ test "multiple containers with different limits coexist" {
             "-c",       "sleep 0.1",
         });
         defer result.deinit();
-        try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+        try result.expectExitCode(0);
 
         // cleanup
         var rm = try env.runYoq(&.{ "rm", name });
@@ -159,7 +159,7 @@ test "container restart policy no prevents restart" {
         "-c",        "exit 1",
     });
     defer run_result.deinit();
-    try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+    try run_result.expectExitCode(0);
 
     // wait for it to exit
     std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(200 * std.time.ns_per_ms)), .awake) catch unreachable;

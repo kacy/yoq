@@ -2,6 +2,7 @@
 """Exercise scheduled OCI execution and readiness in disposable Linux namespaces."""
 
 import concurrent.futures
+import contextlib
 import gzip
 import hashlib
 import http.server
@@ -101,7 +102,7 @@ def start_registry(cert, key):
     server.socket = context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    return server, f"192.0.2.1:{server.server_port}/fixture@{digest(manifest)}"
+    return server, f"registry.fixture:{server.server_port}/fixture@{digest(manifest)}"
 
 
 def wait_for(description, operation, timeout=45):
@@ -138,10 +139,13 @@ def inside(root, outer_mount, outer_net):
     run(*worker_prefix, "ip", "addr", "add", "192.0.2.2/24", "dev", "fixture-worker")
     run(*worker_prefix, "ip", "link", "set", "fixture-worker", "up")
     run(*worker_prefix, "ip", "route", "add", "default", "via", "192.0.2.1")
+    hosts = root / "hosts"
+    hosts.write_text(Path("/etc/hosts").read_text() + "\n192.0.2.1 registry.fixture\n")
+    run("mount", "--bind", str(hosts), "/etc/hosts")
     cert, key = root / "cert.pem", root / "key.pem"
     run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-        "-keyout", str(key), "-out", str(cert), "-subj", "/CN=127.0.0.1",
-        "-addext", "subjectAltName=IP:192.0.2.1", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        "-keyout", str(key), "-out", str(cert), "-subj", "/CN=registry.fixture",
+        "-addext", "subjectAltName=DNS:registry.fixture", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     registry, image = start_registry(cert, key)
     # The same real client/image must fail before its CA is trusted, then pass
     # through the agent after the private trust bind below.
@@ -177,7 +181,7 @@ def inside(root, outer_mount, outer_net):
 
     def container_row():
         path = homes["agent"] / ".local/share/yoq/yoq.db"
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
             db.row_factory = sqlite3.Row
             return db.execute("SELECT id, pid, ip_address FROM containers WHERE hostname='web' AND pid IS NOT NULL").fetchone()
 
@@ -196,6 +200,7 @@ def inside(root, outer_mount, outer_net):
                         "--token", enrollment, "--role", "agent"])
         agents = wait_for("registered agent", lambda: api("/agents"))
         agent_id = agents[0]["id"]
+        registered_at = time.monotonic()
         body = {"app_name": "scheduled-fixture", "services": [{
             "name": "web", "image": image, "cpu_limit": 250, "memory_limit_mb": 64,
             "health_check": {"kind": "http", "path": "/", "port": 8080, "interval": 1, "timeout": 1, "retries": 20},
@@ -233,6 +238,9 @@ def inside(root, outer_mount, outer_net):
             cgroup = Path("/sys/fs/cgroup/yoq") / row["id"]
             assert (cgroup / "cpu.max").read_text().strip() == "25000 100000"
             assert (cgroup / "memory.max").read_text().strip() == str(64 * 1024 * 1024)
+            while time.monotonic() - registered_at < 25:
+                assert api("/agents")[0]["status"] == "active", "healthy agent was marked offline by gossip"
+                time.sleep(0.5)
             run(*worker_prefix, str(YOQ), "stop", "web", env=dict(os.environ, HOME=str(homes["agent"])), stdout=subprocess.DEVNULL)
             wait_for("assignment exit", lambda: api(f"/agents/{agent_id}/assignments")[0]["status"] == "stopped")
         print("scheduled runtime: API authentication, registry certificate trust, OCI pull, readiness, routed HTTP, identity, limits, and exit passed", flush=True)
@@ -271,7 +279,7 @@ def main():
             # Remove only empty cgroups named by this fixture's private database.
             database = Path(directory) / "agent/.local/share/yoq/yoq.db"
             if database.exists():
-                with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
+                with contextlib.closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as db:
                     for (container_id,) in db.execute("SELECT id FROM containers"):
                         if len(container_id) == 12 and all(c in "0123456789abcdef" for c in container_id):
                             cgroup = Path("/sys/fs/cgroup/yoq") / container_id

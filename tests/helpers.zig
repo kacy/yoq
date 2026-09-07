@@ -27,6 +27,13 @@ pub const RunResult = struct {
     exit_code: u8,
     alloc: std.mem.Allocator,
 
+    pub fn expectExitCode(self: RunResult, expected: u8) !void {
+        if (self.exit_code != expected) {
+            std.debug.print("subprocess stdout:\n{s}\nsubprocess stderr:\n{s}\n", .{ self.stdout, self.stderr });
+        }
+        try std.testing.expectEqual(expected, self.exit_code);
+    }
+
     pub fn deinit(self: *RunResult) void {
         self.alloc.free(self.stdout);
         self.alloc.free(self.stderr);
@@ -120,7 +127,7 @@ pub const TmpDir = struct {
 pub const TestEnv = struct {
     alloc: std.mem.Allocator,
     tmp: TmpDir,
-    cwd: []const u8,
+    cwd: [:0]const u8,
     home: []const u8,
     xdg_data_home: []const u8,
     env_map: std.process.Environ.Map,
