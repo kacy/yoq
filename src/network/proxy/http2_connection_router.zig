@@ -1176,7 +1176,7 @@ test "proxy transport policy refuses required streaming peer TLS before dialing"
     try linux_platform.posix.bind(listener, &address.any, address.getOsSockLen());
     try linux_platform.posix.listen(listener, 1);
     var length = address.getOsSockLen();
-    try posix.getsockname(listener, &address.any, &length);
+    try linux_platform.posix.getsockname(listener, &address.any, &length);
     const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-1", .address = "127.0.0.1", .port = address.getPort(), .peer_mode = .require };
     const route = router.Route{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" } };
     try std.testing.expectError(error.StreamingPeerTlsUnsupported, connectAndSendUpstream(std.testing.allocator, route, &upstream, "request must not be sent", nowMs() + 1000));
