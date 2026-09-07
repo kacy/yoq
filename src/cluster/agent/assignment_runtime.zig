@@ -858,7 +858,7 @@ test "assignment removal cancels a real process and invalidates cached work" {
         local_containers: std.StringHashMap(*agent_mod.LocalAssignment),
     };
     try agent_store.initTestDb();
-    defer agent_store.deinit();
+    defer agent_store.closeDb();
     for ([_][]const u8{ "[]", "[{\"id\":\"assignment\",\"status\":\"stopped\"}]", "[{\"id\":\"assignment\",\"status\":\"failed\"}]" }) |desired| {
         var owner = agent_mod.LocalAssignment{};
         var fixture = Fixture{ .local_containers = std.StringHashMap(*agent_mod.LocalAssignment).init(std.testing.allocator) };
