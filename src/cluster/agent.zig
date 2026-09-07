@@ -128,7 +128,7 @@ pub const Agent = struct {
 
     /// register this agent with the cluster server.
     /// on success, self.id is set to the server-assigned agent ID.
-    /// generates a wireguard keypair and sends the public key to the
+    /// loads its durable wireguard identity and sends the public key to the
     /// server, which assigns a node_id and overlay IP in response.
     pub fn register(self: *Agent) AgentError!void {
         const resources = resource_support.getSystemResources();

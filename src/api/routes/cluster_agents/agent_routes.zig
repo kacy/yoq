@@ -126,8 +126,15 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
             }) catch |refresh_error| return deploy_routes.mutationFailure(alloc, node, refresh_error);
         } else return deploy_routes.mutationFailure(alloc, node, err);
     };
-    const registered = (enrollment.readRegistered(alloc, session, &id_buf, &credential, if (registration_key != null) wg_public_key else null) catch |err| return deploy_routes.mutationFailure(alloc, node, err)) orelse
-        return common.conflict("registration identity unavailable");
+    // Keep credential validation, assigned identity and peer bootstrap in the
+    // same applied-state snapshot while constructing the response.
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
+    const registered = (enrollment.readRegisteredLocked(alloc, session, &id_buf, &credential, if (registration_key != null) wg_public_key else null) catch |err| return switch (err) {
+        error.NotLeader => common.badRequest("not leader"),
+        error.Conflict => common.conflict("registration credential does not own this identity"),
+        else => common.internalError(),
+    }) orelse return common.conflict("registration identity unavailable");
     defer registered.deinit(alloc);
     const assigned_node_id: ?u16 = if (registered.node_id) |nid| std.math.cast(u16, nid) else null;
     const overlay_ip_str = registered.overlay_ip;
@@ -580,4 +587,11 @@ test "simultaneous enrollment retries converge on the same applied identity" {
     try std.testing.expectEqualStrings(extractJsonString(workers[0].response.?.body, "id").?, extractJsonString(workers[1].response.?.body, "id").?);
     const count = (try node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM agents;", .{}, .{})).?;
     try std.testing.expectEqual(@as(i64, 1), count.count);
+}
+
+test "enrollment rejects malformed retry keys instead of creating a legacy identity" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{ "{\"registration_key\":7}", "{\"registration_key\":\"short\"}", "{\"registration_key\":null}" }) |body|
+        try std.testing.expectError(error.InvalidKey, enrollment.parseKey(alloc, body));
+    try std.testing.expect((try enrollment.parseKey(alloc, "{}")) == null);
 }

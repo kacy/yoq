@@ -41,10 +41,9 @@ pub fn refresh(alloc: std.mem.Allocator, session: mutation.Session, id: []const 
     try session.commit(batch.written());
 }
 
-pub fn readRegistered(alloc: std.mem.Allocator, session: mutation.Session, id: []const u8, credential: []const u8, public_key: ?[]const u8) mutation.Error!?registry.AgentRecord {
+/// The caller holds the node lock through response snapshot construction.
+pub fn readRegisteredLocked(alloc: std.mem.Allocator, session: mutation.Session, id: []const u8, credential: []const u8, public_key: ?[]const u8) mutation.Error!?registry.AgentRecord {
     const node = session.node;
-    node.mu.lockUncancelable(std.Options.debug_io);
-    defer node.mu.unlock(std.Options.debug_io);
     try session.checkLocked();
     const record = (registry.getAgent(alloc, node.stateMachineDb(), id) catch return error.InternalError) orelse return null;
     errdefer record.deinit(alloc);
