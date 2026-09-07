@@ -110,7 +110,7 @@ jobs:
         if: matrix.lane == 'network'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes iproute2 openssl python3 curl wireguard-tools libsqlite3-dev
+          sudo apt-get install --yes iproute2 iptables openssl python3 curl wireguard-tools libsqlite3-dev
 
       - name: build yoq
         shell: bash
