@@ -210,6 +210,8 @@ comptime {
     _ = @import("tls/mtls_metrics.zig");
     _ = @import("tls/cli/service_cert_command.zig");
     _ = @import("tls/proxy.zig");
+    _ = @import("tls/challenge_server.zig");
+    _ = @import("lib/connection_workers.zig");
     _ = @import("tls/proxy/session_runtime.zig");
     _ = @import("storage/s3.zig");
     _ = @import("storage/s3_xml.zig");
