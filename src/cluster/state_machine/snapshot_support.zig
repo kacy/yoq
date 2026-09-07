@@ -100,6 +100,13 @@ pub fn publishSnapshot(path: []const u8, data: []const u8) SnapshotError!Prepare
 }
 
 pub fn takeSnapshot(self: anytype, dest_path: []const u8, meta: SnapshotMeta) SnapshotError!void {
+    var published = try captureSnapshot(self, dest_path, meta);
+    published.deinit();
+}
+
+/// Keep the validated image alive so lifecycle activation and restore use the
+/// exact immutable generation selected by publication, including retries.
+pub fn captureSnapshot(self: anytype, dest_path: []const u8, meta: SnapshotMeta) SnapshotError!PreparedSnapshot {
     if (meta.last_included_index != self.last_applied or meta.last_included_index > std.math.maxInt(i64) or meta.last_included_term > std.math.maxInt(i64)) return SnapshotError.InvalidSnapshot;
     var tmp_path_buf: [512]u8 = undefined;
     var tmp = try createUniqueTempFile(&tmp_path_buf, dest_path, ".tmp");
@@ -137,8 +144,7 @@ pub fn takeSnapshot(self: anytype, dest_path: []const u8, meta: SnapshotMeta) Sn
     std.mem.writeInt(u64, data[8..16], meta.last_included_term, .little);
     std.mem.writeInt(u64, data[16..24], @intCast(tmp_data.len), .little);
     @memcpy(data[snapshot_header_size..], tmp_data);
-    var published = try publishSnapshot(dest_path, data);
-    published.deinit();
+    return publishSnapshot(dest_path, data);
 }
 
 pub fn restoreFromSnapshot(self: anytype, src_path: []const u8) SnapshotError!SnapshotMeta {

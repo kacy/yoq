@@ -1,6 +1,6 @@
 const std = @import("std");
 const types = @import("../raft_types.zig");
-const bootstrap = @import("bootstrap.zig");
+const lifecycle = @import("../snapshot_lifecycle.zig");
 const artifact = @import("../state_machine/snapshot_support.zig");
 const logger = @import("../../lib/log.zig");
 
@@ -9,48 +9,14 @@ const SnapshotMeta = types.SnapshotMeta;
 const snapshot_threshold: u64 = 1000;
 pub const NodeId = types.NodeId;
 
-pub fn generationPath(buf: []u8, data_dir: []const u8, meta: SnapshotMeta) ![]const u8 {
-    return std.fmt.bufPrint(buf, "{s}/snapshot-{d}-{d}.dat", .{ data_dir, meta.last_included_index, meta.last_included_term });
-}
+pub const generationPath = lifecycle.generationPath;
+const readSelected = lifecycle.readSelected;
 
-fn sameBoundary(a: SnapshotMeta, b: SnapshotMeta) bool {
-    return a.last_included_index == b.last_included_index and a.last_included_term == b.last_included_term;
-}
-
-/// Read the selected generation, not the newest file in the directory. An
-/// unselected generation can be left behind by a crash before activation.
-fn readSelected(alloc: std.mem.Allocator, data_dir: []const u8, selected: SnapshotMeta) ![]u8 {
-    var path_buf: [512]u8 = undefined;
-    const path = try generationPath(&path_buf, data_dir, selected);
-    const data = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, path, alloc, .limited(artifact.max_snapshot_file_size)) catch |err| blk: {
-        if (err != error.FileNotFound) return err;
-        // Older releases wrote one snapshot.dat and recorded a zero length.
-        // Only that legacy record may migrate, and its boundary must match.
-        if (selected.data_len != 0) return error.MissingSnapshot;
-        var legacy_buf: [512]u8 = undefined;
-        const legacy = bootstrap.snapshotPath(&legacy_buf, data_dir) orelse return error.NameTooLong;
-        break :blk try artifact.readBytes(alloc, legacy);
-    };
-    errdefer alloc.free(data);
-    const actual = try artifact.parseSnapshotMeta(data);
-    if (!sameBoundary(actual, selected) or (selected.data_len != 0 and selected.data_len != actual.data_len)) return error.SnapshotMismatch;
-    return data;
-}
-
-/// Called before Raft and transport initialization. Activation can commit just
-/// before a crash, leaving the state database behind its durable snapshot.
+/// Complete any selected generation before Raft or transport initialization.
 pub fn recover(alloc: std.mem.Allocator, data_dir: []const u8, log: anytype, state_machine: anytype) !void {
-    const selected = (try log.readSnapshotMeta()) orelse return;
-    const data = try readSelected(alloc, data_dir, selected);
-    defer alloc.free(data);
-    var prepared = if (selected.data_len == 0) blk: {
-        var path_buf: [512]u8 = undefined;
-        const path = try generationPath(&path_buf, data_dir, selected);
-        break :blk try artifact.publishSnapshot(path, data);
-    } else try artifact.PreparedSnapshot.init(data);
-    defer prepared.deinit();
-    if (selected.data_len == 0) try log.activateSnapshot(prepared.meta);
-    if (state_machine.last_applied < selected.last_included_index) try prepared.restore(state_machine);
+    var generation = (try lifecycle.Generation.recoverSelected(alloc, data_dir, log)) orelse return;
+    defer generation.deinit();
+    try generation.finish(log, state_machine);
 }
 
 pub fn maybeSnapshot(self: anytype) void {
@@ -65,19 +31,15 @@ pub fn takeSnapshot(self: anytype, index: LogIndex, term: types.Term) void {
     if (self.snapshot_failed.load(.acquire) or index != self.state_machine.last_applied or index <= self.last_snapshot_index) return;
     if (term == 0 or term != self.log.termAt(index)) return;
     const requested: SnapshotMeta = .{ .last_included_index = index, .last_included_term = term, .data_len = 0 };
-    var path_buf: [512]u8 = undefined;
-    const path = generationPath(&path_buf, self.config.data_dir, requested) catch return;
-    self.state_machine.takeSnapshot(path, requested) catch |err| {
+    var generation = lifecycle.Generation.capture(&self.state_machine, self.config.data_dir, requested) catch |err| {
         logger.warn("snapshot: failed to publish index {}: {}", .{ index, err });
         return;
     };
-    const meta = artifact.readSnapshotMeta(path) catch return;
-    self.log.activateSnapshot(meta) catch |err| {
+    defer generation.deinit();
+    finish(self, &generation) catch |err| {
         logger.warn("snapshot: failed to activate index {}: {}", .{ index, err });
         return;
     };
-    self.raft.snapshot_meta = meta;
-    self.last_snapshot_index = index;
     logger.info("snapshot: completed at index {}, term {}", .{ index, term });
 }
 
@@ -88,22 +50,26 @@ pub fn install(self: anytype, data: []const u8, expected: ?SnapshotMeta) !void {
     if (self.snapshot_failed.load(.acquire)) return error.SnapshotRecoveryRequired;
     const requested = try artifact.parseSnapshotMeta(data);
     if (expected) |want| {
-        if (!sameBoundary(requested, want)) return error.SnapshotMismatch;
+        if (!lifecycle.sameBoundary(requested, want)) return error.SnapshotMismatch;
     }
     if (requested.last_included_index <= self.state_machine.last_applied) return;
-    var path_buf: [512]u8 = undefined;
-    const path = try generationPath(&path_buf, self.config.data_dir, requested);
-    var prepared = try artifact.publishSnapshot(path, data);
-    defer prepared.deinit();
-    const meta = prepared.meta;
-    try self.log.activateSnapshot(meta);
-    prepared.restore(&self.state_machine) catch |err| {
+    var generation = try lifecycle.Generation.receive(self.config.data_dir, data);
+    defer generation.deinit();
+    try finish(self, &generation);
+}
+
+/// Local and received snapshots share activation, restore, and publication of
+/// volatile progress. Only a failure after durable selection requires restart.
+fn finish(self: anytype, generation: *lifecycle.Generation) !void {
+    generation.finish(&self.log, &self.state_machine) catch |err| {
+        if (generation.phase != .selected) return err;
         self.snapshot_failed.store(true, .release);
         self.running.store(false, .release);
         self.raft.role = .follower;
         logger.err("snapshot: restore failed after activation; restart required: {}", .{err});
         return error.SnapshotRecoveryRequired;
     };
+    const meta = generation.prepared.meta;
     self.raft.snapshot_meta = meta;
     self.raft.commit_index = @max(self.raft.commit_index, meta.last_included_index);
     self.raft.last_applied = @max(self.raft.last_applied, meta.last_included_index);
@@ -442,4 +408,72 @@ test "snapshot generation reuse rejects mismatched boundaries and corrupt retain
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "retained.dat", .data = data });
     data[artifact.snapshot_header_size] = original_magic;
     try std.testing.expectError(error.CorruptSnapshot, artifact.publishSnapshot(path, data));
+}
+
+test "snapshot lifecycle reopens local and received generations at every durable transition" {
+    const Log = @import("../log.zig").Log;
+    const StateMachine = @import("../state_machine.zig").StateMachine;
+    const Source = enum { local, received };
+    const Transition = enum { published, selected, restored };
+    for ([_]Source{ .local, .received }) |source| {
+        for ([_]Transition{ .published, .selected, .restored }) |transition| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var dir_buf: [512]u8 = undefined;
+            const dir_len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+            const dir = dir_buf[0..dir_len];
+            const data = try testSnapshot(dir);
+            defer std.testing.allocator.free(data);
+            const meta = try artifact.parseSnapshotMeta(data);
+            var log_buf: [512]u8 = undefined;
+            const log_path = try std.fmt.bufPrintZ(&log_buf, "{s}/raft.db", .{dir});
+            var state_buf: [512]u8 = undefined;
+            const state_path = try std.fmt.bufPrintZ(&state_buf, "{s}/state.db", .{dir});
+            {
+                var log = try Log.init(log_path);
+                defer log.deinit();
+                var state = try StateMachine.init(state_path);
+                defer state.deinit();
+                try log.append(.{ .index = 1, .term = 3, .data = "prefix" });
+                try log.append(.{ .index = 2, .term = 3, .data = "boundary" });
+                try log.append(.{ .index = 3, .term = 3, .data = "suffix" });
+                if (source == .local) _ = try state.restoreFromBytes(data);
+                var generation = switch (source) {
+                    .local => try lifecycle.Generation.capture(&state, dir, meta),
+                    .received => try lifecycle.Generation.receive(dir, data),
+                };
+                defer generation.deinit();
+                try std.testing.expectError(error.SnapshotNotSelected, generation.restore(&state));
+                if (transition != .published) try generation.select(&log);
+                if (transition == .restored) try generation.restore(&state);
+                // Drop all process state at the selected seam. Recovery below
+                // can use only the on-disk log, state database, and generation.
+            }
+            {
+                var log = try Log.init(log_path);
+                defer log.deinit();
+                var state = try StateMachine.init(state_path);
+                defer state.deinit();
+                try recover(std.testing.allocator, dir, &log, &state);
+                const selected = transition != .published;
+                try std.testing.expectEqual(selected, (try log.readSnapshotMeta()) != null);
+                const prefix = try log.getEntry(std.testing.allocator, 1);
+                defer if (prefix) |entry| std.testing.allocator.free(entry.data);
+                try std.testing.expectEqual(!selected, prefix != null);
+                try std.testing.expectEqual(@as(u64, 3), log.lastIndex());
+                const applied: u64 = if (source == .local or selected) 2 else 0;
+                try std.testing.expectEqual(applied, state.last_applied);
+                if (applied == 2) {
+                    const row = (try state.db.one(struct { value: i64 }, "SELECT cpu_used AS value FROM agents WHERE id = 'snapshot-probe';", .{}, .{})).?;
+                    try std.testing.expectEqual(@as(i64, 42), row.value);
+                    state.apply(.{ .index = 3, .term = 3, .data = "UPDATE agents SET cpu_used = 99 WHERE id = 'snapshot-probe';" });
+                    try std.testing.expectEqual(@as(u64, 3), state.last_applied);
+                    try recover(std.testing.allocator, dir, &log, &state);
+                    const updated = (try state.db.one(struct { value: i64 }, "SELECT cpu_used AS value FROM agents WHERE id = 'snapshot-probe';", .{}, .{})).?;
+                    try std.testing.expectEqual(@as(i64, 99), updated.value);
+                    try std.testing.expectEqual(@as(u64, 3), state.last_applied);
+                }
+            }
+        }
+    }
 }
