@@ -243,23 +243,14 @@ fn handleApply(
     defer if (app_lock) |*lock| lock.release();
 
     const vol_constraints = if (parsed.app_name) |name|
-        volumes_mod.getVolumesByApp(alloc, db, name) catch &[_]volumes_mod.VolumeConstraint{}
+        volumes_mod.getVolumesByApp(alloc, db, name) catch return common.internalError()
     else
         &[_]volumes_mod.VolumeConstraint{};
     defer if (parsed.app_name != null) alloc.free(vol_constraints);
 
     parsed.setVolumeConstraints(vol_constraints);
 
-    const agents = if (parsed.requests.items.len > 0)
-        agent_registry.listAgents(alloc, db) catch return common.internalError()
-    else
-        alloc.alloc(agent_registry.AgentRecord, 0) catch return common.internalError();
-    defer {
-        for (agents) |a| a.deinit(alloc);
-        alloc.free(agents);
-    }
-
-    if (parsed.requests.items.len > 0 and agents.len == 0) {
+    if (parsed.requests.items.len > 0 and !(agent_registry.hasAgents(db) catch return common.internalError())) {
         return .{ .status = .bad_request, .body = "{\"error\":\"no agents available\"}", .allocated = false };
     }
 
@@ -274,7 +265,6 @@ fn handleApply(
         .alloc = alloc,
         .session = session,
         .requests = parsed.requests.items,
-        .agents = agents,
     };
     const apply_result = apply_release.execute(&tracker, &backend) catch |err| return mutationFailure(alloc, node, err);
     const apply_report = apply_result.toReport(parsed.app_name orelse "", parsed.requests.items.len, apply_context);

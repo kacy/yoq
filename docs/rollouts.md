@@ -57,6 +57,16 @@ cluster behavior:
 
 cluster rollback now restores prior assignments from stored workload snapshots instead of only reporting a failed release.
 
+## cluster capacity
+
+cluster placement accounts for committed assignments across every app. running assignment limits form a floor for heartbeat usage; pending assignments reserve additional CPU, memory, and GPUs. replacement needs room for both the existing and new assignments until cutover.
+
+placement, gang scheduling, orphan recovery, and rollback share the same committed capacity checks. a heartbeat or membership change between selection and commit rejects the stale batch. gang ranks commit together, and a resumed release reuses its committed assignment IDs. if rollback cannot restore the previous resource claims, it preserves the current assignments and checkpoint for operator recovery.
+
+one gang is limited to 4,096 ranks and one placement or rollback batch to 1 MiB of encoded mutations. larger batches are rejected before log submission.
+
+assignments created before resource claims were introduced lack saved GPU quantities and placement constraints. their worker's GPU capacity stays reserved conservatively until they are replaced. orphaned legacy assignments require an explicit redeploy.
+
 ## rollout states
 
 operator surfaces expose a derived `rollout_state` in addition to release `status`.

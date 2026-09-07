@@ -138,7 +138,7 @@ pub const Placement = struct {
 
 pub fn place(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8) mutation.Error!?Placement {
     // Bound gang work before allocating a ranks array or building SQL.
-    if (request.gang_world_size > max_gang_ranks) return error.Conflict;
+    if (request.cpu_limit <= 0 or request.memory_limit_mb <= 0 or request.gpu_limit < 0 or request.gang_world_size > max_gang_ranks) return error.Conflict;
     for (0..3) |_| {
         return placeOnce(alloc, session, request, release_id) catch |err| {
             if (err == error.Conflict) continue;

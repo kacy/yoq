@@ -1273,3 +1273,20 @@ test "route rejects app rollback without cluster" {
     const response = route(request, std.testing.allocator, ctx).?;
     try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
 }
+
+test "multi-service apply reserves capacity across sequential batches" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+    try harness.node.stateMachineDb().exec("UPDATE agents SET cpu_cores = 1, memory_mb = 1024, cpu_used = 0, memory_used_mb = 0;", .{}, .{});
+    const response = harness.appApply(
+        \\{"app_name":"capacity","services":[{"name":"first","image":"alpine","cpu_limit":600,"memory_limit_mb":128,"rollout":{"parallelism":1,"failure_action":"pause"}},{"name":"second","image":"alpine","cpu_limit":600,"memory_limit_mb":128,"rollout":{"parallelism":1,"failure_action":"pause"}}]}
+    );
+    defer freeResponse(alloc, response);
+    try expectResponseOk(response);
+    try expectJsonContains(response.body, "\"placed\":1");
+    try expectJsonContains(response.body, "\"failed\":1");
+    const reserved = (try harness.node.stateMachineDb().one(struct { count: i64, cpu: i64 }, "SELECT COUNT(*) AS count, COALESCE(SUM(cpu_limit), 0) AS cpu FROM assignments;", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 1), reserved.count);
+    try std.testing.expectEqual(@as(i64, 600), reserved.cpu);
+}

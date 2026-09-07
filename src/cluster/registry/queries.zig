@@ -23,6 +23,11 @@ pub const WireguardPeer = struct {
     }
 };
 
+pub fn hasAgents(db: *sqlite.Db) !bool {
+    const row = (try db.one(struct { present: i64 }, "SELECT EXISTS(SELECT 1 FROM agents) AS present;", .{}, .{})).?;
+    return row.present != 0;
+}
+
 pub fn listWireguardPeers(alloc: Allocator, db: *sqlite.Db) ![]WireguardPeer {
     return queryWireguardPeers(
         alloc,

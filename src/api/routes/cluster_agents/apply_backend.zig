@@ -1,6 +1,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 
+const placement_transaction = @import("../../../cluster/placement_transaction.zig");
 const scheduler = @import("../../../cluster/scheduler.zig");
 const mutation_session = @import("../../../cluster/mutation_session.zig");
 const cluster_node = @import("../../../cluster/node.zig");
@@ -17,10 +18,6 @@ const runtime_wait = @import("../../../lib/runtime_wait.zig");
 const FailureDetailBuilder = rollout_targets_mod.FailureDetailBuilder;
 const RolloutTargetBuilder = rollout_targets_mod.RolloutTargetBuilder;
 const ScheduledTarget = rollout_targets_mod.ScheduledTarget;
-
-fn nowRealSeconds() i64 {
-    return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
-}
 
 const ResumeSeed = struct {
     completed_targets: usize = 0,
@@ -57,7 +54,6 @@ pub const ClusterApplyBackend = struct {
     alloc: std.mem.Allocator,
     session: mutation_session.Session,
     requests: []apply_request.ServiceRequest,
-    agents: []agent_registry.AgentRecord,
     progress: ?apply_release.ProgressRecorder = null,
 
     pub fn attachProgressRecorder(self: *@This(), recorder: apply_release.ProgressRecorder) void {
@@ -77,7 +73,7 @@ pub const ClusterApplyBackend = struct {
         var rollback_state_storage: RollbackState = undefined;
         var rollback_state: ?*RollbackState = null;
         if (strategy.failure_action == .rollback) {
-            rollback_state_storage = try RollbackState.capture(self.alloc, self.session.node.stateMachineDb(), self.requests);
+            rollback_state_storage = try RollbackState.capture(self.alloc, self.session, self.requests);
             rollback_state = &rollback_state_storage;
         }
         defer if (rollback_state) |state| state.deinit();
@@ -162,11 +158,7 @@ pub const ClusterApplyBackend = struct {
         }
 
         for (batch) |req| {
-            if (req.request.gang_world_size > 0) {
-                try self.applyGangRequest(req, batch_start, batch_end, failure_details, rollout_targets, counters, &scheduled_targets);
-            } else {
-                try self.applySingleRequest(req, batch_start, batch_end, failure_details, rollout_targets, counters, &scheduled_targets);
-            }
+            try self.applyRequest(req, batch_start, batch_end, failure_details, rollout_targets, counters, &scheduled_targets);
         }
 
         if (scheduled_targets.items.len == 0) return;
@@ -207,7 +199,7 @@ pub const ClusterApplyBackend = struct {
         }
     }
 
-    fn applyGangRequest(
+    fn applyRequest(
         self: *const ClusterApplyBackend,
         req: apply_request.ServiceRequest,
         batch_start: usize,
@@ -218,112 +210,22 @@ pub const ClusterApplyBackend = struct {
         scheduled_targets: *std.ArrayListUnmanaged(ScheduledTarget),
     ) ClusterApplyError!void {
         if (isTerminalRolloutTargetState(rollout_targets.stateForRequest(req.request))) return;
-        const gang_placements = scheduler.scheduleGang(self.alloc, req.request, self.agents) catch {
-            counters.failed += 1;
-            counters.failed_targets += 1;
-            failure_details.appendRequest(req, "placement_failed") catch return ClusterApplyError.InternalError;
-            rollout_targets.setRequestState(req.request, "failed", "placement_failed");
-            try self.reportProgress("schedule", batch_start, batch_end, counters.*, failure_details, rollout_targets);
-            return;
-        };
-
-        if (gang_placements) |gps| {
-            defer self.alloc.free(gps);
-
-            var keep_ids = std.ArrayList([]const u8).empty;
-            errdefer {
-                for (keep_ids.items) |id| self.alloc.free(id);
-                keep_ids.deinit(self.alloc);
-            }
-
-            for (gps) |gp| {
-                const owned_id = generateOwnedAssignmentId(self.alloc) catch return ClusterApplyError.InternalError;
-                errdefer self.alloc.free(owned_id);
-                keep_ids.append(self.alloc, owned_id) catch return ClusterApplyError.InternalError;
-
-                var sql_buf: [@import("../../../cluster/assignment_spec.zig").sql_buffer_size]u8 = undefined;
-                const sql = scheduler.assignmentSqlGang(
-                    &sql_buf,
-                    owned_id,
-                    gp.agent_id,
-                    req.request,
-                    nowRealSeconds(),
-                    gp,
-                ) catch return ClusterApplyError.InternalError;
-
-                try self.session.commit(sql);
-            }
-
-            scheduled_targets.append(self.alloc, .{
+        scheduled_targets.ensureUnusedCapacity(self.alloc, 1) catch return error.InternalError;
+        const placement = try placement_transaction.place(self.alloc, self.session, req.request, if (self.progress) |progress| progress.release_id else null);
+        if (placement) |reserved| {
+            scheduled_targets.appendAssumeCapacity(.{
                 .request = req.request,
-                .assignment_ids = keep_ids.toOwnedSlice(self.alloc) catch return ClusterApplyError.InternalError,
-                .placement_count = gps.len,
-            }) catch return ClusterApplyError.InternalError;
+                .assignment_ids = reserved.assignment_ids,
+                .placement_count = reserved.assignment_ids.len,
+            });
             rollout_targets.setRequestState(req.request, "starting", null);
-            keep_ids.deinit(self.alloc);
             return;
         }
-
-        counters.failed += req.request.gang_world_size;
+        counters.failed += @max(@as(usize, 1), req.request.gang_world_size);
         counters.failed_targets += 1;
-        failure_details.appendRequest(req, "placement_failed") catch return ClusterApplyError.InternalError;
+        failure_details.appendRequest(req, "placement_failed") catch return error.InternalError;
         rollout_targets.setRequestState(req.request, "failed", "placement_failed");
         try self.reportProgress("schedule", batch_start, batch_end, counters.*, failure_details, rollout_targets);
-    }
-
-    fn applySingleRequest(
-        self: *const ClusterApplyBackend,
-        req: apply_request.ServiceRequest,
-        batch_start: usize,
-        batch_end: usize,
-        failure_details: *FailureDetailBuilder,
-        rollout_targets: *RolloutTargetBuilder,
-        counters: *ApplyCounters,
-        scheduled_targets: *std.ArrayListUnmanaged(ScheduledTarget),
-    ) ClusterApplyError!void {
-        if (isTerminalRolloutTargetState(rollout_targets.stateForRequest(req.request))) return;
-        const placements = scheduler.schedule(self.alloc, &[_]scheduler.PlacementRequest{req.request}, self.agents) catch {
-            return ClusterApplyError.InternalError;
-        };
-        defer self.alloc.free(placements);
-
-        if (placements.len == 0 or placements[0] == null) {
-            counters.failed += 1;
-            counters.failed_targets += 1;
-            failure_details.appendRequest(req, "placement_failed") catch return ClusterApplyError.InternalError;
-            rollout_targets.setRequestState(req.request, "failed", "placement_failed");
-            try self.reportProgress("schedule", batch_start, batch_end, counters.*, failure_details, rollout_targets);
-            return;
-        }
-
-        const placement = placements[0].?;
-        const owned_id = generateOwnedAssignmentId(self.alloc) catch return ClusterApplyError.InternalError;
-        errdefer self.alloc.free(owned_id);
-
-        var sql_buf: [@import("../../../cluster/assignment_spec.zig").sql_buffer_size]u8 = undefined;
-        const sql = scheduler.assignmentSql(
-            &sql_buf,
-            owned_id,
-            placement.agent_id,
-            req.request,
-            nowRealSeconds(),
-        ) catch return ClusterApplyError.InternalError;
-
-        try self.session.commit(sql);
-
-        const assignment_ids = self.alloc.alloc([]const u8, 1) catch return ClusterApplyError.InternalError;
-        assignment_ids[0] = owned_id;
-        errdefer {
-            self.alloc.free(owned_id);
-            self.alloc.free(assignment_ids);
-        }
-
-        scheduled_targets.append(self.alloc, .{
-            .request = req.request,
-            .assignment_ids = assignment_ids,
-            .placement_count = 1,
-        }) catch return ClusterApplyError.InternalError;
-        rollout_targets.setRequestState(req.request, "starting", null);
     }
 
     fn reportProgress(
@@ -525,12 +427,6 @@ pub fn nextClusterBatchEnd(
             @min(start + @max(@as(usize, 1), @as(usize, strategy.parallelism)), total),
         .rolling => @min(start + @max(@as(usize, 1), @as(usize, strategy.parallelism)), total),
     };
-}
-
-fn generateOwnedAssignmentId(alloc: std.mem.Allocator) ![]u8 {
-    var id_buf: [12]u8 = undefined;
-    scheduler.generateAssignmentId(&id_buf);
-    return alloc.dupe(u8, id_buf[0..]);
 }
 
 const RolloutNodeHarness = struct {
@@ -1017,7 +913,6 @@ test "finalizeBatchTargets honors paused rollout resume before cutover" {
         .alloc = alloc,
         .session = try mutation_session.Session.begin(harness.node),
         .requests = &.{},
-        .agents = &.{},
         .progress = makeTestProgressRecorder("dep-resume"),
     };
     var failure_details = FailureDetailBuilder.init(alloc);
@@ -1128,7 +1023,6 @@ test "finalizeBatchTargets discards scheduled targets when paused rollout is can
         .alloc = alloc,
         .session = try mutation_session.Session.begin(harness.node),
         .requests = &.{},
-        .agents = &.{},
         .progress = makeTestProgressRecorder("dep-cancel-finalize"),
     };
     var failure_details = FailureDetailBuilder.init(alloc);
@@ -1199,6 +1093,8 @@ test "rollback state restores prior assignments after cutover" {
     var harness = try RolloutNodeHarness.init(alloc);
     defer harness.deinit();
 
+    try harness.node.stateMachineDb().exec("INSERT INTO agents (id, address, status, cpu_cores, memory_mb, last_heartbeat, registered_at) VALUES ('agent1', '127.0.0.1', 'active', 1, 1024, 0, 0);", .{}, .{});
+
     const request: scheduler.PlacementRequest = .{
         .image = "alpine",
         .command = "echo web",
@@ -1215,7 +1111,7 @@ test "rollback state restores prior assignments after cutover" {
         .{ "old-web", "agent1", "alpine", "echo old", "running", @as(i64, 1000), @as(i64, 256), "demo-app", "service", "web", @as(i64, 1) },
     ) catch return error.SkipZigTest;
 
-    var rollback_state = try RollbackState.capture(alloc, harness.node.stateMachineDb(), &.{.{ .request = request, .rollout = .{} }});
+    var rollback_state = try RollbackState.capture(alloc, try mutation_session.Session.begin(harness.node), &.{.{ .request = request, .rollout = .{} }});
     defer rollback_state.deinit();
 
     harness.node.stateMachineDb().exec("DELETE FROM assignments WHERE app_name = ? AND workload_kind = ? AND workload_name = ?;", .{}, .{ "demo-app", "service", "web" }) catch return error.SkipZigTest;
