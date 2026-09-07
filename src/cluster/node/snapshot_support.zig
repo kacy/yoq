@@ -474,7 +474,7 @@ test "snapshot lifecycle survives process death at every local and received tran
                 }
             }
             try std.testing.expect(std.posix.W.IFSIGNALED(status));
-            try std.testing.expectEqual(@as(u32, linux.SIG.KILL), std.posix.W.TERMSIG(status));
+            try std.testing.expectEqual(@intFromEnum(linux.SIG.KILL), std.posix.W.TERMSIG(status));
             {
                 var log = try Log.init(log_path);
                 defer log.deinit();
