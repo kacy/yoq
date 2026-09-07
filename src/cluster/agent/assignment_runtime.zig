@@ -387,6 +387,12 @@ fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignm
         return;
     };
 
+    var image_user: ?[]const u8 = null;
+    if (config_parsed.value.config) |config| {
+        if (config.User) |user| {
+            if (user.len > 0) image_user = user;
+        }
+    }
     var c = container.Container{
         .config = .{
             .id = container_id,
@@ -394,7 +400,7 @@ fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignm
             .command = resolved.command.command,
             .args = resolved.command.args.items,
             .working_dir = resolved.working_dir,
-            .user = if (config_parsed.value.config) |config| if (config.User) |user| if (user.len > 0) user else null else null else null,
+            .user = image_user,
             .limits = limits,
             .network = .{ .node_id = self.node_id },
             .hostname = hostname,
