@@ -1,0 +1,63 @@
+name: _runtime-test
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: immutable commit to check out
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  kernel:
+    name: runtime-kernel-${{ matrix.lane }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [core, network]
+    steps:
+      - name: check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+        with:
+          cache-prefix: zig-kernel-${{ matrix.lane }}
+
+      - name: install runtime fixture tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes iproute2 openssl python3 curl
+
+      - name: run kernel fixtures
+        shell: bash
+        env:
+          RUNTIME_LANE: ${{ matrix.lane }}
+        run: |
+          set -o pipefail
+          zig_bin="$(command -v zig)"
+          sudo env YOQ_SKIP_SLOW_TESTS=1 \
+            ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zig-global-cache-root" \
+            ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zig-local-cache-root" \
+            "$zig_bin" build -j1 -Doptimize=ReleaseSafe -Drun-privileged-tests=true \
+            "test-runtime-$RUNTIME_LANE" 2>&1 | tee "$RUNNER_TEMP/runtime-kernel.log"
+          if [ "$RUNTIME_LANE" = network ]; then
+            sudo env RUNNER_TEMP="$RUNNER_TEMP" python3 scripts/scheduled-runtime-smoke.py \
+              2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+          fi
+
+      - name: upload runtime log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-kernel-${{ matrix.lane }}-log
+          path: ${{ runner.temp }}/runtime-kernel.log
+          retention-days: 7

@@ -121,7 +121,11 @@ fn requirePortAvailable(port: u16) !void {
     };
 }
 
-fn skip(comptime fmt: []const u8, args: anytype) error{SkipZigTest}!void {
+fn skip(comptime fmt: []const u8, args: anytype) error{ SkipZigTest, MissingRuntimePrerequisite }!void {
+    if (build_options.run_privileged_tests) {
+        std.debug.print("missing privileged runtime prerequisite: " ++ fmt ++ "\n", args);
+        return error.MissingRuntimePrerequisite;
+    }
     std.debug.print("skipping privileged runtime test: " ++ fmt ++ "\n", args);
     return error.SkipZigTest;
 }
