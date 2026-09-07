@@ -10,6 +10,7 @@ const h2c_upgrade = @import("h2c_upgrade.zig");
 const http2 = @import("http2.zig");
 const http2_connection_router = @import("http2_connection_router.zig");
 const http2_passthrough = @import("http2_passthrough.zig");
+const upstream_exchange = @import("upstream_exchange.zig");
 const http2_request = @import("http2_request.zig");
 const http2_response = @import("http2_response.zig");
 const proxy_policy = @import("policy.zig");
@@ -18,8 +19,7 @@ const proxy_runtime = @import("runtime.zig");
 const router = @import("router.zig");
 const upstream_mod = @import("upstream.zig");
 const upstream_pool = @import("upstream_pool.zig");
-const runtime_wait = @import("../../lib/runtime_wait.zig");
-const client_dial = @import("../../tls/client_dial.zig");
+const MirrorWorkers = @import("../../lib/task_workers.zig").Group(64);
 const transport = @import("../../tls/client_transport.zig");
 const store_mod = @import("../../state/store.zig");
 
@@ -30,10 +30,7 @@ const x_forwarded_proto_header = "X-Forwarded-Proto";
 const traceparent_header = "traceparent";
 const tracestate_header = "tracestate";
 
-const Protocol = enum {
-    http1,
-    http2,
-};
+const Protocol = upstream_exchange.Protocol;
 
 pub const ProxyResponse = struct {
     protocol: Protocol = .http1,
@@ -70,7 +67,6 @@ pub const ForwardPlan = struct {
 const MirrorTask = struct {
     peer_key: ?proxy_credentials.Key = null,
     allocator: std.mem.Allocator,
-    active_mirror_requests: *std.atomic.Value(usize),
     raw_request: []u8,
     protocol: Protocol,
     method: http.Method,
@@ -114,7 +110,7 @@ pub const HandleResult = union(enum) {
 const peer_identity = @import("../../tls/peer_identity.zig");
 const proxy_credentials = @import("../../tls/proxy_credentials.zig");
 
-const PeerTimeouts = struct { connect_timeout_ms: u32, request_timeout_ms: u32, head: bool = false, protocol: Protocol = .http1 };
+const parseForwardedStatusCode = upstream_exchange.parseStatusCode;
 
 pub const ReverseProxy = struct {
     peer_key: ?proxy_credentials.Key = null,
@@ -122,7 +118,7 @@ pub const ReverseProxy = struct {
     routes: []const router.Route,
     running: bool = false,
     max_response_bytes: usize = 64 * 1024,
-    active_mirror_requests: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    mirror_workers: MirrorWorkers = .{},
 
     pub fn init(allocator: std.mem.Allocator, routes: []const router.Route) ReverseProxy {
         return .{
@@ -133,9 +129,7 @@ pub const ReverseProxy = struct {
 
     pub fn deinit(self: *ReverseProxy) void {
         defer if (self.peer_key) |*key| std.crypto.secureZero(u8, key);
-        while (self.active_mirror_requests.load(.acquire) != 0) {
-            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(1), "reverse proxy mirror drain")) break;
-        }
+        self.mirror_workers.join();
     }
 
     pub fn start(self: *ReverseProxy) void {
@@ -395,27 +389,22 @@ pub const ReverseProxy = struct {
 
     fn startMirrorRequest(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan, client_ip: ?[4]u8) void {
         const mirror_service = plan.route.mirror_service orelse return;
-        _ = @constCast(&self.active_mirror_requests).fetchAdd(1, .monotonic);
         var task = cloneMirrorTask(
             self.allocator,
-            @constCast(&self.active_mirror_requests),
             self.max_response_bytes,
             raw_request,
             plan,
             mirror_service,
             client_ip,
         ) catch {
-            _ = @constCast(&self.active_mirror_requests).fetchSub(1, .monotonic);
             return;
         };
         task.peer_key = self.peer_key;
         defer if (task.peer_key) |*key| std.crypto.secureZero(u8, key);
-        const thread = std.Thread.spawn(.{}, runMirrorTask, .{task}) catch {
-            _ = @constCast(&self.active_mirror_requests).fetchSub(1, .monotonic);
+        @constCast(&self.mirror_workers).spawn(runMirrorTask, .{task}) catch {
             task.deinit();
             return;
         };
-        thread.detach();
     }
 
     const ForwardRequestSpec = struct {
@@ -536,7 +525,9 @@ pub const ReverseProxy = struct {
                     log.warn("l7 proxy no eligible upstream after retries method={s} host={s} path={s} service={s} retries={d}", .{
                         proxy_helpers.methodString(plan.method), plan.host, plan.path, plan.route.service, retries_used,
                     });
-                    return formatProxyResponse(self.allocator, .{
+                    return formatResponseForProtocol(self.allocator, .{
+                        .protocol = plan.protocol,
+                        .http2_stream_id = plan.http2_stream_id,
                         .status = .service_unavailable,
                         .body = "{\"error\":\"no eligible upstream\"}",
                     });
@@ -546,6 +537,7 @@ pub const ReverseProxy = struct {
             defer upstream.deinit(self.allocator);
 
             const response = self.forwardSingleAttempt(raw_request, plan, &upstream, client_ip) catch |err| {
+                if (err == error.OutOfMemory) return err;
                 recordUpstreamError(upstream.endpoint_id, cb_policy, mapUpstreamFailure(err), plan.route.name, plan.route.service, upstream.service);
                 if (proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), attempt, null, true)) {
                     proxy_runtime.recordRetry();
@@ -558,25 +550,22 @@ pub const ReverseProxy = struct {
                     proxy_helpers.methodString(plan.method), plan.host,     plan.path,    plan.route.service,
                     upstream.address,                        upstream.port, retries_used, err,
                 });
-                return formatProxyResponse(self.allocator, proxyFailureResponse(err));
+                var failure = proxyFailureResponse(err);
+                failure.protocol = plan.protocol;
+                failure.http2_stream_id = plan.http2_stream_id;
+                return formatResponseForProtocol(self.allocator, failure);
             };
 
-            if (plan.protocol == .http2) {
-                proxy_runtime.recordEndpointSuccess(upstream.endpoint_id);
-                proxy_runtime.recordRouteRecovered(plan.route.name);
-                return response;
-            }
-
-            if (self.evaluateHttp1Response(response, plan, &upstream, policy, cb_policy, attempt, retries_used)) |final_response| {
+            if (try self.evaluateResponse(response, plan, &upstream, policy, cb_policy, attempt, retries_used)) |final_response| {
                 return final_response;
             }
             retries_used += 1;
         }
     }
 
-    /// Evaluate an HTTP/1 upstream response: parse status, record circuit state,
+    /// Evaluate a buffered upstream response: parse status, record circuit state,
     /// decide retry. Returns the final response bytes to send, or null to retry.
-    fn evaluateHttp1Response(
+    fn evaluateResponse(
         self: *const ReverseProxy,
         response: []u8,
         plan: *const ForwardPlan,
@@ -585,8 +574,12 @@ pub const ReverseProxy = struct {
         cb_policy: proxy_policy.CircuitBreakerPolicy,
         attempt: u8,
         retries_used: u8,
-    ) ?[]u8 {
-        const status_code = parseUpstreamStatusCode(response) catch {
+    ) !?[]u8 {
+        const status_code = parseForwardedStatusCode(self.allocator, plan.protocol, response) catch |err| {
+            if (err == error.OutOfMemory) {
+                self.allocator.free(response);
+                return err;
+            }
             recordUpstreamError(upstream.endpoint_id, cb_policy, .other, plan.route.name, plan.route.service, upstream.service);
             log.warn("l7 proxy invalid upstream response method={s} host={s} path={s} service={s} upstream={s}:{d} retries={d}", .{
                 proxy_helpers.methodString(plan.method), plan.host,     plan.path,    plan.route.service,
@@ -594,10 +587,12 @@ pub const ReverseProxy = struct {
             });
             self.allocator.free(response);
             proxy_runtime.recordRouteFailure(plan.route.name, .invalid_response);
-            return formatProxyResponse(self.allocator, .{
+            return try formatResponseForProtocol(self.allocator, .{
+                .protocol = plan.protocol,
+                .http2_stream_id = plan.http2_stream_id,
                 .status = .bad_gateway,
                 .body = "{\"error\":\"invalid upstream response\"}",
-            }) catch return null;
+            });
         };
 
         if (status_code >= 500 and status_code <= 599) {
@@ -630,155 +625,51 @@ pub const ReverseProxy = struct {
         const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
         defer self.allocator.free(request);
 
-        if (upstream.peer_mode != .off) {
-            return self.forwardSingleAttemptMtls(request, .{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms, .head = plan.method == .HEAD, .protocol = plan.protocol }, upstream);
-        }
-
-        return self.forwardPlainAttempt(request, .{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms, .head = plan.method == .HEAD, .protocol = plan.protocol }, upstream);
+        return self.upstreamClient().forward(request, .{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms, .head = plan.method == .HEAD, .protocol = plan.protocol }, upstream);
     }
 
-    /// mTLS-specific dial + request/response. always opens a fresh
-    /// connection (TLS sessions hold encryption state and can't be pooled
-    /// alongside bare-fd siblings keyed on the same address). on `.warn`
-    /// a missing/invalid cluster CA logs and downgrades to plaintext;
-    /// `.require` returns an error in the same case so the caller can
-    /// surface the failure (PR 5 finale will plug this into proper
-    /// observability).
-    fn forwardSingleAttemptMtls(
-        self: *const ReverseProxy,
-        request: []const u8,
-        timeouts: PeerTimeouts,
-        upstream: *const upstream_mod.Upstream,
-    ) ![]u8 {
-        const ca_rec_opt = store_mod.getClusterCa(self.allocator) catch null;
-        const ca_rec = ca_rec_opt orelse {
-            if (upstream.peer_mode == .require) return error.ClusterCaMissing;
-            log.warn("mtls upstream {s}: cluster CA not seeded, downgrading to plain dial", .{upstream.address});
-            return self.forwardPlainAttempt(request, timeouts, upstream);
-        };
-        defer ca_rec.deinit(self.allocator);
-
-        const expected_identity = try peer_identity.service(self.allocator, upstream.service);
-        defer self.allocator.free(expected_identity);
-        const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
-        const credentials: ?proxy_credentials.Credentials = credentials: {
-            const key = self.peer_key orelse {
-                if (upstream.peer_mode == .require) return error.ProxyCredentialsMissing;
-                log.warn("mtls upstream {s}: proxy credentials unavailable, continuing without client authentication", .{upstream.service});
-                break :credentials null;
-            };
-            break :credentials proxy_credentials.load(self.allocator, key, ca_rec.cert_pem, now) catch |err| switch (err) {
-                error.ProxyCredentialsMissing, error.ReadFailed, error.DbOpenFailed => {
-                    if (upstream.peer_mode == .require) return err;
-                    log.warn("mtls upstream {s}: proxy credentials unavailable ({}), continuing without client authentication", .{ upstream.service, err });
-                    break :credentials null;
-                },
-                else => return err,
-            };
-        };
-        defer if (credentials) |owned| owned.deinit(self.allocator);
-
-        var outcome = client_dial.dial(std.Options.debug_io, self.allocator, .{
-            .address = upstream.address,
-            .port = upstream.port,
-            .connect_timeout_ms = timeouts.connect_timeout_ms,
-            .request_timeout_ms = timeouts.request_timeout_ms,
-            .ca_cert_pem = ca_rec.cert_pem,
-            .server_name = upstream.service,
-            .expected_server_identity = expected_identity,
-            .client_cert_pem = if (credentials) |owned| owned.cert_pem else null,
-            .client_key_pem = if (credentials) |owned| owned.key_pem else null,
-            .now_unix = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
-        }) catch |err| return err;
-
-        switch (outcome) {
-            .bare => |fd| {
-                // dial returned plaintext somehow (shouldn't happen when
-                // ca_cert_pem is set, but be defensive).
-                defer linux_platform.posix.close(fd);
-                return error.HandshakeFailed;
-            },
-            .session => |*sess| {
-                defer {
-                    sess.deinit();
-                    linux_platform.posix.close(sess.fd);
-                }
-
-                _ = sess.write(request) catch return error.SendFailed;
-                return (try readProtocolResponse(self.allocator, sess, self.max_response_bytes, timeouts)).bytes;
-            },
-        }
-    }
-
-    /// Primary, mirror, and permissive fallback traffic share one plaintext
-    /// exchange budget, including any stale pooled-connection retry.
-    fn forwardPlainAttempt(
-        self: *const ReverseProxy,
-        request: []const u8,
-        timeouts: PeerTimeouts,
-        upstream: *const upstream_mod.Upstream,
-    ) ![]u8 {
-        const deadline = transport.Deadline.afterMilliseconds(timeouts.request_timeout_ms);
-        var from_pool = true;
-        var fd = upstream_pool.checkout(upstream.endpoint_id, upstream.address, upstream.port) orelse blk: {
-            from_pool = false;
-            const dialed = try socket_helpers.connectToUpstreamUntil(timeouts.connect_timeout_ms, deadline, upstream);
-            upstream_pool.noteDialed();
-            break :blk dialed;
-        };
-
-        (transport.Stream{ .fd = fd, .deadline = deadline }).writeAll(request) catch |err| {
-            upstream_pool.discard(fd);
-            if (err == error.TimedOut) return err;
-            if (!from_pool) return error.SendFailed;
-            from_pool = false;
-            fd = try socket_helpers.connectToUpstreamUntil(timeouts.connect_timeout_ms, deadline, upstream);
-            upstream_pool.noteDialed();
-            (transport.Stream{ .fd = fd, .deadline = deadline }).writeAll(request) catch |write_err| {
-                upstream_pool.discard(fd);
-                return if (write_err == error.TimedOut) write_err else error.SendFailed;
-            };
-        };
-
-        const result = readProtocolResponse(self.allocator, transport.Stream{ .fd = fd, .deadline = deadline }, self.max_response_bytes, timeouts) catch |err| {
-            upstream_pool.discard(fd);
-            return err;
-        };
-
-        if (result.reusable) {
-            upstream_pool.release(upstream.endpoint_id, upstream.address, upstream.port, fd);
-        } else {
-            upstream_pool.discard(fd);
-        }
-        return result.bytes;
+    fn upstreamClient(self: *const ReverseProxy) upstream_exchange.Client {
+        return .{ .allocator = self.allocator, .peer_key = self.peer_key, .max_response_bytes = self.max_response_bytes };
     }
 };
 
 fn cloneMirrorTask(
     alloc: std.mem.Allocator,
-    active_mirror_requests: *std.atomic.Value(usize),
     max_response_bytes: usize,
     raw_request: []const u8,
     plan: *const ForwardPlan,
     mirror_service: []const u8,
     client_ip: ?[4]u8,
 ) !MirrorTask {
+    const owned_raw_request = try alloc.dupe(u8, raw_request);
+    errdefer alloc.free(owned_raw_request);
+    const owned_path = try alloc.dupe(u8, plan.path);
+    errdefer alloc.free(owned_path);
+    const owned_outbound_path = try alloc.dupe(u8, plan.outbound_path);
+    errdefer alloc.free(owned_outbound_path);
+    const owned_host = try alloc.dupe(u8, plan.host);
+    errdefer alloc.free(owned_host);
+    const owned_outbound_host = try alloc.dupe(u8, if (plan.route.preserve_host) plan.host else mirror_service);
+    errdefer alloc.free(owned_outbound_host);
+    const owned_route_name = try alloc.dupe(u8, plan.route.name);
+    errdefer alloc.free(owned_route_name);
+    const owned_route_service = try alloc.dupe(u8, plan.route.service);
+    errdefer alloc.free(owned_route_service);
+    const owned_mirror_service = try alloc.dupe(u8, mirror_service);
+    errdefer alloc.free(owned_mirror_service);
+
     return .{
         .allocator = alloc,
-        .active_mirror_requests = active_mirror_requests,
-        .raw_request = try alloc.dupe(u8, raw_request),
+        .raw_request = owned_raw_request,
         .protocol = plan.protocol,
         .method = plan.method,
-        .path = try alloc.dupe(u8, plan.path),
-        .outbound_path = try alloc.dupe(u8, plan.outbound_path),
-        .host = try alloc.dupe(u8, plan.host),
-        .outbound_host = if (plan.route.preserve_host)
-            try alloc.dupe(u8, plan.host)
-        else
-            try alloc.dupe(u8, mirror_service),
-        .route_name = try alloc.dupe(u8, plan.route.name),
-        .route_service = try alloc.dupe(u8, plan.route.service),
-        .mirror_service = try alloc.dupe(u8, mirror_service),
+        .path = owned_path,
+        .outbound_path = owned_outbound_path,
+        .host = owned_host,
+        .outbound_host = owned_outbound_host,
+        .route_name = owned_route_name,
+        .route_service = owned_route_service,
+        .mirror_service = owned_mirror_service,
         .connect_timeout_ms = plan.route.connect_timeout_ms,
         .request_timeout_ms = plan.route.request_timeout_ms,
         .max_response_bytes = max_response_bytes,
@@ -786,10 +677,10 @@ fn cloneMirrorTask(
     };
 }
 
-fn runMirrorTask(input: MirrorTask) void {
+fn runMirrorTask(stopping: *const std.atomic.Value(bool), input: MirrorTask) void {
     var task = input;
-    defer _ = task.active_mirror_requests.fetchSub(1, .release);
     defer task.deinit();
+    if (stopping.load(.acquire)) return;
 
     proxy_runtime.recordMirrorRouteRequestStart(task.route_name, task.route_service, task.mirror_service);
     var upstream = proxy_runtime.resolveUpstream(task.allocator, task.mirror_service) catch {
@@ -815,10 +706,7 @@ fn runMirrorTask(input: MirrorTask) void {
     proxy.peer_key = task.peer_key;
     proxy.max_response_bytes = task.max_response_bytes;
     defer proxy.deinit();
-    const response = if (upstream.peer_mode != .off)
-        proxy.forwardSingleAttemptMtls(request, .{ .connect_timeout_ms = task.connect_timeout_ms, .request_timeout_ms = task.request_timeout_ms, .head = task.method == .HEAD, .protocol = task.protocol }, &upstream)
-    else
-        proxy.forwardPlainAttempt(request, .{ .connect_timeout_ms = task.connect_timeout_ms, .request_timeout_ms = task.request_timeout_ms, .head = task.method == .HEAD, .protocol = task.protocol }, &upstream);
+    const response = proxy.upstreamClient().forward(request, .{ .connect_timeout_ms = task.connect_timeout_ms, .request_timeout_ms = task.request_timeout_ms, .head = task.method == .HEAD, .protocol = task.protocol }, &upstream);
     const bytes = response catch {
         proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
         return;
@@ -1164,356 +1052,6 @@ fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64
     hasher.update(host);
     hasher.update(path);
     return hasher.final();
-}
-
-const max_informational_responses = 16;
-
-/// Response accounting and retries use the final status, not an interim hint.
-fn parseUpstreamStatusCode(response: []const u8) !u16 {
-    var start: usize = 0;
-    var interim: usize = 0;
-    while (true) {
-        const status = try parseResponseStatusLine(response[start..]);
-        if (status < 100 or status >= 200 or status == 101) return status;
-        if (interim == max_informational_responses) return error.InvalidResponse;
-        interim += 1;
-        const end = std.mem.indexOfPos(u8, response, start, "\r\n\r\n") orelse return error.InvalidResponse;
-        start = end + 4;
-    }
-}
-
-fn parseResponseStatusLine(response: []const u8) !u16 {
-    if (response.len < 12) return error.InvalidResponse;
-    if (!std.mem.startsWith(u8, response, "HTTP/")) return error.InvalidResponse;
-
-    const first_space = std.mem.indexOfScalar(u8, response, ' ') orelse return error.InvalidResponse;
-    const status_start = first_space + 1;
-    if (status_start + 3 > response.len) return error.InvalidResponse;
-    return std.fmt.parseInt(u16, response[status_start .. status_start + 3], 10) catch error.InvalidResponse;
-}
-
-fn parseForwardedStatusCode(alloc: std.mem.Allocator, protocol: Protocol, response: []const u8) !u16 {
-    return switch (protocol) {
-        .http1 => parseUpstreamStatusCode(response),
-        .http2 => http2_passthrough.parseStatusCode(alloc, response),
-    };
-}
-
-/// an upstream response plus whether its connection can be returned to the pool.
-const UpstreamResponse = struct {
-    bytes: []u8,
-    /// true only when the response body was fully delimited by Content-Length
-    /// or chunked framing and the upstream did not ask to close the connection.
-    /// connection-close-delimited (read-to-EOF) responses are never reusable.
-    reusable: bool,
-};
-
-/// how the upstream response body is delimited.
-const BodyFraming = union(enum) {
-    /// no body at all (HEAD, interim responses, 204, 304).
-    empty,
-    /// A protocol switch needs a tunnel, which this buffered path does not own.
-    upgrade,
-    /// exactly `len` bytes of body.
-    fixed: usize,
-    /// chunked transfer-encoding, terminated by the zero-length chunk.
-    chunked,
-    /// delimited by connection close — read until EOF, not reusable.
-    eof,
-};
-
-/// read a full upstream response. unlike a naive read-until-EOF, this honors
-/// HTTP/1.1 framing so a kept-alive connection can be returned promptly without
-/// waiting for the peer to close. Responses without a body length use EOF
-/// framing and cannot reuse the connection.
-fn readResponse(
-    alloc: std.mem.Allocator,
-    socket: anytype,
-    max_bytes: usize,
-    head_request: bool,
-) !UpstreamResponse {
-    return readHttp1ResponseFrom(alloc, transport.stream(socket), max_bytes, head_request);
-}
-
-/// Buffered HTTP/2 forwarding retains its bounded, connection-close exchange.
-/// Streaming HTTP/2 connections are handled separately by http2_connection.
-fn readProtocolResponse(alloc: std.mem.Allocator, wire: anytype, max_bytes: usize, options: PeerTimeouts) !UpstreamResponse {
-    if (options.protocol == .http1) return readHttp1ResponseFrom(alloc, wire, max_bytes, options.head);
-    const response = try alloc.alloc(u8, max_bytes);
-    errdefer alloc.free(response);
-    var total: usize = 0;
-    while (total < response.len) {
-        const count = try readUpstream(wire, response[total..]);
-        if (count == 0) break;
-        total += count;
-    }
-    if (total == response.len) {
-        var extra: [1]u8 = undefined;
-        if (try readUpstream(wire, &extra) != 0) return error.ResponseTooLarge;
-    }
-    if (total == 0) return error.ReceiveFailed;
-    return shrinkResponse(alloc, response, total, false);
-}
-
-/// TLS and plaintext use the same bounded framing rules. Keep interim bytes
-/// for forwarding, but only the final response controls body framing and reuse.
-fn readHttp1ResponseFrom(alloc: std.mem.Allocator, wire: anytype, max_bytes: usize, head_request: bool) !UpstreamResponse {
-    var response = try alloc.alloc(u8, max_bytes);
-    errdefer alloc.free(response);
-    var total: usize = 0;
-    var final_start: usize = 0;
-    var interim: usize = 0;
-    var status: u16 = 0;
-    const headers_end = while (true) {
-        if (std.mem.indexOfPos(u8, response[0..total], final_start, "\r\n\r\n")) |idx| {
-            const end = idx + 4;
-            status = try parseResponseStatusLine(response[final_start..end]);
-            if (status >= 100 and status < 200 and status != 101) {
-                if (interim == max_informational_responses) return error.InvalidResponse;
-                interim += 1;
-                final_start = end;
-                continue;
-            }
-            break end;
-        }
-        if (total == response.len) return error.ResponseTooLarge;
-        const n = try readUpstream(wire, response[total..]);
-        if (n == 0) return if (total == 0) error.ReceiveFailed else error.InvalidResponse;
-        total += n;
-    };
-    const headers = response[final_start..headers_end];
-    const wants_close = http1ResponseWantsClose(headers);
-    const framing = responseBodyFraming(headers, status, head_request);
-
-    switch (framing) {
-        .upgrade => return error.UnsupportedUpgrade,
-        .empty => {
-            // any bytes past the headers are unexpected for a bodiless response.
-            const reusable = !wants_close and total == headers_end;
-            return try shrinkResponse(alloc, response, headers_end, reusable);
-        },
-        .fixed => |body_len| {
-            const target = std.math.add(usize, headers_end, body_len) catch return error.ResponseTooLarge;
-            if (target > response.len) return error.ResponseTooLarge;
-            while (total < target) {
-                const bytes_read = try readUpstream(wire, response[total..]);
-                if (bytes_read == 0) {
-                    return error.InvalidResponse;
-                }
-                total += bytes_read;
-            }
-            const reusable = !wants_close and total == target;
-            return try shrinkResponse(alloc, response, target, reusable);
-        },
-        .chunked => {
-            while (true) {
-                if (try chunkedBodyEnd(response[headers_end..total])) |body_len| {
-                    const target = headers_end + body_len;
-                    const reusable = !wants_close and total == target;
-                    return try shrinkResponse(alloc, response, target, reusable);
-                }
-                if (total == response.len) return error.ResponseTooLarge;
-                const bytes_read = try readUpstream(wire, response[total..]);
-                if (bytes_read == 0) {
-                    return error.InvalidResponse;
-                }
-                total += bytes_read;
-            }
-        },
-        .eof => {
-            while (total < response.len) {
-                const bytes_read = try readUpstream(wire, response[total..]);
-                if (bytes_read == 0) break;
-                total += bytes_read;
-            }
-            if (total == response.len) {
-                var extra_buf: [1]u8 = undefined;
-                const extra = try readUpstream(wire, &extra_buf);
-                if (extra > 0) return error.ResponseTooLarge;
-            }
-            return try shrinkResponse(alloc, response, total, false);
-        },
-    }
-}
-
-fn readUpstream(reader: anytype, buffer: []u8) !usize {
-    return reader.read(buffer) catch |err| {
-        const failure: anyerror = err;
-        return switch (failure) {
-            error.PeerClosed => 0,
-            error.TimedOut => error.TimedOut,
-            else => error.ReceiveFailed,
-        };
-    };
-}
-
-/// shrink the over-allocated read buffer down to the bytes actually used and
-/// package it with its reusability verdict.
-fn shrinkResponse(alloc: std.mem.Allocator, response: []u8, len: usize, reusable: bool) !UpstreamResponse {
-    var bytes = response;
-    if (len < bytes.len) bytes = try alloc.realloc(bytes, len);
-    return .{ .bytes = bytes, .reusable = reusable };
-}
-
-/// pick the body framing from the response headers. mirrors RFC 9112 message
-/// body rules for the cases we care about; anything we cannot classify becomes
-/// connection-close (EOF) delimited so we never misframe.
-fn responseBodyFraming(headers: []const u8, status: u16, head_request: bool) BodyFraming {
-    if (status == 101) return .upgrade;
-    if (status >= 100 and status < 200) return .empty;
-    if (head_request or status == 204 or status == 304) return .empty;
-
-    if (http.findHeaderValue(headers, "Transfer-Encoding")) |te| {
-        if (headerListContains(te, "chunked")) return .chunked;
-    }
-    if (http.findHeaderValue(headers, "Content-Length") != null) {
-        const len = http.findContentLength(headers) catch return .eof;
-        return .{ .fixed = len };
-    }
-    return .eof;
-}
-
-/// true when the upstream signalled the connection should close (explicit
-/// `Connection: close`, or an HTTP/1.0 response which defaults to close).
-fn http1ResponseWantsClose(headers: []const u8) bool {
-    if (std.mem.startsWith(u8, headers, "HTTP/1.0")) return true;
-    if (http.findHeaderValue(headers, "Connection")) |conn| {
-        return headerListContains(conn, "close");
-    }
-    return false;
-}
-
-/// case-insensitive membership test over a comma-separated header value.
-fn headerListContains(value: []const u8, token: []const u8) bool {
-    var it = std.mem.splitScalar(u8, value, ',');
-    while (it.next()) |raw| {
-        const trimmed = std.mem.trim(u8, raw, " \t");
-        if (std.ascii.eqlIgnoreCase(trimmed, token)) return true;
-    }
-    return false;
-}
-
-/// given the bytes received after the header block, return the offset at which
-/// a complete chunked body ends, or null if more data is still needed. handles
-/// chunk extensions and trailer fields. Invalid framing is distinct from an
-/// incomplete body, so malformed sizes never wait for more network data.
-fn chunkedBodyEnd(body: []const u8) error{InvalidResponse}!?usize {
-    var pos: usize = 0;
-    while (true) {
-        const line_end = std.mem.indexOfPos(u8, body, pos, "\r\n") orelse return null;
-        var size_field = body[pos..line_end];
-        if (std.mem.indexOfScalar(u8, size_field, ';')) |semi| size_field = size_field[0..semi];
-        size_field = std.mem.trim(u8, size_field, " \t");
-        if (size_field.len == 0) return error.InvalidResponse;
-        for (size_field) |digit| _ = std.fmt.charToDigit(digit, 16) catch return error.InvalidResponse;
-        const size = std.fmt.parseInt(usize, size_field, 16) catch return error.InvalidResponse;
-
-        const data_start = line_end + 2;
-        if (size == 0) {
-            // last chunk: skip any trailer lines up to the terminating blank line.
-            var trailer_pos = data_start;
-            while (true) {
-                const trailer_end = std.mem.indexOfPos(u8, body, trailer_pos, "\r\n") orelse return null;
-                if (trailer_end == trailer_pos) return trailer_pos + 2;
-                trailer_pos = trailer_end + 2;
-            }
-        }
-
-        const size_with_terminator = std.math.add(usize, size, 2) catch return error.InvalidResponse;
-        const next = std.math.add(usize, data_start, size_with_terminator) catch return error.InvalidResponse;
-        if (next > body.len) return null;
-        if (!std.mem.eql(u8, body[next - 2 .. next], "\r\n")) return error.InvalidResponse;
-        pos = next;
-    }
-}
-
-test "headerListContains matches tokens case-insensitively" {
-    try std.testing.expect(headerListContains("close", "close"));
-    try std.testing.expect(headerListContains("keep-alive, Close", "close"));
-    try std.testing.expect(headerListContains("chunked", "chunked"));
-    try std.testing.expect(!headerListContains("keep-alive", "close"));
-}
-
-test "responseBodyFraming reads Content-Length, chunked, and close-delimited bodies" {
-    const cl = responseBodyFraming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", 200, false);
-    try std.testing.expectEqual(@as(usize, 5), cl.fixed);
-
-    const chunked = responseBodyFraming("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", 200, false);
-    try std.testing.expect(chunked == .chunked);
-
-    const none = responseBodyFraming("HTTP/1.1 200 OK\r\n\r\n", 200, false);
-    try std.testing.expect(none == .eof);
-}
-
-test "responseBodyFraming treats HEAD, 204, 304, and 1xx specially" {
-    try std.testing.expect(responseBodyFraming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", 200, true) == .empty);
-    try std.testing.expect(responseBodyFraming("HTTP/1.1 204 No Content\r\n\r\n", 204, false) == .empty);
-    try std.testing.expect(responseBodyFraming("HTTP/1.1 304 Not Modified\r\n\r\n", 304, false) == .empty);
-    try std.testing.expect(responseBodyFraming("HTTP/1.1 100 Continue\r\n\r\n", 100, false) == .empty);
-}
-
-test "http1ResponseWantsClose honors Connection header and HTTP/1.0" {
-    try std.testing.expect(http1ResponseWantsClose("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"));
-    try std.testing.expect(http1ResponseWantsClose("HTTP/1.0 200 OK\r\n\r\n"));
-    try std.testing.expect(!http1ResponseWantsClose("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n\r\n"));
-}
-
-test "chunkedBodyEnd finds the end of a complete chunked body" {
-    const body = "5\r\nhello\r\n0\r\n\r\n";
-    try std.testing.expectEqual(@as(?usize, body.len), try chunkedBodyEnd(body));
-
-    // incomplete: terminating chunk not yet received.
-    try std.testing.expectEqual(@as(?usize, null), try chunkedBodyEnd("5\r\nhello\r\n"));
-
-    // trailers before the final blank line.
-    const with_trailers = "0\r\nX-Trace: abc\r\n\r\n";
-    try std.testing.expectEqual(@as(?usize, with_trailers.len), try chunkedBodyEnd(with_trailers));
-}
-
-fn readResponseTestPair() ![2]i32 {
-    var fds: [2]i32 = undefined;
-    const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds);
-    if (rc != 0) return error.SkipZigTest;
-    return fds;
-}
-
-test "readResponse returns a Content-Length body without waiting for EOF" {
-    const fds = try readResponseTestPair();
-    defer linux_platform.posix.close(fds[0]);
-    defer linux_platform.posix.close(fds[1]);
-
-    // peer stays open after writing — a framed read must not block on it.
-    try socket_helpers.writeAll(fds[1], "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello");
-
-    const result = try readResponse(std.testing.allocator, fds[0], 64 * 1024, false);
-    defer std.testing.allocator.free(result.bytes);
-    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", result.bytes);
-    try std.testing.expect(result.reusable);
-}
-
-test "readResponse marks Connection: close responses as not reusable" {
-    const fds = try readResponseTestPair();
-    defer linux_platform.posix.close(fds[0]);
-    defer linux_platform.posix.close(fds[1]);
-
-    try socket_helpers.writeAll(fds[1], "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
-
-    const result = try readResponse(std.testing.allocator, fds[0], 64 * 1024, false);
-    defer std.testing.allocator.free(result.bytes);
-    try std.testing.expect(!result.reusable);
-}
-
-test "readResponse reads a chunked body to completion" {
-    const fds = try readResponseTestPair();
-    defer linux_platform.posix.close(fds[0]);
-    defer linux_platform.posix.close(fds[1]);
-
-    try socket_helpers.writeAll(fds[1], "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
-
-    const result = try readResponse(std.testing.allocator, fds[0], 64 * 1024, false);
-    defer std.testing.allocator.free(result.bytes);
-    try std.testing.expect(std.mem.endsWith(u8, result.bytes, "0\r\n\r\n"));
-    try std.testing.expect(result.reusable);
 }
 
 const ReadRequestError = error{
@@ -3256,14 +2794,28 @@ test "forwardRequest retries safe methods after upstream receive failure" {
     try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);
 }
 
-test "forwardRequest retries safe methods on upstream 5xx" {
+test "proxy transport policy retries buffered HTTP1 and HTTP2 5xx consistently" {
+    for ([_]Protocol{ .http1, .http2 }) |protocol| {
+        try expectBufferedRetry(protocol);
+    }
+}
+
+fn expectBufferedRetry(protocol: Protocol) !void {
     const store = @import("../../state/store.zig");
     const service_rollout = @import("../service_rollout.zig");
     const service_registry_runtime = @import("../service_registry_runtime.zig");
-    const actions = [_]TestUpstreamAction{
-        .{ .respond = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope" },
-        .{ .respond = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" },
-    };
+    const alloc = std.testing.allocator;
+    const unavailable = if (protocol == .http1)
+        try alloc.dupe(u8, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope")
+    else
+        try http2_response.formatSimpleResponse(alloc, 1, 503, "text/plain", "nope");
+    defer alloc.free(unavailable);
+    const okay = if (protocol == .http1)
+        try alloc.dupe(u8, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+    else
+        try http2_response.formatSimpleResponse(alloc, 1, 200, "text/plain", "ok");
+    defer alloc.free(okay);
+    const actions = [_]TestUpstreamAction{ .{ .respond = unavailable }, .{ .respond = okay } };
     var upstream = try TestUpstreamServer.init(&actions);
     defer upstream.deinit();
     try upstream.start();
@@ -3320,14 +2872,17 @@ test "forwardRequest retries safe methods on upstream 5xx" {
     var proxy = ReverseProxy.init(std.testing.allocator, &routes);
     defer proxy.deinit();
 
-    const response = try proxy.forwardRequest(
-        "GET /users HTTP/1.1\r\nHost: api.internal\r\n\r\n",
-    );
+    const request = if (protocol == .http1)
+        try alloc.dupe(u8, "GET /users HTTP/1.1\r\nHost: api.internal\r\n\r\n")
+    else
+        try buildTestHttp2Request(alloc, 1, "GET", "api.internal", "/users");
+    defer alloc.free(request);
+    const response = try proxy.forwardRequest(request);
     defer std.testing.allocator.free(response);
 
     upstream.wait();
     try std.testing.expectEqual(@as(usize, 2), upstream.accepted);
-    try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 200 OK\r\n") != null);
+    try std.testing.expectEqual(@as(u16, 200), try parseForwardedStatusCode(alloc, protocol, response));
 }
 
 test "forwardRequest returns bad gateway after upstream request timeout" {
@@ -4925,42 +4480,6 @@ test "handleConnection rejects looped request after listener restart" {
     server_thread.join();
 }
 
-// A session-shaped reader verifies TLS framing without requiring EOF.
-const FakeSession = struct {
-    chunks: []const []const u8,
-    index: usize = 0,
-    offset: usize = 0,
-
-    fn read(self: *FakeSession, buf: []u8) !usize {
-        if (self.index == self.chunks.len) return error.PeerClosed;
-        const chunk = self.chunks[self.index][self.offset..];
-        const n = @min(buf.len, chunk.len);
-        @memcpy(buf[0..n], chunk[0..n]);
-        self.offset += n;
-        if (self.offset == self.chunks[self.index].len) {
-            self.index += 1;
-            self.offset = 0;
-        }
-        return n;
-    }
-};
-
-test "response framing TLS reader stops at a complete response without EOF" {
-    var sess = FakeSession{ .chunks = &.{ "HTTP/1.1 103 Early Hints\r\nLink: /style.css\r\n\r\nHTTP/1.1 200 OK\r\n", "Content-Length: 2\r\n\r\nok", "unread" } };
-    const result = try readHttp1ResponseFrom(std.testing.allocator, &sess, 64 * 1024, false);
-    defer std.testing.allocator.free(result.bytes);
-    try std.testing.expectEqual(@as(usize, 2), sess.index);
-    try std.testing.expectEqual(@as(u16, 200), try parseUpstreamStatusCode(result.bytes));
-    try std.testing.expect(result.reusable);
-}
-
-test "response framing TLS reader rejects oversized and empty responses" {
-    var sess = FakeSession{ .chunks = &.{ "AAAA", "BBBB", "CCCC" } };
-    try std.testing.expectError(error.ResponseTooLarge, readHttp1ResponseFrom(std.testing.allocator, &sess, 6, false));
-    var empty = FakeSession{ .chunks = &.{} };
-    try std.testing.expectError(error.ReceiveFailed, readHttp1ResponseFrom(std.testing.allocator, &empty, 64, false));
-}
-
 const PeerForwardFixture = struct {
     const x509 = @import("../../tls/x509_gen.zig");
     const csr = @import("../../tls/csr.zig");
@@ -5070,7 +4589,7 @@ const PeerForwardFixture = struct {
         var joined = false;
         defer if (!joined) worker.join();
         const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-1", .address = "127.0.0.1", .port = listener.port, .peer_mode = mode };
-        const result = proxy.forwardSingleAttemptMtls("GET / HTTP/1.1\r\nHost: untrusted.example\r\n\r\n", .{ .connect_timeout_ms = 1000, .request_timeout_ms = 1000 }, &upstream);
+        const result = proxy.upstreamClient().forwardTls("GET / HTTP/1.1\r\nHost: untrusted.example\r\n\r\n", .{ .connect_timeout_ms = 1000, .request_timeout_ms = 1000 }, &upstream);
         if (allowed) {
             const response = try result;
             defer std.testing.allocator.free(response);
@@ -5103,7 +4622,7 @@ test "upstream peer identity authenticates proxy credentials and observes rotati
     var proxy = ReverseProxy.init(alloc, &.{});
     defer proxy.deinit();
     const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-1", .address = "127.0.0.1", .port = 1, .peer_mode = .require };
-    try std.testing.expectError(error.ProxyCredentialsMissing, proxy.forwardSingleAttemptMtls("GET / HTTP/1.1\r\n\r\n", .{ .connect_timeout_ms = 1, .request_timeout_ms = 1 }, &upstream));
+    try std.testing.expectError(error.ProxyCredentialsMissing, proxy.upstreamClient().forwardTls("GET / HTTP/1.1\r\n\r\n", .{ .connect_timeout_ms = 1, .request_timeout_ms = 1 }, &upstream));
     try f.forward(&proxy, ca.cert_pem, server.cert_pem, server_key, now, true, .warn);
     proxy.peer_key = f.key;
 
@@ -5144,67 +4663,45 @@ test "listener lifecycle exchange deadline is reported as a receive timeout" {
     try std.testing.expectEqualStrings("{\"error\":\"upstream request timed out\"}", response.body);
 }
 
-test "response framing rejects overflowing chunk sizes before waiting for payload" {
-    for ([_]usize{ std.math.maxInt(usize), std.math.maxInt(usize) - 1, std.math.maxInt(usize) - 2 }) |size| {
-        var chunk_buf: [64]u8 = undefined;
-        const chunk = try std.fmt.bufPrint(&chunk_buf, "{x}\r\n", .{size});
-        try std.testing.expectError(error.InvalidResponse, chunkedBodyEnd(chunk));
-        const fds = try readResponseTestPair();
-        defer for (fds) |fd| linux_platform.posix.close(fd);
-        try socket_helpers.writeAll(fds[1], "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
-        try socket_helpers.writeAll(fds[1], chunk);
-        const wire = transport.Stream{ .fd = fds[0], .deadline = transport.Deadline.afterMilliseconds(1000) };
-        // Peer stays open with no payload. Malformed framing must fail now.
-        try std.testing.expectError(error.InvalidResponse, readResponse(std.testing.allocator, wire, 4096, false));
-    }
-    try std.testing.expectEqual(http.StatusCode.bad_gateway, proxyFailureResponse(error.InvalidResponse).status);
-    try std.testing.expectError(error.InvalidResponse, chunkedBodyEnd("1\r\nxZZ"));
-    try std.testing.expectError(error.InvalidResponse, chunkedBodyEnd("+1\r\nx\r\n"));
-    try std.testing.expectError(error.InvalidResponse, chunkedBodyEnd("ffffffffffffffffffffffffffffffff\r\n"));
-    try std.testing.expectEqual(@as(?usize, null), try chunkedBodyEnd("5\r\nhel"));
+test "proxy transport policy propagates response allocation failure instead of retrying" {
+    var failed = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const alloc = failed.allocator();
+    var proxy = ReverseProxy.init(alloc, &.{});
+    defer proxy.deinit();
+    const plan = ForwardPlan{
+        .method = .GET,
+        .path = "/",
+        .outbound_path = "/",
+        .host = "api",
+        .outbound_host = "api",
+        .backend_service = "api",
+        .selection_key = 0,
+        .route = try cloneRouteSnapshot(std.testing.allocator, .{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" } }),
+        .upstream = .{ .service = "api", .endpoint_id = "api-1", .address = "127.0.0.1", .port = 1 },
+    };
+    defer plan.route.deinit(std.testing.allocator);
+    const response = try alloc.dupe(u8, "malformed response");
+    try std.testing.expectError(error.OutOfMemory, proxy.evaluateResponse(response, &plan, &plan.upstream, .{ .retries = 1 }, .{}, 0, 0));
 }
 
-test "response framing preserves informational blocks and completes on a persistent socket" {
-    const raw = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: /style.css\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
-    const fds = try readResponseTestPair();
-    defer for (fds) |fd| linux_platform.posix.close(fd);
-    try socket_helpers.writeAll(fds[1], raw);
-    const wire = transport.Stream{ .fd = fds[0], .deadline = transport.Deadline.afterMilliseconds(1000) };
-    const result = try readResponse(std.testing.allocator, wire, 4096, false);
-    defer std.testing.allocator.free(result.bytes);
-    try std.testing.expectEqualStrings(raw, result.bytes);
-    try std.testing.expect(result.reusable);
-    try std.testing.expectEqual(@as(u16, 200), try parseUpstreamStatusCode(result.bytes));
-
-    var fragments = FakeSession{ .chunks = &.{ "HTTP/1.1 10", "0 Continue\r\n\r", "\nHTTP/1.1 103 Early Hints\r\nLink: /style.css\r\n\r\nHTTP/1.1 503 Unavailable\r\nContent-Length: 2\r\n\r\nx", "x", "unread" } };
-    const final = try readHttp1ResponseFrom(std.testing.allocator, &fragments, 4096, false);
-    defer std.testing.allocator.free(final.bytes);
-    try std.testing.expectEqual(@as(u16, 503), try parseUpstreamStatusCode(final.bytes));
-    try std.testing.expectEqual(@as(usize, 4), fragments.index);
-    try std.testing.expect(final.reusable);
-}
-
-test "response framing bounds interim floods and separates unsupported upgrades" {
-    const interim = "HTTP/1.1 103 Early Hints\r\nLink: /style.css\r\n\r\n";
-    var flood: [max_informational_responses + 2][]const u8 = @splat(interim);
-    flood[flood.len - 1] = "unread";
-    var reader = FakeSession{ .chunks = &flood };
-    try std.testing.expectError(error.InvalidResponse, readHttp1ResponseFrom(std.testing.allocator, &reader, 4096, false));
-    try std.testing.expectEqual(@as(usize, max_informational_responses + 1), reader.index);
-    var upgrade = FakeSession{ .chunks = &.{ "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", "unread" } };
-    try std.testing.expectError(error.UnsupportedUpgrade, readHttp1ResponseFrom(std.testing.allocator, &upgrade, 4096, false));
-    try std.testing.expectEqual(@as(usize, 1), upgrade.index);
-    var truncated = FakeSession{ .chunks = &.{"HTTP/1.1 103 Early Hints\r\n\r\n"} };
-    try std.testing.expectError(error.InvalidResponse, readHttp1ResponseFrom(std.testing.allocator, &truncated, 4096, false));
-}
-
-test "response framing keeps binary HTTP2 separate on TLS readers" {
-    const binary = "\x00\x00\x00\x04\x00\x00\x00\x00\x00";
-    var session = FakeSession{ .chunks = &.{ binary[0..3], binary[3..] } };
-    const response = try readProtocolResponse(std.testing.allocator, &session, 64, .{ .connect_timeout_ms = 1000, .request_timeout_ms = 1000, .protocol = .http2 });
-    defer std.testing.allocator.free(response.bytes);
-    try std.testing.expectEqualStrings(binary, response.bytes);
-    try std.testing.expect(!response.reusable);
-    var malformed_http1 = FakeSession{ .chunks = &.{binary} };
-    try std.testing.expectError(error.InvalidResponse, readProtocolResponse(std.testing.allocator, &malformed_http1, 64, .{ .connect_timeout_ms = 1000, .request_timeout_ms = 1000 }));
+test "proxy mirror ownership cleans up every partial clone allocation" {
+    const Fixture = struct {
+        fn clone(alloc: std.mem.Allocator, plan: *const ForwardPlan) !void {
+            var task = try cloneMirrorTask(alloc, 4096, "GET / HTTP/1.1\r\n\r\n", plan, "mirror", null);
+            defer task.deinit();
+        }
+    };
+    const plan = ForwardPlan{
+        .method = .GET,
+        .path = "/",
+        .outbound_path = "/",
+        .host = "api",
+        .outbound_host = "api",
+        .backend_service = "api",
+        .selection_key = 0,
+        .route = try cloneRouteSnapshot(std.testing.allocator, .{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" } }),
+        .upstream = .{ .service = "api", .endpoint_id = "api-1", .address = "127.0.0.1", .port = 1 },
+    };
+    defer plan.route.deinit(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Fixture.clone, .{&plan});
 }

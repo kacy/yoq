@@ -315,6 +315,10 @@ certificate management and TLS termination.
 
 **ACME:** Let's Encrypt-compatible client implementing HTTP-01 and DNS-01 challenge validation. HTTP-01 serves challenge tokens on port 80. DNS-01 computes `_acme-challenge` TXT values, updates records through built-in providers (`cloudflare`, `route53`, `gcloud`) or an exec hook, polls DNS visibility, and then finalizes the order.
 
+**upstream request policy:** buffered HTTP/1 and HTTP/2 share a single upstream exchange for deadlines, response framing, connection ownership, and service identity verification. Routing owns retries and circuit accounting; the transport never silently replays a failed pooled write. Both buffered protocols use the same method and status retry policy. Mirror tasks use bounded, joined workers and the same exchange.
+
+Streaming HTTP/2 keeps its frame router and applies the shared method retry predicate before forwarding response frames. Its sessions currently own plaintext sockets: a required peer-TLS upstream is rejected before dialing, while permissive `warn` mode logs the plaintext fallback. Verified TLS streaming requires a session transport implementation; buffered HTTP/2 already uses the verified TLS exchange.
+
 **TLS proxy:** a reverse proxy that terminates TLS 1.3 (AES-256-GCM). routes connections based on SNI (Server Name Indication) extracted from the ClientHello message.
 
 **certificate store:** persists certificates by domain with expiry tracking plus stored per-domain ACME renewal metadata. the TLS proxy checks for expiring managed certificates and renews each one using its own stored challenge and provider settings.
