@@ -449,7 +449,7 @@ test "registration returns credentials only after their row is applied" {
     const id = extractJsonString(response.body, "id") orelse return error.MissingIdentity;
     const secret = extractJsonString(response.body, "credential") orelse return error.MissingCredential;
     try std.testing.expect(try credentials.authenticates(&node.state_machine.db, secret, id));
-    try std.testing.expectEqual(@as(?i64, 2), extractJsonInt(response.body, "node_id"));
+    try std.testing.expectEqual(@as(?i64, 2), json_helpers.extractJsonInt(response.body, "node_id"));
     const gossip = json_helpers.extractJsonObject(response.body, "gossip_server") orelse return error.MissingGossipServer;
     try std.testing.expectEqual(@as(?i64, 1), json_helpers.extractJsonInt(gossip, "id"));
     try std.testing.expectEqual(@as(?i64, 19877), json_helpers.extractJsonInt(gossip, "port"));
