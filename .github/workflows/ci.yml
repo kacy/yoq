@@ -209,6 +209,24 @@ jobs:
           path: ${{ runner.temp }}/bpf-diff.patch
           retention-days: 7
 
+  dns-bridge-kernel:
+    name: dns-bridge-kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+      - name: install fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes iproute2 libsqlite3-dev
+      - name: verify bridge-confined dns packets
+        run: |
+          zig build-exe -O ReleaseSafe -lc -lsqlite3 -Ivendor/zig-sqlite/c vendor/zig-sqlite/c/workaround.c --dep sqlite --dep linux_platform -Mroot=src/test_dns_bridge.zig -Ivendor/zig-sqlite/c -Msqlite=vendor/zig-sqlite/sqlite.zig -Mlinux_platform=src/lib/linux_platform.zig -femit-bin=/tmp/yoq-dns-bridge-fixture
+          sudo python3 tools/test_dns_bridge.py --binary /tmp/yoq-dns-bridge-fixture
+
   examples-validate:
     name: examples-validate
     needs:

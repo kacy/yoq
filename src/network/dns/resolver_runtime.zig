@@ -105,7 +105,7 @@ pub fn stopResolver() void {
     // shut down the socket to unblock any recvfrom() in the resolver thread
     // before closing it, so the thread sees ENOTCONN instead of EBADF
     if (resolver_socket) |sock| {
-        posix.shutdown(sock, .both) catch {};
+        _ = std.os.linux.shutdown(sock, std.os.linux.SHUT.RDWR);
     }
 
     const thread = resolver_thread;
