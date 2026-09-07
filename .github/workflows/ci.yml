@@ -43,6 +43,8 @@ jobs:
             bpf:
               - 'bpf/**'
               - 'tools/bpf_gen.zig'
+              - 'src/test_bpf_load_balancer.zig'
+              - 'scripts/bpf-load-balancer-smoke.sh'
               - 'src/network/bpf/**'
 
   fmt-check:
@@ -172,6 +174,9 @@ jobs:
             git status --porcelain -- src/network/bpf
             exit 1
           fi
+
+      - name: verify load balancer with the kernel
+        run: bash scripts/bpf-load-balancer-smoke.sh
 
       - name: upload bpf diff
         if: failure()
