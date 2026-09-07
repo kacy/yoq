@@ -59,7 +59,7 @@ jobs:
 
       - name: collect kernel failure diagnostics
         if: failure()
-        run: sudo dmesg --level=err,warn | tail -80 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+        run: sudo dmesg | tail -100 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
 
       - name: upload runtime log
         if: always()

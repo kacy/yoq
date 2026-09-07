@@ -185,6 +185,14 @@ def inside(root, outer_mount, outer_net):
             db.row_factory = sqlite3.Row
             return db.execute("SELECT id, pid, ip_address FROM containers WHERE hostname='web' AND pid IS NOT NULL").fetchone()
 
+    def assignment_rows():
+        # Worker assignment endpoints require worker credentials. Inspect this
+        # fixture's committed state without giving the administrator that secret.
+        path = homes["server"] / ".local/share/yoq/cluster/state.db"
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            return db.execute("SELECT status FROM assignments WHERE agent_id = ?", (agent_id,)).fetchall()
+
     try:
         spawn("server", ["init-server", "--id", "1", "--port", "19700", "--api-port", "17700",
                          "--peers", "", "--token", enrollment, "--api-token", token])
@@ -216,7 +224,7 @@ def inside(root, outer_mount, outer_net):
 
             row = wait_for("scheduled container process", starting_container)
             assert row["ip_address"], "scheduled container has no routed IP"
-            assignments = api(f"/agents/{agent_id}/assignments")
+            assignments = assignment_rows()
             assert assignments[0]["status"] == "pending", assignments
             assert not apply.done(), "apply completed before the delayed service became ready"
             url = f"http://{row['ip_address']}:8080/"
@@ -229,7 +237,7 @@ def inside(root, outer_mount, outer_net):
             wait_for("HTTP across the container network", reachable)
             result = apply.result(timeout=35)
             assert result.get("status") == "completed", result
-            assignments = api(f"/agents/{agent_id}/assignments")
+            assignments = assignment_rows()
             assert assignments[0]["status"] == "running", assignments
             assert any("/manifests/" in path for path in registry.request_paths)
             assert sum("/blobs/" in path for path in registry.request_paths) >= 2
@@ -242,7 +250,7 @@ def inside(root, outer_mount, outer_net):
                 assert api("/agents")[0]["status"] == "active", "healthy agent was marked offline by gossip"
                 time.sleep(0.5)
             run(*worker_prefix, str(YOQ), "stop", "web", env=dict(os.environ, HOME=str(homes["agent"])), stdout=subprocess.DEVNULL)
-            wait_for("assignment exit", lambda: api(f"/agents/{agent_id}/assignments")[0]["status"] == "stopped")
+            wait_for("assignment exit", lambda: assignment_rows()[0]["status"] == "stopped")
         print("scheduled runtime: API authentication, registry certificate trust, OCI pull, readiness, routed HTTP, identity, limits, and exit passed", flush=True)
     finally:
         for process in reversed(processes):

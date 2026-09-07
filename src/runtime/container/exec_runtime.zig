@@ -61,7 +61,10 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
 
     if (!host_mode) {
         const result = mountFilesystem(ctx);
-        if (result != .success) return @intFromEnum(result);
+        if (result != .success) {
+            log.err("container filesystem preparation failed: {s}", .{@tagName(result)});
+            return @intFromEnum(result);
+        }
     }
 
     // Parent network setup needs the child's PID, while generated files must
@@ -70,7 +73,10 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     const network_files = startup.receiveNetwork(ctx.startup_fd) catch return @intFromEnum(ExitCode.general_error);
     if (!host_mode) {
         const result = completeFilesystem(ctx, network_files, gpu_passthrough.setupGpuPassthrough);
-        if (result != .success) return @intFromEnum(result);
+        if (result != .success) {
+            log.err("container root finalization failed: {s}", .{@tagName(result)});
+            return @intFromEnum(result);
+        }
     }
 
     if (host_mode) {
@@ -90,9 +96,18 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
         linux_platform.posix.chdir("/") catch {};
     };
 
-    const account = identity.resolve(ctx.user) catch return @intFromEnum(ExitCode.security_failed);
-    security.apply() catch return @intFromEnum(ExitCode.security_failed);
-    identity.apply(account, ctx.rootless and ctx.user == null) catch return @intFromEnum(ExitCode.security_failed);
+    const account = identity.resolve(ctx.user) catch |err| {
+        log.err("container identity resolution failed: {}", .{err});
+        return @intFromEnum(ExitCode.security_failed);
+    };
+    security.apply() catch |err| {
+        log.err("container security configuration failed: {}", .{err});
+        return @intFromEnum(ExitCode.security_failed);
+    };
+    identity.apply(account, ctx.rootless and ctx.user == null) catch |err| {
+        log.err("container identity change failed: {}", .{err});
+        return @intFromEnum(ExitCode.security_failed);
+    };
     startup.notify(ctx.startup_fd, .prepared) catch return @intFromEnum(ExitCode.general_error);
     startup.expect(ctx.startup_fd, .execute) catch return @intFromEnum(ExitCode.general_error);
     return init.run(execCommandWrapper, @ptrCast(@constCast(ctx)));
@@ -123,7 +138,10 @@ fn completeFilesystem(ctx: *const ChildExecContext, files: startup.NetworkFiles,
         var gpu_env_buf: [4096]u8 = undefined;
         _ = setup_gpu(root, ctx.gpu_indices, &gpu_env_buf) catch return .filesystem_error;
     }
-    filesystem.pivotRoot(root) catch return .filesystem_error;
+    filesystem.pivotRoot(root) catch |err| {
+        log.err("container pivot root failed: {}", .{err});
+        return .filesystem_error;
+    };
     // Resolve image-provided /etc symlinks only within the container root.
     if (files.enabled) net_setup.writeNetworkFiles("/", files.address, files.gateway, ctx.hostname) catch return .filesystem_error;
     return .success;
