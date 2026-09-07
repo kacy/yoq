@@ -573,7 +573,7 @@ test "layer format migration rebuilds verified blobs without mutating v3 entries
     defer deleteExtractedLayerForDigest(digest);
     const hex = digest.hex();
     var old_buf: [max_path]u8 = undefined;
-    const old = try paths.dataPathFmt(&old_buf, "layers/v3/sha256/{s}", .{hex});
+    const old = try @import("../lib/paths.zig").dataPathFmt(&old_buf, "layers/v3/sha256/{s}", .{hex});
     try cwd().createDirPath(std.testing.io, old);
     defer cwd().deleteTree(std.testing.io, old) catch {};
     var previous = try cwd().openDir(std.testing.io, old, .{});
