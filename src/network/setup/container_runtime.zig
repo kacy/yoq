@@ -44,7 +44,7 @@ pub fn setupContainer(
     var veth_buf: [32]u8 = undefined;
     const host_veth = bridge.vethName(container_id, &veth_buf);
 
-    bridge.createVethPair(host_veth, "eth0", bridge.default_bridge) catch {
+    bridge.createVethPairForContainer(host_veth, "eth0", bridge.default_bridge, pid) catch {
         return common.SetupError.VethFailed;
     };
     errdefer {
@@ -52,11 +52,6 @@ pub fn setupContainer(
             log.warn("setup: failed to clean up veth {s} after error: {}", .{ host_veth, e });
         };
     }
-
-    bridge.moveToNamespace("eth0", pid) catch |e| {
-        log.err("setup: failed to move veth to container namespace: {}", .{e});
-        return common.SetupError.VethFailed;
-    };
 
     if (subnet_config) |sc| {
         bridge.configurableContainer(pid, container_ip, sc.gateway, sc.prefix_len) catch {

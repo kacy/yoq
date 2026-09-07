@@ -2,7 +2,7 @@
 //
 // creates and manages the yoq0 bridge for container networking.
 // each container gets a veth pair: one end attached to the bridge
-// (named veth_<container-id-prefix>), the other end moved into the
+// (named veth_<container-id-prefix>), the other end created in the
 // container's network namespace as eth0.
 //
 // uses netlink.zig for all kernel interactions. for operations
@@ -167,6 +167,17 @@ pub fn deleteBridge(name: []const u8) BridgeError!void {
 /// peer_name: name of the container-side veth (e.g. "eth0")
 /// bridge_name: bridge to attach host end to (e.g. "yoq0")
 pub fn createVethPair(host_name: []const u8, peer_name: []const u8, bridge_name: []const u8) BridgeError!void {
+    return createVethPairInNamespace(host_name, peer_name, bridge_name, null);
+}
+
+/// Create the peer directly in the destination namespace. Its name never
+/// occupies the host namespace, where another eth0 may already exist.
+pub fn createVethPairForContainer(host_name: []const u8, peer_name: []const u8, bridge_name: []const u8, pid: posix.pid_t) BridgeError!void {
+    if (pid <= 0) return BridgeError.NamespaceFailed;
+    return createVethPairInNamespace(host_name, peer_name, bridge_name, pid);
+}
+
+fn createVethPairInNamespace(host_name: []const u8, peer_name: []const u8, bridge_name: []const u8, peer_pid: ?posix.pid_t) BridgeError!void {
     const fd = nl.openSocket() catch return BridgeError.VethCreateFailed;
     defer linux_platform.posix.close(fd);
 
@@ -208,12 +219,20 @@ pub fn createVethPair(host_name: []const u8, peer_name: []const u8, bridge_name:
     hdr.len = @intCast(@as(usize, hdr.len) + aligned_size);
 
     mb.putAttrStr(hdr, nl.IFLA.IFNAME, peer_name) catch return BridgeError.VethCreateFailed;
+    if (peer_pid) |pid| {
+        mb.putAttrU32(hdr, nl.IFLA.NET_NS_PID, @intCast(pid)) catch return BridgeError.VethCreateFailed;
+    }
 
     mb.endNested(peer);
     mb.endNested(data);
     mb.endNested(linkinfo);
 
     nl.sendAndCheck(fd, mb.message()) catch return BridgeError.VethCreateFailed;
+
+    // Once creation succeeds, this function owns cleanup until link setup ends.
+    errdefer deleteVeth(host_name) catch |err| {
+        log.warn("failed to roll back veth {s}: {}", .{ host_name, err });
+    };
 
     // bring host end up
     const host_idx = nl.getIfIndex(fd, host_name) catch return BridgeError.VethCreateFailed;
