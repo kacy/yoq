@@ -376,6 +376,9 @@ pub const Node = struct {
             return err;
         };
         const term = self.raft.persistent_state.current_term;
+        // Background reconcilers can call this from the tick thread itself.
+        // Dispatch replication before waiting instead of relying on a later tick.
+        action_loop.processActions(self);
         self.mu.unlock(std.Options.debug_io);
         return self.waitForApplied(index, term, timeout_ms);
     }

@@ -94,7 +94,8 @@ pub fn scheduleGang(
                 if (std.mem.eql(u8, role, "server")) continue;
             }
 
-            const free_gpu = a.gpu_count - gpu_alloc[agent_idx];
+            if (a.gpu_count < 0 or a.gpu_count > std.math.maxInt(u32) or gpu_alloc[agent_idx] < 0) continue;
+            const free_gpu = a.gpu_count -| gpu_alloc[agent_idx];
             if (free_gpu < gang.gpus_per_rank) continue;
 
             const same_zone = if (preferred_zone) |pz|
