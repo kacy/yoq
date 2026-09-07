@@ -55,6 +55,12 @@ pub const ContainerState = enum {
     failed,
 };
 
+pub const LocalAssignment = struct {
+    state: ContainerState = .starting,
+    canceled: std.atomic.Value(bool) = .init(false),
+    done: std.atomic.Value(bool) = .init(false),
+};
+
 // max peers in the wireguard mesh — matches max node_id (1-65534).
 const max_peers = 65534;
 
@@ -76,7 +82,7 @@ pub const Agent = struct {
 
     /// tracks assignment_id → local container state.
     /// protected by mutex since container threads update it.
-    local_containers: std.StringHashMap(ContainerState),
+    local_containers: std.StringHashMap(*LocalAssignment),
     container_lock: std.Io.Mutex,
 
     // wireguard mesh networking fields (set during registration if the

@@ -55,6 +55,11 @@ pub fn reconcile(self: anytype) void {
     };
     defer resp.deinit(self.alloc);
 
+    // Only a complete successful snapshot can remove desired work. A server
+    // error or malformed response must never look like an empty assignment set.
+    if (resp.status_code != 200) return;
+    cancelRemovedAssignments(self, resp.body) catch return;
+
     const now = nowRealSeconds();
     var iter = json_helpers.extractJsonObjects(resp.body);
     while (iter.next()) |obj| {
@@ -107,6 +112,45 @@ pub fn reconcile(self: anytype) void {
                 .health_check_json = health_check_json,
             });
         }
+    }
+}
+
+fn cancelRemovedAssignments(self: anytype, body: []const u8) !void {
+    const Desired = struct { id: []const u8, status: []const u8 };
+    const parsed = try std.json.parseFromSlice([]Desired, self.alloc, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    var desired = std.StringHashMap(void).init(self.alloc);
+    defer desired.deinit();
+    for (parsed.value) |assignment| {
+        if (std.mem.eql(u8, assignment.status, "pending") or std.mem.eql(u8, assignment.status, "running"))
+            try desired.put(assignment.id, {});
+    }
+    var retired: std.ArrayList([]const u8) = .empty;
+    defer retired.deinit(self.alloc);
+    self.container_lock.lockUncancelable(std.Options.debug_io);
+    defer self.container_lock.unlock(std.Options.debug_io);
+    var it = self.local_containers.iterator();
+    while (it.next()) |entry| {
+        if (!desired.contains(entry.key_ptr.*)) {
+            entry.value_ptr.*.canceled.store(true, .release);
+            agent_store.removeAssignment(entry.key_ptr.*) catch {};
+            if (entry.value_ptr.*.done.load(.acquire)) try retired.append(self.alloc, entry.key_ptr.*);
+        }
+    }
+    for (retired.items) |id| {
+        const removed = self.local_containers.fetchRemove(id).?;
+        self.alloc.destroy(removed.value);
+        self.alloc.free(removed.key);
+    }
+    // Cached work can predate this process. A successful desired-state snapshot
+    // also invalidates those entries, preventing resurrection during an outage.
+    const cached = try agent_store.listAssignments(self.alloc);
+    defer {
+        for (cached) |assignment| assignment.deinit(self.alloc);
+        self.alloc.free(cached);
+    }
+    for (cached) |assignment| {
+        if (!desired.contains(assignment.id)) try agent_store.removeAssignment(assignment.id);
     }
 }
 
@@ -201,8 +245,21 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         };
     } else null;
 
+    const owner = self.alloc.create(@import("../agent.zig").LocalAssignment) catch {
+        self.alloc.free(id_copy);
+        self.alloc.free(image_copy);
+        self.alloc.free(command_copy);
+        if (app_name_copy) |name| self.alloc.free(name);
+        if (workload_kind_copy) |kind| self.alloc.free(kind);
+        if (workload_name_copy) |name| self.alloc.free(name);
+        if (health_check_json_copy) |check| self.alloc.free(check);
+        if (gang_copy) |gang| self.alloc.free(gang.master_addr);
+        return;
+    };
+    owner.* = .{};
     self.container_lock.lockUncancelable(std.Options.debug_io);
-    self.local_containers.put(id_copy, .starting) catch {
+    self.local_containers.put(id_copy, owner) catch {
+        self.alloc.destroy(owner);
         self.container_lock.unlock(std.Options.debug_io);
         self.alloc.free(id_copy);
         self.alloc.free(image_copy);
@@ -222,7 +279,7 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         log.info("starting assignment {s} (image: {s})", .{ id_copy, image_copy });
     }
 
-    self.assignment_workers.spawn(runAssignment, .{ self, id_copy, image_copy, command_copy, gang_copy, AssignmentMeta{
+    self.assignment_workers.spawn(runAssignment, .{ self, owner, id_copy, image_copy, command_copy, gang_copy, AssignmentMeta{
         .cpu_limit = meta.cpu_limit,
         .memory_limit_mb = meta.memory_limit_mb,
         .app_name = app_name_copy,
@@ -233,6 +290,7 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         log.warn("failed to spawn thread for assignment {s}", .{id_copy});
         self.container_lock.lockUncancelable(std.Options.debug_io);
         _ = self.local_containers.remove(id_copy);
+        self.alloc.destroy(owner);
         self.container_lock.unlock(std.Options.debug_io);
         self.alloc.free(id_copy);
         self.alloc.free(image_copy);
@@ -251,7 +309,19 @@ fn fetchAssignments(self: anytype) ?http_client.Response {
     return http_client.getWithAuth(self.alloc, self.server_addr, self.server_port, path, self.worker_credential) catch return null;
 }
 
-fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignment_id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo, meta: AssignmentMeta) void {
+const StopToken = struct {
+    group: *const std.atomic.Value(bool),
+    assignment: *const std.atomic.Value(bool),
+
+    fn load(self: StopToken, comptime order: std.builtin.AtomicOrder) bool {
+        return self.group.load(order) or self.assignment.load(order);
+    }
+};
+
+fn runAssignment(group_stopping: *const std.atomic.Value(bool), self: anytype, owner: *@import("../agent.zig").LocalAssignment, assignment_id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo, meta: AssignmentMeta) void {
+    // Published only after the thread releases all borrowed assignment fields.
+    defer owner.done.store(true, .release);
+    const stopping = StopToken{ .group = group_stopping, .assignment = &owner.canceled };
     defer {
         self.alloc.free(image);
         self.alloc.free(command);
@@ -443,12 +513,13 @@ fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignm
     setContainerState(self, assignment_id, .running);
 
     const exit_code = waitForAssignmentExit(&c, stopping, false);
+    agent_store.removeAssignment(assignment_id) catch {};
 
     log.info("container {s} exited for assignment {s}", .{ container_id, assignment_id });
     if (meta.workload_kind != null and meta.workload_name != null and std.mem.eql(u8, meta.workload_kind.?, "service")) {
         manifest_health.unregisterService(meta.workload_name.?);
     }
-    if (exit_code == 0) {
+    if (stopping.load(.acquire) or exit_code == 0) {
         setContainerState(self, assignment_id, .stopped);
         reportStatus(self, assignment_id, "stopped", null);
     } else {
@@ -461,11 +532,11 @@ fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignm
 /// Keep the container and its cleanup on the assignment thread. Shutdown first
 /// asks the workload to exit, then kills it after a short grace period, so join
 /// cannot leave a running workload borrowing the agent's state indefinitely.
-fn waitForAssignmentExit(c: anytype, stopping: *const std.atomic.Value(bool), stop_requested: bool) u8 {
+fn waitForAssignmentExit(c: anytype, stopping: anytype, stop_requested: bool) u8 {
     return waitForAssignmentExitWith(c, stopping, stop_requested, nowAwakeNanoseconds, runtime_wait.sleep);
 }
 
-fn waitForAssignmentExitWith(c: anytype, stopping: *const std.atomic.Value(bool), stop_requested: bool, comptime now: anytype, comptime sleep: anytype) u8 {
+fn waitForAssignmentExitWith(c: anytype, stopping: anytype, stop_requested: bool, comptime now: anytype, comptime sleep: anytype) u8 {
     var stop_deadline: ?i128 = if (stop_requested) now() + 5 * std.time.ns_per_s else null;
     if (stop_requested) c.stop() catch {};
     while (true) {
@@ -490,7 +561,7 @@ fn waitForAssignmentExitWith(c: anytype, stopping: *const std.atomic.Value(bool)
     }
 }
 
-fn waitForServiceReadiness(stopping: *const std.atomic.Value(bool), alloc: std.mem.Allocator, container_id: []const u8, meta: AssignmentMeta) ServiceReadinessResult {
+fn waitForServiceReadiness(stopping: anytype, alloc: std.mem.Allocator, container_id: []const u8, meta: AssignmentMeta) ServiceReadinessResult {
     const workload_kind = meta.workload_kind orelse return .healthy;
     const service_name = meta.workload_name orelse return .healthy;
     if (!std.mem.eql(u8, workload_kind, "service")) return .healthy;
@@ -646,7 +717,7 @@ fn setContainerState(self: anytype, assignment_id: []const u8, state: anytype) v
     self.container_lock.lockUncancelable(std.Options.debug_io);
     defer self.container_lock.unlock(std.Options.debug_io);
     if (self.local_containers.getPtr(assignment_id)) |container_state| {
-        container_state.* = state;
+        container_state.*.state = state;
     }
 }
 
@@ -745,4 +816,78 @@ test "assignment worker ownership escalates uncooperative shutdown and reaps" {
     try std.testing.expectEqual(@as(usize, 1), cooperative.terms);
     try std.testing.expectEqual(@as(usize, 0), cooperative.kills);
     try std.testing.expect(cooperative.reaped);
+}
+
+test "assignment removal cancels a real process and invalidates cached work" {
+    const agent_mod = @import("../agent.zig");
+    const process = @import("../../runtime/process.zig");
+    const linux = std.os.linux;
+    const Process = struct {
+        pid: std.posix.pid_t,
+        status: container.Status = .running,
+        exit_code: ?u8 = null,
+        fn poll(self: *@This()) !void {
+            const result = try process.wait(self.pid, true);
+            switch (result.status) {
+                .running, .stopped => {},
+                .exited => |code| {
+                    self.status = .stopped;
+                    self.exit_code = code;
+                },
+                .signaled => {
+                    self.status = .stopped;
+                    self.exit_code = 128;
+                },
+            }
+        }
+        fn stop(self: *@This()) !void {
+            try process.terminate(self.pid);
+        }
+        fn forceStop(self: *@This()) !void {
+            try process.kill(self.pid);
+        }
+        fn wait(self: *@This()) !u8 {
+            _ = try process.wait(self.pid, false);
+            self.status = .stopped;
+            return 128;
+        }
+    };
+    const Fixture = struct {
+        alloc: std.mem.Allocator = std.testing.allocator,
+        container_lock: std.Io.Mutex = .init,
+        local_containers: std.StringHashMap(*agent_mod.LocalAssignment),
+    };
+    try agent_store.initTestDb();
+    defer agent_store.deinit();
+    for ([_][]const u8{ "[]", "[{\"id\":\"assignment\",\"status\":\"stopped\"}]", "[{\"id\":\"assignment\",\"status\":\"failed\"}]" }) |desired| {
+        var owner = agent_mod.LocalAssignment{};
+        var fixture = Fixture{ .local_containers = std.StringHashMap(*agent_mod.LocalAssignment).init(std.testing.allocator) };
+        defer fixture.local_containers.deinit();
+        try fixture.local_containers.put("assignment", &owner);
+        try agent_store.upsertAssignment(.{ .id = "assignment", .image = "fixture", .command = "", .status = "pending", .cpu_limit = 1000, .memory_limit_mb = 256, .synced_at = 0 });
+        const group_stopping = std.atomic.Value(bool).init(false);
+        const token = StopToken{ .group = &group_stopping, .assignment = &owner.canceled };
+        try cancelRemovedAssignments(&fixture, "[{\"id\":\"assignment\",\"status\":\"running\"}]");
+        try std.testing.expect(!token.load(.acquire));
+        try std.testing.expectError(error.UnexpectedToken, cancelRemovedAssignments(&fixture, "{"));
+        try std.testing.expect(!token.load(.acquire));
+        const pid = linux.fork();
+        if (linux.errno(pid) != .SUCCESS) return error.ForkFailed;
+        if (pid == 0) {
+            while (true) _ = linux.syscall0(.pause);
+        }
+        var child = Process{ .pid = @intCast(pid) };
+        defer if (child.status != .stopped) {
+            child.forceStop() catch {};
+            _ = child.wait() catch {};
+        };
+        try cancelRemovedAssignments(&fixture, desired);
+        try std.testing.expect(token.load(.acquire));
+        try std.testing.expect(!group_stopping.load(.acquire));
+        _ = waitForAssignmentExit(&child, token, false);
+        try std.testing.expectEqual(container.Status.stopped, child.status);
+        const cached = try agent_store.listAssignments(std.testing.allocator);
+        defer std.testing.allocator.free(cached);
+        try std.testing.expectEqual(@as(usize, 0), cached.len);
+    }
 }
