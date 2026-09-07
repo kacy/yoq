@@ -5,6 +5,7 @@ const paths = @import("../../lib/paths.zig");
 const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
 const metadata = @import("../../lib/tar_metadata.zig");
+const whiteout = @import("../../lib/tar_whiteout.zig");
 
 const max_path = paths.max_path;
 
@@ -27,7 +28,7 @@ pub fn createLayerFromDir(
 
     var check_iter = dir.iterate();
     const has_entries = (check_iter.next(std.Options.debug_io) catch return types.LayerError.CreateFailed) != null;
-    if (!has_entries) return null;
+    if (!has_entries and !(whiteout.isOpaque(dir) catch return types.LayerError.CreateFailed)) return null;
 
     var tar_path_buf: [max_path]u8 = undefined;
     const tar_path = paths.uniqueDataTempPath(&tar_path_buf, "tmp", "build-layer", ".tar") catch
@@ -111,7 +112,7 @@ fn gzipCompress(alloc: std.mem.Allocator, src_path: []const u8, dst_path: []cons
     };
 }
 
-fn writeTarFromDir(
+pub fn writeTarFromDir(
     alloc: std.mem.Allocator,
     dir_path: []const u8,
     tar_path: []const u8,
@@ -125,6 +126,8 @@ fn writeTarFromDir(
     var write_buf: [8192]u8 = undefined;
     var file_writer = tar_file.writer(std.Options.debug_io, &write_buf);
     var tar_writer: std.tar.Writer = .{ .underlying_writer = &file_writer.interface };
+
+    if (try whiteout.isOpaque(dir)) try tar_writer.writeFileBytes(".wh..wh..opq", "", .{});
 
     var walker = try dir.walk(alloc);
     defer walker.deinit();
@@ -163,6 +166,16 @@ pub fn writeTarEntry(
         .directory => try writeTarDirectoryEntry(dir, tar_writer, entry.path),
         .file => try writeTarFileEntry(dir, tar_writer, entry.path),
         .sym_link => try writeTarSymlinkEntry(dir, tar_writer, entry.path),
+        .character_device => {
+            if (!try whiteout.isDeviceWhiteout(dir, entry.path)) return error.UnsupportedEntry;
+            var path_buf: [max_path]u8 = undefined;
+            const marker = try std.fmt.bufPrint(&path_buf, "{s}{s}.wh.{s}", .{
+                std.fs.path.dirname(entry.path) orelse "",
+                if (std.fs.path.dirname(entry.path) != null) "/" else "",
+                std.fs.path.basename(entry.path),
+            });
+            try tar_writer.writeFileBytes(marker, "", .{});
+        },
         else => {
             log.warn("tar: unsupported entry kind for '{s}'", .{entry.path});
             return error.UnsupportedEntry;
@@ -172,6 +185,13 @@ pub fn writeTarEntry(
 
 fn writeTarDirectoryEntry(dir: std.Io.Dir, writer: *std.tar.Writer, path: []const u8) !void {
     try writeOwnedHeader(writer, .directory, path, "", 0, try metadata.Metadata.stat(dir, path));
+    var directory = try dir.openDir(std.Options.debug_io, path, .{ .follow_symlinks = false, .iterate = true });
+    defer directory.close(std.Options.debug_io);
+    if (try whiteout.isOpaque(directory)) {
+        var marker_buf: [max_path]u8 = undefined;
+        const marker = try std.fmt.bufPrint(&marker_buf, "{s}/.wh..wh..opq", .{path});
+        try writer.writeFileBytes(marker, "", .{});
+    }
 }
 
 /// Use the standard header encoder, adding the numeric ownership that the

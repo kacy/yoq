@@ -23,13 +23,17 @@ pub fn pull(io: std.Io, args: *std.process.Args.Iterator, alloc: std.mem.Allocat
     };
     defer result.deinit();
 
-    const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch |err| {
-        writeErr("failed to extract image layers: {}\n", .{err});
-        return common.ImageCommandsError.PullFailed;
-    };
-    defer {
-        for (layer_paths) |p| alloc.free(p);
-        alloc.free(layer_paths);
+    // Pulling needs no privilege. Native whiteout preparation is deferred
+    // until a privileged runtime/build assembles its root filesystem.
+    if (std.os.linux.geteuid() == 0) {
+        const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch |err| {
+            writeErr("failed to extract image layers: {}\n", .{err});
+            return common.ImageCommandsError.PullFailed;
+        };
+        defer {
+            for (layer_paths) |p| alloc.free(p);
+            alloc.free(layer_paths);
+        }
     }
 
     common.saveImageRecord(ref, result);
