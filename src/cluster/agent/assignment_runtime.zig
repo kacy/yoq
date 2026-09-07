@@ -324,6 +324,7 @@ const StopToken = struct {
 fn runAssignment(group_stopping: *const std.atomic.Value(bool), self: anytype, owner: *@import("../agent.zig").LocalAssignment, assignment_id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo, meta: AssignmentMeta) void {
     // Published only after the thread releases all borrowed assignment fields.
     defer owner.done.store(true, .release);
+    defer agent_store.removeAssignment(assignment_id) catch {};
     const stopping = StopToken{ .group = group_stopping, .assignment = &owner.canceled };
     defer {
         self.alloc.free(image);
@@ -522,7 +523,6 @@ fn runAssignment(group_stopping: *const std.atomic.Value(bool), self: anytype, o
     setContainerState(self, assignment_id, .running);
 
     const exit_code = waitForAssignmentExit(&c, stopping, false);
-    agent_store.removeAssignment(assignment_id) catch {};
 
     log.info("container {s} exited for assignment {s}", .{ container_id, assignment_id });
     if (meta.workload_kind != null and meta.workload_name != null and std.mem.eql(u8, meta.workload_kind.?, "service")) {
