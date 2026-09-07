@@ -204,3 +204,14 @@ jobs:
           for manifest in examples/*/manifest.toml; do
             ./zig-out/bin/yoq validate -f "$manifest"
           done
+
+  tls-interop:
+    name: tls-interop
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+      - name: exchange application data with openssl
+        run: python3 tools/test_tls_interop.py

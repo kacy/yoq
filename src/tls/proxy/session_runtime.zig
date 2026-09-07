@@ -9,6 +9,8 @@ const message_build = @import("../handshake/message_build.zig");
 const message_parse = @import("../handshake/message_parse.zig");
 const pem = @import("../pem.zig");
 const record = @import("../record.zig");
+const record_transport = @import("../record_transport.zig");
+const transport = @import("../../lib/socket_stream.zig");
 const socket_support = @import("socket_support.zig");
 const x509_verify = @import("../x509_verify.zig");
 const mtls_metrics = @import("../mtls_metrics.zig");
@@ -72,6 +74,7 @@ pub fn acceptServerHandshake(
     mtls_opts: ?MtlsOpts,
     handshake_complete: *bool,
 ) !ServerSession {
+    const wire = transport.Stream{ .fd = client_fd, .deadline = transport.Deadline.afterMilliseconds(10_000) };
     // metrics are tracked only for mtls handshakes — the regular TLS
     // termination path has its own throughput surface elsewhere.
     errdefer if (mtls_opts != null) mtls_metrics.record(.server, .failed);
@@ -114,13 +117,13 @@ pub fn acceptServerHandshake(
     var sh_record: [5 + 512]u8 = undefined;
     record.writeHeader(&sh_record, .handshake, @intCast(sh_len)) catch return error.HandshakeFailed;
     @memcpy(sh_record[5 .. 5 + sh_len], sh_buf[0..sh_len]);
-    _ = linux_platform.posix.send(client_fd, sh_record[0 .. 5 + sh_len], posix.MSG.NOSIGNAL) catch return error.WriteFailed;
+    try wire.writeAll(sh_record[0 .. 5 + sh_len]);
     transcript.update(sh_buf[0..sh_len]);
 
     const ccs = [_]u8{
         0x14, 0x03, 0x03, 0x00, 0x01, 0x01,
     };
-    _ = linux_platform.posix.send(client_fd, &ccs, posix.MSG.NOSIGNAL) catch return error.WriteFailed;
+    try wire.writeAll(&ccs);
 
     var transcript_hash: [hash_len]u8 = undefined;
     transcript_hash = transcript.peek();
@@ -137,13 +140,13 @@ pub fn acceptServerHandshake(
     var ee_buf: [64]u8 = undefined;
     const ee_len = handshake.buildEncryptedExtensions(&ee_buf, selected_alpn) catch return error.HandshakeFailed;
     transcript.update(ee_buf[0..ee_len]);
-    try sendEncryptedHandshake(client_fd, ee_buf[0..ee_len], server_hs_traffic, &server_seq);
+    try sendEncryptedHandshake(wire, ee_buf[0..ee_len], server_hs_traffic, &server_seq);
 
     if (mtls_opts != null) {
         var cr_buf: [64]u8 = undefined;
         const cr_len = message_build.buildCertificateRequest(&cr_buf) catch return error.HandshakeFailed;
         transcript.update(cr_buf[0..cr_len]);
-        try sendEncryptedHandshake(client_fd, cr_buf[0..cr_len], server_hs_traffic, &server_seq);
+        try sendEncryptedHandshake(wire, cr_buf[0..cr_len], server_hs_traffic, &server_seq);
     }
 
     const cert_der = pem.parseCertDer(alloc, cert_pem) catch return error.CertParseFailed;
@@ -152,7 +155,7 @@ pub fn acceptServerHandshake(
     var cert_buf: [8192]u8 = undefined;
     const cert_len = handshake.buildCertificate(&cert_buf, cert_der) catch return error.HandshakeFailed;
     transcript.update(cert_buf[0..cert_len]);
-    try sendEncryptedHandshake(client_fd, cert_buf[0..cert_len], server_hs_traffic, &server_seq);
+    try sendEncryptedHandshake(wire, cert_buf[0..cert_len], server_hs_traffic, &server_seq);
 
     const private_key = pem.parseEcPrivateKey(key_pem) catch return error.KeyParseFailed;
     const cv_transcript_hash = transcript.peek();
@@ -161,7 +164,7 @@ pub fn acceptServerHandshake(
     const cv_len = handshake.buildCertificateVerify(&cv_buf, .server, cv_transcript_hash, private_key) catch
         return error.HandshakeFailed;
     transcript.update(cv_buf[0..cv_len]);
-    try sendEncryptedHandshake(client_fd, cv_buf[0..cv_len], server_hs_traffic, &server_seq);
+    try sendEncryptedHandshake(wire, cv_buf[0..cv_len], server_hs_traffic, &server_seq);
 
     const fin_transcript_hash = transcript.peek();
     const verify_data = handshake.computeFinished(hs_keys.server_handshake_traffic_secret, fin_transcript_hash);
@@ -169,24 +172,16 @@ pub fn acceptServerHandshake(
     var fin_buf: [128]u8 = undefined;
     const fin_len = handshake.buildFinished(&fin_buf, verify_data) catch return error.HandshakeFailed;
     transcript.update(fin_buf[0..fin_len]);
-    try sendEncryptedHandshake(client_fd, fin_buf[0..fin_len], server_hs_traffic, &server_seq);
+    try sendEncryptedHandshake(wire, fin_buf[0..fin_len], server_hs_traffic, &server_seq);
+
+    // Application keys use the transcript through server Finished only.
+    const app_transcript_hash = transcript.peek();
 
     var client_seq: u64 = 0;
     var peer_identity_out: ?[]u8 = null;
     errdefer if (peer_identity_out) |p| alloc.free(p);
 
-    if (mtls_opts) |opts| {
-        // mTLS path: client may send Certificate + CertificateVerify + Finished,
-        // possibly across several records. read until we have a Finished.
-        try acceptClientAuthAndFinished(alloc, client_fd, client_hs_traffic, &client_seq, &transcript, hs_keys, opts, &peer_identity_out);
-    } else {
-        // non-mTLS path: single read, expects just a Finished (preceded by
-        // an optional ChangeCipherSpec record from middlebox-friendly clients).
-        try readPlainClientFinished(client_fd, client_hs_traffic, &client_seq, &transcript, hs_keys);
-    }
-
-    var app_transcript_hash: [hash_len]u8 = undefined;
-    transcript.final(&app_transcript_hash);
+    try acceptClientAuthAndFinished(alloc, wire, client_hs_traffic, &client_seq, &transcript, hs_keys, mtls_opts, &peer_identity_out);
 
     const master = handshake.deriveMasterSecret(hs_keys.handshake_secret);
     const app_keys = handshake.deriveApplicationSecrets(master, app_transcript_hash);
@@ -239,9 +234,10 @@ pub fn handleTlsSession(
 
     var client_app_seq: u64 = 0;
     var server_app_seq: u64 = 0;
-    var initial_plaintext: std.ArrayList(u8) = .empty;
-    defer initial_plaintext.deinit(std.heap.page_allocator);
+    var initial = RequestBuffer.init();
+    defer initial.deinit();
     var initial_request_forwarded = false;
+    const is_h2 = selected_alpn != null and std.mem.eql(u8, selected_alpn.?, "h2");
     var h2_rewrite_state = http2_request.StreamRewriteState{};
 
     var poll_fds = [_]posix.pollfd{
@@ -250,93 +246,89 @@ pub fn handleTlsSession(
     };
 
     while (true) {
-        const poll_result = posix.poll(&poll_fds, 30000) catch break;
+        const pending_request = !initial_request_forwarded or initial.bytes.items.len > 0;
+        const deadline = if (pending_request) initial.deadline else transport.Deadline.afterMilliseconds(30_000);
+        const timeout = deadline.remaining() catch break;
+        const wait = posix.timespec{ .sec = @divTrunc(timeout, 1000), .nsec = @rem(timeout, 1000) * std.time.ns_per_ms };
+        // ppoll exposes interruptions so retries keep the request's deadline.
+        const poll_result = posix.ppoll(&poll_fds, &wait, null) catch |err| switch (err) {
+            error.SignalInterrupt => continue,
+            else => break,
+        };
         if (poll_result == 0) break;
 
-        if (poll_fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) break;
-        if (poll_fds[1].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) break;
-
         if (poll_fds[0].revents & posix.POLL.IN != 0) {
-            var enc_buf: [record.max_ciphertext_size + record.record_header_size]u8 = undefined;
-            const enc_n = posix.read(client_fd, &enc_buf) catch break;
-            if (enc_n == 0) break;
-
-            if (enc_n < record.record_header_size) break;
-            const app_rec_header = enc_buf[0..5].*;
-            const app_ct_len = (@as(usize, enc_buf[3]) << 8) | @as(usize, enc_buf[4]);
-            if (5 + app_ct_len > enc_n) break;
-
-            const app_ct = enc_buf[5 .. 5 + app_ct_len];
-            const decrypted = record.decryptRecord(
-                app_keys.client.key,
-                app_keys.client.iv,
-                client_app_seq,
-                app_ct,
-                app_rec_header,
-            ) catch break;
-            client_app_seq += 1;
-
+            var buffer: record_transport.Buffer = undefined;
+            const decrypted = record_transport.readEncrypted(.{ .fd = client_fd, .deadline = deadline }, &buffer, app_keys.client, &client_app_seq, false) catch break;
             if (decrypted.content_type == .alert) break;
+            if (decrypted.content_type != .application_data) return error.UnexpectedRecord;
+            const backend_wire = transport.Stream{ .fd = backend_fd, .deadline = deadline };
 
             if (decrypted.plaintext.len > 0) {
-                if (selected_alpn != null and std.mem.eql(u8, selected_alpn.?, "h2")) {
-                    initial_plaintext.appendSlice(std.heap.page_allocator, decrypted.plaintext) catch break;
-                    while (true) {
-                        const rewritten_chunk = http2_request.rewriteClientStreamChunk(
-                            std.heap.page_allocator,
-                            initial_plaintext.items,
-                            &h2_rewrite_state,
-                            "https",
-                        ) catch break;
-                        if (rewritten_chunk == null) break;
-                        defer rewritten_chunk.?.deinit(std.heap.page_allocator);
-                        if (rewritten_chunk.?.bytes.len > 0) {
-                            _ = linux_platform.posix.send(backend_fd, rewritten_chunk.?.bytes, posix.MSG.NOSIGNAL) catch break;
-                        }
-                        initial_plaintext.replaceRange(std.heap.page_allocator, 0, rewritten_chunk.?.consumed, "") catch break;
+                if (is_h2) {
+                    if (initial_request_forwarded and initial.bytes.items.len == 0) initial.deadline = transport.Deadline.afterMilliseconds(request_timeout_ms);
+                    try initial.append(decrypted.plaintext);
+                    while (try http2_request.rewriteClientStreamChunk(std.heap.page_allocator, initial.bytes.items, &h2_rewrite_state, "https")) |chunk| {
+                        defer chunk.deinit(std.heap.page_allocator);
+                        try backend_wire.writeAll(chunk.bytes);
+                        try initial.bytes.replaceRange(std.heap.page_allocator, 0, chunk.consumed, "");
+                        initial_request_forwarded = true;
                     }
                 } else if (!initial_request_forwarded) {
-                    initial_plaintext.appendSlice(std.heap.page_allocator, decrypted.plaintext) catch break;
-                    const first_request = prepareInitialRequest(std.heap.page_allocator, selected_alpn, initial_plaintext.items) catch |err| switch (err) {
-                        error.BufferTooShort, error.MissingHeaders, error.IncompleteRequest, error.MissingClientPreface => null,
-                        else => break,
+                    try initial.append(decrypted.plaintext);
+                    const first_request = prepareInitialRequest(std.heap.page_allocator, selected_alpn, initial.bytes.items) catch |err| switch (err) {
+                        error.IncompleteRequest => null,
+                        else => return err,
                     };
                     if (first_request) |request| {
                         defer std.heap.page_allocator.free(request);
-                        _ = linux_platform.posix.send(backend_fd, request, posix.MSG.NOSIGNAL) catch break;
+                        try backend_wire.writeAll(request);
                         initial_request_forwarded = true;
+                        initial.bytes.clearAndFree(std.heap.page_allocator);
                     }
                 } else {
-                    _ = linux_platform.posix.send(backend_fd, decrypted.plaintext, posix.MSG.NOSIGNAL) catch break;
+                    try backend_wire.writeAll(decrypted.plaintext);
                 }
             }
         }
 
         if (poll_fds[1].revents & posix.POLL.IN != 0) {
-            var plain_buf: [record.max_record_size]u8 = undefined;
-            const plain_n = posix.read(backend_fd, &plain_buf) catch break;
-            if (plain_n == 0) break;
-
-            var ct_out: [record.max_ciphertext_size]u8 = undefined;
-            const ct_len = record.encryptRecord(
-                app_keys.server.key,
-                app_keys.server.iv,
-                server_app_seq,
-                plain_buf[0..plain_n],
-                .application_data,
-                &ct_out,
-            ) catch break;
-            server_app_seq += 1;
-
-            var out_rec: [5 + record.max_ciphertext_size]u8 = undefined;
-            record.writeHeader(&out_rec, .application_data, @intCast(ct_len)) catch break;
-            @memcpy(out_rec[5 .. 5 + ct_len], ct_out[0..ct_len]);
-            _ = linux_platform.posix.send(client_fd, out_rec[0 .. 5 + ct_len], posix.MSG.NOSIGNAL) catch break;
+            var plaintext: [record.max_record_size]u8 = undefined;
+            const n = (transport.Stream{ .fd = backend_fd, .deadline = deadline }).read(&plaintext) catch break;
+            if (n == 0) break;
+            try record_transport.write(.{ .fd = client_fd, .deadline = deadline }, app_keys.server, &server_app_seq, .application_data, plaintext[0..n]);
         }
+        // Keep draining records when readable data accompanies a half-close.
+        if (poll_fds[0].revents & posix.POLL.IN == 0 and poll_fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) break;
+        if (poll_fds[1].revents & posix.POLL.IN == 0 and poll_fds[1].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) break;
     }
 
     sendEncryptedCloseNotify(client_fd, app_keys.server, &server_app_seq);
 }
+
+// This also bounds incomplete HTTP/2 frame/header sequences. With the listener's
+// connection cap, retained request input has a finite process-wide upper bound.
+const max_request_bytes = 64 * 1024;
+const request_timeout_ms = 10_000;
+
+const RequestBuffer = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    deadline: transport.Deadline,
+
+    fn init() RequestBuffer {
+        return .{ .deadline = transport.Deadline.afterMilliseconds(request_timeout_ms) };
+    }
+
+    fn append(self: *RequestBuffer, bytes: []const u8) !void {
+        _ = try self.deadline.remaining();
+        if (bytes.len > max_request_bytes - self.bytes.items.len) return error.RequestTooLarge;
+        try self.bytes.appendSlice(std.heap.page_allocator, bytes);
+    }
+
+    fn deinit(self: *RequestBuffer) void {
+        self.bytes.deinit(std.heap.page_allocator);
+    }
+};
 
 const InitialRequestError = error{IncompleteRequest} || http2_request.ParseError;
 
@@ -372,61 +364,6 @@ fn injectForwardedProtoHttp1(alloc: std.mem.Allocator, request: []const u8, prot
     return out.toOwnedSlice(alloc);
 }
 
-/// non-mTLS path: the client sends just an (optionally CCS-prefixed)
-/// encrypted Finished. existing behavior, factored out into a helper.
-fn readPlainClientFinished(
-    client_fd: posix.fd_t,
-    keys: handshake.TrafficKeys,
-    client_seq: *u64,
-    transcript: *Sha384,
-    hs_keys: handshake.HandshakeKeys,
-) !void {
-    var client_finished_buf: [512]u8 = undefined;
-    const client_rec_n = socket_support.readWithTimeout(client_fd, &client_finished_buf, 10000) catch
-        return error.ReadFailed;
-    if (client_rec_n < record.record_header_size + record.aead_tag_size + 1)
-        return error.InvalidClientFinished;
-
-    var client_data = client_finished_buf[0..client_rec_n];
-    if (client_data[0] == 0x14) {
-        if (client_data.len < 6) return error.InvalidClientFinished;
-        const ccs_len: usize = 5 + @as(usize, (@as(u16, client_data[3]) << 8) | @as(u16, client_data[4]));
-        if (ccs_len > client_data.len) return error.InvalidClientFinished;
-        client_data = client_data[ccs_len..];
-        if (client_data.len < record.record_header_size + record.aead_tag_size + 1)
-            return error.InvalidClientFinished;
-    }
-
-    const client_rec_header = client_data[0..5].*;
-    const client_ciphertext_len = (@as(usize, client_data[3]) << 8) | @as(usize, client_data[4]);
-    if (5 + client_ciphertext_len > client_data.len) return error.InvalidClientFinished;
-    const client_ciphertext = client_data[5 .. 5 + client_ciphertext_len];
-
-    const client_decrypted = record.decryptRecord(
-        keys.key,
-        keys.iv,
-        client_seq.*,
-        client_ciphertext,
-        client_rec_header,
-    ) catch return error.InvalidClientFinished;
-    client_seq.* += 1;
-
-    if (client_decrypted.content_type != .handshake) return error.InvalidClientFinished;
-    if (client_decrypted.plaintext.len < 4 + hash_len) return error.InvalidClientFinished;
-    if (client_decrypted.plaintext[0] != 0x14) return error.InvalidClientFinished;
-
-    const client_fin_transcript_hash = transcript.peek();
-    const expected_verify = handshake.computeFinished(
-        hs_keys.client_handshake_traffic_secret,
-        client_fin_transcript_hash,
-    );
-
-    if (!std.mem.eql(u8, client_decrypted.plaintext[4 .. 4 + hash_len], &expected_verify))
-        return error.FinishedVerifyFailed;
-
-    transcript.update(client_decrypted.plaintext);
-}
-
 /// mTLS path: read the client's Certificate, optionally CertificateVerify,
 /// then Finished. messages may arrive over one or more encrypted records;
 /// accumulate plaintext in `pending` and dispatch by handshake message
@@ -434,12 +371,12 @@ fn readPlainClientFinished(
 /// `peer_identity_out` (caller frees).
 fn acceptClientAuthAndFinished(
     alloc: std.mem.Allocator,
-    client_fd: posix.fd_t,
+    wire: transport.Stream,
     keys: handshake.TrafficKeys,
     client_seq: *u64,
     transcript: *Sha384,
     hs_keys: handshake.HandshakeKeys,
-    opts: MtlsOpts,
+    opts: ?MtlsOpts,
     peer_identity_out: *?[]u8,
 ) !void {
     var pending: std.ArrayList(u8) = .empty;
@@ -459,7 +396,7 @@ fn acceptClientAuthAndFinished(
     var total_client_auth_bytes: usize = 0;
 
     while (!saw_finished) {
-        const plaintext = try readOneEncryptedHandshakeRecordAlloc(alloc, client_fd, keys, client_seq);
+        const plaintext = try readOneEncryptedHandshakeRecordAlloc(alloc, wire, keys, client_seq);
         defer alloc.free(plaintext);
         // bound the client's auth flight (Certificate + CertVerify + Finished):
         // a malicious client could otherwise stream handshake records forever.
@@ -474,7 +411,7 @@ fn acceptClientAuthAndFinished(
 
             switch (msg.msg_type) {
                 @intFromEnum(message_parse.HandshakeType.certificate) => {
-                    if (saw_certificate) return error.InvalidClientFinished;
+                    if (opts == null or saw_certificate) return error.InvalidClientFinished;
                     saw_certificate = true;
                     const der = message_parse.parseCertificateMessage(msg.body) catch return error.InvalidClientFinished;
                     if (der.len > 0) {
@@ -484,7 +421,7 @@ fn acceptClientAuthAndFinished(
                     transcript.update(msg.raw);
                 },
                 @intFromEnum(message_parse.HandshakeType.certificate_verify) => {
-                    if (client_cert_der == null) return error.InvalidClientFinished;
+                    if (client_cert_der == null or got_cert_verify_sig != null) return error.InvalidClientFinished;
                     const cv = message_parse.parseCertificateVerify(msg.body) catch return error.InvalidClientFinished;
                     if (cv.algorithm != 0x0403) return error.InvalidClientFinished;
                     transcript_hash_at_cv = transcript.peek();
@@ -510,9 +447,11 @@ fn acceptClientAuthAndFinished(
         }
     }
 
+    if (pending.items.len != 0) return error.InvalidClientFinished;
+
     // verify the client cert (if any) before declaring the handshake done.
     if (client_cert_pem) |cpem| {
-        x509_verify.verifyLeafAgainstCa(alloc, cpem, opts.trust_ca_pem, opts.expected_identity, opts.now_unix) catch return error.UntrustedClientCert;
+        x509_verify.verifyLeafAgainstCa(alloc, cpem, opts.?.trust_ca_pem, opts.?.expected_identity, opts.?.now_unix) catch return error.UntrustedClientCert;
 
         // verify the client's CertificateVerify signature against the
         // cert's public key — the spec-required peer-of-keypair check.
@@ -529,7 +468,7 @@ fn acceptClientAuthAndFinished(
         } else {
             peer_identity_out.* = try alloc.dupe(u8, parsed.subject_cn);
         }
-    } else if (opts.require_client_cert) {
+    } else if (opts != null and opts.?.require_client_cert) {
         return error.MissingClientCert;
     }
 }
@@ -538,29 +477,12 @@ fn acceptClientAuthAndFinished(
 /// plaintext. helper for the mTLS client-auth read loop.
 fn readOneEncryptedHandshakeRecordAlloc(
     alloc: std.mem.Allocator,
-    fd: posix.fd_t,
+    wire: transport.Stream,
     keys: handshake.TrafficKeys,
     seq: *u64,
 ) ![]u8 {
-    var hdr: [5]u8 = undefined;
-    var off: usize = 0;
-    while (off < 5) {
-        const n = posix.read(fd, hdr[off..]) catch return error.ReadFailed;
-        if (n == 0) return error.UnexpectedEof;
-        off += n;
-    }
-    const payload_len = (@as(usize, hdr[3]) << 8) | @as(usize, hdr[4]);
-    if (payload_len > record.max_ciphertext_size) return error.InvalidClientFinished;
-    const ciphertext = try alloc.alloc(u8, payload_len);
-    defer alloc.free(ciphertext);
-    off = 0;
-    while (off < payload_len) {
-        const n = posix.read(fd, ciphertext[off..]) catch return error.ReadFailed;
-        if (n == 0) return error.UnexpectedEof;
-        off += n;
-    }
-    const dec = record.decryptRecord(keys.key, keys.iv, seq.*, ciphertext, hdr) catch return error.DecryptFailed;
-    seq.* += 1;
+    var buffer: record_transport.Buffer = undefined;
+    const dec = try record_transport.readEncrypted(wire, &buffer, keys, seq, true);
     if (dec.content_type != .handshake) return error.InvalidClientFinished;
     return try alloc.dupe(u8, dec.plaintext);
 }
@@ -601,44 +523,12 @@ fn derToPemLocal(alloc: std.mem.Allocator, der: []const u8) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
-pub fn sendEncryptedHandshake(fd: posix.fd_t, msg: []const u8, keys: handshake.TrafficKeys, seq: *u64) !void {
-    var ct_buf: [record.max_ciphertext_size]u8 = undefined;
-    const ct_len = record.encryptRecord(
-        keys.key,
-        keys.iv,
-        seq.*,
-        msg,
-        .handshake,
-        &ct_buf,
-    ) catch return error.EncryptFailed;
-
-    var out: [5 + record.max_ciphertext_size]u8 = undefined;
-    record.writeHeader(&out, .application_data, @intCast(ct_len)) catch return error.EncryptFailed;
-    @memcpy(out[5 .. 5 + ct_len], ct_buf[0..ct_len]);
-    _ = linux_platform.posix.send(fd, out[0 .. 5 + ct_len], posix.MSG.NOSIGNAL) catch return error.WriteFailed;
-    seq.* += 1;
+pub fn sendEncryptedHandshake(wire: transport.Stream, msg: []const u8, keys: handshake.TrafficKeys, seq: *u64) !void {
+    try record_transport.write(wire, keys, seq, .handshake, msg);
 }
 
-pub fn sendEncryptedCloseNotify(fd: posix.fd_t, keys: handshake.TrafficKeys, seq: *u64) void {
-    const alert = [_]u8{ 0x01, 0x00 };
-    var ct_buf: [64]u8 = undefined;
-    const ct_len = record.encryptRecord(
-        keys.key,
-        keys.iv,
-        seq.*,
-        &alert,
-        .alert,
-        &ct_buf,
-    ) catch return;
-
-    var out: [5 + 64]u8 = undefined;
-    record.writeHeader(&out, .application_data, @intCast(ct_len)) catch return;
-    @memcpy(out[5 .. 5 + ct_len], ct_buf[0..ct_len]);
-    _ = linux_platform.posix.send(fd, out[0 .. 5 + ct_len], posix.MSG.NOSIGNAL) catch |e| {
-        log.warn("tls encrypted data write failed: {}", .{e});
-        return;
-    };
-    seq.* += 1;
+fn sendEncryptedCloseNotify(fd: posix.fd_t, keys: handshake.TrafficKeys, seq: *u64) void {
+    record_transport.write(.{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(1000) }, keys, seq, .alert, &.{ 0x01, 0x00 }) catch {};
 }
 
 test "injectForwardedProtoHttp1 rewrites the first request headers" {
@@ -886,4 +776,15 @@ test "mTLS — warn mode accepts an empty client cert (no identity)" {
     t.join();
     try std.testing.expect(server_err == null);
     try std.testing.expect(peer_id == null); // no identity surfaced
+}
+
+test "request buffering rejects oversized and expired incomplete headers" {
+    var pending = RequestBuffer.init();
+    defer pending.deinit();
+    const chunk = [_]u8{'x'} ** 16384;
+    for (0..4) |_| try pending.append(&chunk);
+    try std.testing.expectError(error.RequestTooLarge, pending.append("x"));
+    try std.testing.expectEqual(@as(usize, max_request_bytes), pending.bytes.items.len);
+    pending.deadline = .{ .expires_ns = 0 };
+    try std.testing.expectError(error.TimedOut, pending.append(""));
 }
