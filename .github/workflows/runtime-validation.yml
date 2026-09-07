@@ -145,6 +145,7 @@ jobs:
           bash scripts/bpf-load-balancer-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/bpf-load-balancer.log"
           bash scripts/dns-bridge-kernel-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/dns-bridge-kernel.log"
           bash scripts/wireguard-kernel-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/wireguard-kernel.log"
+          bash scripts/veth-namespace-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/veth-namespace.log"
           sudo env RUNNER_TEMP="$RUNNER_TEMP" python3 scripts/scheduled-runtime-smoke.py \
             2>&1 | tee "$RUNNER_TEMP/runtime-logs/scheduled-runtime.log"
 
