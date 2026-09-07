@@ -29,7 +29,6 @@ pub fn apply(db: *sqlite.Db, entry: types.LogEntry) !void {
         }
     }
 
-    try db_runtime.initMeta(db);
     var statements = sql_guard.StatementIterator{ .sql = entry.data };
     while (statements.next()) |sql| {
         db_runtime.execStatement(db, sql, .{}) catch |err| {
