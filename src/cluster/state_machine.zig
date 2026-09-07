@@ -829,7 +829,7 @@ test "replicated batch applies every heartbeat emitted by the real batcher" {
     }
 }
 
-test "replicated batch rolls back earlier writes when a later constraint fails and permits retry" {
+test "replicated conflict rolls back the batch and permits later commands" {
     var sm = try StateMachine.initMemory();
     defer sm.deinit();
     try seedBatchTestAgents(&sm);
@@ -839,13 +839,14 @@ test "replicated batch rolls back earlier writes when a later constraint fails a
         "VALUES ('abcdef000002', 'localhost', 'active', 4, 8192, 5, 0, 0, 100, 100);";
     const entry: LogEntry = .{ .index = 1, .term = 1, .data = batch };
     sm.apply(entry);
-    try expectBatchTestState(&sm, 0, 0, 0);
+    try expectBatchTestState(&sm, 1, 0, 0);
+    try std.testing.expect(try @import("state_machine/command.zig").wasRejected(&sm.db, 1, 1));
 
-    // Remove the conflicting row locally, then retry the exact same entry.
-    // Its increment must happen once, not accumulate across failed attempts.
-    try sm.db.exec("DELETE FROM agents WHERE id = 'abcdef000002';", .{}, .{});
+    // Replaying a rejected entry never reruns its partial mutation.
     sm.apply(entry);
-    try expectBatchTestState(&sm, 1, 1, 5);
+    try expectBatchTestState(&sm, 1, 0, 0);
+    sm.apply(.{ .index = 2, .term = 1, .data = batch_test_increment });
+    try expectBatchTestState(&sm, 2, 1, 2);
 }
 
 test "replicated batch rolls back data when persisting its applied index fails" {
@@ -990,4 +991,30 @@ test "snapshot creation rejects advertised and persisted boundary mismatches" {
         .data_len = 0,
     }));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "snapshot.dat", .{}));
+}
+
+test "pending wireguard registrations allocate distinct applied identities" {
+    const registry = @import("registry.zig");
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+    var batches: [2][4096]u8 = undefined;
+    var commands: [2][]const u8 = undefined;
+    for ([_][]const u8{ "agent-one", "agent-two" }, 0..) |id, i| {
+        var registration: [2048]u8 = undefined;
+        var peer: [2048]u8 = undefined;
+        commands[i] = try std.fmt.bufPrint(&batches[i], "{s} {s}", .{
+            try registry.registerSql(&registration, id, "10.0.0.1", .{ .cpu_cores = 2, .memory_mb = 512 }, 1),
+            try registry.allocateWireguardPeerSql(&peer, id, id, "10.0.0.1:51820"),
+        });
+    }
+    // Build both proposals before applying either, as concurrent HTTP threads do.
+    for (commands, 1..) |data, index| sm.apply(.{ .index = index, .term = 1, .data = data });
+    try std.testing.expectEqual(@as(u64, 2), sm.last_applied);
+    const Row = struct { node_id: i64 };
+    for ([_][]const u8{ "agent-one", "agent-two" }, 1..) |id, expected| {
+        const row = (try sm.db.one(Row, "SELECT node_id FROM agents WHERE id = ?;", .{}, .{id})).?;
+        try std.testing.expectEqual(@as(i64, @intCast(expected)), row.node_id);
+        const peer = (try sm.db.one(Row, "SELECT node_id FROM wireguard_peers WHERE agent_id = ?;", .{}, .{id})).?;
+        try std.testing.expectEqual(row.node_id, peer.node_id);
+    }
 }

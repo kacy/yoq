@@ -29,10 +29,28 @@ pub fn apply(db: *sqlite.Db, entry: types.LogEntry) !void {
         }
     }
 
+    try db_runtime.initMeta(db);
     var statements = sql_guard.StatementIterator{ .sql = entry.data };
     while (statements.next()) |sql| {
-        try db_runtime.execStatement(db, sql, .{});
+        db_runtime.execStatement(db, sql, .{}) catch |err| {
+            if (err != error.SQLiteConstraint) return err;
+            // A client conflict has a deterministic result. Roll back the whole
+            // command and record rejection, so later committed entries can run.
+            try db_runtime.execStatement(db, "ROLLBACK;", .{});
+            try db_runtime.execStatement(db, "BEGIN IMMEDIATE;", .{});
+            try db_runtime.initMeta(db);
+            try db_runtime.execStatement(db, "INSERT INTO rejected_commands (log_index, term) VALUES (?, ?);", .{ @as(i64, @intCast(entry.index)), @as(i64, @intCast(entry.term)) });
+            break;
+        };
     }
     try db_runtime.setLastApplied(db, entry.index);
     try db_runtime.execStatement(db, "COMMIT;", .{});
+}
+
+/// Rejections are snapshot state, just like the applied position. A caller
+/// can still observe its outcome after compaction removes the original log.
+pub fn wasRejected(db: *sqlite.Db, index: types.LogIndex, term: types.Term) !bool {
+    const Row = struct { count: i64 };
+    const row = (try db.one(Row, "SELECT COUNT(*) AS count FROM rejected_commands WHERE log_index = ? AND term = ?;", .{}, .{ @as(i64, @intCast(index)), @as(i64, @intCast(term)) })).?;
+    return row.count != 0;
 }
