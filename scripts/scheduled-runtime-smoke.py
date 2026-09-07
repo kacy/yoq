@@ -72,6 +72,7 @@ def start_registry(cert, key):
 
     class Registry(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
+            self.server.request_paths.append(self.path)
             if self.path == "/v2/":
                 data = b"{}"
             elif self.path == "/v2/fixture/manifests/" + digest(manifest):
@@ -94,6 +95,7 @@ def start_registry(cert, key):
             pass
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Registry)
+    server.request_paths = []
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, key)
     server.socket = context.wrap_socket(server.socket, server_side=True)
@@ -134,6 +136,7 @@ def inside(root, outer_mount, outer_net):
     rejected = subprocess.run([str(YOQ), "pull", image], env=dict(os.environ, HOME=str(untrusted_home)),
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
     assert rejected.returncode != 0, "registry certificate was accepted without trust"
+    assert not registry.request_paths, "untrusted registry received an HTTP request"
     run("mount", "--bind", str(cert), "/etc/ssl/certs/ca-certificates.crt")
     processes = []
     logs = []
@@ -201,6 +204,8 @@ def inside(root, outer_mount, outer_net):
             assert result.get("status") == "completed", result
             assignments = api(f"/agents/{agent_id}/assignments")
             assert assignments[0]["status"] == "running", assignments
+            assert any("/manifests/" in path for path in registry.request_paths)
+            assert sum("/blobs/" in path for path in registry.request_paths) >= 2
             status = Path(f"/proc/{row['pid']}/status").read_text()
             assert "Uid:\t65534\t65534\t65534\t65534" in status, status
             cgroup = Path("/sys/fs/cgroup/yoq") / row["id"]
