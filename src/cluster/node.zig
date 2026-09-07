@@ -597,6 +597,7 @@ test "resolveNodeId matches configured peer" {
         .id = 1,
         .port = 0,
         .peers = peers,
+        .shared_key = [_]u8{7} ** 32,
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -661,6 +662,7 @@ test "handleMessage drops request_vote with mismatched sender id" {
         .id = 1,
         .port = 0,
         .peers = peers,
+        .shared_key = [_]u8{7} ** 32,
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -697,6 +699,7 @@ test "handleMessage accepts append_entries only from authenticated leader" {
         .id = 1,
         .port = 0,
         .peers = peers,
+        .shared_key = [_]u8{7} ** 32,
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -746,6 +749,7 @@ test "leader_id defaults to null" {
         .id = 1,
         .port = 0,
         .peers = peers,
+        .shared_key = [_]u8{7} ** 32,
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -769,6 +773,7 @@ test "become_leader sets leader_id to self" {
         .id = 1,
         .port = 0,
         .peers = peers,
+        .shared_key = [_]u8{7} ** 32,
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -794,6 +799,7 @@ test "become_follower sets leader_id to provided id" {
         .id = 1,
         .port = 0,
         .peers = peers,
+        .shared_key = [_]u8{7} ** 32,
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -819,6 +825,7 @@ test "leaderAddrBuf returns null when leader is self" {
         .id = 1,
         .port = 0,
         .peers = peers,
+        .shared_key = [_]u8{7} ** 32,
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -844,6 +851,7 @@ test "leaderAddrBuf returns null when no leader known" {
         .id = 1,
         .port = 0,
         .peers = peers,
+        .shared_key = [_]u8{7} ** 32,
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -869,6 +877,7 @@ test "leaderAddrBuf returns peer address when leader is a peer" {
         .port = 0,
         .api_port = 7700,
         .peers = peers,
+        .shared_key = [_]u8{7} ** 32,
         .data_dir = tmp_path,
     });
     defer node.deinit();
