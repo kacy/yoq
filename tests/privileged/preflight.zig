@@ -46,12 +46,7 @@ fn requireLinux() !void {
 fn requireOptIn() !void {
     if (build_options.run_privileged_tests) return;
 
-    const environ = cwd().readFileAlloc(
-        std.testing.io,
-        "/proc/self/environ",
-        std.testing.allocator,
-        .limited(64 * 1024),
-    ) catch |err| {
+    const environ = readProcFile("/proc/self/environ") catch |err| {
         return skip("cannot read /proc/self/environ for opt-in check: {s}", .{@errorName(err)});
     };
     defer std.testing.allocator.free(environ);
@@ -86,12 +81,7 @@ fn requireCgroupV2() !void {
 }
 
 fn requireOverlayfs() !void {
-    const filesystems = cwd().readFileAlloc(
-        std.testing.io,
-        "/proc/filesystems",
-        std.testing.allocator,
-        .limited(64 * 1024),
-    ) catch |err| {
+    const filesystems = readProcFile("/proc/filesystems") catch |err| {
         return skip("cannot read /proc/filesystems: {s}", .{@errorName(err)});
     };
     defer std.testing.allocator.free(filesystems);
@@ -99,6 +89,14 @@ fn requireOverlayfs() !void {
     if (std.mem.indexOf(u8, filesystems, "overlay") == null) {
         return skip("overlayfs is not available on this host", .{});
     }
+}
+
+fn readProcFile(path: []const u8) ![]u8 {
+    const file = try cwd().openFile(std.testing.io, path, .{});
+    defer file.close(std.testing.io);
+    // Proc files report size zero but provide data when read as streams.
+    var reader = file.readerStreaming(std.testing.io, &.{});
+    return reader.interface.allocRemaining(std.testing.allocator, .limited(64 * 1024));
 }
 
 pub fn requirePortsAvailable(base: u16, count: usize) !void {
