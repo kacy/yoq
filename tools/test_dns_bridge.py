@@ -74,7 +74,9 @@ def inside(binary, outer):
             result = subprocess.run([*prefix, sys.executable, str(Path(__file__).resolve()), "--query", "10.42.2.1", "--expect"], capture_output=True)
             if result.returncode == 0:
                 break
-            assert server.poll() is None and time.monotonic() < deadline, result.stderr
+            if server.poll() is not None:
+                raise AssertionError(server.stderr.read().decode())
+            assert time.monotonic() < deadline, result.stderr
         run(*prefix, sys.executable, str(Path(__file__).resolve()), "--query", "10.42.0.1", "--expect")
         # Deliver a gateway-addressed packet through the unrelated interface:
         # explicit address binding alone would still accept this packet.
