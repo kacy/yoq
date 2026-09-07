@@ -426,13 +426,13 @@ fn waitForAssignmentExitWith(c: anytype, stopping: *const std.atomic.Value(bool)
     if (stop_requested) c.stop() catch {};
     while (true) {
         c.poll() catch {
-            c.kill() catch {};
+            c.forceStop() catch {};
             return c.wait() catch 255;
         };
         if (c.status == .stopped) return c.exit_code orelse 255;
         if (stop_deadline) |deadline| {
             if (now() >= deadline) {
-                c.kill() catch {};
+                c.forceStop() catch {};
                 return c.wait() catch 255;
             }
         } else if (stopping.load(.acquire)) {
@@ -440,7 +440,7 @@ fn waitForAssignmentExitWith(c: anytype, stopping: *const std.atomic.Value(bool)
             stop_deadline = now() + 5 * std.time.ns_per_s;
         }
         if (!sleep(std.Io.Duration.fromMilliseconds(50), "assignment process wait")) {
-            c.kill() catch {};
+            c.forceStop() catch {};
             return c.wait() catch 255;
         }
     }
@@ -672,7 +672,7 @@ test "assignment worker ownership escalates uncooperative shutdown and reaps" {
         fn stop(self: *@This()) !void {
             self.terms += 1;
         }
-        fn kill(self: *@This()) !void {
+        fn forceStop(self: *@This()) !void {
             self.kills += 1;
         }
         fn wait(self: *@This()) !u8 {
