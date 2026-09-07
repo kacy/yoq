@@ -185,6 +185,11 @@ def inside(root, outer_mount, outer_net):
             db.row_factory = sqlite3.Row
             return db.execute("SELECT id, pid, ip_address FROM containers WHERE hostname='web' AND pid IS NOT NULL").fetchone()
 
+    def container_removed(container_id):
+        path = homes["agent"] / ".local/share/yoq/yoq.db"
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
+            return db.execute("SELECT count(*) FROM containers WHERE id = ?", (container_id,)).fetchone()[0] == 0
+
     def assignment_rows():
         # Worker assignment endpoints require worker credentials. Inspect this
         # fixture's committed state without giving the administrator that secret.
@@ -256,7 +261,7 @@ def inside(root, outer_mount, outer_net):
                                 rows[0]["status"] == "failed" and rows[0])
             assert terminal["status_reason"] == "process_failed", dict(terminal)
             assert not Path(f"/proc/{row['pid']}").exists(), "terminated process remains alive"
-            assert container_row() is None, "assignment cleanup retained its process record"
+            wait_for("assignment cleanup", lambda: container_removed(row["id"]))
         print("scheduled runtime: API authentication, registry certificate trust, OCI pull, readiness, routed HTTP, identity, limits, and exit passed", flush=True)
     finally:
         for process in reversed(processes):
