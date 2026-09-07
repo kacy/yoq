@@ -130,7 +130,7 @@ test "detached supervisor inherits process environment and exposes container jso
     for ([_][]const u8{ "HOME", "PATH", "YOQ_TEST_SUPERVISOR_MARKER" }) |key| {
         const expected = try std.fmt.allocPrint(alloc, "{s}={s}\x00", .{ key, fixture.env.env_map.get(key).? });
         defer alloc.free(expected);
-        try helpers.expectContains(environ.stdout, expected);
+        try std.testing.expect(std.mem.indexOf(u8, environ.stdout, expected) != null);
     }
 }
 
