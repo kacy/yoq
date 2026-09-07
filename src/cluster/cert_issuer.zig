@@ -62,49 +62,61 @@ const Ctx = struct {
     node: *cluster_node.Node,
     alloc: std.mem.Allocator,
     join_token_owned: []u8,
-    running: bool = true,
+    stopped: std.Io.Event = .unset,
+};
+
+/// The server owns this handle until stop joins all accesses to its node.
+pub const Worker = struct {
+    ctx: *Ctx,
+    thread: ?std.Thread,
+
+    pub fn stop(self: *Worker) void {
+        const thread = self.thread orelse return;
+        self.ctx.stopped.set(std.Options.debug_io);
+        thread.join();
+        const ctx = self.ctx;
+        std.crypto.secureZero(u8, ctx.join_token_owned);
+        ctx.alloc.free(ctx.join_token_owned);
+        ctx.alloc.destroy(ctx);
+        self.thread = null;
+    }
 };
 
 /// spawn the leader-only issuer loop. callable once at server startup.
 /// safe if `service_mtls` is off (the tick body returns early).
-pub fn spawn(node: *cluster_node.Node, alloc: std.mem.Allocator, join_token: []const u8) void {
+pub fn spawn(node: *cluster_node.Node, alloc: std.mem.Allocator, join_token: []const u8) ?Worker {
     const token_copy = alloc.dupe(u8, join_token) catch {
         log.warn("cert issuer: failed to copy join token", .{});
-        return;
+        return null;
     };
 
     const ctx = alloc.create(Ctx) catch {
+        std.crypto.secureZero(u8, token_copy);
         alloc.free(token_copy);
         log.warn("cert issuer: failed to allocate context", .{});
-        return;
+        return null;
     };
     ctx.* = .{ .node = node, .alloc = alloc, .join_token_owned = token_copy };
 
     const thread = std.Thread.spawn(.{}, run, .{ctx}) catch |err| {
         log.warn("cert issuer: failed to spawn thread: {}", .{err});
+        std.crypto.secureZero(u8, token_copy);
         alloc.free(token_copy);
         alloc.destroy(ctx);
-        return;
+        return null;
     };
-    thread.detach();
+    return .{ .ctx = ctx, .thread = thread };
 }
 
 fn run(ctx: *Ctx) void {
-    defer {
-        std.crypto.secureZero(u8, ctx.join_token_owned);
-        ctx.alloc.free(ctx.join_token_owned);
-        ctx.alloc.destroy(ctx);
-    }
-
-    while (ctx.running) {
+    while (!ctx.stopped.isSet()) {
         tick(ctx) catch |err| {
             log.warn("cert issuer: tick failed: {}", .{err});
         };
-        std.Io.sleep(
-            std.Options.debug_io,
-            std.Io.Duration.fromMilliseconds(tick_interval_secs * 1000),
-            .awake,
-        ) catch return;
+        ctx.stopped.waitTimeout(std.Options.debug_io, .{ .duration = .{ .raw = .fromSeconds(tick_interval_secs), .clock = .awake } }) catch |err| switch (err) {
+            error.Timeout => continue,
+            error.Canceled => return,
+        };
     }
 }
 
@@ -137,6 +149,7 @@ fn tickAt(ctx: *Ctx, now: i64) !void {
     };
 
     for (services.items) |service| {
+        if (ctx.stopped.isSet()) return;
         ensureCertForService(ctx, &loaded, service.service_name, now) catch |err| {
             log.warn("cert issuer: {s}: {}", .{ service.service_name, err });
             recordFailureLocked(ctx.alloc, service.service_name);
@@ -433,4 +446,16 @@ test "proxy issuer lifecycle issues and rotates with no registered services" {
     defer record.deinit(alloc);
     try std.testing.expectEqual(threshold, record.created_at);
     try std.testing.expectEqual(threshold + leaf_validity_secs, record.not_after);
+}
+
+test "certificate worker ownership stops before node teardown" {
+    var node = try cluster_node.Node.initForTests(std.testing.allocator, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/tmp" });
+    defer node.deinit();
+    node.raft.log = &node.log;
+    var worker = spawn(&node, std.testing.allocator, "worker-shutdown-test") orelse return error.WorkerStartFailed;
+    defer worker.stop();
+    worker.stop();
+    try std.testing.expect(worker.thread == null);
+    // Repeated cleanup does not touch the already-freed context.
+    worker.stop();
 }

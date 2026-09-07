@@ -5,6 +5,7 @@ const posix = std.posix;
 const log = @import("../lib/log.zig");
 const proxy = @import("proxy.zig");
 const http_support = @import("proxy/http_support.zig");
+const WorkerGroup = @import("../lib/connection_workers.zig").Group(128);
 const socket_support = @import("proxy/socket_support.zig");
 
 pub const ChallengeServerError = error{
@@ -16,6 +17,7 @@ pub const ChallengeServer = struct {
     fd: posix.fd_t,
     running: std.atomic.Value(bool),
     thread: ?std.Thread,
+    workers: WorkerGroup = .{},
 
     pub fn init(store: *proxy.ChallengeStore, port: u16) ChallengeServerError!ChallengeServer {
         const fd = socket_support.createListenSocket(port) catch return ChallengeServerError.SocketFailed;
@@ -34,6 +36,7 @@ pub const ChallengeServer = struct {
 
     pub fn start(self: *ChallengeServer) void {
         if (self.running.load(.acquire)) return;
+        self.workers.restart();
         self.running.store(true, .release);
         self.thread = std.Thread.spawn(.{}, acceptLoop, .{self}) catch {
             self.running.store(false, .release);
@@ -43,10 +46,12 @@ pub const ChallengeServer = struct {
 
     pub fn stop(self: *ChallengeServer) void {
         self.running.store(false, .release);
+        self.workers.cancel();
         if (self.thread) |thread| {
             thread.join();
             self.thread = null;
         }
+        self.workers.join();
     }
 
     fn acceptLoop(self: *ChallengeServer) void {
@@ -63,11 +68,10 @@ pub const ChallengeServer = struct {
                 continue;
             };
 
-            const thread = std.Thread.spawn(.{}, connectionHandler, .{ self.store, client_fd }) catch {
+            self.workers.spawn(client_fd, connectionHandler, .{ self.store, client_fd }) catch {
                 linux_platform.posix.close(client_fd);
                 continue;
             };
-            thread.detach();
         }
     }
 
@@ -84,10 +88,12 @@ pub const ChallengeServer = struct {
             return;
         };
 
-        const key_auth = store.get(token) orelse {
+        const key_auth = (store.getOwned(store.allocator, token) catch return) orelse {
             http_support.sendHttpResponse(client_fd, "404 Not Found", "not found");
             return;
         };
+
+        defer store.allocator.free(key_auth);
 
         var response_buf: [1024]u8 = undefined;
         const response = std.fmt.bufPrint(&response_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{
@@ -99,3 +105,22 @@ pub const ChallengeServer = struct {
         };
     }
 };
+
+test "challenge worker ownership cancels idle clients before store teardown" {
+    var store = proxy.ChallengeStore.init(std.testing.allocator);
+    defer store.deinit();
+    var server = try ChallengeServer.init(&store, 0);
+    defer server.deinit();
+    var fds: [2]posix.fd_t = undefined;
+    if (posix.errno(std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &fds)) != .SUCCESS)
+        return error.SocketFailed;
+    defer linux_platform.posix.close(fds[1]);
+    server.workers.spawn(fds[0], ChallengeServer.connectionHandler, .{ &store, fds[0] }) catch |err| {
+        linux_platform.posix.close(fds[0]);
+        return err;
+    };
+    server.stop();
+    try std.testing.expectEqual(@as(usize, 0), server.workers.count());
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try linux_platform.posix.recv(fds[1], &byte, posix.MSG.DONTWAIT));
+}

@@ -2,7 +2,7 @@
 //
 // the server uses io_uring multishot accept to efficiently accept
 // connections on the main thread, then dispatches each connection
-// to a detached worker thread for handling.
+// to an owned worker thread for handling.
 //
 // worker threads: blocking read → parse HTTP → route to handler →
 // write response → close. each thread can safely open its own
@@ -25,6 +25,8 @@ const orchestrator = @import("../manifest/orchestrator.zig");
 const rate_limit = @import("server/rate_limit.zig");
 const connection_runtime = @import("server/connection_runtime.zig");
 
+const WorkerGroup = @import("../lib/connection_workers.zig").Group(connection_runtime.max_connections);
+
 const max_connections = connection_runtime.max_connections;
 const connectionWrapper = connection_runtime.connectionWrapper;
 const tryAcquireConnectionSlot = connection_runtime.tryAcquireConnectionSlot;
@@ -44,6 +46,7 @@ pub const Server = struct {
     listen_fd: posix.fd_t,
     port: u16,
     bind_addr: [4]u8,
+    workers: WorkerGroup = .{},
 
     /// create a server bound to the given port.
     /// bind_addr controls the listen address:
@@ -79,6 +82,7 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Server) void {
+        self.workers.join();
         linux_platform.posix.close(self.listen_fd);
     }
 
@@ -161,7 +165,7 @@ pub const Server = struct {
         }
     }
 
-    /// spawn a detached worker thread to handle a single connection.
+    /// Each accepted connection is joined before route state can be released.
     fn spawnWorker(self: *Server, client_fd: posix.fd_t) void {
         if (!tryAcquireConnectionSlot()) {
             linux_platform.posix.close(client_fd);
@@ -169,21 +173,20 @@ pub const Server = struct {
         }
 
         const alloc = self.alloc;
-        const thread = std.Thread.spawn(.{}, connectionWrapper, .{ alloc, client_fd }) catch {
+        self.workers.spawn(client_fd, connectionWrapper, .{ alloc, client_fd }) catch {
             releaseConnectionSlot();
             linux_platform.posix.close(client_fd);
             return;
         };
-        thread.detach();
     }
 
     fn drainWorkers(self: *Server) void {
-        _ = self;
         if (!connection_runtime.waitForConnectionsToDrain(connection_runtime.drain_timeout_ms)) {
-            log.warn("api server shutdown timed out with {d} active connection(s)", .{
+            log.warn("api server cancelling {d} remaining connection(s)", .{
                 connection_runtime.activeConnectionCount(),
             });
         }
+        self.workers.join();
     }
 };
 
@@ -307,4 +310,20 @@ test "rate limiter reuses stale slots for new ips" {
     }
 
     try std.testing.expect(limiter.checkRateAt(0xABCDEF01, 6001));
+}
+
+test "api worker ownership closes idle connections before server deinit returns" {
+    var server = try Server.init(std.testing.allocator, 0, .{ 127, 0, 0, 1 });
+    var fds: [2]posix.fd_t = undefined;
+    if (posix.errno(std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &fds)) != .SUCCESS) {
+        server.deinit();
+        return error.SocketFailed;
+    }
+    defer linux_platform.posix.close(fds[1]);
+    server.spawnWorker(fds[0]);
+    server.deinit();
+    try std.testing.expectEqual(@as(usize, 0), server.workers.count());
+    try std.testing.expectEqual(@as(u32, 0), connection_runtime.activeConnectionCount());
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try linux_platform.posix.recv(fds[1], &byte, posix.MSG.DONTWAIT));
 }

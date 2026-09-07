@@ -29,7 +29,7 @@ const runtime_wait = @import("../lib/runtime_wait.zig");
 const store_mod = @import("../state/store.zig");
 
 const max_connections = 256;
-const WorkerGroup = @import("proxy/worker_group.zig").Group(max_connections);
+const WorkerGroup = @import("../lib/connection_workers.zig").Group(max_connections);
 const accept_support = @import("proxy/accept_support.zig");
 
 pub const ProxyError = error{
