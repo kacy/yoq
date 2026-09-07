@@ -119,7 +119,7 @@ Container setup appends forwarding rules for traffic originating on `yoq0` from 
 
 the agent writes its private enrollment identity under `~/.local/share/yoq/enrollment/` before contacting the server. retrying the same join address, API port and token reuses its credential and WireGuard key, including after a lost response or process restart. updated servers return the same committed agent and node IDs and refresh the worker endpoint; a retry cannot revive a revoked credential or replace the WireGuard key.
 
-keep this directory across agent restarts. changing the join address, port or token selects a separate identity. older servers remain compatible but do not deduplicate enrollment; upgrade servers before relying on retry recovery.
+keep this directory across agent restarts. changing the join address, port or token selects a separate identity. older servers remain compatible but do not deduplicate enrollment; upgrade servers before relying on retry recovery. registrations created without a durable enrollment identity are not matched retroactively.
 
 after joining, verify the agent appears:
 

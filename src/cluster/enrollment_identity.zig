@@ -35,9 +35,9 @@ pub fn refresh(alloc: std.mem.Allocator, session: mutation.Session, id: []const 
     sql.write(
         &batch.writer,
         "UPDATE agents SET address = CASE WHEN credential_hash = ? AND wg_public_key = ? THEN ? ELSE NULL END, agent_api_port = ?, cpu_cores = ?, memory_mb = ?, gpu_count = ?, gpu_model = ?, gpu_vram_mb = ?, role = ?, region = ?, labels = ?, last_heartbeat = ? WHERE id = ?;",
-        .{ digest, request.public_key, request.address, request.options.agent_api_port, request.resources.cpu_cores, request.resources.memory_mb, request.resources.gpu_count, request.resources.gpu_model, request.resources.gpu_vram_mb, request.options.role orelse "both", request.options.region orelse "", request.options.labels orelse "", request.now, id },
+        .{ &digest, request.public_key, request.address, request.options.agent_api_port, request.resources.cpu_cores, request.resources.memory_mb, request.resources.gpu_count, request.resources.gpu_model, request.resources.gpu_vram_mb, request.options.role orelse "both", request.options.region orelse "", request.options.labels orelse "", request.now, id },
     ) catch return error.InternalError;
-    sql.write(&batch.writer, "UPDATE wireguard_peers SET endpoint = ? WHERE agent_id = ? AND EXISTS (SELECT 1 FROM agents WHERE id = ? AND credential_hash = ? AND wg_public_key = ?);", .{ request.endpoint, id, id, digest, request.public_key }) catch return error.InternalError;
+    sql.write(&batch.writer, "UPDATE wireguard_peers SET endpoint = ? WHERE agent_id = ? AND EXISTS (SELECT 1 FROM agents WHERE id = ? AND credential_hash = ? AND wg_public_key = ?);", .{ request.endpoint, id, id, &digest, request.public_key }) catch return error.InternalError;
     try session.commit(batch.written());
 }
 
