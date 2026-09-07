@@ -411,3 +411,34 @@ test "training replacement keeps the original job when capacity or metadata reje
     defer alloc.free(retained.id);
     try std.testing.expectEqualStrings(original_id.id, retained.id);
 }
+
+test "running training replacement waits for heartbeat capacity after pause" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
+    defer harness.deinit();
+    try harness.seedTrainingRelease("running-training", "finetune", 1);
+    const start = try harness.trainingStart("running-training", "finetune");
+    defer freeResponse(alloc, start);
+    try std.testing.expectEqual(http.StatusCode.ok, start.status);
+    try harness.node.stateMachineDb().exec("UPDATE agents SET gpu_count = 1, gpu_used = 1;", .{}, .{});
+    try harness.node.stateMachineDb().exec("UPDATE assignments SET status = 'running';", .{}, .{});
+    const scaled = try harness.trainingScale("running-training", "finetune", 1);
+    defer freeResponse(alloc, scaled);
+    try std.testing.expectEqual(http.StatusCode.conflict, scaled.status);
+    try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(harness.node.stateMachineDb(), "running-training", "finetune"));
+    const pause = try harness.trainingPause("running-training", "finetune");
+    defer freeResponse(alloc, pause);
+    try std.testing.expectEqual(http.StatusCode.ok, pause.status);
+    const req = makeRequest(.POST, "/apps/running-training/training/finetune/resume", "", "");
+    const busy = route(req, alloc, harness.ctx()).?;
+    defer freeResponse(alloc, busy);
+    try std.testing.expectEqual(http.StatusCode.conflict, busy.status);
+    const paused = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "running-training", "finetune")).?;
+    defer paused.deinit(alloc);
+    try std.testing.expectEqualStrings("paused", paused.state);
+    try harness.node.stateMachineDb().exec("UPDATE agents SET gpu_used = 0;", .{}, .{});
+    const resumed = route(req, alloc, harness.ctx()).?;
+    defer freeResponse(alloc, resumed);
+    try std.testing.expectEqual(http.StatusCode.ok, resumed.status);
+    try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(harness.node.stateMachineDb(), "running-training", "finetune"));
+}
