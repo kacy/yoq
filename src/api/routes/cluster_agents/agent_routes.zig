@@ -58,7 +58,7 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
 
     var endpoint_buf: [64]u8 = undefined;
     var peer_sql: ?[]const u8 = null;
-    var peer_sql_buf: [2048]u8 = undefined;
+    var peer_sql_buf: [6144]u8 = undefined;
 
     const role_str = json_helpers.extractJsonString(request.body, "role");
     const region_str = json_helpers.extractJsonString(request.body, "region");
@@ -76,11 +76,16 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
         else
             std.fmt.bufPrint(&endpoint_buf, "{s}:{d}", .{ address, port }) catch null;
 
+        const reserved_nodes = alloc.alloc(u64, node.config.peers.len + 1) catch return common.internalError();
+        defer alloc.free(reserved_nodes);
+        reserved_nodes[0] = node.config.id;
+        for (node.config.peers, 1..) |peer, i| reserved_nodes[i] = peer.id;
         peer_sql = agent_registry.allocateWireguardPeerSql(
             &peer_sql_buf,
             &id_buf,
             pub_key,
             endpoint_host orelse return common.badRequest("invalid wireguard endpoint"),
+            reserved_nodes,
         ) catch return common.internalError();
     }
 
@@ -119,7 +124,7 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
     var credential = credentials.issue();
     defer std.crypto.secureZero(u8, &credential);
     const credential_hash = credentials.hash(&credential);
-    var combined_buf: [4608]u8 = undefined;
+    var combined_buf: [9216]u8 = undefined;
     const combined = std.fmt.bufPrint(&combined_buf, "{s} {s} UPDATE agents SET credential_hash = '{s}' WHERE id = '{s}';", .{ sql, peer_sql orelse "", credential_hash, id_buf }) catch return common.internalError();
     _ = node.proposeCommitted(combined, 5000) catch |err| return switch (err) {
         error.NotLeader, error.LeadershipLost => common.notLeader(alloc, node),
@@ -453,6 +458,6 @@ test "registration returns credentials only after their row is applied" {
     const id = extractJsonString(response.body, "id") orelse return error.MissingIdentity;
     const secret = extractJsonString(response.body, "credential") orelse return error.MissingCredential;
     try std.testing.expect(try credentials.authenticates(&node.state_machine.db, secret, id));
-    try std.testing.expectEqual(@as(?i64, 1), extractJsonInt(response.body, "node_id"));
+    try std.testing.expectEqual(@as(?i64, 2), extractJsonInt(response.body, "node_id"));
     try std.testing.expectEqual(node.raft.commit_index, node.state_machine.last_applied);
 }

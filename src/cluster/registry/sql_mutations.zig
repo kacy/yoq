@@ -319,21 +319,27 @@ pub fn removeWireguardPeerSql(buf: []u8, node_id: u16) ![]const u8 {
 /// and server peers reserve IDs. The subnet scheme supports IDs through 54783.
 /// If exhausted, remove the unassigned registration so no unusable identity is
 /// published; the caller checks the applied row before returning credentials.
-pub fn allocateWireguardPeerSql(buf: []u8, agent_id: []const u8, public_key: []const u8, endpoint: []const u8) ![]const u8 {
+pub fn allocateWireguardPeerSql(buf: []u8, agent_id: []const u8, public_key: []const u8, endpoint: []const u8, reserved_node_ids: []const u64) ![]const u8 {
     var agent_buf: [64]u8 = undefined;
     const agent = try sql_escape.escapeSqlString(&agent_buf, agent_id);
     var key_buf: [128]u8 = undefined;
     const key = try sql_escape.escapeSqlString(&key_buf, public_key);
     var endpoint_buf: [128]u8 = undefined;
     const ep = try sql_escape.escapeSqlString(&endpoint_buf, endpoint);
+    var reserved_buf: [2048]u8 = undefined;
+    var reserved = std.Io.Writer.fixed(&reserved_buf);
+    try reserved.writeAll("SELECT 0 AS id");
+    for (reserved_node_ids) |id| try reserved.print(" UNION SELECT {d}", .{id});
+    const reserved_sql = reserved.buffered();
     return std.fmt.bufPrint(buf,
         \\UPDATE agents SET node_id = (
         \\  SELECT MIN(candidate) FROM (
-        \\    SELECT 1 AS candidate UNION SELECT node_id + 1 FROM agents WHERE node_id IS NOT NULL
+        \\    SELECT id + 1 AS candidate FROM ({s}) UNION SELECT node_id + 1 FROM agents WHERE node_id IS NOT NULL
         \\    UNION SELECT node_id + 1 FROM wireguard_peers
         \\  ) WHERE candidate BETWEEN 1 AND 54783
         \\    AND candidate NOT IN (SELECT node_id FROM agents WHERE node_id IS NOT NULL)
         \\    AND candidate NOT IN (SELECT node_id FROM wireguard_peers)
+        \\    AND candidate NOT IN ({s})
         \\) WHERE id = '{s}';
         \\DELETE FROM agents WHERE id = '{s}' AND node_id IS NULL;
         \\UPDATE agents SET wg_public_key = '{s}', overlay_ip = printf('10.40.%d.%d', node_id >> 8, node_id & 255)
@@ -342,5 +348,5 @@ pub fn allocateWireguardPeerSql(buf: []u8, agent_id: []const u8, public_key: []c
         \\ SELECT node_id, id, wg_public_key, '{s}', overlay_ip,
         \\   printf('10.%d.%d.0/24', 42 + (node_id >> 8), node_id & 255)
         \\ FROM agents WHERE id = '{s}';
-    , .{ agent, agent, key, agent, ep, agent });
+    , .{ reserved_sql, reserved_sql, agent, agent, key, agent, ep, agent });
 }
