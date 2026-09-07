@@ -191,7 +191,7 @@ def inside(root, outer_mount, outer_net):
         path = homes["server"] / ".local/share/yoq/cluster/state.db"
         with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
             db.row_factory = sqlite3.Row
-            return db.execute("SELECT status FROM assignments WHERE agent_id = ?", (agent_id,)).fetchall()
+            return db.execute("SELECT status, status_reason FROM assignments WHERE agent_id = ?", (agent_id,)).fetchall()
 
     try:
         spawn("server", ["init-server", "--id", "1", "--port", "19700", "--api-port", "17700",
@@ -250,7 +250,13 @@ def inside(root, outer_mount, outer_net):
                 assert api("/agents")[0]["status"] == "active", "healthy agent was marked offline by gossip"
                 time.sleep(0.5)
             run(*worker_prefix, str(YOQ), "stop", "web", env=dict(os.environ, HOME=str(homes["agent"])), stdout=subprocess.DEVNULL)
-            wait_for("assignment exit", lambda: assignment_rows()[0]["status"] == "stopped")
+            # The fixture server has no graceful SIGTERM handler. Its signaled
+            # exit must be reported as a process failure, never left running.
+            terminal = wait_for("assignment exit", lambda: (rows := assignment_rows()) and
+                                rows[0]["status"] == "failed" and rows[0])
+            assert terminal["status_reason"] == "process_failed", dict(terminal)
+            assert not Path(f"/proc/{row['pid']}").exists(), "terminated process remains alive"
+            assert container_row() is None, "assignment cleanup retained its process record"
         print("scheduled runtime: API authentication, registry certificate trust, OCI pull, readiness, routed HTTP, identity, limits, and exit passed", flush=True)
     finally:
         for process in reversed(processes):
