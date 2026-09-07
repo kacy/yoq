@@ -48,7 +48,12 @@ class ReleaseSecurityTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 action_commits(root)
             workflow.write_text('steps:\n  - uses: actions/checkout@' + 'a' * 40 + '\n')
-            self.assertEqual(action_commits(root), {'actions/checkout': 'a' * 40})
+            self.assertEqual(action_commits(root), {('actions/checkout', 'a' * 40)})
+            (root / '.github/other.yaml').write_text('steps:\n  - uses: actions/checkout@' + 'b' * 40 + '\n')
+            self.assertEqual(len(action_commits(root)), 2)
+            (root / '.github/other.yaml').write_text('steps:\n  - uses: actions/checkout@v4\n')
+            with self.assertRaises(ValueError):
+                action_commits(root)
 
     def run_installer(self, failure):
         with tempfile.TemporaryDirectory() as directory:

@@ -8,15 +8,17 @@ from release_metadata import sqlite_dependency
 
 
 def action_commits(root):
-    commits = {}
-    for path in (root / '.github').rglob('*.yml'):
+    commits = set()
+    for path in (root / '.github').rglob('*'):
+        if path.suffix not in ('.yml', '.yaml'):
+            continue
         for action in re.findall(r'^\s*(?:- )?uses:\s*([^\s]+)', path.read_text(), re.M):
             if action.startswith('./'):
                 continue
             repo, separator, commit = action.partition('@')
             if not separator or not re.fullmatch('[0-9a-f]{40}', commit):
                 raise ValueError(f'{path.relative_to(root)}: action must be pinned: {action}')
-            commits[repo] = commit
+            commits.add((repo, commit))
     if not commits:
         raise ValueError('no pinned actions found')
     return commits
@@ -39,7 +41,7 @@ def main():
     version, _ = sqlite_dependency(root)
     queries = [(f'sqlite3 {version} (OSS-Fuzz)',
                 {'package': {'name': 'sqlite3', 'ecosystem': 'OSS-Fuzz'}, 'version': version})]
-    queries.extend((name + '@' + commit, {'commit': commit}) for name, commit in sorted(commits.items()))
+    queries.extend((name + '@' + commit, {'commit': commit}) for name, commit in sorted(commits))
     findings = []
     for name, query in queries:
         vulnerabilities = lookup(query)

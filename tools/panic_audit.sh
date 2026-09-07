@@ -32,7 +32,12 @@ tmp_excess="$(mktemp)"
 trap 'rm -f "$tmp_total" "$tmp_production" "$tmp_excess"' EXIT
 
 scan_total() {
-  rg -c "$pattern" src | sort || true
+  if command -v rg >/dev/null 2>&1; then
+    { rg -c "$pattern" src || test "$?" -eq 1; } | sort
+  else
+    { grep -rEc --include='*.zig' "$pattern" src || test "$?" -eq 1; } |
+      awk -F: '$NF > 0' | sort
+  fi
 }
 
 scan_production() {
