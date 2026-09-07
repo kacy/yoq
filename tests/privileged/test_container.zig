@@ -68,13 +68,25 @@ test "logs captures local rootfs output" {
     defer rm.deinit();
 }
 
-test "ps --json produces valid json" {
+test "detached supervisor inherits process environment and exposes container json" {
     var fixture = try initLifecycleFixture();
     defer fixture.env.deinit();
     defer fixture.rootfs.deinit();
 
     const name = try helpers.uniqueName(alloc, "lifecycle-json");
     defer alloc.free(name);
+
+    try fixture.env.env_map.put("YOQ_TEST_SUPERVISOR_MARKER", "inherited-through-entrypoint");
+    defer {
+        if (fixture.env.runYoq(&.{ "stop", name })) |value| {
+            var result = value;
+            result.deinit();
+        } else |_| {}
+        if (fixture.env.runYoq(&.{ "rm", name })) |value| {
+            var result = value;
+            result.deinit();
+        } else |_| {}
+    }
 
     var run_result = try fixture.env.runYoq(&.{
         "run",                      "-d",      "--name", name,
@@ -96,10 +108,30 @@ test "ps --json produces valid json" {
     try std.testing.expect(trimmed[trimmed.len - 1] == ']');
     try helpers.expectContains(trimmed, id);
 
-    var stop = try fixture.env.runYoq(&.{ "stop", name });
-    defer stop.deinit();
-    var rm = try fixture.env.runYoq(&.{ "rm", name });
-    defer rm.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, trimmed, .{});
+    defer parsed.deinit();
+    const pid = parsed.value.array.items[0].object.get("pid").?.integer;
+    const status_path = try std.fmt.allocPrint(alloc, "/proc/{d}/status", .{pid});
+    defer alloc.free(status_path);
+    var status = try fixture.env.run(&.{ "/bin/cat", status_path });
+    defer status.deinit();
+    try std.testing.expectEqual(@as(u8, 0), status.exit_code);
+    var lines = std.mem.splitScalar(u8, status.stdout, '\n');
+    const supervisor_pid = while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "PPid:")) {
+            break try std.fmt.parseInt(u32, std.mem.trim(u8, line[5..], " \t"), 10);
+        }
+    } else return error.TestUnexpectedResult;
+    const environ_path = try std.fmt.allocPrint(alloc, "/proc/{d}/environ", .{supervisor_pid});
+    defer alloc.free(environ_path);
+    var environ = try fixture.env.run(&.{ "/bin/cat", environ_path });
+    defer environ.deinit();
+    try std.testing.expectEqual(@as(u8, 0), environ.exit_code);
+    for ([_][]const u8{ "HOME", "PATH", "YOQ_TEST_SUPERVISOR_MARKER" }) |key| {
+        const expected = try std.fmt.allocPrint(alloc, "{s}={s}\x00", .{ key, fixture.env.env_map.get(key).? });
+        defer alloc.free(expected);
+        try helpers.expectContains(environ.stdout, expected);
+    }
 }
 
 test "version --json produces valid json" {
