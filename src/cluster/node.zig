@@ -1258,7 +1258,7 @@ test "applied snapshot retries failed commits without compacting unapplied entri
         try node.log.append(.{ .index = index, .term = 1, .data = increment });
     }
     try node.state_machine.db.exec(
-        "CREATE TRIGGER reject_snapshot_apply BEFORE UPDATE ON agents WHEN OLD.cpu_used = 999 " ++
+        "CREATE TRIGGER reject_snapshot_apply BEFORE UPDATE ON state_machine_meta WHEN OLD.last_applied = 999 " ++
             "BEGIN SELECT RAISE(ABORT, 'injected apply failure'); END;",
         .{},
         .{},
@@ -1285,7 +1285,7 @@ test "applied snapshot retries failed commits without compacting unapplied entri
     // 1000-entry snapshot threshold. No new commit action is delivered.
     try node.state_machine.db.exec("DROP TRIGGER reject_snapshot_apply;", .{}, .{});
     try node.state_machine.db.exec(
-        "CREATE TRIGGER reject_snapshot_apply BEFORE UPDATE ON agents WHEN OLD.cpu_used = 1000 " ++
+        "CREATE TRIGGER reject_snapshot_apply BEFORE UPDATE ON state_machine_meta WHEN OLD.last_applied = 1000 " ++
             "BEGIN SELECT RAISE(ABORT, 'injected apply failure'); END;",
         .{},
         .{},

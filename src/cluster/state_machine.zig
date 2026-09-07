@@ -710,7 +710,7 @@ test "apply refuses out-of-order entry with gap" {
     try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
 }
 
-test "apply with duplicate key SQL does not advance last_applied" {
+test "apply records a duplicate key as a rejected command" {
     var sm = try StateMachine.initMemory();
     defer sm.deinit();
 
@@ -722,13 +722,14 @@ test "apply with duplicate key SQL does not advance last_applied" {
     });
     try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
 
-    // entry 2 has valid prefix but bad SQL (duplicate key) — should fail and NOT advance
+    // Entry 2 conflicts with an applied identity: reject it without stalling replay.
     sm.apply(.{
         .index = 2,
         .term = 1,
         .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('a1', 'h1', 'active', 1, 1024, 0, 0, 0, 100, 100);",
     });
-    try std.testing.expectEqual(@as(LogIndex, 1), sm.last_applied);
+    try std.testing.expectEqual(@as(LogIndex, 2), sm.last_applied);
+    try std.testing.expect(try @import("state_machine/command.zig").wasRejected(&sm.db, 2, 1));
 }
 
 test "applyUpTo stops at missing entries in the middle" {
@@ -1004,14 +1005,14 @@ test "pending wireguard registrations allocate distinct applied identities" {
         var peer: [2048]u8 = undefined;
         commands[i] = try std.fmt.bufPrint(&batches[i], "{s} {s}", .{
             try registry.registerSql(&registration, id, "10.0.0.1", .{ .cpu_cores = 2, .memory_mb = 512 }, 1),
-            try registry.allocateWireguardPeerSql(&peer, id, id, "10.0.0.1:51820"),
+            try registry.allocateWireguardPeerSql(&peer, id, id, "10.0.0.1:51820", &.{ 1, 3 }),
         });
     }
     // Build both proposals before applying either, as concurrent HTTP threads do.
     for (commands, 1..) |data, index| sm.apply(.{ .index = index, .term = 1, .data = data });
     try std.testing.expectEqual(@as(u64, 2), sm.last_applied);
     const Row = struct { node_id: i64 };
-    for ([_][]const u8{ "agent-one", "agent-two" }, 1..) |id, expected| {
+    for ([_][]const u8{ "agent-one", "agent-two" }, [_]i64{ 2, 4 }) |id, expected| {
         const row = (try sm.db.one(Row, "SELECT node_id FROM agents WHERE id = ?;", .{}, .{id})).?;
         try std.testing.expectEqual(@as(i64, @intCast(expected)), row.node_id);
         const peer = (try sm.db.one(Row, "SELECT node_id FROM wireguard_peers WHERE agent_id = ?;", .{}, .{id})).?;
