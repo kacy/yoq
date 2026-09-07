@@ -142,6 +142,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          bash scripts/bpf-load-balancer-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/bpf-load-balancer.log"
           bash scripts/dns-bridge-kernel-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/dns-bridge-kernel.log"
           bash scripts/wireguard-kernel-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/wireguard-kernel.log"
           sudo env RUNNER_TEMP="$RUNNER_TEMP" python3 scripts/scheduled-runtime-smoke.py \
