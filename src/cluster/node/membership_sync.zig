@@ -18,10 +18,12 @@ fn proposeUnderLock(self: anytype, sql: []const u8) !void {
 pub fn checkAgentHealth(self: anytype, agents: []const agent_registry.AgentRecord) void {
     const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     const base_timeout: i64 = 30;
+    self.mu.lockUncancelable(std.Options.debug_io);
     const multiplier: i64 = if (self.gossip) |g| blk: {
         const member_count = g.members.count() + 1;
         break :blk @min(@as(i64, gossip_mod.Gossip.ceilLog2(member_count)), gossip_mod.Gossip.max_interval_multiplier);
     } else 1;
+    self.mu.unlock(std.Options.debug_io);
     const timeout: i64 = base_timeout * multiplier;
 
     for (agents) |agent| {
