@@ -196,3 +196,9 @@ yoq rollback --app myapp --server 10.0.0.1:7700
 ```
 
 for local operation, use the same commands without `--server`.
+
+### cluster training controls
+
+training start, resume and scale commit job metadata and the complete replacement assignment group together. a capacity failure or rejected metadata write preserves the previous job and assignments. pause and stop commit the job state and assignment removal together. these operations retain their original leadership term, so an old executor cannot resume writes after re-election.
+
+resume keeps the last requested GPU count. training groups share the scheduler's 4096-rank bound; invalid requests are rejected before removing any assignment. the `running` job state records successful scheduling, while assignment status reports execution on the workers.

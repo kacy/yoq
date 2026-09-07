@@ -11,7 +11,6 @@ const app_snapshot = @import("../../../manifest/app_snapshot.zig");
 const store = @import("../../../state/store.zig");
 const common = @import("../common.zig");
 const http = @import("../../http.zig");
-const workload_placements = @import("workload_placements.zig");
 
 const Response = common.Response;
 const RouteContext = common.RouteContext;
@@ -30,7 +29,7 @@ pub fn handleScale(alloc: std.mem.Allocator, app_name: []const u8, job_name: []c
     const numbers = @import("../../../lib/json_numbers.zig");
     const parsed = numbers.parse(alloc, request.body) catch return common.badRequest("invalid gpus");
     defer parsed.deinit();
-    const gpus = (numbers.optional(u32, parsed.value, "gpus", 1, std.math.maxInt(u32)) catch return common.badRequest("invalid gpus")) orelse return common.badRequest("missing gpus");
+    const gpus = (numbers.optional(u32, parsed.value, "gpus", 1, placement.max_gang_ranks) catch return common.badRequest("invalid gpus")) orelse return common.badRequest("missing gpus");
     return mutate(alloc, app_name, job_name, .scale, gpus, ctx);
 }
 
@@ -106,16 +105,16 @@ fn schedule(
         std.math.cast(u32, existing.?.gpus) orelse return common.internalError()
     else
         job.?.gpus;
-    if (desired_gpus == 0) return common.badRequest("invalid gpus");
+    if (desired_gpus == 0 or desired_gpus > placement.max_gang_ranks) return common.badRequest("invalid gpus");
+    if (job.?.cpu_limit <= 0 or job.?.memory_limit_mb <= 0) return common.badRequest("invalid training resources");
     const now = nowRealSeconds();
     var batch = std.Io.Writer.Allocating.init(alloc);
     defer batch.deinit();
-    appendClearAssignments(&batch.writer, app_name, job_name) catch return common.internalError();
     appendRecord(&batch.writer, .{
         .id = job_id,
         .name = job_name,
         .app_name = app_name,
-        .state = "scheduling",
+        .state = "running",
         .image = job.?.image,
         .gpus = desired_gpus,
         .checkpoint_path = job.?.checkpoint_path,
@@ -125,9 +124,7 @@ fn schedule(
         .created_at = if (existing_job_id != null and existing != null) existing.?.created_at else now,
         .updated_at = now,
     }) catch return common.internalError();
-    session.commit(batch.written()) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
-
-    const outcome = workload_placements.runWithSession(alloc, session, &[_]scheduler.PlacementRequest{.{
+    const scheduled = (placement.replaceWorkload(alloc, session, .{
         .image = job.?.image,
         .command = job.?.command,
         .cpu_limit = job.?.cpu_limit,
@@ -139,13 +136,8 @@ fn schedule(
         .gpu_model = job.?.gpu_type,
         .gang_world_size = desired_gpus,
         .gpus_per_rank = 1,
-    }}) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
-    defer workload_placements.freeOutcomePayloads(alloc, outcome);
-
-    const final_state = if (outcome.failed == 0 and outcome.placed > 0) "running" else "failed";
-    batch.clearRetainingCapacity();
-    appendState(&batch.writer, job_id, final_state, nowRealSeconds()) catch return common.internalError();
-    session.commit(batch.written()) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
+    }, batch.written()) catch |err| return deploy_routes.mutationFailure(alloc, node, err)) orelse return common.conflict("insufficient capacity for training job");
+    defer scheduled.deinit(alloc);
 
     const rec = readRecord(alloc, session, job_id) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
     defer rec.deinit(alloc);
@@ -153,8 +145,8 @@ fn schedule(
     return formatRecordResponse(
         alloc,
         rec,
-        final_state,
-        if (std.mem.eql(u8, final_state, "running")) "training job scheduled" else "training job scheduling failed",
+        rec.state,
+        "training job scheduled",
     );
 }
 

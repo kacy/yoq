@@ -364,3 +364,50 @@ test "training mutations reject follower and concurrent app apply before changin
     try std.testing.expectEqual(index, harness.node.log.lastIndex());
     try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(harness.node.stateMachineDb(), "locked-training", "finetune"));
 }
+
+test "oversized training scale preserves prior metadata and assignments" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
+    defer harness.deinit();
+    try harness.seedTrainingRelease("bounded-training", "finetune", 1);
+    const start = try harness.trainingStart("bounded-training", "finetune");
+    defer freeResponse(alloc, start);
+    try std.testing.expectEqual(http.StatusCode.ok, start.status);
+    const index = harness.node.log.lastIndex();
+    const scaled = try harness.trainingScale("bounded-training", "finetune", @import("../../../cluster/placement_transaction.zig").max_gang_ranks + 1);
+    defer freeResponse(alloc, scaled);
+    try std.testing.expectEqual(http.StatusCode.bad_request, scaled.status);
+    try std.testing.expectEqual(index, harness.node.log.lastIndex());
+    const record = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "bounded-training", "finetune")).?;
+    defer record.deinit(alloc);
+    try std.testing.expectEqualStrings("running", record.state);
+    try std.testing.expectEqual(@as(i64, 1), record.gpus);
+    try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(harness.node.stateMachineDb(), "bounded-training", "finetune"));
+}
+
+test "training replacement keeps the original job when capacity or metadata rejects it" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
+    defer harness.deinit();
+    try harness.seedTrainingRelease("atomic-training", "finetune", 1);
+    const start = try harness.trainingStart("atomic-training", "finetune");
+    defer freeResponse(alloc, start);
+    try std.testing.expectEqual(http.StatusCode.ok, start.status);
+    const original_id = (try harness.node.stateMachineDb().oneAlloc(struct { id: []const u8 }, alloc, "SELECT id FROM assignments;", .{}, .{})).?;
+    defer alloc.free(original_id.id);
+    const no_capacity = try harness.trainingScale("atomic-training", "finetune", 5);
+    defer freeResponse(alloc, no_capacity);
+    try std.testing.expectEqual(http.StatusCode.conflict, no_capacity.status);
+    try harness.node.stateMachineDb().exec("CREATE TRIGGER reject_training_scale BEFORE INSERT ON training_jobs WHEN NEW.gpus = 2 BEGIN SELECT RAISE(ABORT, 'injected metadata failure'); END;", .{}, .{});
+    const rejected = try harness.trainingScale("atomic-training", "finetune", 2);
+    defer freeResponse(alloc, rejected);
+    try std.testing.expectEqual(http.StatusCode.conflict, rejected.status);
+    const record = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "atomic-training", "finetune")).?;
+    defer record.deinit(alloc);
+    try std.testing.expectEqualStrings("running", record.state);
+    try std.testing.expectEqual(@as(i64, 1), record.gpus);
+    try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(harness.node.stateMachineDb(), "atomic-training", "finetune"));
+    const retained = (try harness.node.stateMachineDb().oneAlloc(struct { id: []const u8 }, alloc, "SELECT id FROM assignments;", .{}, .{})).?;
+    defer alloc.free(retained.id);
+    try std.testing.expectEqualStrings(original_id.id, retained.id);
+}

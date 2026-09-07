@@ -13,11 +13,6 @@ pub fn run(
     node: *cluster_node.Node,
     requests: []const scheduler.PlacementRequest,
 ) deploy_routes.ClusterApplyError!apply_release.ApplyOutcome {
-    return runWithSession(alloc, try mutation_session.Session.begin(node), requests);
-}
-
-pub fn runWithSession(alloc: std.mem.Allocator, session: mutation_session.Session, requests: []const scheduler.PlacementRequest) deploy_routes.ClusterApplyError!apply_release.ApplyOutcome {
-    const node = session.node;
     const owned_requests = alloc.alloc(apply_request.ServiceRequest, requests.len) catch return deploy_routes.ClusterApplyError.InternalError;
     defer alloc.free(owned_requests);
     for (requests, 0..) |req, i| {
@@ -30,7 +25,7 @@ pub fn runWithSession(alloc: std.mem.Allocator, session: mutation_session.Sessio
 
     var backend = deploy_routes.ClusterApplyBackend{
         .alloc = alloc,
-        .session = session,
+        .session = try mutation_session.Session.begin(node),
         .requests = owned_requests,
     };
     return backend.apply();
