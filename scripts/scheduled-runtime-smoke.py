@@ -155,7 +155,7 @@ def inside(root, outer_mount, outer_net):
         home = root / name
         home.mkdir()
         homes[name] = home
-        output = open(root / (name + ".log"), "w")
+        output = open(root / (name + ".log"), "ab", buffering=0)
         logs.append(output)
         env = dict(os.environ, HOME=str(home))
         processes.append(subprocess.Popen([str(YOQ), *args], env=env, stdout=output, stderr=output))
@@ -188,7 +188,13 @@ def inside(root, outer_mount, outer_net):
         }]}
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             apply = pool.submit(api, "/apps/apply", body)
-            row = wait_for("scheduled container process", container_row)
+            def starting_container():
+                if apply.done():
+                    result = apply.result()
+                    assert result.get("status") == "completed", result
+                return container_row()
+
+            row = wait_for("scheduled container process", starting_container)
             assert row["ip_address"], "scheduled container has no routed IP"
             assignments = api(f"/agents/{agent_id}/assignments")
             assert assignments[0]["status"] == "pending", assignments
