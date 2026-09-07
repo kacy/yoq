@@ -12,7 +12,7 @@ const agent_gossip_port: u16 = 9800;
 fn proposeUnderLock(self: anytype, sql: []const u8) !void {
     self.mu.lockUncancelable(std.Options.debug_io);
     defer self.mu.unlock(std.Options.debug_io);
-    _ = try self.raft.propose(sql);
+    _ = try self.proposeLocked(sql);
 }
 
 pub fn checkAgentHealth(self: anytype, agents: []const agent_registry.AgentRecord) void {

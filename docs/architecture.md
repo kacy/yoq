@@ -178,6 +178,10 @@ multi-node orchestration via Raft consensus and SWIM gossip.
 
 **scheduler:** bin-packing placement as a pure function: given resource requests and agent capacities, it scores agents by free resources (CPU + memory) and assigns containers. draining and offline agents are skipped.
 
+**replicated commands:** API writes, membership changes, and heartbeat batches pass through `Node.proposeLocked` and the same structural guard used during replay. A command is an unmodified SQL batch; no envelope or wire version is added, so existing single statements and batches replay unchanged. Every statement and its applied index commit in one transaction. Invalid structure is rejected before proposal; SQL syntax, schema, and constraint errors during apply roll back the batch and leave the applied index unchanged. Apply stops at that entry and retries on later ticks; it never skips a failed command. Storage errors remain distinct from leadership errors.
+
+This preserves the current command format, not arbitrary schema compatibility. During a rolling upgrade, producers must use SQL understood by every member. New tables, columns, or statement forms require compatible schema rollout before producers emit them. A future typed command format needs explicit version negotiation rather than guessing a version from SQL bytes.
+
 **agents:** worker nodes register with the server via HTTP, then heartbeat every 5s reporting capacity. they pull assignments, download images, and start containers using the local runtime. WireGuard tunnels are set up on join for encrypted cross-node networking.
 
 **app-first control plane:** the canonical cluster write path is `POST /apps/apply`. cluster routes parse app snapshots into the same release model used locally, then execute through the cluster scheduling backend. app-scoped reads (`/apps`, `/apps/{name}/status`, `/apps/{name}/history`) and writes (`/apps/{name}/rollback`, rollout control, worker run, training control) all project from that same release/store layer.

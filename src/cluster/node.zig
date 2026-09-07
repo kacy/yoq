@@ -25,6 +25,7 @@
 //   node.stop();
 
 const std = @import("std");
+const command = @import("state_machine/command.zig");
 const linux_platform = @import("linux_platform");
 const sqlite = @import("sqlite");
 const raft_mod = @import("raft.zig");
@@ -338,8 +339,15 @@ pub const Node = struct {
         self.mu.lockUncancelable(std.Options.debug_io);
         defer self.mu.unlock(std.Options.debug_io);
 
+        return self.proposeLocked(data);
+    }
+
+    /// Submit while holding mu. Background producers use the same admission
+    /// contract as API requests without recursively locking the node.
+    pub fn proposeLocked(self: *Node, data: []const u8) !LogIndex {
         if (self.snapshot_failed.load(.acquire)) return error.SnapshotRecoveryRequired;
-        return self.raft.propose(data) catch return NodeError.NotLeader;
+        try command.validate(data);
+        return try self.raft.propose(data);
     }
 
     /// buffer a heartbeat for batch proposal. HTTP threads call this
@@ -1439,4 +1447,77 @@ test "snapshot installation refuses an unpersisted leader term" {
     try std.testing.expect((try node.log.readSnapshotMeta()) == null);
     try std.testing.expectEqual(@as(types.Term, 1), node.log.termAt(1));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "snapshot-1-2.dat", .{}));
+}
+
+test "replicated command admission rejects unsafe batches before appending" {
+    var node = try Node.initForTests(std.testing.allocator, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = "/tmp",
+    });
+    defer node.deinit();
+    node.raft.role = .leader;
+
+    const invalid = [_][]const u8{
+        "",
+        "UPDATE agents SET cpu_used = 1; DROP TABLE agents;",
+        "UPDATE agents SET address = 'unterminated;",
+        "UPDATE agents SET cpu_used = 1; -- trailing comment",
+    };
+    for (invalid) |sql| {
+        try std.testing.expectError(error.InvalidCommand, node.propose(sql));
+        node.mu.lockUncancelable(std.Options.debug_io);
+        defer node.mu.unlock(std.Options.debug_io);
+        try std.testing.expectError(error.InvalidCommand, node.proposeLocked(sql));
+    }
+    try std.testing.expectEqual(@as(LogIndex, 0), node.log.lastIndex());
+    try std.testing.expectEqual(@as(LogIndex, 0), node.state_machine.last_applied);
+}
+
+test "replicated command admission preserves legacy bytes and replay semantics" {
+    var node = try Node.initForTests(std.testing.allocator, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = "/tmp",
+    });
+    defer node.deinit();
+    node.raft.role = .leader;
+    try insertAgentForTest(&node.state_machine.db, "legacy-agent", "active");
+
+    // Old logs contain unwrapped SQL, including batches without a final ';'.
+    const sql = " UPDATE agents SET address = 'it''s; legacy' WHERE id = 'legacy-agent';\n" ++
+        "UPDATE agents SET cpu_used = cpu_used + 1 WHERE id = 'legacy-agent'";
+    const index = try node.propose(sql);
+    const entry = (try node.log.getEntry(std.testing.allocator, index)).?;
+    defer std.testing.allocator.free(entry.data);
+    try std.testing.expectEqualStrings(sql, entry.data);
+    node.state_machine.apply(entry);
+    node.state_machine.apply(entry);
+    const Row = struct { address: sqlite.Text, cpu_used: i64 };
+    const row = (try node.state_machine.db.oneAlloc(Row, std.testing.allocator, "SELECT address, cpu_used FROM agents WHERE id = 'legacy-agent';", .{}, .{})).?;
+    defer std.testing.allocator.free(row.address.data);
+    try std.testing.expectEqualStrings("it's; legacy", row.address.data);
+    try std.testing.expectEqual(@as(i64, 1), row.cpu_used);
+    try std.testing.expectEqual(index, node.state_machine.last_applied);
+}
+
+test "replicated command admission preserves durable storage failures" {
+    const Fault = struct {
+        fn deny(_: ?*anyopaque, action: c_int, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+            return if (action == sqlite.c.SQLITE_READ) sqlite.c.SQLITE_DENY else sqlite.c.SQLITE_OK;
+        }
+    };
+    var node = try Node.initForTests(std.testing.allocator, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = "/tmp",
+    });
+    defer node.deinit();
+    node.raft.role = .leader;
+    try std.testing.expectEqual(@as(c_int, sqlite.c.SQLITE_OK), sqlite.c.sqlite3_set_authorizer(node.log.db.db, Fault.deny, null));
+    defer _ = sqlite.c.sqlite3_set_authorizer(node.log.db.db, null, null);
+    try std.testing.expectError(error.ReadFailed, node.propose("UPDATE agents SET cpu_used = 0;"));
 }

@@ -152,8 +152,12 @@ pub fn handleClusterPropose(alloc: std.mem.Allocator, request: http.Request, ctx
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     if (request.body.len == 0) return common.badRequest("missing request body");
 
-    _ = node.propose(request.body) catch {
-        return common.notLeader(alloc, node);
+    _ = node.propose(request.body) catch |err| {
+        return switch (err) {
+            error.InvalidCommand => common.badRequest("invalid replicated command"),
+            error.NotLeader => common.notLeader(alloc, node),
+            else => common.internalError(),
+        };
     };
 
     return .{ .status = .ok, .body = "{\"status\":\"proposed\"}", .allocated = false };
