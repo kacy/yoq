@@ -123,7 +123,10 @@ test "log sink concurrent tagged records appear exactly once" {
         fn run(output: *Sink, stream: []const u8, failed: *std.atomic.Value(bool)) void {
             for (0..200) |i| {
                 var buf: [32]u8 = undefined;
-                const message = std.fmt.bufPrint(&buf, "record-{d}", .{i}) catch unreachable;
+                const message = std.fmt.bufPrint(&buf, "record-{d}", .{i}) catch {
+                    failed.store(true, .release);
+                    return;
+                };
                 output.write(stream, message) catch failed.store(true, .release);
             }
         }

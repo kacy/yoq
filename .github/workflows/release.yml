@@ -12,9 +12,7 @@ on:
         type: string
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event.inputs.version || github.ref }}
@@ -30,7 +28,7 @@ jobs:
       commit: ${{ steps.tag.outputs.commit }}
     steps:
       - name: check out workflow repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: resolve tag
@@ -71,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.validate-tag.outputs.commit }}
 
@@ -103,6 +101,27 @@ jobs:
       ref: ${{ needs.validate-tag.outputs.commit }}
       failure-artifact-name: release-build-debug-log
 
+  unit-tests:
+    needs: validate-tag
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: release-unit-tests
+      command: YOQ_SKIP_SLOW_TESTS=1 zig build test
+      ref: ${{ needs.validate-tag.outputs.commit }}
+      timeout-minutes: 30
+      failure-artifact-name: release-unit-tests-log
+
+  dependency-security:
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.commit }}
+      - name: check dependencies and panic paths
+        run: python3 tools/security_gate.py && bash tools/panic_audit.sh
+
   docker-build:
     name: docker-build
     needs:
@@ -110,7 +129,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.validate-tag.outputs.commit }}
 
@@ -125,7 +144,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.validate-tag.outputs.commit }}
 
@@ -151,6 +170,8 @@ jobs:
       - validate-tag
       - fmt-check
       - build-debug
+      - unit-tests
+      - dependency-security
       - docker-build
       - examples-validate
     strategy:
@@ -167,7 +188,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.validate-tag.outputs.commit }}
 
@@ -181,21 +202,30 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
 
       - name: upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: yoq-release-linux-${{ matrix.arch }}-raw
           path: zig-out/bin/yoq
           retention-days: 7
 
   package:
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     name: package
     needs:
       - validate-tag
       - release-build
     runs-on: ubuntu-latest
     steps:
+      - name: check out validated source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate-tag.outputs.commit }}
+
       - name: download all release binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: yoq-release-linux-*-raw
           path: dist/raw
@@ -217,55 +247,28 @@ jobs:
             (cd dist/out && sha256sum "${archive_name}" > "${checksum_name}")
           done
 
-          RELEASE_TAG="$TAG" RELEASE_VERSION="${{ needs.validate-tag.outputs.version }}" RELEASE_COMMIT="${{ needs.validate-tag.outputs.commit }}" RELEASE_RUN="${{ github.run_id }}-${{ github.run_attempt }}" python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          output = Path("dist/out")
-          artifacts = []
-          for archive in sorted(output.glob("*.tar.gz")):
-              digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-              artifacts.append({"name": archive.name, "sha256": digest})
-
-          provenance = {
-              "schema": "https://github.com/kacy/yoq/release-provenance/v1",
-              "subject": artifacts,
-              "buildType": "https://github.com/kacy/yoq/release",
-              "invocation": {"tag": os.environ["RELEASE_TAG"], "commit": os.environ["RELEASE_COMMIT"]},
-              "metadata": {"version": os.environ["RELEASE_VERSION"], "generatedAt": datetime.now(timezone.utc).isoformat()},
-          }
-          (output / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
-
-          sbom = {
-              "spdxVersion": "SPDX-2.3",
-              "dataLicense": "CC0-1.0",
-              "SPDXID": "SPDXRef-DOCUMENT",
-              "name": "yoq-" + os.environ["RELEASE_TAG"],
-              "documentNamespace": "https://github.com/kacy/yoq/releases/" + os.environ["RELEASE_TAG"] + "/" + os.environ["RELEASE_RUN"],
-              "creationInfo": {"created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "creators": ["Tool: yoq release workflow"]},
-              "packages": [{"SPDXID": "SPDXRef-Package-yoq", "name": "yoq", "versionInfo": os.environ["RELEASE_VERSION"], "downloadLocation": "NOASSERTION", "filesAnalyzed": False, "licenseConcluded": "NOASSERTION", "licenseDeclared": "NOASSERTION", "copyrightText": "NOASSERTION"}],
-          }
-          (output / "sbom.spdx.json").write_text(json.dumps(sbom, indent=2) + "\n")
-          PY
-
-          test "$(python3 -c 'import json; d=json.load(open("dist/out/provenance.json")); print(d["invocation"]["tag"])')" = "$TAG"
+          python3 tools/release_metadata.py --output dist/out --tag "$TAG" \
+            --commit "${{ needs.validate-tag.outputs.commit }}" \
+            --run "${{ github.run_id }}-${{ github.run_attempt }}"
 
       - name: upload packaged artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: yoq-release-bundle
           path: dist/out/*
           retention-days: 14
 
       - name: attest release archives
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
-          subject-path: dist/out/*.tar.gz
+          subject-path: |
+            dist/out/*.tar.gz
+            dist/out/provenance.json
+            dist/out/sbom.spdx.json
 
   publish-release:
+    permissions:
+      contents: write
     name: publish-release
     needs:
       - validate-tag
@@ -273,18 +276,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.validate-tag.outputs.commit }}
 
       - name: download packaged artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: yoq-release-bundle
           path: dist
 
       - name: publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.validate-tag.outputs.tag }}
           name: yoq ${{ needs.validate-tag.outputs.tag }}

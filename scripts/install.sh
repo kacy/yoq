@@ -1,6 +1,14 @@
 #!/bin/sh
 set -eu
 
+# Verify publisher attestations before extracting or installing any release.
+for tool in curl gh python3; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "installation requires $tool (GitHub CLI with attestation support)" >&2
+    exit 1
+  fi
+done
+
 # --- detect OS ---
 OS=$(uname -s)
 case "$OS" in
@@ -45,6 +53,11 @@ if [ -z "$LATEST" ]; then
   exit 1
 fi
 
+if ! printf '%s\n' "$LATEST" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "invalid release tag" >&2
+  exit 1
+fi
+
 echo "installing yoq ${LATEST} (linux/${ARCH_NAME})..."
 
 # --- download ---
@@ -52,19 +65,41 @@ BASE_URL="https://github.com/${REPO}/releases/download/${LATEST}"
 TARBALL="yoq-linux-${ARCH_NAME}-${LATEST}.tar.gz"
 CHECKSUM="yoq-linux-${ARCH_NAME}-${LATEST}.sha256"
 
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+INSTALL_TMP=$(mktemp -d)
+trap 'rm -rf "$INSTALL_TMP"' EXIT
 
-curl -fsSL "${BASE_URL}/${TARBALL}" -o "${TMPDIR}/${TARBALL}"
-curl -fsSL "${BASE_URL}/${CHECKSUM}" -o "${TMPDIR}/${CHECKSUM}"
+curl -fsSL "${BASE_URL}/${TARBALL}" -o "${INSTALL_TMP}/${TARBALL}"
+curl -fsSL "${BASE_URL}/${CHECKSUM}" -o "${INSTALL_TMP}/${CHECKSUM}"
 
 # --- verify checksum ---
 # strip any directory prefix from the checksum file (older releases used dist/ prefix)
-sed -i "s|[^ ]*/||" "${TMPDIR}/${CHECKSUM}"
-(cd "$TMPDIR" && sha256sum -c "${CHECKSUM}")
+sed -i "s|[^ ]*/||" "${INSTALL_TMP}/${CHECKSUM}"
+(cd "$INSTALL_TMP" && sha256sum -c "${CHECKSUM}")
+
+curl -fsSL "${BASE_URL}/provenance.json" -o "${INSTALL_TMP}/provenance.json"
+for artifact in "$TARBALL" provenance.json; do
+  gh attestation verify "${INSTALL_TMP}/${artifact}" --repo "$REPO" \
+    --signer-workflow "${REPO}/.github/workflows/release.yml" \
+    --deny-self-hosted-runners
+done
+
+# The signed metadata binds this archive's digest to the requested release tag.
+python3 - "${INSTALL_TMP}/provenance.json" "$LATEST" "$TARBALL" "${INSTALL_TMP}/${TARBALL}" <<'PYVERIFY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+metadata, tag, name, archive = sys.argv[1:]
+provenance = json.loads(Path(metadata).read_text())
+digest = hashlib.sha256(Path(archive).read_bytes()).hexdigest()
+if provenance['invocation']['tag'] != tag or not any(
+    item['name'] == name and item['sha256'] == digest for item in provenance['subject']
+):
+    raise SystemExit('signed release metadata does not match requested archive')
+PYVERIFY
 
 # --- install ---
-tar -xzf "${TMPDIR}/${TARBALL}" -C "$TMPDIR"
+tar -xzf "${INSTALL_TMP}/${TARBALL}" -C "$INSTALL_TMP"
 
 INSTALL_DIR="/usr/local/bin"
 if [ "$(id -u)" -ne 0 ]; then
@@ -72,7 +107,7 @@ if [ "$(id -u)" -ne 0 ]; then
   mkdir -p "$INSTALL_DIR"
 fi
 
-mv "${TMPDIR}/yoq" "${INSTALL_DIR}/yoq"
+mv "${INSTALL_TMP}/yoq" "${INSTALL_DIR}/yoq"
 chmod +x "${INSTALL_DIR}/yoq"
 
 echo "yoq ${LATEST} installed to ${INSTALL_DIR}/yoq"
