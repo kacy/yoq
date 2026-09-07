@@ -813,8 +813,9 @@ fn writeServiceObservabilityPrometheus(
 
     for (services) |service| {
         const service_counters = service_observability.findServiceCounters(counters, service.service_name);
-        const health_state = health.getServiceHealth(service.service_name);
-        const endpoint_label = if (health_state) |entry| entry.endpointId() else "unknown";
+        const health_state = try health.getServiceHealth(std.heap.page_allocator, service.service_name);
+        defer if (health_state) |entry| entry.config.deinit(std.heap.page_allocator);
+        const endpoint_label = if (health_state) |*entry| entry.endpointId() else "unknown";
 
         try writer.print("yoq_service_endpoints_total{{service=\"{s}\",state=\"total\"}} {d}\n", .{ service.service_name, service.total_endpoints });
         try writer.print("yoq_service_endpoints_total{{service=\"{s}\",state=\"healthy\"}} {d}\n", .{ service.service_name, service.healthy_endpoints });

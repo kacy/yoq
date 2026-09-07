@@ -85,6 +85,7 @@ fn workerLoop(_: usize) void {
             continue;
         };
 
+        defer item.config.deinit(std.heap.page_allocator);
         const started_ns = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
         const success = checks.runCheck(item.container_ip, item.config);
         const completed_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
@@ -108,21 +109,29 @@ fn scheduleDueChecks(now: i64) void {
         if (now < entry.next_check_at) continue;
 
         entry.in_flight = true;
-        const item = buildCheckItem(entry);
+        const item = buildCheckItem(entry) catch |err| {
+            entry.in_flight = false;
+            log.warn("health: failed to copy check for {s}: {}", .{ entry.serviceName(), err });
+            continue;
+        };
         const queued = registry.enqueueCheck(item, now) catch |err| {
+            item.config.deinit(std.heap.page_allocator);
             entry.in_flight = false;
             log.warn("health: failed to enqueue check for {s}: {}", .{ entry.serviceName(), err });
             continue;
         };
-        if (!queued) entry.in_flight = false;
+        if (!queued) {
+            item.config.deinit(std.heap.page_allocator);
+            entry.in_flight = false;
+        }
     }
 }
 
-fn buildCheckItem(entry: *const types.ServiceHealth) types.CheckItem {
+fn buildCheckItem(entry: *const types.ServiceHealth) !types.CheckItem {
     var item = types.CheckItem{
         .container_ip = entry.container_ip,
         .container_id = entry.container_id,
-        .config = entry.config,
+        .config = try entry.config.clone(std.heap.page_allocator),
         .generation = entry.generation,
         .registration_epoch = entry.registration_epoch,
         .service_name_len = @intCast(entry.serviceName().len),
@@ -283,7 +292,8 @@ test "applyCompletedCheck rejects stale registration epochs" {
     @memcpy(entry.endpoint_id_buf[0..14], "abcdef123456:0");
     try registry.health_states.append(std.heap.page_allocator, entry);
 
-    var stale = buildCheckItem(&registry.health_states.items[0]);
+    var stale = try buildCheckItem(&registry.health_states.items[0]);
+    defer stale.config.deinit(std.heap.page_allocator);
     stale.registration_epoch = 1;
     try std.testing.expectEqual(Completion.stale, applyCompletedCheck(stale, true, 200));
     try std.testing.expectEqual(types.HealthStatus.starting, registry.health_states.items[0].status);
@@ -325,4 +335,68 @@ test "scheduleDueChecks bounds the queued work" {
     const snapshot = registry.snapshotChecker();
     try std.testing.expectEqual(@as(usize, types.max_queued_checks), snapshot.queued_checks);
     try std.testing.expect(snapshot.dropped_queue_full_total > 0);
+}
+
+test "background health checks own configuration after caller release and unregister" {
+    const platform = @import("linux_platform");
+    const posix = std.posix;
+    const Server = struct {
+        listener: platform.posix.socket_t,
+        valid_requests: std.atomic.Value(usize) = .init(0),
+
+        fn run(self: *@This()) void {
+            for (0..2) |_| {
+                const client = platform.posix.accept(self.listener, null, null, posix.SOCK.CLOEXEC) catch return;
+                defer platform.posix.close(client);
+                var request: [512]u8 = undefined;
+                const size = posix.read(client, &request) catch return;
+                if (!std.mem.startsWith(u8, request[0..size], "GET /owned-ready HTTP/1.0\r\n")) return;
+                _ = self.valid_requests.fetchAdd(1, .release);
+                _ = platform.posix.write(client, "HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n") catch return;
+            }
+        }
+    };
+    registry.resetForTest();
+    defer registry.resetForTest();
+    const listener = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer platform.posix.close(listener);
+    const timeout = posix.timeval{ .sec = 3, .usec = 0 };
+    try posix.setsockopt(listener, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+    const address = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    try platform.posix.bind(listener, &address.any, address.getOsSockLen());
+    try platform.posix.listen(listener, 2);
+    var bound: posix.sockaddr.in = undefined;
+    var bound_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+    try platform.posix.getsockname(listener, @ptrCast(&bound), &bound_len);
+    var server = Server{ .listener = listener };
+    const thread = try std.Thread.spawn(.{}, Server.run, .{&server});
+    defer thread.join();
+
+    // The caller's allocation is gone before any scheduler or worker reads it.
+    {
+        const path = try std.testing.allocator.dupe(u8, "/owned-ready");
+        defer std.testing.allocator.free(path);
+        const config = @import("../spec.zig").HealthCheck{
+            .check_type = .{ .http = .{ .port = std.mem.bigToNative(u16, bound.port), .path = path } },
+            .interval = 3600,
+            .timeout = 1,
+        };
+        try registry.registerService("owned-live", "abcdef123456".*, .{ 127, 0, 0, 1 }, config);
+        try registry.registerService("owned-removed", "abcdef123457".*, .{ 127, 0, 0, 1 }, config);
+    }
+    scheduleDueChecks(std.Io.Clock.real.now(std.Options.debug_io).toSeconds());
+    // A queued check must also outlive the registration that produced it.
+    registry.unregisterService("owned-removed");
+    startChecker();
+    defer stopChecker();
+    for (0..300) |_| {
+        if (registry.snapshotChecker().completed_total == 2) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
+    }
+    stopChecker();
+    try std.testing.expectEqual(@as(u64, 2), registry.snapshotChecker().completed_total);
+    try std.testing.expectEqual(@as(u64, 1), registry.snapshotChecker().stale_results_total);
+    try std.testing.expectEqual(types.HealthStatus.healthy, registry.getStatus("owned-live").?);
+    // completed_total is published after each request and response finishes.
+    try std.testing.expectEqual(@as(usize, 2), server.valid_requests.load(.acquire));
 }
