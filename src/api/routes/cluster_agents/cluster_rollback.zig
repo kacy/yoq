@@ -168,7 +168,7 @@ fn deleteAssignmentsForRequest(node: *cluster_node.Node, request: scheduler.Plac
 }
 
 fn restoreAssignment(node: *cluster_node.Node, assignment: agent_registry.Assignment) ApplyError!void {
-    var sql_buf: [2048]u8 = undefined;
+    var sql_buf: [@import("../../../cluster/assignment_spec.zig").sql_buffer_size]u8 = undefined;
     const request: scheduler.PlacementRequest = .{
         .image = assignment.image,
         .command = assignment.command,

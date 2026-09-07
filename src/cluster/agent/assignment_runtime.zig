@@ -11,6 +11,7 @@ const manifest_spec = @import("../../manifest/spec.zig");
 const store = @import("../../state/store.zig");
 const logs = @import("../../runtime/logs.zig");
 const agent_store = @import("../agent_store.zig");
+const assignment_spec = @import("../assignment_spec.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const extractJsonString = json_helpers.extractJsonString;
@@ -32,6 +33,8 @@ pub const GangInfo = struct {
 };
 
 const AssignmentMeta = struct {
+    cpu_limit: i64 = 1000,
+    memory_limit_mb: i64 = 256,
     app_name: ?[]const u8 = null,
     workload_kind: ?[]const u8 = null,
     workload_name: ?[]const u8 = null,
@@ -58,7 +61,10 @@ pub fn reconcile(self: anytype) void {
         const assignment_id = extractJsonString(obj, "id") orelse continue;
         const status = extractJsonString(obj, "status") orelse continue;
         const image = extractJsonString(obj, "image") orelse continue;
-        const command = extractJsonString(obj, "command") orelse "";
+        const CommandField = struct { command: []const u8 = "" };
+        const parsed_command = std.json.parseFromSlice(CommandField, self.alloc, obj, .{ .ignore_unknown_fields = true }) catch continue;
+        defer parsed_command.deinit();
+        const command = parsed_command.value.command;
         const cpu_limit = extractJsonInt(obj, "cpu_limit") orelse 1000;
         const memory_limit_mb = extractJsonInt(obj, "memory_limit_mb") orelse 256;
         const app_name = extractJsonString(obj, "app_name");
@@ -93,6 +99,8 @@ pub fn reconcile(self: anytype) void {
                 .master_port = if (gang_master_port) |port| @intCast(@max(0, port)) else 29500,
             } else null;
             startPendingAssignment(self, assignment_id, image, command, gang_info, .{
+                .cpu_limit = cpu_limit,
+                .memory_limit_mb = memory_limit_mb,
                 .app_name = app_name,
                 .workload_kind = workload_kind,
                 .workload_name = workload_name,
@@ -112,7 +120,7 @@ fn reconcileFromCache(self: anytype) void {
     if (cached.len == 0) return;
     log.warn("server unreachable, reconciling from cache ({d} assignments)", .{cached.len});
     for (cached) |assignment| {
-        startPendingAssignment(self, assignment.id, assignment.image, assignment.command, null, .{});
+        startPendingAssignment(self, assignment.id, assignment.image, assignment.command, null, .{ .cpu_limit = assignment.cpu_limit, .memory_limit_mb = assignment.memory_limit_mb });
     }
 }
 
@@ -215,6 +223,8 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
     }
 
     self.assignment_workers.spawn(runAssignment, .{ self, id_copy, image_copy, command_copy, gang_copy, AssignmentMeta{
+        .cpu_limit = meta.cpu_limit,
+        .memory_limit_mb = meta.memory_limit_mb,
         .app_name = app_name_copy,
         .workload_kind = workload_kind_copy,
         .workload_name = workload_name_copy,
@@ -257,6 +267,17 @@ fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignm
         return;
     }
 
+    var execution = assignment_spec.decode(self.alloc, command) catch {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "invalid_execution_spec");
+        return;
+    };
+    defer execution.deinit();
+    const limits = assignment_spec.resourceLimits(meta.cpu_limit, meta.memory_limit_mb) catch {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "invalid_resource_limits");
+        return;
+    };
     const ref = image_spec.parseImageRef(image);
     var threaded_io = std.Io.Threaded.init(self.alloc, .{});
     defer threaded_io.deinit();
@@ -268,6 +289,12 @@ fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignm
         return;
     };
     defer pull_result.deinit();
+    const config_parsed = image_spec.parseImageConfig(self.alloc, pull_result.config_bytes) catch {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "invalid_image_config");
+        return;
+    };
+    defer config_parsed.deinit();
 
     if (stopping.load(.acquire)) {
         setContainerState(self, assignment_id, .stopped);
@@ -304,23 +331,6 @@ fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignm
     var hostname_buf: [128]u8 = undefined;
     const hostname = buildAssignmentHostname(&hostname_buf, meta, gang_info);
 
-    store.save(.{
-        .id = container_id,
-        .rootfs = rootfs,
-        .command = if (command.len > 0) command else "/bin/sh",
-        .hostname = hostname,
-        .status = "created",
-        .pid = null,
-        .exit_code = null,
-        .app_name = meta.app_name,
-        .created_at = nowRealSeconds(),
-    }) catch {
-        log.warn("failed to save container record for assignment {s}", .{assignment_id});
-        setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "container_record_failed");
-        return;
-    };
-
     const gpu_mesh = @import("../../gpu/mesh.zig");
     var mesh_env: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
@@ -353,13 +363,42 @@ fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignm
         } else |_| {}
     }
 
+    var resolved = assignment_spec.resolve(self.alloc, execution.value, config_parsed.value.config, mesh_env.items) catch {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "invalid_execution_spec");
+        return;
+    };
+    defer resolved.deinit(self.alloc);
+
+    store.save(.{
+        .id = container_id,
+        .rootfs = rootfs,
+        .command = resolved.command.command,
+        .hostname = hostname,
+        .status = "created",
+        .pid = null,
+        .exit_code = null,
+        .app_name = meta.app_name,
+        .created_at = nowRealSeconds(),
+    }) catch {
+        log.warn("failed to save container record for assignment {s}", .{assignment_id});
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "container_record_failed");
+        return;
+    };
+
     var c = container.Container{
         .config = .{
             .id = container_id,
             .rootfs = rootfs,
-            .command = if (command.len > 0) command else "/bin/sh",
+            .command = resolved.command.command,
+            .args = resolved.command.args.items,
+            .working_dir = resolved.working_dir,
+            .limits = limits,
+            .network = .{ .node_id = self.node_id },
+            .hostname = hostname,
             .lower_dirs = layer_paths,
-            .env = mesh_env.items,
+            .env = resolved.env.items,
         },
         .status = .created,
         .pid = null,

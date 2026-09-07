@@ -128,7 +128,7 @@ fn execCommandWrapper(arg: ?*anyopaque) callconv(.c) u8 {
     return execCommand(ctx.command, ctx.args, ctx.env);
 }
 
-fn execCommand(command: []const u8, args: []const []const u8, env: []const []const u8) u8 {
+pub fn execCommand(command: []const u8, args: []const []const u8, env: []const []const u8) u8 {
     const str_buf_size = 65536;
     const max_entries = 257;
 

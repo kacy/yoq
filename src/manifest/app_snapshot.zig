@@ -154,49 +154,8 @@ fn findNamedObject(json: []const u8, key: []const u8, name: []const u8) ?[]const
     return null;
 }
 
-fn extractJsonStringArray(alloc: std.mem.Allocator, json: []const u8, key: []const u8) !?[]u8 {
-    const array_json = json_helpers.extractJsonArray(json, key) orelse return null;
-    if (array_json.len < 2) return null;
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-
-    var pos: usize = 1;
-    var first = true;
-    while (pos < array_json.len - 1) {
-        while (pos < array_json.len - 1 and (array_json[pos] == ' ' or array_json[pos] == '\n' or array_json[pos] == '\r' or array_json[pos] == '\t' or array_json[pos] == ',')) : (pos += 1) {}
-        if (pos >= array_json.len - 1) break;
-        if (array_json[pos] != '"') return error.InvalidRequest;
-        pos += 1;
-        const start = pos;
-
-        while (pos < array_json.len - 1) : (pos += 1) {
-            if (array_json[pos] == '\\') {
-                pos += 1;
-                if (pos >= array_json.len - 1) return error.InvalidRequest;
-                continue;
-            }
-            if (array_json[pos] == '"') break;
-        }
-        if (pos >= array_json.len - 1) return error.InvalidRequest;
-
-        if (!first) try out.append(alloc, ' ');
-        first = false;
-        try out.appendSlice(alloc, array_json[start..pos]);
-        pos += 1;
-    }
-
-    return try out.toOwnedSlice(alloc);
-}
-
 fn extractCommandString(alloc: std.mem.Allocator, obj: []const u8) ![]const u8 {
-    if (json_helpers.extractJsonString(obj, "command")) |command| {
-        return alloc.dupe(u8, command);
-    }
-    if (try extractJsonStringArray(alloc, obj, "command")) |joined| {
-        return joined;
-    }
-    return alloc.dupe(u8, "");
+    return @import("../cluster/assignment_spec.zig").fromWorkload(alloc, obj);
 }
 
 test "summarize counts all workload kinds" {
@@ -220,7 +179,9 @@ test "findWorkerRunSpec extracts worker scheduler fields" {
     defer worker.deinit(alloc);
 
     try std.testing.expectEqualStrings("alpine", worker.image);
-    try std.testing.expectEqualStrings("sh -c migrate", worker.command);
+    var execution = try @import("../cluster/assignment_spec.zig").decode(alloc, worker.command);
+    defer execution.deinit();
+    try std.testing.expectEqualStrings("migrate", execution.value.argv[2]);
     try std.testing.expectEqualStrings("gpu=true", worker.required_labels);
     try std.testing.expectEqual(@as(i64, 1), worker.gpu_limit);
     try std.testing.expectEqualStrings("L4", worker.gpu_model.?);
@@ -237,7 +198,9 @@ test "findTrainingJobSpec extracts training scheduler fields" {
     defer job.deinit(alloc);
 
     try std.testing.expectEqualStrings("trainer:v1", job.image);
-    try std.testing.expectEqualStrings("torchrun train.py", job.command);
+    var execution = try @import("../cluster/assignment_spec.zig").decode(alloc, job.command);
+    defer execution.deinit();
+    try std.testing.expectEqualStrings("train.py", execution.value.argv[1]);
     try std.testing.expectEqual(@as(u32, 4), job.gpus);
     try std.testing.expectEqualStrings("H100", job.gpu_type.?);
     try std.testing.expectEqual(@as(i64, 2000), job.cpu_limit);

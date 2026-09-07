@@ -240,7 +240,7 @@ pub const ClusterApplyBackend = struct {
                 errdefer self.alloc.free(owned_id);
                 keep_ids.append(self.alloc, owned_id) catch return ClusterApplyError.InternalError;
 
-                var sql_buf: [2048]u8 = undefined;
+                var sql_buf: [@import("../../../cluster/assignment_spec.zig").sql_buffer_size]u8 = undefined;
                 const sql = scheduler.assignmentSqlGang(
                     &sql_buf,
                     owned_id,
@@ -299,7 +299,7 @@ pub const ClusterApplyBackend = struct {
         const owned_id = generateOwnedAssignmentId(self.alloc) catch return ClusterApplyError.InternalError;
         errdefer self.alloc.free(owned_id);
 
-        var sql_buf: [1024]u8 = undefined;
+        var sql_buf: [@import("../../../cluster/assignment_spec.zig").sql_buffer_size]u8 = undefined;
         const sql = scheduler.assignmentSql(
             &sql_buf,
             owned_id,
