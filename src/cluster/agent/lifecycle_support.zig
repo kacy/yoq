@@ -43,27 +43,23 @@ pub fn initOwned(alloc: std.mem.Allocator, server_addr: [4]u8, server_port: u16,
 pub fn start(self: anytype) !void {
     self.assignment_workers.restart();
     self.running.store(true, .release);
-    self.log_server = try log_server.LogServer.init(self.alloc, self.agent_api_port, self.token);
     errdefer {
-        if (self.log_server) |*server| server.deinit();
-        self.log_server = null;
+        self.running.store(false, .release);
+        stopLogServer(self);
     }
-    self.log_server_thread = std.Thread.spawn(.{}, runLogServer, .{self}) catch {
-        if (self.log_server) |*server| server.deinit();
-        self.log_server = null;
-        self.running.store(false, .release);
-        return error.ThreadSpawnFailed;
-    };
-    self.loop_thread = std.Thread.spawn(.{}, loop_runtime.agentLoop, .{self}) catch {
-        if (self.log_server) |*server| server.deinit();
-        if (self.log_server_thread) |t| {
-            t.join();
-            self.log_server_thread = null;
-        }
-        self.log_server = null;
-        self.running.store(false, .release);
-        return error.ThreadSpawnFailed;
-    };
+    self.log_server = try log_server.LogServer.init(self.alloc, self.agent_api_port, self.token);
+    self.log_server_thread = std.Thread.spawn(.{}, runLogServer, .{self}) catch return error.ThreadSpawnFailed;
+    self.loop_thread = std.Thread.spawn(.{}, loop_runtime.agentLoop, .{self}) catch return error.ThreadSpawnFailed;
+}
+
+fn stopLogServer(self: anytype) void {
+    if (self.log_server) |*server| server.stop();
+    if (self.log_server_thread) |thread| {
+        thread.join();
+        self.log_server_thread = null;
+    }
+    if (self.log_server) |*server| server.deinit();
+    self.log_server = null;
 }
 
 fn runLogServer(self: anytype) void {
@@ -78,14 +74,7 @@ pub fn stop(self: anytype) void {
         self.loop_thread = null;
     }
     self.assignment_workers.join();
-    if (self.log_server) |*server| {
-        server.deinit();
-    }
-    if (self.log_server_thread) |t| {
-        t.join();
-        self.log_server_thread = null;
-    }
-    self.log_server = null;
+    stopLogServer(self);
 
     if (self.node_id != null) {
         setup.teardownClusterNetworking();
@@ -103,14 +92,7 @@ pub fn wait(self: anytype) void {
         self.loop_thread = null;
     }
     self.assignment_workers.join();
-    if (self.log_server) |*server| {
-        server.deinit();
-    }
-    if (self.log_server_thread) |t| {
-        t.join();
-        self.log_server_thread = null;
-    }
-    self.log_server = null;
+    stopLogServer(self);
 }
 
 pub fn deinit(self: anytype) void {

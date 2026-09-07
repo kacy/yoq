@@ -52,8 +52,13 @@ pub const LogServer = struct {
         };
     }
 
-    pub fn deinit(self: *LogServer) void {
+    pub fn stop(self: *LogServer) void {
         self.running.store(false, .release);
+    }
+
+    /// The owner joins run() before releasing its listener.
+    pub fn deinit(self: *LogServer) void {
+        self.stop();
         linux_platform.posix.close(self.listen_fd);
     }
 
