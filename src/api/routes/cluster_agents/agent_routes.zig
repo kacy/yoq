@@ -184,6 +184,10 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
         writer.writeByte(']') catch return common.internalError();
     }
 
+    // The first worker has no other worker seed. Advertise this authenticated
+    // server's identity and actual port; the agent pins its IP to the API peer.
+    writer.print(",\"gossip_server\":{{\"id\":{d},\"port\":{d}}}", .{ node.config.id, node.gossip_port }) catch return common.internalError();
+
     blk: {
         const db = node.stateMachineDb();
         const seeds = agent_registry.getGossipSeeds(alloc, db, 5) catch break :blk;
@@ -437,6 +441,7 @@ test "registration returns credentials only after their row is applied" {
     var node = try node_mod.Node.initForTests(alloc, .{
         .id = 1,
         .port = 0,
+        .gossip_port = 19877,
         .peers = &.{},
         .data_dir = "/unused-in-memory-registration",
     });
@@ -459,5 +464,8 @@ test "registration returns credentials only after their row is applied" {
     const secret = extractJsonString(response.body, "credential") orelse return error.MissingCredential;
     try std.testing.expect(try credentials.authenticates(&node.state_machine.db, secret, id));
     try std.testing.expectEqual(@as(?i64, 2), extractJsonInt(response.body, "node_id"));
+    const gossip = json_helpers.extractJsonObject(response.body, "gossip_server") orelse return error.MissingGossipServer;
+    try std.testing.expectEqual(@as(?i64, 1), json_helpers.extractJsonInt(gossip, "id"));
+    try std.testing.expectEqual(@as(?i64, 19877), json_helpers.extractJsonInt(gossip, "port"));
     try std.testing.expectEqual(node.raft.commit_index, node.state_machine.last_applied);
 }
