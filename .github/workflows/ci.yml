@@ -223,9 +223,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes iproute2 libsqlite3-dev
       - name: verify bridge-confined dns packets
-        run: |
-          zig build-exe -O ReleaseSafe -lc -lsqlite3 -Ivendor/zig-sqlite/c vendor/zig-sqlite/c/workaround.c --dep sqlite --dep linux_platform -Mroot=src/test_dns_bridge.zig -Ivendor/zig-sqlite/c -Msqlite=vendor/zig-sqlite/sqlite.zig -Mlinux_platform=src/lib/linux_platform.zig -femit-bin=/tmp/yoq-dns-bridge-fixture
-          sudo python3 tools/test_dns_bridge.py --binary /tmp/yoq-dns-bridge-fixture
+        run: bash scripts/dns-bridge-kernel-smoke.sh
 
   examples-validate:
     name: examples-validate
