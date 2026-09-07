@@ -35,7 +35,8 @@ pub fn apply(db: *sqlite.Db, entry: types.LogEntry) !void {
             if (err != error.SQLiteConstraint) return err;
             // A client conflict has a deterministic result. Roll back the whole
             // command and record rejection, so later committed entries can run.
-            try db_runtime.execStatement(db, "ROLLBACK;", .{});
+            if (sqlite.c.sqlite3_get_autocommit(db.db) == 0)
+                try db_runtime.execStatement(db, "ROLLBACK;", .{});
             try db_runtime.execStatement(db, "BEGIN IMMEDIATE;", .{});
             try db_runtime.initMeta(db);
             try db_runtime.execStatement(db, "INSERT INTO rejected_commands (log_index, term) VALUES (?, ?);", .{ @as(i64, @intCast(entry.index)), @as(i64, @intCast(entry.term)) });

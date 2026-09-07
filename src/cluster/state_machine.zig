@@ -1019,3 +1019,16 @@ test "pending wireguard registrations allocate distinct applied identities" {
         try std.testing.expectEqual(row.node_id, peer.node_id);
     }
 }
+
+test "replicated rejection handles SQLite rolling back the transaction itself" {
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+    try seedBatchTestAgents(&sm);
+    try sm.db.exec("CREATE TRIGGER reject_agent BEFORE UPDATE ON agents BEGIN SELECT RAISE(ROLLBACK, 'conflict'); END;", .{}, .{});
+    sm.apply(.{ .index = 1, .term = 1, .data = batch_test_increment });
+    try expectBatchTestState(&sm, 1, 0, 0);
+    try std.testing.expect(try @import("state_machine/command.zig").wasRejected(&sm.db, 1, 1));
+    try sm.db.exec("DROP TRIGGER reject_agent;", .{}, .{});
+    sm.apply(.{ .index = 2, .term = 1, .data = batch_test_increment });
+    try expectBatchTestState(&sm, 2, 1, 2);
+}
