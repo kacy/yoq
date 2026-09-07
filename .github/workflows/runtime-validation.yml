@@ -131,6 +131,14 @@ jobs:
           set -e
           exit "$status"
 
+      - name: verify scheduled runtime end to end
+        if: matrix.lane == 'network'
+        shell: bash
+        run: |
+          set -o pipefail
+          sudo env RUNNER_TEMP="$RUNNER_TEMP" python3 scripts/scheduled-runtime-smoke.py \
+            2>&1 | tee "$RUNNER_TEMP/runtime-logs/scheduled-runtime.log"
+
       - name: upload privileged runtime logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
