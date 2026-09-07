@@ -127,20 +127,23 @@ fn cancelRemovedAssignments(self: anytype, body: []const u8) !void {
     }
     var retired: std.ArrayList([]const u8) = .empty;
     defer retired.deinit(self.alloc);
-    self.container_lock.lockUncancelable(std.Options.debug_io);
-    defer self.container_lock.unlock(std.Options.debug_io);
-    var it = self.local_containers.iterator();
-    while (it.next()) |entry| {
-        if (!desired.contains(entry.key_ptr.*)) {
-            entry.value_ptr.*.canceled.store(true, .release);
-            agent_store.removeAssignment(entry.key_ptr.*) catch {};
-            if (entry.value_ptr.*.done.load(.acquire)) try retired.append(self.alloc, entry.key_ptr.*);
+    {
+        self.container_lock.lockUncancelable(std.Options.debug_io);
+        defer self.container_lock.unlock(std.Options.debug_io);
+        var it = self.local_containers.iterator();
+        while (it.next()) |entry| {
+            if (!desired.contains(entry.key_ptr.*)) {
+                entry.value_ptr.*.canceled.store(true, .release);
+                agent_store.removeAssignment(entry.key_ptr.*) catch {};
+            }
+            if (entry.value_ptr.*.canceled.load(.acquire) and entry.value_ptr.*.done.load(.acquire))
+                try retired.append(self.alloc, entry.key_ptr.*);
         }
-    }
-    for (retired.items) |id| {
-        const removed = self.local_containers.fetchRemove(id).?;
-        self.alloc.destroy(removed.value);
-        self.alloc.free(removed.key);
+        for (retired.items) |id| {
+            const removed = self.local_containers.fetchRemove(id).?;
+            self.alloc.destroy(removed.value);
+            self.alloc.free(removed.key);
+        }
     }
     // Cached work can predate this process. A successful desired-state snapshot
     // also invalidates those entries, preventing resurrection during an outage.
@@ -497,6 +500,12 @@ fn runAssignment(group_stopping: *const std.atomic.Value(bool), self: anytype, o
         .unhealthy, .timeout, .invalid => {
             log.warn("service assignment {s} failed readiness gate", .{assignment_id});
             _ = waitForAssignmentExit(&c, stopping, true);
+            if (stopping.load(.acquire)) {
+                setContainerState(self, assignment_id, .stopped);
+                reportStatus(self, assignment_id, "stopped", null);
+                cleanup(container_id);
+                return;
+            }
             setContainerState(self, assignment_id, .failed);
             reportStatus(self, assignment_id, "failed", switch (readiness_result) {
                 .healthy => unreachable,
@@ -890,4 +899,25 @@ test "assignment removal cancels a real process and invalidates cached work" {
         defer std.testing.allocator.free(cached);
         try std.testing.expectEqual(@as(usize, 0), cached.len);
     }
+}
+
+test "assignment cancellation retires completed owner when the same id becomes pending" {
+    const agent_mod = @import("../agent.zig");
+    const alloc = std.testing.allocator;
+    const Fixture = struct {
+        alloc: std.mem.Allocator,
+        container_lock: std.Io.Mutex = .init,
+        local_containers: std.StringHashMap(*agent_mod.LocalAssignment),
+    };
+    try agent_store.initTestDb();
+    defer agent_store.closeDb();
+    var fixture = Fixture{ .alloc = alloc, .local_containers = std.StringHashMap(*agent_mod.LocalAssignment).init(alloc) };
+    defer fixture.local_containers.deinit();
+    const owner = try alloc.create(agent_mod.LocalAssignment);
+    owner.* = .{};
+    owner.canceled.store(true, .release);
+    owner.done.store(true, .release);
+    try fixture.local_containers.put(try alloc.dupe(u8, "assignment"), owner);
+    try cancelRemovedAssignments(&fixture, "[{\"id\":\"assignment\",\"status\":\"pending\"}]");
+    try std.testing.expectEqual(@as(u32, 0), fixture.local_containers.count());
 }

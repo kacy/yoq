@@ -384,7 +384,7 @@ pub fn handleAssignmentStatusUpdate(alloc: std.mem.Allocator, request: http.Requ
     var owner_buf: [64]u8 = undefined;
     const escaped = @import("../../../lib/sql.zig").escapeSqlString(&owner_buf, agent_id) catch return common.internalError();
     var bound_buf: [512]u8 = undefined;
-    const bound = std.fmt.bufPrint(&bound_buf, "{s} AND agent_id = '{s}';", .{ sql[0 .. sql.len - 1], escaped }) catch return common.internalError();
+    const bound = std.fmt.bufPrint(&bound_buf, "{s} AND agent_id = '{s}' AND status IN ('pending', 'running');", .{ sql[0 .. sql.len - 1], escaped }) catch return common.internalError();
 
     _ = node.propose(bound) catch {
         return common.notLeader(alloc, node);
