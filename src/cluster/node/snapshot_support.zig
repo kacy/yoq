@@ -410,13 +410,40 @@ test "snapshot generation reuse rejects mismatched boundaries and corrupt retain
     try std.testing.expectError(error.CorruptSnapshot, artifact.publishSnapshot(path, data));
 }
 
-test "snapshot lifecycle reopens local and received generations at every durable transition" {
+const TestSource = enum { local, received };
+const TestTransition = enum { published, selected, restored };
+
+fn crashAtSnapshotTransition(log_path: [:0]const u8, state_path: [:0]const u8, dir: []const u8, data: []const u8, source: TestSource, transition: TestTransition) !void {
+    const linux = std.os.linux;
+    var log = try @import("../log.zig").Log.init(log_path);
+    defer log.deinit();
+    var state = try @import("../state_machine.zig").StateMachine.init(state_path);
+    defer state.deinit();
+    try log.append(.{ .index = 1, .term = 3, .data = "prefix" });
+    try log.append(.{ .index = 2, .term = 3, .data = "boundary" });
+    try log.append(.{ .index = 3, .term = 3, .data = "suffix" });
+    if (source == .local) _ = try state.restoreFromBytes(data);
+    var generation = switch (source) {
+        .local => try lifecycle.Generation.capture(&state, dir, try artifact.parseSnapshotMeta(data)),
+        .received => try lifecycle.Generation.receive(dir, data),
+    };
+    errdefer generation.deinit();
+    try std.testing.expectError(error.SnapshotNotSelected, generation.restore(&state));
+    if (transition != .published) try generation.select(&log);
+    if (transition == .restored) try generation.restore(&state);
+    // Remove only the disposable validation image. The actual state and log
+    // connections remain open: SIGKILL must leave their recovery journals intact.
+    generation.deinit();
+    _ = linux.kill(linux.getpid(), linux.SIG.KILL);
+    linux.exit_group(1);
+}
+
+test "snapshot lifecycle survives process death at every local and received transition" {
     const Log = @import("../log.zig").Log;
     const StateMachine = @import("../state_machine.zig").StateMachine;
-    const Source = enum { local, received };
-    const Transition = enum { published, selected, restored };
-    for ([_]Source{ .local, .received }) |source| {
-        for ([_]Transition{ .published, .selected, .restored }) |transition| {
+    const linux = std.os.linux;
+    for ([_]TestSource{ .local, .received }) |source| {
+        for ([_]TestTransition{ .published, .selected, .restored }) |transition| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var dir_buf: [512]u8 = undefined;
@@ -424,31 +451,30 @@ test "snapshot lifecycle reopens local and received generations at every durable
             const dir = dir_buf[0..dir_len];
             const data = try testSnapshot(dir);
             defer std.testing.allocator.free(data);
-            const meta = try artifact.parseSnapshotMeta(data);
             var log_buf: [512]u8 = undefined;
             const log_path = try std.fmt.bufPrintZ(&log_buf, "{s}/raft.db", .{dir});
             var state_buf: [512]u8 = undefined;
             const state_path = try std.fmt.bufPrintZ(&state_buf, "{s}/state.db", .{dir});
-            {
-                var log = try Log.init(log_path);
-                defer log.deinit();
-                var state = try StateMachine.init(state_path);
-                defer state.deinit();
-                try log.append(.{ .index = 1, .term = 3, .data = "prefix" });
-                try log.append(.{ .index = 2, .term = 3, .data = "boundary" });
-                try log.append(.{ .index = 3, .term = 3, .data = "suffix" });
-                if (source == .local) _ = try state.restoreFromBytes(data);
-                var generation = switch (source) {
-                    .local => try lifecycle.Generation.capture(&state, dir, meta),
-                    .received => try lifecycle.Generation.receive(dir, data),
+            const child = linux.fork();
+            if (linux.errno(child) != .SUCCESS) return error.ForkFailed;
+            if (child == 0) {
+                crashAtSnapshotTransition(log_path, state_path, dir, data, source, transition) catch |err| {
+                    std.debug.print("snapshot transition {s}/{s} failed before crash: {}\n", .{ @tagName(source), @tagName(transition), err });
+                    linux.exit_group(1);
                 };
-                defer generation.deinit();
-                try std.testing.expectError(error.SnapshotNotSelected, generation.restore(&state));
-                if (transition != .published) try generation.select(&log);
-                if (transition == .restored) try generation.restore(&state);
-                // Drop all process state at the selected seam. Recovery below
-                // can use only the on-disk log, state database, and generation.
+                linux.exit_group(1);
             }
+            var status: u32 = 0;
+            while (true) {
+                const result = linux.waitpid(@intCast(child), &status, 0);
+                switch (linux.errno(result)) {
+                    .SUCCESS => break,
+                    .INTR => continue,
+                    else => return error.WaitFailed,
+                }
+            }
+            try std.testing.expect(std.posix.W.IFSIGNALED(status));
+            try std.testing.expectEqual(@as(u32, linux.SIG.KILL), std.posix.W.TERMSIG(status));
             {
                 var log = try Log.init(log_path);
                 defer log.deinit();
