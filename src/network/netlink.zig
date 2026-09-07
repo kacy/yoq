@@ -117,6 +117,7 @@ test "nested attributes" {
     var mb = MessageBuilder.init(&buf);
     const hdr = try mb.putHeader(.RTM_NEWLINK, NLM_F.REQUEST, linux.ifinfomsg);
     const nested = try mb.startNested(hdr, IFLA.LINKINFO);
+    try std.testing.expectEqual(IFLA.LINKINFO | @as(u16, 1 << 15), nested.type);
     try mb.putAttrStr(hdr, IFLA.INFO_KIND, "bridge");
     mb.endNested(nested);
     try std.testing.expect(hdr.len > @sizeOf(linux.nlmsghdr) + @sizeOf(linux.ifinfomsg));

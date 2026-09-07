@@ -124,7 +124,7 @@ pub fn addPeer(name: []const u8, peer: types.PeerConfig) types.WireguardError!vo
         const cidr = parse_support.parseCidr(cidr_str) orelse return types.WireguardError.PeerAddFailed;
 
         const aip_nest = mb.startNested(hdr, 0) catch return types.WireguardError.PeerAddFailed;
-        mb.putAttrU8(hdr, nl.WGALLOWEDIP_A.FAMILY, nl.AF.INET) catch return types.WireguardError.PeerAddFailed;
+        mb.putAttrU16(hdr, nl.WGALLOWEDIP_A.FAMILY, nl.AF.INET) catch return types.WireguardError.PeerAddFailed;
         mb.putAttr(hdr, nl.WGALLOWEDIP_A.IPADDR, &cidr.addr) catch return types.WireguardError.PeerAddFailed;
         mb.putAttrU8(hdr, nl.WGALLOWEDIP_A.CIDR_MASK, cidr.prefix) catch return types.WireguardError.PeerAddFailed;
         mb.endNested(aip_nest);
