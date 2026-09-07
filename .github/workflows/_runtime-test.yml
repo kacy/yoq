@@ -35,7 +35,7 @@ jobs:
       - name: install runtime fixture tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes iproute2 openssl python3 curl wireguard-tools
+          sudo apt-get install --yes iproute2 openssl python3 curl wireguard-tools libsqlite3-dev
 
       - name: run kernel fixtures
         shell: bash
@@ -51,10 +51,15 @@ jobs:
             "$zig_bin" build -j1 -Doptimize=ReleaseSafe -Drun-privileged-tests=true \
             "test-runtime-$RUNTIME_LANE" 2>&1 | tee "$RUNNER_TEMP/runtime-kernel.log"
           if [ "$RUNTIME_LANE" = network ]; then
+            bash scripts/dns-bridge-kernel-smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
             bash scripts/wireguard-kernel-smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
             sudo env RUNNER_TEMP="$RUNNER_TEMP" python3 scripts/scheduled-runtime-smoke.py \
               2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
           fi
+
+      - name: collect kernel failure diagnostics
+        if: failure()
+        run: sudo dmesg --level=err,warn | tail -80 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
 
       - name: upload runtime log
         if: always()

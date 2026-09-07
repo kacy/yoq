@@ -153,7 +153,7 @@ def inside(root, outer_mount, outer_net):
     untrusted_home.mkdir()
     rejected = subprocess.run([str(YOQ), "pull", image], env=dict(os.environ, HOME=str(untrusted_home)),
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
-    assert rejected.returncode != 0, "registry certificate was accepted without trust"
+    assert rejected.returncode == 1 and b"error.NetworkError" in rejected.stderr, rejected.stderr.decode()
     assert not registry.request_paths, "untrusted registry received an HTTP request"
     run("mount", "--bind", str(cert), "/etc/ssl/certs/ca-certificates.crt")
     processes = [worker_net]
@@ -259,6 +259,8 @@ def inside(root, outer_mount, outer_net):
             output.close()
         for name in homes:
             print(f"--- {name} log ---\n{(root / (name + '.log')).read_text()}", flush=True)
+        for log in homes.get("agent", root).glob(".local/share/yoq/logs/*.log"):
+            print(f"--- container {log.name} ---\n{log.read_text()}", flush=True)
 
 
 def main():

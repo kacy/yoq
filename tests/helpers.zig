@@ -179,10 +179,26 @@ pub const TestEnv = struct {
     }
 
     pub fn runYoq(self: *const TestEnv, args: []const []const u8) !RunResult {
-        return runYoqWithOptions(self.alloc, args, .{
+        const result = try runYoqWithOptions(self.alloc, args, .{
             .env_map = &self.env_map,
             .cwd = self.cwd,
         });
+        if (result.exit_code != 0) self.printContainerLogs();
+        return result;
+    }
+
+    fn printContainerLogs(self: *const TestEnv) void {
+        const path = std.fmt.allocPrint(self.alloc, "{s}/.local/share/yoq/logs", .{self.home}) catch return;
+        defer self.alloc.free(path);
+        var dir = std.Io.Dir.cwd().openDir(std.testing.io, path, .{ .iterate = true }) catch return;
+        defer dir.close(std.testing.io);
+        var files = dir.iterate();
+        while (files.next(std.testing.io) catch null) |file| {
+            if (file.kind != .file) continue;
+            const data = dir.readFileAlloc(std.testing.io, file.name, self.alloc, .limited(64 * 1024)) catch continue;
+            defer self.alloc.free(data);
+            if (data.len > 0) std.debug.print("container {s}:\n{s}\n", .{ file.name, data });
+        }
     }
 };
 
