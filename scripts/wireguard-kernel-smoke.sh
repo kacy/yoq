@@ -28,7 +28,6 @@ repo="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 fixture_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/yoq-wireguard.XXXXXX")"
 trap 'rm -rf -- "$fixture_dir"' EXIT
 cd "$repo"
-zig build-exe -O ReleaseSafe --dep wireguard -Mroot=scripts/fixtures/wireguard_kernel.zig \
-  --dep linux_platform -Mwireguard=src/network/wireguard.zig \
+zig build-exe -O ReleaseSafe --dep linux_platform -Mroot=src/test_wireguard_kernel.zig \
   -Mlinux_platform=src/lib/linux_platform.zig -lc -femit-bin="$fixture_dir/fixture"
 sudo --preserve-env=PATH unshare --net bash "$0" --inside "$(readlink /proc/self/ns/net)" "$fixture_dir/fixture"

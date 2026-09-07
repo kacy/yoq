@@ -1,5 +1,5 @@
 const std = @import("std");
-const wireguard = @import("wireguard");
+const wireguard = @import("network/wireguard.zig");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
