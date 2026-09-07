@@ -27,14 +27,31 @@ const Ctx = struct {
     node: *cluster_node.Node,
     alloc: std.mem.Allocator,
     derived_key: [secrets.key_length]u8,
+    stopped: std.Io.Event = .unset,
+};
+
+/// The server owns this handle until stop joins all accesses to its node.
+pub const Worker = struct {
+    ctx: *Ctx,
+    thread: ?std.Thread,
+
+    pub fn stop(self: *Worker) void {
+        const thread = self.thread orelse return;
+        self.ctx.stopped.set(std.Options.debug_io);
+        thread.join();
+        const ctx = self.ctx;
+        std.crypto.secureZero(u8, &ctx.derived_key);
+        ctx.alloc.destroy(ctx);
+        self.thread = null;
+    }
 };
 
 /// spawn the bootstrap thread. callable once at server startup; safe if the
 /// cluster CA already exists (the thread will see the row and exit).
-pub fn spawn(node: *cluster_node.Node, alloc: std.mem.Allocator, join_token: []const u8) void {
+pub fn spawn(node: *cluster_node.Node, alloc: std.mem.Allocator, join_token: []const u8) ?Worker {
     const ctx = alloc.create(Ctx) catch {
         log.warn("ca bootstrap: failed to allocate context", .{});
-        return;
+        return null;
     };
     ctx.* = .{
         .node = node,
@@ -44,10 +61,11 @@ pub fn spawn(node: *cluster_node.Node, alloc: std.mem.Allocator, join_token: []c
 
     const thread = std.Thread.spawn(.{}, run, .{ctx}) catch |err| {
         log.warn("ca bootstrap: failed to spawn thread: {}", .{err});
+        std.crypto.secureZero(u8, &ctx.derived_key);
         alloc.destroy(ctx);
-        return;
+        return null;
     };
-    thread.detach();
+    return .{ .ctx = ctx, .thread = thread };
 }
 
 fn deriveKey(join_token: []const u8) [secrets.key_length]u8 {
@@ -57,10 +75,8 @@ fn deriveKey(join_token: []const u8) [secrets.key_length]u8 {
 }
 
 fn run(ctx: *Ctx) void {
-    defer ctx.alloc.destroy(ctx);
-
     var attempt: u32 = 0;
-    while (attempt < max_attempts) : (attempt += 1) {
+    while (!ctx.stopped.isSet() and attempt < max_attempts) : (attempt += 1) {
         if (store.clusterCaExistsInDb(ctx.node.stateMachineDb())) return;
         if (ctx.node.isLeader()) {
             if (bootstrap(ctx)) |_| {
@@ -69,8 +85,13 @@ fn run(ctx: *Ctx) void {
                 log.warn("ca bootstrap: attempt {d} failed: {}", .{ attempt, err });
             }
         }
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(poll_interval_ms), .awake) catch return;
+        ctx.stopped.waitTimeout(std.Options.debug_io, .{ .duration = .{ .raw = .fromMilliseconds(poll_interval_ms), .clock = .awake } }) catch |err| switch (err) {
+            error.Timeout => continue,
+            error.Canceled => return,
+        };
+        return;
     }
+    if (ctx.stopped.isSet()) return;
     log.warn("ca bootstrap: timed out waiting for leader / quorum", .{});
 }
 
@@ -105,4 +126,16 @@ fn bootstrap(ctx: *Ctx) !void {
         return err;
     };
     log.info("ca bootstrap: cluster CA seeded (valid through unix {d})", .{not_after});
+}
+
+test "certificate worker ownership stops before node teardown" {
+    var node = try cluster_node.Node.initForTests(std.testing.allocator, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/tmp" });
+    defer node.deinit();
+    node.raft.log = &node.log;
+    var worker = spawn(&node, std.testing.allocator, "worker-shutdown-test") orelse return error.WorkerStartFailed;
+    defer worker.stop();
+    worker.stop();
+    try std.testing.expect(worker.thread == null);
+    // Repeated cleanup does not touch the already-freed context.
+    worker.stop();
 }

@@ -296,16 +296,20 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
     // seed the cluster mTLS CA in the background — runs on the leader once,
     // exits silently on followers when the row appears via raft apply. needs a
     // join token to derive the key-encryption key, so skipped without one.
+    const ca_bootstrap = @import("../ca_bootstrap.zig");
+    const cert_issuer = @import("../cert_issuer.zig");
+    var ca_worker: ?ca_bootstrap.Worker = null;
+    var issuer_worker: ?cert_issuer.Worker = null;
+    defer if (ca_worker) |*worker| worker.stop();
+    defer if (issuer_worker) |*worker| worker.stop();
     if (join_token) |jt| {
-        const ca_bootstrap = @import("../ca_bootstrap.zig");
-        ca_bootstrap.spawn(&node, alloc, jt);
+        ca_worker = ca_bootstrap.spawn(&node, alloc, jt);
 
         // periodic per-service leaf-cert issuance / rotation. no-ops when the
         // service_mtls flag is off (default), or when this node isn't the
         // leader. shares the join-token-derived key-encryption scheme with
         // ca_bootstrap so every node can decrypt what's written.
-        const cert_issuer = @import("../cert_issuer.zig");
-        cert_issuer.spawn(&node, alloc, jt);
+        issuer_worker = cert_issuer.spawn(&node, alloc, jt);
     }
 
     const dns = @import("../../network/dns.zig");
@@ -330,6 +334,8 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
     orchestrator.installSignalHandlers();
     server.run();
 
+    if (issuer_worker) |*worker| worker.stop();
+    if (ca_worker) |*worker| worker.stop();
     node.stop();
     if (rollout_recovery_thread) |thread| thread.join();
 }

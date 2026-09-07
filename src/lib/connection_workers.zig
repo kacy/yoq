@@ -122,7 +122,7 @@ test "listener lifecycle cancellation does not shut down a reused descriptor" {
         linux_platform.posix.close(original[0]);
         return err;
     };
-    const deadline = @import("../client_transport.zig").Deadline.afterMilliseconds(2000);
+    const deadline = @import("../tls/client_transport.zig").Deadline.afterMilliseconds(2000);
     while (!fixture.closed.load(.acquire)) {
         _ = try deadline.remaining();
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
@@ -138,4 +138,43 @@ test "listener lifecycle cancellation does not shut down a reused descriptor" {
     var byte: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try linux_platform.posix.recv(unrelated[1], &byte, posix.MSG.DONTWAIT));
     try std.testing.expectEqual(@as(u8, 'x'), byte[0]);
+}
+
+test "connection worker ownership rejects overload and joins before restart" {
+    const Fixture = struct {
+        fn run(fd: posix.fd_t) void {
+            defer linux_platform.posix.close(fd);
+            var byte: [1]u8 = undefined;
+            _ = linux_platform.posix.recv(fd, &byte, 0) catch return;
+        }
+
+        fn pair() ![2]posix.fd_t {
+            var fds: [2]posix.fd_t = undefined;
+            if (posix.errno(std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &fds)) != .SUCCESS)
+                return error.SocketFailed;
+            return fds;
+        }
+    };
+    var group = Group(1){};
+    defer group.join();
+    const first = try Fixture.pair();
+    defer linux_platform.posix.close(first[1]);
+    group.spawn(first[0], Fixture.run, .{first[0]}) catch |err| {
+        linux_platform.posix.close(first[0]);
+        return err;
+    };
+    const second = try Fixture.pair();
+    defer linux_platform.posix.close(second[1]);
+    var second_owned = true;
+    defer if (second_owned) linux_platform.posix.close(second[0]);
+    try std.testing.expectError(error.ConnectionLimit, group.spawn(second[0], Fixture.run, .{second[0]}));
+    group.cancel();
+    try std.testing.expectError(error.Stopping, group.spawn(second[0], Fixture.run, .{second[0]}));
+    group.join();
+    try std.testing.expectEqual(@as(usize, 0), group.count());
+    group.restart();
+    try group.spawn(second[0], Fixture.run, .{second[0]});
+    second_owned = false;
+    group.join();
+    try std.testing.expectEqual(@as(usize, 0), group.count());
 }
