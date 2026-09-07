@@ -256,8 +256,14 @@ pub const Container = struct {
         };
         var files: startup.NetworkFiles = .{};
         if (config.network != null) {
-            network_db = store.openDb() catch return ContainerError.StartFailed;
-            files = start_support.setupNetwork(config, child.pid, &self.net_info, &network_db.?) catch return ContainerError.StartFailed;
+            network_db = store.openDb() catch |err| {
+                log.err("container {s}: network database open failed: {}", .{ config.id, err });
+                return ContainerError.StartFailed;
+            };
+            files = start_support.setupNetwork(config, child.pid, &self.net_info, &network_db.?) catch |err| {
+                log.err("container {s}: network setup failed: {}", .{ config.id, err });
+                return ContainerError.StartFailed;
+            };
         }
         startup.sendNetwork(channel.parent, files) catch return ContainerError.StartFailed;
         startup.expect(channel.parent, .prepared) catch |err| {
