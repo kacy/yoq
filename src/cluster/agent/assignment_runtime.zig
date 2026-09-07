@@ -214,7 +214,7 @@ fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, comm
         log.info("starting assignment {s} (image: {s})", .{ id_copy, image_copy });
     }
 
-    _ = std.Thread.spawn(.{}, runAssignment, .{ self, id_copy, image_copy, command_copy, gang_copy, AssignmentMeta{
+    self.assignment_workers.spawn(runAssignment, .{ self, id_copy, image_copy, command_copy, gang_copy, AssignmentMeta{
         .app_name = app_name_copy,
         .workload_kind = workload_kind_copy,
         .workload_name = workload_name_copy,
@@ -241,7 +241,7 @@ fn fetchAssignments(self: anytype) ?http_client.Response {
     return http_client.getWithAuth(self.alloc, self.server_addr, self.server_port, path, self.worker_credential) catch return null;
 }
 
-fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo, meta: AssignmentMeta) void {
+fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignment_id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo, meta: AssignmentMeta) void {
     defer {
         self.alloc.free(image);
         self.alloc.free(command);
@@ -250,6 +250,11 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         if (meta.workload_name) |workload_name| self.alloc.free(workload_name);
         if (meta.health_check_json) |health_check_json| self.alloc.free(health_check_json);
         if (gang_info) |gang| self.alloc.free(gang.master_addr);
+    }
+
+    if (stopping.load(.acquire)) {
+        setContainerState(self, assignment_id, .stopped);
+        return;
     }
 
     const ref = image_spec.parseImageRef(image);
@@ -263,6 +268,11 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         return;
     };
     defer pull_result.deinit();
+
+    if (stopping.load(.acquire)) {
+        setContainerState(self, assignment_id, .stopped);
+        return;
+    }
 
     const layer_paths = image_layer.assembleRootfs(self.alloc, pull_result.layer_digests) catch {
         log.warn("failed to assemble rootfs for assignment {s}", .{assignment_id});
@@ -352,6 +362,12 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         .created_at = nowRealSeconds(),
     };
 
+    if (stopping.load(.acquire)) {
+        setContainerState(self, assignment_id, .stopped);
+        cleanup(container_id);
+        return;
+    }
+
     log.info("starting container {s} for assignment {s}", .{ container_id, assignment_id });
     c.start() catch {
         log.warn("container {s} failed to start for assignment {s}", .{ container_id, assignment_id });
@@ -361,13 +377,12 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
         return;
     };
 
-    const readiness_result = waitForServiceReadiness(self.alloc, container_id, meta);
+    const readiness_result = waitForServiceReadiness(stopping, self.alloc, container_id, meta);
     switch (readiness_result) {
         .healthy => {},
         .unhealthy, .timeout, .invalid => {
             log.warn("service assignment {s} failed readiness gate", .{assignment_id});
-            _ = c.stop() catch {};
-            _ = c.wait() catch 255;
+            _ = waitForAssignmentExit(&c, stopping, true);
             setContainerState(self, assignment_id, .failed);
             reportStatus(self, assignment_id, "failed", switch (readiness_result) {
                 .healthy => unreachable,
@@ -383,7 +398,7 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
     reportStatus(self, assignment_id, "running", null);
     setContainerState(self, assignment_id, .running);
 
-    const exit_code = c.wait() catch 255;
+    const exit_code = waitForAssignmentExit(&c, stopping, false);
 
     log.info("container {s} exited for assignment {s}", .{ container_id, assignment_id });
     if (meta.workload_kind != null and meta.workload_name != null and std.mem.eql(u8, meta.workload_kind.?, "service")) {
@@ -399,7 +414,39 @@ fn runAssignment(self: anytype, assignment_id: []const u8, image: []const u8, co
     cleanup(container_id);
 }
 
-fn waitForServiceReadiness(alloc: std.mem.Allocator, container_id: []const u8, meta: AssignmentMeta) ServiceReadinessResult {
+/// Keep the container and its cleanup on the assignment thread. Shutdown first
+/// asks the workload to exit, then kills it after a short grace period, so join
+/// cannot leave a running workload borrowing the agent's state indefinitely.
+fn waitForAssignmentExit(c: anytype, stopping: *const std.atomic.Value(bool), stop_requested: bool) u8 {
+    return waitForAssignmentExitWith(c, stopping, stop_requested, nowAwakeNanoseconds, runtime_wait.sleep);
+}
+
+fn waitForAssignmentExitWith(c: anytype, stopping: *const std.atomic.Value(bool), stop_requested: bool, comptime now: anytype, comptime sleep: anytype) u8 {
+    var stop_deadline: ?i128 = if (stop_requested) now() + 5 * std.time.ns_per_s else null;
+    if (stop_requested) c.stop() catch {};
+    while (true) {
+        c.poll() catch {
+            c.forceStop() catch {};
+            return c.wait() catch 255;
+        };
+        if (c.status == .stopped) return c.exit_code orelse 255;
+        if (stop_deadline) |deadline| {
+            if (now() >= deadline) {
+                c.forceStop() catch {};
+                return c.wait() catch 255;
+            }
+        } else if (stopping.load(.acquire)) {
+            c.stop() catch {};
+            stop_deadline = now() + 5 * std.time.ns_per_s;
+        }
+        if (!sleep(std.Io.Duration.fromMilliseconds(50), "assignment process wait")) {
+            c.forceStop() catch {};
+            return c.wait() catch 255;
+        }
+    }
+}
+
+fn waitForServiceReadiness(stopping: *const std.atomic.Value(bool), alloc: std.mem.Allocator, container_id: []const u8, meta: AssignmentMeta) ServiceReadinessResult {
     const workload_kind = meta.workload_kind orelse return .healthy;
     const service_name = meta.workload_name orelse return .healthy;
     if (!std.mem.eql(u8, workload_kind, "service")) return .healthy;
@@ -425,6 +472,7 @@ fn waitForServiceReadiness(alloc: std.mem.Allocator, container_id: []const u8, m
         if (final_status != .healthy) manifest_health.unregisterService(service_name);
     }
     while (nowAwakeNanoseconds() < deadline_ns) {
+        if (stopping.load(.acquire)) return .timeout;
         switch (manifest_health.getStatus(service_name) orelse .starting) {
             .healthy => return .healthy,
             .unhealthy => return .unhealthy,
@@ -602,4 +650,55 @@ test "parseHealthCheckJson parses exec service checks" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "assignment worker ownership escalates uncooperative shutdown and reaps" {
+    const Fixture = struct {
+        status: enum { running, stopped } = .running,
+        exit_code: ?u8 = null,
+        terms: usize = 0,
+        kills: usize = 0,
+        reaped: bool = false,
+        cooperative: bool = false,
+        var clock: i128 = 0;
+
+        fn poll(self: *@This()) !void {
+            if (self.cooperative and self.terms != 0) {
+                self.status = .stopped;
+                self.exit_code = 0;
+                self.reaped = true;
+            }
+        }
+        fn stop(self: *@This()) !void {
+            self.terms += 1;
+        }
+        fn forceStop(self: *@This()) !void {
+            self.kills += 1;
+        }
+        fn wait(self: *@This()) !u8 {
+            try std.testing.expectEqual(@as(usize, 1), self.kills);
+            self.reaped = true;
+            return 128;
+        }
+        fn now() i128 {
+            return clock;
+        }
+        fn sleep(_: std.Io.Duration, _: []const u8) bool {
+            clock += std.time.ns_per_s;
+            return true;
+        }
+    };
+    const stopping = std.atomic.Value(bool).init(true);
+    var stubborn = Fixture{};
+    Fixture.clock = 0;
+    try std.testing.expectEqual(@as(u8, 128), waitForAssignmentExitWith(&stubborn, &stopping, false, Fixture.now, Fixture.sleep));
+    try std.testing.expectEqual(@as(usize, 1), stubborn.terms);
+    try std.testing.expect(stubborn.reaped);
+    try std.testing.expect(Fixture.clock >= 5 * std.time.ns_per_s);
+    var cooperative = Fixture{ .cooperative = true };
+    Fixture.clock = 0;
+    try std.testing.expectEqual(@as(u8, 0), waitForAssignmentExitWith(&cooperative, &stopping, false, Fixture.now, Fixture.sleep));
+    try std.testing.expectEqual(@as(usize, 1), cooperative.terms);
+    try std.testing.expectEqual(@as(usize, 0), cooperative.kills);
+    try std.testing.expect(cooperative.reaped);
 }
