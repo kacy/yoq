@@ -234,7 +234,7 @@ pub fn handleTlsSession(
 
     var client_app_seq: u64 = 0;
     var server_app_seq: u64 = 0;
-    var initial = RequestBuffer{};
+    var initial = RequestBuffer.init();
     defer initial.deinit();
     var initial_request_forwarded = false;
     const is_h2 = selected_alpn != null and std.mem.eql(u8, selected_alpn.?, "h2");
@@ -308,7 +308,11 @@ const request_timeout_ms = 10_000;
 
 const RequestBuffer = struct {
     bytes: std.ArrayList(u8) = .empty,
-    deadline: transport.Deadline = transport.Deadline.afterMilliseconds(request_timeout_ms),
+    deadline: transport.Deadline,
+
+    fn init() RequestBuffer {
+        return .{ .deadline = transport.Deadline.afterMilliseconds(request_timeout_ms) };
+    }
 
     fn append(self: *RequestBuffer, bytes: []const u8) !void {
         _ = try self.deadline.remaining();
@@ -770,7 +774,7 @@ test "mTLS — warn mode accepts an empty client cert (no identity)" {
 }
 
 test "request buffering rejects oversized and expired incomplete headers" {
-    var pending = RequestBuffer{};
+    var pending = RequestBuffer.init();
     defer pending.deinit();
     const chunk = [_]u8{'x'} ** 16384;
     for (0..4) |_| try pending.append(&chunk);
