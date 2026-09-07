@@ -47,3 +47,23 @@ test "static membership accepts peer order changes and rejects changed voters" {
     try std.testing.expectError(error.InvalidPeerId, validate(2, &peers));
     try std.testing.expectError(error.DuplicatePeerId, validate(1, &[_]Peer{ peers[0], peers[0] }));
 }
+
+test "static membership survives database reopen and permits address changes" {
+    const Peer = struct { id: u64, addr: [4]u8, port: u16 };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [512]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &dir_buf);
+    var path_buf: [600]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/raft.db", .{dir_buf[0..len]});
+    const peers = [_]Peer{.{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 }};
+    {
+        var db = try sqlite.Db.init(.{ .mode = .{ .File = path }, .open_flags = .{ .write = true, .create = true } });
+        defer db.deinit();
+        try check(std.testing.allocator, &db, 1, &peers);
+    }
+    var reopened = try sqlite.Db.init(.{ .mode = .{ .File = path }, .open_flags = .{ .write = true } });
+    defer reopened.deinit();
+    try check(std.testing.allocator, &reopened, 1, &[_]Peer{.{ .id = 2, .addr = .{ 10, 1, 0, 2 }, .port = 9800 }});
+    try std.testing.expectError(error.MembershipChanged, check(std.testing.allocator, &reopened, 1, &[_]Peer{}));
+}
