@@ -106,6 +106,12 @@ jobs:
         with:
           cache-prefix: zig-runtime-${{ matrix.lane }}
 
+      - name: install scheduled network fixture tools
+        if: matrix.lane == 'network'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes iproute2 openssl python3 curl wireguard-tools
+
       - name: build yoq
         shell: bash
         run: zig build -Doptimize=ReleaseSafe
@@ -136,6 +142,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          bash scripts/wireguard-kernel-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/wireguard-kernel.log"
           sudo env RUNNER_TEMP="$RUNNER_TEMP" python3 scripts/scheduled-runtime-smoke.py \
             2>&1 | tee "$RUNNER_TEMP/runtime-logs/scheduled-runtime.log"
 
