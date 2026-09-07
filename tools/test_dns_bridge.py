@@ -39,8 +39,13 @@ def inside(binary, outer):
     missing = subprocess.run([str(binary)], capture_output=True, timeout=3)
     assert missing.returncode != 0 and b"ResolverStartFailed" in missing.stderr, missing.stderr
     query("127.0.0.1", False)
+    # Simulate the host stub resolver without touching any real host service.
+    stub = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    stub.bind(("127.0.0.53", 53))
+    stub.settimeout(1)
     run("ip", "link", "add", "yoq0", "type", "bridge")
     run("ip", "addr", "add", "10.42.2.1/24", "dev", "yoq0")
+    run("ip", "addr", "add", "10.42.0.1/24", "dev", "yoq0")
     run("ip", "link", "set", "yoq0", "up")
     client = subprocess.Popen(["unshare", "--net", "sleep", "30"])
     server = None
@@ -62,6 +67,7 @@ def inside(binary, outer):
             run("ip", "link", "set", host, "up")
             run(*prefix, "ip", "addr", "add", address, "dev", peer)
             run(*prefix, "ip", "link", "set", peer, "up")
+        run(*prefix, "ip", "addr", "add", "10.42.0.2/24", "dev", "bridge-peer")
         server = subprocess.Popen([str(binary)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         deadline = time.monotonic() + 3
         while True:
@@ -69,10 +75,24 @@ def inside(binary, outer):
             if result.returncode == 0:
                 break
             assert server.poll() is None and time.monotonic() < deadline, result.stderr
+        run(*prefix, sys.executable, str(Path(__file__).resolve()), "--query", "10.42.0.1", "--expect")
+        # Deliver a gateway-addressed packet through the unrelated interface:
+        # explicit address binding alone would still accept this packet.
+        run(*prefix, "ip", "route", "add", "10.42.2.1/32", "via", "192.0.2.1", "dev", "outside-peer")
+        run(*prefix, sys.executable, str(Path(__file__).resolve()), "--query", "10.42.2.1")
+        run(*prefix, "ip", "route", "del", "10.42.2.1/32")
         run(*prefix, sys.executable, str(Path(__file__).resolve()), "--query", "192.0.2.1")
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.settimeout(1)
+            probe.sendto(b"host-dns", ("127.0.0.53", 53))
+            message, peer = stub.recvfrom(512)
+            assert message == b"host-dns"
+            stub.sendto(b"host-dns-ok", peer)
+            assert probe.recv(512) == b"host-dns-ok"
         query("127.0.0.1", False)
-        print("DNS kernel: node gateway answers through bridge; unrelated interface and loopback rejected", flush=True)
+        print("DNS kernel: local and node gateways coexist with host DNS; unrelated ingress and loopback rejected", flush=True)
     finally:
+        stub.close()
         for process in (server, client):
             if process is not None:
                 process.terminate()

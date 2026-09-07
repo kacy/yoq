@@ -105,8 +105,9 @@ pub fn setupContainer(
         configured_port_maps += 1;
     }
 
-    dns.startResolver();
-    if (!config.skip_dns and !dns.resolverRunning()) {
+    const gateway = if (subnet_config) |sc| sc.gateway else bridge.gateway_ip;
+    dns.startResolverAt(gateway);
+    if (!config.skip_dns and !dns.resolverRunningAt(gateway)) {
         return common.SetupError.ConfigFailed;
     }
     if (dns.resolverOwnedByCurrentProcess()) {

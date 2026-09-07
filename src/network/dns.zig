@@ -132,6 +132,14 @@ pub fn parseResolvConf(content: []const u8) ?[4]u8 {
 }
 
 /// start the DNS resolver thread. idempotent — safe to call multiple times.
+pub fn startResolverAt(address: [4]u8) void {
+    resolver_runtime.startResolverAt(address);
+}
+
+pub fn resolverRunningAt(address: [4]u8) bool {
+    return resolver_runtime.isRunningAt(address);
+}
+
 pub fn startResolver() void {
     resolver_runtime.startResolver();
 }
