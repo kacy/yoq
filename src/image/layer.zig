@@ -119,7 +119,7 @@ test "layer path format" {
     const path = try layerPath(digest, &buf);
 
     // should contain the cache subdir and the hex digest
-    try std.testing.expect(std.mem.indexOf(u8, path, "layers/v3/sha256") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "layers/v4/sha256") != null);
     try std.testing.expect(std.mem.endsWith(u8, path, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9/rootfs"));
 }
 
@@ -557,4 +557,37 @@ test "extract layer concurrent callers publish one complete immutable directory"
         try std.testing.expectEqualStrings(workers[0].result.?, worker.result.?);
         try std.testing.expectEqual(workers[0].inode, worker.inode);
     }
+}
+
+test "layer format migration rebuilds verified blobs without mutating v3 entries" {
+    const alloc = std.testing.allocator;
+    var output = std.Io.Writer.Allocating.init(alloc);
+    defer output.deinit();
+    var writer: std.tar.Writer = .{ .underlying_writer = &output.writer };
+    try writer.writeFileBytes("version", "fresh image contents", .{});
+    try writer.finishPedantically();
+    const compressed = try gzipBytes(alloc, output.written());
+    defer alloc.free(compressed);
+    const digest = try blob_store.putBlob(compressed);
+    defer blob_store.deleteBlob(digest) catch {};
+    defer deleteExtractedLayerForDigest(digest);
+    const hex = digest.hex();
+    var old_buf: [max_path]u8 = undefined;
+    const old = try @import("../lib/paths.zig").dataPathFmt(&old_buf, "layers/v3/sha256/{s}", .{hex});
+    try cwd().createDirPath(std.testing.io, old);
+    defer cwd().deleteTree(std.testing.io, old) catch {};
+    var previous = try cwd().openDir(std.testing.io, old, .{});
+    defer previous.close(std.testing.io);
+    try previous.createDirPath(std.testing.io, "rootfs");
+    try previous.writeFile(std.testing.io, .{ .sub_path = "complete", .data = &hex });
+    try previous.writeFile(std.testing.io, .{ .sub_path = "rootfs/version", .data = "old extraction policy" });
+    var digest_buf: [71]u8 = undefined;
+    const extracted_path = try extractLayer(alloc, digestString(digest, &digest_buf));
+    defer alloc.free(extracted_path);
+    try std.testing.expect(std.mem.indexOf(u8, extracted_path, "layers/v4/sha256/") != null);
+    var extracted = try cwd().openDir(std.testing.io, extracted_path, .{});
+    defer extracted.close(std.testing.io);
+    var bytes: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("fresh image contents", try extracted.readFile(std.testing.io, "version", &bytes));
+    try std.testing.expectEqualStrings("old extraction policy", try previous.readFile(std.testing.io, "rootfs/version", &bytes));
 }

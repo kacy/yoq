@@ -215,3 +215,20 @@ jobs:
         uses: ./.github/actions/setup-zig
       - name: exchange application data with openssl
         run: python3 tools/test_tls_interop.py
+
+  image-layer-interop:
+    name: image-layer-interop
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+      - name: install independent oci unpacker
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y umoci
+      - name: compare native layers with umoci
+        run: |
+          zig build-exe -lc --dep linux_platform -Mroot=src/test_image_layers.zig -Mlinux_platform=src/lib/linux_platform.zig -femit-bin=/tmp/yoq-image-layer-fixture
+          sudo python3 tools/test_image_layers.py --binary /tmp/yoq-image-layer-fixture

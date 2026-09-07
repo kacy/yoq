@@ -11,6 +11,7 @@ pub const FilesystemError = error{
 };
 
 pub const FilesystemConfig = struct {
+    /// Immutable layers in OCI order: oldest first, newest last.
     lower_dirs: []const []const u8,
     upper_dir: []const u8,
     work_dir: []const u8,

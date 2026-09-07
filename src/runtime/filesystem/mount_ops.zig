@@ -41,6 +41,20 @@ pub fn mountOverlay(config: FilesystemConfig) FilesystemError!void {
         return FilesystemError.SymlinkNotAllowed;
     }
 
+    // OverlayFS does not apply an opaque xattr on a lower layer's root.
+    // An OCI root whiteout therefore drops all older layers at this boundary.
+    var first_lower: usize = 0;
+    var index = config.lower_dirs.len;
+    while (index > 0) {
+        index -= 1;
+        var directory = std.Io.Dir.cwd().openDir(std.Options.debug_io, config.lower_dirs[index], .{ .iterate = true, .follow_symlinks = false }) catch return error.MountFailed;
+        defer directory.close(std.Options.debug_io);
+        if (@import("../../lib/tar_whiteout.zig").isOpaque(directory) catch return error.MountFailed) {
+            first_lower = index;
+            break;
+        }
+    }
+
     var opts_buf: [4096]u8 = undefined;
     var pos: usize = 0;
 
@@ -49,7 +63,10 @@ pub fn mountOverlay(config: FilesystemConfig) FilesystemError!void {
     @memcpy(opts_buf[pos..][0..lowerdir_prefix.len], lowerdir_prefix);
     pos += lowerdir_prefix.len;
 
-    for (config.lower_dirs, 0..) |dir, i| {
+    // Public layer lists follow OCI order (base first). OverlayFS gives the
+    // leftmost lowerdir highest precedence, so only this boundary reverses it.
+    for (0..config.lower_dirs.len - first_lower) |i| {
+        const dir = config.lower_dirs[config.lower_dirs.len - 1 - i];
         if (i > 0) {
             if (pos >= opts_buf.len) return FilesystemError.PathTooLong;
             opts_buf[pos] = ':';

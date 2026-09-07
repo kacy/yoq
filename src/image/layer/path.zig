@@ -5,9 +5,9 @@ const paths = @import("../../lib/paths.zig");
 const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
 
-// v3 preserves numeric image ownership and ordinary directory/file modes.
-// Earlier extraction policies must never satisfy this cache.
-pub const layer_subdir = "layers/v3/sha256";
+// v4 adds native OverlayFS whiteouts and opaque directory metadata.
+// Keep older published caches intact; rebuild from verified blobs on demand.
+pub const layer_subdir = "layers/v4/sha256";
 const max_path = paths.max_path;
 
 fn cwd() std.Io.Dir {

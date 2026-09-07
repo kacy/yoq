@@ -17,12 +17,14 @@ each container gets its own set of namespaces via `clone3()`:
 - **MNT** — isolated mount table for overlayfs
 - **UTS** — separate hostname
 - **IPC** — separate shared memory and semaphores
-- **USER** — UID/GID mapping for rootless operation
+- **USER** — UID/GID mapping; this alone does not make the complete runtime rootless
 - **CGROUP** — dedicated cgroup subtree
 
 ### filesystem
 
 the container root is an overlayfs mount: image layers are the read-only lower dirs, with a writable upper dir on top. `pivot_root` switches into this merged view. inside, yoq mounts `/proc`, `/dev`, `/sys`, and `/tmp`. symlinks in overlay paths are rejected to prevent escape.
+
+Native image whiteout preparation on Linux 6.1 requires privilege, as do the usual cgroup and networking setup. Unprivileged `yoq pull` downloads verified blobs without preparing native layer filesystems; see [image layer storage](image-layers.md) for the extraction contract.
 
 ### resource limits
 

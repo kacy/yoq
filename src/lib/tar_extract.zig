@@ -56,6 +56,8 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
     // Rootless extraction cannot adopt arbitrary numeric owners. Preserve its
     // existing caller ownership; explicit USER still requires a usable mapping.
     const restore_owner = image_layer and linux.geteuid() == 0;
+    var whiteouts = @import("tar_whiteout.zig").Pending{};
+    defer whiteouts.deinit();
     var directory_path_bytes: usize = 0;
     var directories: std.StringHashMap(Metadata) = .init(std.heap.page_allocator);
     defer {
@@ -85,6 +87,8 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
             if (entry.kind == .directory) continue;
             return error.UnsafeArchivePath;
         }
+
+        if (image_layer and try whiteouts.add(name, entry)) continue;
 
         switch (entry.kind) {
             .directory => {
@@ -146,6 +150,8 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
             },
         }
     }
+    try whiteouts.apply(dest_dir, ensureDirectory);
+
     // Apply directories deepest-first after contents are complete, so a mode
     // such as 0500 or 0000 cannot prevent extraction of its children. Keeping
     // only the last record gives duplicate directory headers their usual meaning.

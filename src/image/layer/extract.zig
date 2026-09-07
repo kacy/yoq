@@ -61,7 +61,10 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
     const stage_path = std.fmt.bufPrint(&stage_path_buf, "{s}/{s}/rootfs", .{ parent_path, stage_name }) catch return error.PathTooLong;
     var blob_path_buf: [max_path]u8 = undefined;
     const blob_path = blob_store.blobPath(digest, &blob_path_buf) catch return error.BlobNotFound;
-    extractTarGz(blob_path, stage_path) catch return error.ExtractionFailed;
+    extractTarGz(blob_path, stage_path) catch |err| return switch (err) {
+        error.WhiteoutRequiresPrivilege => error.WhiteoutRequiresPrivilege,
+        else => error.ExtractionFailed,
+    };
 
     // Flush the complete tree before publishing metadata. syncfs also covers
     // archive directories whose final modes intentionally prohibit traversal.
@@ -77,6 +80,8 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
     return alloc.dupe(u8, dest_path) catch error.ExtractionFailed;
 }
 
+/// Return immutable native layers in OCI manifest order: base first, newest
+/// last. Every overlay caller uses the same ordering contract.
 pub fn assembleRootfs(
     alloc: std.mem.Allocator,
     layer_digests: []const []const u8,
@@ -88,7 +93,10 @@ pub fn assembleRootfs(
     }
 
     for (layer_digests) |digest| {
-        const path = extractLayer(alloc, digest) catch return types.LayerError.AssemblyFailed;
+        const path = extractLayer(alloc, digest) catch |err| return switch (err) {
+            error.WhiteoutRequiresPrivilege => error.WhiteoutRequiresPrivilege,
+            else => types.LayerError.AssemblyFailed,
+        };
         layer_paths.append(alloc, path) catch {
             alloc.free(path);
             return types.LayerError.AssemblyFailed;

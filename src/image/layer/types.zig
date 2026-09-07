@@ -3,6 +3,8 @@ const blob_store = @import("../store.zig");
 pub const LayerError = error{
     /// gzip decompression or tar extraction failed
     ExtractionFailed,
+    /// native OverlayFS deletion metadata cannot be prepared by this caller
+    WhiteoutRequiresPrivilege,
     /// layer digest not found in the blob store
     BlobNotFound,
     /// constructed layer path exceeds max_path buffer
