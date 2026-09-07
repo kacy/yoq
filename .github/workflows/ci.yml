@@ -233,5 +233,19 @@ jobs:
             ./zig-out/bin/yoq validate -f "$manifest"
           done
 
+  registry-tls:
+    name: registry-tls
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+      - name: verify trusted and rejected registry connections
+        run: |
+          zig build-exe -lc --dep linux_platform -Mroot=src/test_registry_tls.zig -Mlinux_platform=src/lib/linux_platform.zig -femit-bin=/tmp/yoq-registry-tls-fixture
+          sudo python3 tools/test_registry_tls.py --binary /tmp/yoq-registry-tls-fixture
+
   interoperability:
     uses: ./.github/workflows/_interoperability.yml
