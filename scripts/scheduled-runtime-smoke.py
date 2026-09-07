@@ -223,9 +223,21 @@ def main():
     if not YOQ.is_file() or not HELPER.is_file():
         raise SystemExit("build yoq and the runtime-network helper before running this fixture")
     with tempfile.TemporaryDirectory(prefix="yoq-scheduled-", dir=os.environ.get("RUNNER_TEMP")) as directory:
-        run("unshare", "--mount", "--net", "--pid", "--fork", "--mount-proc", sys.executable,
-            str(Path(__file__).resolve()), "--inside", directory,
-            os.readlink("/proc/self/ns/mnt"), os.readlink("/proc/self/ns/net"))
+        try:
+            run("unshare", "--mount", "--net", "--pid", "--fork", "--mount-proc", sys.executable,
+                str(Path(__file__).resolve()), "--inside", directory,
+                os.readlink("/proc/self/ns/mnt"), os.readlink("/proc/self/ns/net"))
+        finally:
+            # The PID namespace has exited, so its tasks are already gone.
+            # Remove only empty cgroups named by this fixture's private database.
+            database = Path(directory) / "agent/.local/share/yoq/yoq.db"
+            if database.exists():
+                with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
+                    for (container_id,) in db.execute("SELECT id FROM containers"):
+                        if len(container_id) == 12 and all(c in "0123456789abcdef" for c in container_id):
+                            cgroup = Path("/sys/fs/cgroup/yoq") / container_id
+                            if cgroup.exists():
+                                cgroup.rmdir()
 
 
 if __name__ == "__main__":
