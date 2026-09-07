@@ -13,7 +13,6 @@ const credentials = @import("../../../cluster/agent_credentials.zig");
 const Response = common.Response;
 const RouteContext = common.RouteContext;
 const extractJsonString = json_helpers.extractJsonString;
-const extractJsonInt = json_helpers.extractJsonInt;
 
 fn nowRealSeconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
@@ -62,10 +61,7 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
     if (wg_public_key) |pub_key| {
         if (!common.validateClusterInput(pub_key)) return common.badRequest("invalid wg_public_key");
 
-        const port: u16 = if (wg_listen_port) |p| blk: {
-            if (p <= 0 or p > 65535) return common.badRequest("invalid wg_listen_port");
-            break :blk @intCast(p);
-        } else 51820;
+        const port = wg_listen_port orelse 51820;
         const endpoint_host = if (request_support.parseHostPort(address)) |hp|
             std.fmt.bufPrint(&endpoint_buf, "{d}.{d}.{d}.{d}:{d}", .{ hp.addr[0], hp.addr[1], hp.addr[2], hp.addr[3], port }) catch null
         else
@@ -458,29 +454,4 @@ test "registration returns credentials only after their row is applied" {
     try std.testing.expectEqual(@as(?i64, 1), json_helpers.extractJsonInt(gossip, "id"));
     try std.testing.expectEqual(@as(?i64, 19877), json_helpers.extractJsonInt(gossip, "port"));
     try std.testing.expectEqual(node.raft.commit_index, node.state_machine.last_applied);
-}
-
-test "placement numbers reject invalid heartbeat then accept valid resource snapshot" {
-    const support = @import("route_test_support.zig");
-    const alloc = std.testing.allocator;
-    var harness = try support.Harness.init(alloc);
-    defer harness.deinit();
-    for ([_][]const u8{
-        "\"cpu_cores\":4294967296",
-        "\"containers\":4294967296",
-        "\"gpu_count\":4294967296",
-        "\"cpu_used\":-1",
-        "\"memory_used_mb\":18446744073709551615",
-        "\"gpu_used\":1.5",
-        "\"memory_mb\":null",
-    }) |fields| {
-        const body = try std.fmt.allocPrint(alloc, "{{{s}}}", .{fields});
-        defer alloc.free(body);
-        const response = handleAgentHeartbeat(alloc, support.makeRequest(.POST, "/agents/abc123def456/heartbeat", body), "abc123def456", harness.ctx());
-        defer support.freeResponse(alloc, response);
-        try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
-    }
-    const response = handleAgentHeartbeat(alloc, support.makeRequest(.POST, "/agents/abc123def456/heartbeat", "{\"cpu_cores\":8,\"memory_mb\":16384,\"cpu_used\":1000}"), "abc123def456", harness.ctx());
-    defer support.freeResponse(alloc, response);
-    try std.testing.expectEqual(http.StatusCode.ok, response.status);
 }

@@ -1355,3 +1355,29 @@ test "placement numbers reject invalid requests without poisoning the next apply
     try std.testing.expectEqual(@as(i64, 1000), assignment.cpu_limit);
     try std.testing.expectEqual(@as(i64, 256), assignment.memory_limit_mb);
 }
+
+test "placement numbers reject invalid heartbeat then accept valid resource snapshot" {
+    const support = @import("route_test_support.zig");
+    const handleAgentHeartbeat = @import("agent_routes.zig").handleAgentHeartbeat;
+    const alloc = std.testing.allocator;
+    var harness = try support.Harness.init(alloc);
+    defer harness.deinit();
+    for ([_][]const u8{
+        "\"cpu_cores\":4294967296",
+        "\"containers\":4294967296",
+        "\"gpu_count\":4294967296",
+        "\"cpu_used\":-1",
+        "\"memory_used_mb\":18446744073709551615",
+        "\"gpu_used\":1.5",
+        "\"memory_mb\":null",
+    }) |fields| {
+        const body = try std.fmt.allocPrint(alloc, "{{{s}}}", .{fields});
+        defer alloc.free(body);
+        const response = handleAgentHeartbeat(alloc, support.makeRequest(.POST, "/agents/abc123def456/heartbeat", body), "abc123def456", harness.ctx());
+        defer support.freeResponse(alloc, response);
+        try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
+    }
+    const response = handleAgentHeartbeat(alloc, support.makeRequest(.POST, "/agents/abc123def456/heartbeat", "{\"cpu_cores\":8,\"memory_mb\":16384,\"cpu_used\":1000}"), "abc123def456", harness.ctx());
+    defer support.freeResponse(alloc, response);
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+}
