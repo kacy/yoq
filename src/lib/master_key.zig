@@ -26,14 +26,19 @@ pub fn loadOrCreateKey() KeyError![key_length]u8 {
 }
 
 fn loadOrCreateAt(dir: std.Io.Dir, name: []const u8) KeyError![key_length]u8 {
-    if (readAt(dir, name)) |key| {
+    return loadOrCreateBytesAt(key_length, dir, name);
+}
+
+/// Publish random private bytes once; concurrent callers read the durable winner.
+pub fn loadOrCreateBytesAt(comptime byte_count: usize, dir: std.Io.Dir, name: []const u8) KeyError![byte_count]u8 {
+    if (readBytesAt(byte_count, dir, name)) |key| {
         (platform.File{ .handle = dir.handle }).sync() catch return error.KeyCreateFailed;
         return key;
     } else |err| switch (err) {
         error.NotFound => {},
         else => return error.KeyLoadFailed,
     }
-    var candidate: [key_length]u8 = undefined;
+    var candidate: [byte_count]u8 = undefined;
     platform.randomBytes(&candidate);
     defer secureZero(&candidate);
     var pending = dir.createFileAtomic(io, name, .{ .permissions = .fromMode(0o600) }) catch return error.KeyCreateFailed;
@@ -46,7 +51,7 @@ fn loadOrCreateAt(dir: std.Io.Dir, name: []const u8) KeyError![key_length]u8 {
     };
     // Also sync when losing the race: the winner may not have synced yet.
     (platform.File{ .handle = dir.handle }).sync() catch return error.KeyCreateFailed;
-    return readAt(dir, name) catch return error.KeyLoadFailed;
+    return readBytesAt(byte_count, dir, name) catch return error.KeyLoadFailed;
 }
 
 pub fn readKeyFile(path: []const u8) ReadError![key_length]u8 {
@@ -54,6 +59,10 @@ pub fn readKeyFile(path: []const u8) ReadError![key_length]u8 {
 }
 
 fn readAt(dir: std.Io.Dir, name: []const u8) ReadError![key_length]u8 {
+    return readBytesAt(key_length, dir, name);
+}
+
+fn readBytesAt(comptime byte_count: usize, dir: std.Io.Dir, name: []const u8) ReadError![byte_count]u8 {
     const path = std.posix.toPosixPath(name) catch return error.KeyLoadFailed;
     // NONBLOCK makes hostile FIFO/device entries fail without blocking startup.
     const rc = linux.openat(dir.handle, &path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, 0);
@@ -68,8 +77,8 @@ fn readAt(dir: std.Io.Dir, name: []const u8) ReadError![key_length]u8 {
     if (linux.errno(linux.statx(file.handle, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .MODE = true, .UID = true, .SIZE = true }, &stat)) != .SUCCESS) return error.KeyLoadFailed;
     if (!stat.mask.TYPE or !stat.mask.MODE or !stat.mask.UID or !stat.mask.SIZE or
         stat.mode & linux.S.IFMT != linux.S.IFREG or stat.mode & 0o077 != 0 or
-        stat.uid != linux.geteuid() or stat.size != key_length) return error.KeyLoadFailed;
-    var key: [key_length]u8 = undefined;
+        stat.uid != linux.geteuid() or stat.size != byte_count) return error.KeyLoadFailed;
+    var key: [byte_count]u8 = undefined;
     errdefer secureZero(&key);
     var reader = file.reader(io, &.{});
     reader.interface.readSliceAll(&key) catch return error.KeyLoadFailed;
