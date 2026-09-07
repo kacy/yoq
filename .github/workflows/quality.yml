@@ -25,6 +25,16 @@ jobs:
       timeout-minutes: 45
       failure-artifact-name: quality-full-test-log
 
+  recovery-contracts:
+    name: recovery-contracts
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: recovery-contracts
+      command: YOQ_SKIP_SLOW_TESTS=1 zig build test-recovery
+      timeout-minutes: 20
+      failure-artifact-name: recovery-contracts-log
+
   operator-smoke:
     name: operator-smoke
     uses: ./.github/workflows/_build-test.yml

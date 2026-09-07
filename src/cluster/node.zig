@@ -591,15 +591,16 @@ test "resolveNodeId matches configured peer" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
-    var node = Node.init(alloc, .{
+    var node = try Node.initForTests(alloc, .{
         .id = 1,
         .port = 0,
         .peers = peers,
         .data_dir = tmp_path,
-    }) catch return;
+    });
     defer node.deinit();
+    node.fixPointers();
 
     // build an address matching peer 2 (10.0.0.2:9700)
     const addr2 = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700);
@@ -629,15 +630,16 @@ test "node init and deinit" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
-    var node = Node.init(alloc, .{
+    var node = try Node.init(alloc, .{
         .id = 1,
         .port = 0, // let OS assign port — but init will try to bind
         .peers = &.{},
         .data_dir = tmp_path,
-    }) catch return; // port binding may fail in test environment
+    });
     defer node.deinit();
+    node.fixPointers();
 
     try std.testing.expectEqual(types.Role.follower, node.role());
 }
@@ -653,15 +655,16 @@ test "handleMessage drops request_vote with mismatched sender id" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
-    var node = Node.init(alloc, .{
+    var node = try Node.initForTests(alloc, .{
         .id = 1,
         .port = 0,
         .peers = peers,
         .data_dir = tmp_path,
-    }) catch return;
+    });
     defer node.deinit();
+    node.fixPointers();
 
     node.handleMessage(.{
         .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
@@ -688,15 +691,16 @@ test "handleMessage accepts append_entries only from authenticated leader" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
-    var node = Node.init(alloc, .{
+    var node = try Node.initForTests(alloc, .{
         .id = 1,
         .port = 0,
         .peers = peers,
         .data_dir = tmp_path,
-    }) catch return;
+    });
     defer node.deinit();
+    node.fixPointers();
 
     node.handleMessage(.{
         .from_addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 2 }, 9700),
@@ -736,15 +740,16 @@ test "leader_id defaults to null" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
-    var node = Node.init(alloc, .{
+    var node = try Node.initForTests(alloc, .{
         .id = 1,
         .port = 0,
         .peers = peers,
         .data_dir = tmp_path,
-    }) catch return;
+    });
     defer node.deinit();
+    node.fixPointers();
 
     try std.testing.expect(node.leaderId() == null);
 }
@@ -758,15 +763,16 @@ test "become_leader sets leader_id to self" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
-    var node = Node.init(alloc, .{
+    var node = try Node.initForTests(alloc, .{
         .id = 1,
         .port = 0,
         .peers = peers,
         .data_dir = tmp_path,
-    }) catch return;
+    });
     defer node.deinit();
+    node.fixPointers();
 
     // simulate become_leader
     node.leader_id = node.config.id;
@@ -782,15 +788,16 @@ test "become_follower sets leader_id to provided id" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
-    var node = Node.init(alloc, .{
+    var node = try Node.initForTests(alloc, .{
         .id = 1,
         .port = 0,
         .peers = peers,
         .data_dir = tmp_path,
-    }) catch return;
+    });
     defer node.deinit();
+    node.fixPointers();
 
     // simulate become_follower with leader_id = 2
     node.leader_id = 2;
@@ -806,15 +813,16 @@ test "leaderAddrBuf returns null when leader is self" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
-    var node = Node.init(alloc, .{
+    var node = try Node.initForTests(alloc, .{
         .id = 1,
         .port = 0,
         .peers = peers,
         .data_dir = tmp_path,
-    }) catch return;
+    });
     defer node.deinit();
+    node.fixPointers();
 
     node.leader_id = 1; // self
     var buf: [64]u8 = undefined;
@@ -830,15 +838,16 @@ test "leaderAddrBuf returns null when no leader known" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
-    var node = Node.init(alloc, .{
+    var node = try Node.initForTests(alloc, .{
         .id = 1,
         .port = 0,
         .peers = peers,
         .data_dir = tmp_path,
-    }) catch return;
+    });
     defer node.deinit();
+    node.fixPointers();
 
     var buf: [64]u8 = undefined;
     try std.testing.expect(node.leaderAddrBuf(&buf) == null);
@@ -853,16 +862,17 @@ test "leaderAddrBuf returns peer address when leader is a peer" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [512]u8 = undefined;
-    const tmp_path = testDirPath(tmp.dir, &path_buf) catch return;
+    const tmp_path = try testDirPath(tmp.dir, &path_buf);
 
-    var node = Node.init(alloc, .{
+    var node = try Node.initForTests(alloc, .{
         .id = 1,
         .port = 0,
         .api_port = 7700,
         .peers = peers,
         .data_dir = tmp_path,
-    }) catch return;
+    });
     defer node.deinit();
+    node.fixPointers();
 
     node.leader_id = 2;
     var buf: [64]u8 = undefined;
