@@ -147,7 +147,7 @@ def inside(root, outer_mount, outer_net):
         homes[name] = home
         output = open(root / (name + ".log"), "w")
         logs.append(output)
-        env = dict(os.environ, HOME=str(home), XDG_DATA_HOME=str(home))
+        env = dict(os.environ, HOME=str(home))
         processes.append(subprocess.Popen([str(YOQ), *args], env=env, stdout=output, stderr=output))
 
     def container_row():
