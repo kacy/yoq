@@ -58,9 +58,9 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
 }
 
 pub fn applyPragmas(db: *sqlite.Db) void {
+    _ = sqlite.c.sqlite3_exec(db.db, "PRAGMA busy_timeout=5000;", null, null, null);
     _ = sqlite.c.sqlite3_exec(db.db, "PRAGMA journal_mode=WAL;", null, null, null);
     _ = sqlite.c.sqlite3_exec(db.db, "PRAGMA synchronous=NORMAL;", null, null, null);
-    _ = sqlite.c.sqlite3_exec(db.db, "PRAGMA busy_timeout=5000;", null, null, null);
 }
 
 fn exec(db: *sqlite.Db, comptime sql: []const u8) SchemaError!void {
