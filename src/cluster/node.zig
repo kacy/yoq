@@ -1540,3 +1540,43 @@ test "replicated command admission preserves durable storage failures" {
     defer _ = sqlite.c.sqlite3_set_authorizer(node.log.db.db, null, null);
     try std.testing.expectError(error.ReadFailed, node.propose("UPDATE agents SET cpu_used = 0;"));
 }
+
+test "gossip membership callbacks apply under the node lock" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    var node = try Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = try testDirPath(tmp.dir, &path_buf),
+    });
+    defer node.deinit();
+    node.fixPointers();
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
+    for (0..61) |_| node.raft.tick();
+
+    var sql_buf: [2048]u8 = undefined;
+    const sql = try agent_registry.registerSqlFull(&sql_buf, "gossip-agent", "10.0.0.2", .{
+        .cpu_cores = 1,
+        .memory_mb = 512,
+    }, 1, .{ .node_id = 2 });
+    _ = try node.proposeLocked(sql);
+    node.state_machine.applyUpTo(&node.log, alloc, node.raft.commit_index);
+
+    var actions = [_]gossip_mod.Action{.{ .member_dead = .{ .id = 2 } }};
+    membership_sync.processGossipActions(&node, &actions);
+    node.state_machine.applyUpTo(&node.log, alloc, node.raft.commit_index);
+    const Row = struct { count: i64 };
+    const offline = (try node.state_machine.db.one(Row, "SELECT COUNT(*) AS count FROM agents WHERE status = 'offline';", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 1), offline.count);
+
+    actions[0] = .{ .member_alive = .{ .id = 2 } };
+    membership_sync.processGossipActions(&node, &actions);
+    node.state_machine.applyUpTo(&node.log, alloc, node.raft.commit_index);
+    const active = (try node.state_machine.db.one(Row, "SELECT COUNT(*) AS count FROM agents WHERE status = 'active';", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 1), active.count);
+    try std.testing.expectEqual(node.raft.commit_index, node.state_machine.last_applied);
+}
