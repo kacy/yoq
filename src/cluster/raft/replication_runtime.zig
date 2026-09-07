@@ -191,12 +191,13 @@ pub fn advanceCommitIndex(self: anytype) void {
 
         const quorum = (self.peers.len + 1) / 2 + 1;
         if (count >= quorum) {
-            self.commit_index = candidate_index;
             self.actions.append(self.alloc, .{
                 .commit_entries = .{ .up_to = candidate_index },
             }) catch |e| {
                 logger.warn("raft: failed to queue commit action: {}", .{e});
+                return;
             };
+            self.commit_index = candidate_index;
             break;
         }
     }

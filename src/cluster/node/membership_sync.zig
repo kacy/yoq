@@ -18,10 +18,12 @@ fn proposeUnderLock(self: anytype, sql: []const u8) !void {
 pub fn checkAgentHealth(self: anytype, agents: []const agent_registry.AgentRecord) void {
     const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     const base_timeout: i64 = 30;
+    self.mu.lockUncancelable(std.Options.debug_io);
     const multiplier: i64 = if (self.gossip) |g| blk: {
         const member_count = g.members.count() + 1;
         break :blk @min(@as(i64, gossip_mod.Gossip.ceilLog2(member_count)), gossip_mod.Gossip.max_interval_multiplier);
     } else 1;
+    self.mu.unlock(std.Options.debug_io);
     const timeout: i64 = base_timeout * multiplier;
 
     for (agents) |agent| {
@@ -113,6 +115,9 @@ pub fn cleanupDeadAgents(self: anytype, agents: []const agent_registry.AgentReco
 }
 
 pub fn tickGossip(self: anytype) void {
+    self.mu.lockUncancelable(std.Options.debug_io);
+    defer self.mu.unlock(std.Options.debug_io);
+
     const g = self.gossip orelse return;
 
     g.tick() catch return;
@@ -130,6 +135,9 @@ pub fn tickGossip(self: anytype) void {
 }
 
 pub fn receiveGossipMessages(self: anytype) void {
+    self.mu.lockUncancelable(std.Options.debug_io);
+    defer self.mu.unlock(std.Options.debug_io);
+
     const g = self.gossip orelse return;
     const GossipMsg = gossip_mod.GossipMessage;
     var msgs: [10]GossipMsg = undefined;
@@ -149,9 +157,6 @@ pub fn receiveGossipMessages(self: anytype) void {
     }
 
     if (msg_count == 0) return;
-
-    self.mu.lockUncancelable(std.Options.debug_io);
-    defer self.mu.unlock(std.Options.debug_io);
 
     for (msgs[0..msg_count]) |msg| {
         switch (msg) {
@@ -175,6 +180,7 @@ pub fn receiveGossipMessages(self: anytype) void {
     processGossipActions(self, actions);
 }
 
+/// Gossip state and callbacks share the caller's node lock.
 pub fn processGossipActions(self: anytype, actions: []gossip_mod.Action) void {
     for (actions) |action| {
         switch (action) {
@@ -202,7 +208,7 @@ pub fn handleGossipMemberDead(self: anytype, member_id: u64) void {
 
     var sql_buf: [256]u8 = undefined;
     const sql = agent_registry.markOfflineSql(&sql_buf, agent_id) catch return;
-    _ = proposeUnderLock(self, sql) catch |e| {
+    _ = self.proposeLocked(sql) catch |e| {
         logger.warn("gossip: failed to propose offline for agent {s}: {}", .{ agent_id, e });
         return;
     };
@@ -210,14 +216,14 @@ pub fn handleGossipMemberDead(self: anytype, member_id: u64) void {
 
     var orphan_buf: [256]u8 = undefined;
     const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent_id) catch return;
-    _ = proposeUnderLock(self, orphan_sql) catch |e| {
+    _ = self.proposeLocked(orphan_sql) catch |e| {
         logger.warn("gossip: failed to orphan assignments for agent {s}: {}", .{ agent_id, e });
     };
 
     if (member_id >= 1 and member_id <= 65534) {
         var wg_buf: [256]u8 = undefined;
         const wg_sql = agent_registry.removeWireguardPeerSql(&wg_buf, @intCast(member_id)) catch return;
-        _ = proposeUnderLock(self, wg_sql) catch |e| {
+        _ = self.proposeLocked(wg_sql) catch |e| {
             logger.warn("gossip: failed to remove wireguard peer for dead member {}: {}", .{ member_id, e });
         };
     }
@@ -229,7 +235,7 @@ pub fn handleGossipMemberAlive(self: anytype, member_id: u64) void {
 
     var sql_buf: [256]u8 = undefined;
     const sql = agent_registry.markActiveSql(&sql_buf, agent_id) catch return;
-    _ = proposeUnderLock(self, sql) catch |e| {
+    _ = self.proposeLocked(sql) catch |e| {
         logger.warn("gossip: failed to propose active for agent {s}: {}", .{ agent_id, e });
         return;
     };
