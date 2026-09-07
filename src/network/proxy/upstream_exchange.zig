@@ -601,3 +601,15 @@ test "proxy transport policy does not replay a failed pooled write" {
     try std.testing.expectEqual(@as(usize, 1), upstream_pool.snapshot().reuse_total);
     try std.testing.expectEqual(@as(usize, 0), upstream_pool.snapshot().created_total);
 }
+
+test "proxy transport policy uses final HTTP2 status after informational headers" {
+    const alloc = std.testing.allocator;
+    const responses = @import("http2_response.zig");
+    const interim = try responses.formatSimpleResponse(alloc, 1, 103, "text/plain", "");
+    defer alloc.free(interim);
+    const final = try responses.formatSimpleResponse(alloc, 1, 503, "text/plain", "unavailable");
+    defer alloc.free(final);
+    const combined = try std.mem.concat(alloc, u8, &.{ interim, final });
+    defer alloc.free(combined);
+    try std.testing.expectEqual(@as(u16, 503), try parseStatusCode(alloc, .http2, combined));
+}

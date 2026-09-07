@@ -31,7 +31,11 @@ pub fn parseStatusCode(alloc: std.mem.Allocator, response: []const u8) (Error ||
 
         for (decoded.items) |field| {
             if (std.mem.eql(u8, field.name, ":status")) {
-                return std.fmt.parseInt(u16, field.value, 10) catch error.InvalidResponse;
+                const status = std.fmt.parseInt(u16, field.value, 10) catch return error.InvalidResponse;
+                if (status < 100 or status > 599) return error.InvalidResponse;
+                // Informational HEADERS do not decide retry/circuit outcomes.
+                if (status < 200) break;
+                return status;
             }
         }
     }
