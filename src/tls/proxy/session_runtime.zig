@@ -249,7 +249,12 @@ pub fn handleTlsSession(
         const pending_request = !initial_request_forwarded or initial.bytes.items.len > 0;
         const deadline = if (pending_request) initial.deadline else transport.Deadline.afterMilliseconds(30_000);
         const timeout = deadline.remaining() catch break;
-        const poll_result = posix.poll(&poll_fds, timeout) catch break;
+        const wait = posix.timespec{ .sec = @divTrunc(timeout, 1000), .nsec = @rem(timeout, 1000) * std.time.ns_per_ms };
+        // ppoll exposes interruptions so retries keep the request's deadline.
+        const poll_result = posix.ppoll(&poll_fds, &wait, null) catch |err| switch (err) {
+            error.SignalInterrupt => continue,
+            else => break,
+        };
         if (poll_result == 0) break;
 
         if (poll_fds[0].revents & posix.POLL.IN != 0) {
@@ -293,9 +298,9 @@ pub fn handleTlsSession(
             if (n == 0) break;
             try record_transport.write(.{ .fd = client_fd, .deadline = deadline }, app_keys.server, &server_app_seq, .application_data, plaintext[0..n]);
         }
-        // Drain readable bytes before honoring a simultaneous half-close.
-        if (poll_fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) break;
-        if (poll_fds[1].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) break;
+        // Keep draining records when readable data accompanies a half-close.
+        if (poll_fds[0].revents & posix.POLL.IN == 0 and poll_fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) break;
+        if (poll_fds[1].revents & posix.POLL.IN == 0 and poll_fds[1].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) break;
     }
 
     sendEncryptedCloseNotify(client_fd, app_keys.server, &server_app_seq);
