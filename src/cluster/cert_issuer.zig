@@ -75,6 +75,7 @@ pub const Worker = struct {
         self.ctx.stopped.set(std.Options.debug_io);
         thread.join();
         const ctx = self.ctx;
+        clearFailures(ctx.alloc);
         std.crypto.secureZero(u8, ctx.join_token_owned);
         ctx.alloc.free(ctx.join_token_owned);
         ctx.alloc.destroy(ctx);
@@ -300,13 +301,15 @@ pub fn snapshotFailures(alloc: std.mem.Allocator) !std.ArrayList(FailureSnapshot
     return out;
 }
 
-pub fn resetForTest(alloc: std.mem.Allocator) void {
+fn clearFailures(alloc: std.mem.Allocator) void {
     state.mutex.lockUncancelable(std.Options.debug_io);
     defer state.mutex.unlock(std.Options.debug_io);
     for (state.failures.items) |entry| alloc.free(entry.service_name);
     state.failures.deinit(alloc);
     state.failures = .empty;
 }
+
+pub const resetForTest = clearFailures;
 
 test "shouldRotate truth table" {
     // fresh cert (just issued): no rotation.
