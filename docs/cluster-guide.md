@@ -84,11 +84,13 @@ For existing installations, preserve the original voter configuration on the fir
 
 ### step 4: verify
 
+Run this locally on each server, using the API token saved during its startup:
+
 ```
-yoq nodes
+yoq cluster status
 ```
 
-you should see all 3 servers, one marked as leader. the cluster is ready.
+Check that exactly one server reports `role: "leader"` and that all three settle on the same term. After a registration or deployment, compare their `commit_index` and `last_applied`; they should converge with no apply backlog. `yoq nodes` lists registered workers and is not a Raft voter-membership check.
 
 ---
 
@@ -319,7 +321,7 @@ yoq join 10.2.0.1 --token $TOKEN --region ap-southeast-1
 yoq nodes
 ```
 
-shows all servers and agents, their status (online, offline, draining), resource usage, and which node is the Raft leader.
+Lists registered workers and their resource usage and status. Run `yoq cluster status` on each server to inspect its Raft role and apply progress.
 
 you can also query any server's API directly:
 
