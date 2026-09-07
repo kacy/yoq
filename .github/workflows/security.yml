@@ -1,0 +1,22 @@
+name: security
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '30 6 * * *'
+permissions:
+  contents: read
+jobs:
+  dependency-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: check action pins and dependency advisories
+        run: python3 tools/security_gate.py
+      - name: audit panic paths
+        run: bash tools/panic_audit.sh
+      - name: check release tooling
+        run: python3 -m unittest discover -s tools -p 'test_release_security.py'

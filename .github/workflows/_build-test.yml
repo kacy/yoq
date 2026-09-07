@@ -58,7 +58,7 @@ jobs:
 
     steps:
       - name: check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.ref }}
 
@@ -85,7 +85,7 @@ jobs:
 
       - name: upload failure log
         if: steps.run-command.outcome == 'failure' && inputs.failure-artifact-name != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ inputs.failure-artifact-name }}
           path: ${{ runner.temp }}/build-test.log
@@ -93,7 +93,7 @@ jobs:
 
       - name: upload success artifact
         if: steps.run-command.outcome == 'success' && inputs.upload-path != '' && inputs.upload-artifact-name != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ inputs.upload-artifact-name }}
           path: ${{ inputs.upload-path }}
