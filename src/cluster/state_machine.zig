@@ -25,7 +25,7 @@ const db_runtime = @import("state_machine/db_runtime.zig");
 const types = @import("raft_types.zig");
 const apply_runtime = @import("state_machine/apply_runtime.zig");
 const snapshot_support = @import("state_machine/snapshot_support.zig");
-const sql_guard = @import("state_machine/sql_guard.zig");
+const command = @import("state_machine/command.zig");
 
 const LogEntry = types.LogEntry;
 const LogIndex = types.LogIndex;
@@ -101,7 +101,8 @@ pub const StateMachine = struct {
 ///   - INSERT/UPDATE/DELETE on agents, assignments, and wireguard_peers tables
 ///   - CREATE TABLE IF NOT EXISTS and CREATE INDEX IF NOT EXISTS for schema init
 pub fn isAllowedStatement(sql: []const u8) bool {
-    return sql_guard.isAllowedStatement(sql);
+    command.validate(sql) catch return false;
+    return true;
 }
 
 /// Read snapshot metadata after validating the complete file length.

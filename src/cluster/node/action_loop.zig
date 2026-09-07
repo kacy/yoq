@@ -81,7 +81,7 @@ pub fn tickLoop(self: anytype) void {
             }
             if (heartbeat_batch) |batch| {
                 self.mu.lockUncancelable(std.Options.debug_io);
-                _ = self.raft.propose(batch) catch |e| {
+                _ = self.proposeLocked(batch) catch |e| {
                     logger.warn("failed to propose heartbeat batch: {}", .{e});
                 };
                 self.mu.unlock(std.Options.debug_io);
