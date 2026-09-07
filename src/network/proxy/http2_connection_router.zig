@@ -1143,6 +1143,12 @@ fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64
 }
 
 fn connectAndSendUpstream(alloc: std.mem.Allocator, route: router.Route, upstream: *const upstream_mod.Upstream, request_bytes: []const u8, request_deadline_at_ms: i64) !linux_platform.posix.socket_t {
+    // Streaming sessions currently own bare sockets. Never send a required
+    // peer-TLS request until this path can own and poll a verified TLS session.
+    if (upstream.peer_mode == .require) return error.StreamingPeerTlsUnsupported;
+    if (upstream.peer_mode == .warn) {
+        @import("../../lib/log.zig").warn("http2 streaming upstream {s}: peer TLS unavailable, using permissive plaintext mode", .{upstream.service});
+    }
     const deadline = deadlineAt(request_deadline_at_ms);
     const upstream_fd = try socket_helpers.connectToUpstreamUntil(route.connect_timeout_ms, deadline, upstream);
     errdefer linux_platform.posix.close(upstream_fd);
@@ -1161,4 +1167,18 @@ fn deadlineAt(milliseconds: i64) transport.Deadline {
 
 fn nowMs() i64 {
     return std.Io.Clock.awake.now(std.Options.debug_io).toMilliseconds();
+}
+
+test "proxy transport policy refuses required streaming peer TLS before dialing" {
+    const listener = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
+    defer linux_platform.posix.close(listener);
+    var address = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    try linux_platform.posix.bind(listener, &address.any, address.getOsSockLen());
+    try linux_platform.posix.listen(listener, 1);
+    var length = address.getOsSockLen();
+    try linux_platform.posix.getsockname(listener, &address.any, &length);
+    const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-1", .address = "127.0.0.1", .port = std.mem.bigToNative(u16, address.in.port), .peer_mode = .require };
+    const route = router.Route{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" } };
+    try std.testing.expectError(error.StreamingPeerTlsUnsupported, connectAndSendUpstream(std.testing.allocator, route, &upstream, "request must not be sent", nowMs() + 1000));
+    try std.testing.expectError(error.WouldBlock, linux_platform.posix.accept(listener, null, null, posix.SOCK.CLOEXEC));
 }
