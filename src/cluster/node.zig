@@ -354,6 +354,7 @@ pub const Node = struct {
     /// Timeouts and leadership loss leave an unknown outcome: callers must
     /// inspect durable state before retrying a non-idempotent mutation.
     pub fn proposeCommitted(self: *Node, data: []const u8, timeout_ms: u32) !LogIndex {
+        self.fixPointers();
         self.mu.lockUncancelable(std.Options.debug_io);
         const index = self.proposeLocked(data) catch |err| {
             self.mu.unlock(std.Options.debug_io);
