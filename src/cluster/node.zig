@@ -487,19 +487,6 @@ pub const Node = struct {
         membership_sync.checkAgentHealth(self, agents);
     }
 
-    /// reschedule orphaned assignments onto active agents.
-    /// orphans are assignments with agent_id = '' that were detached
-    /// when their agent went offline. called with self.mu held.
-    ///
-    /// DB queries happen before this call (outside the lock).
-    fn reconcileOrphanedAssignments(
-        self: *Node,
-        orphans: []const agent_registry.Assignment,
-        agents: []const agent_registry.AgentRecord,
-    ) void {
-        membership_sync.reconcileOrphanedAssignments(self, orphans, agents);
-    }
-
     /// remove agents that have been offline for more than 1 hour.
     /// cleans up their remaining terminal assignments, wireguard peers,
     /// and the agent record itself. called with self.mu held.
