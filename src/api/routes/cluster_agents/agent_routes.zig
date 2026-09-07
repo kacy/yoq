@@ -56,14 +56,9 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
     var id_buf: [12]u8 = undefined;
     agent_registry.generateAgentId(&id_buf);
 
-    var assigned_node_id: ?u16 = null;
-    var overlay_ip_str: ?[]const u8 = null;
-    var overlay_ip_buf: [16]u8 = undefined;
-    var container_subnet_buf: [20]u8 = undefined;
-    var container_subnet: ?[]const u8 = null;
     var endpoint_buf: [64]u8 = undefined;
     var peer_sql: ?[]const u8 = null;
-    var peer_sql_buf: [1024]u8 = undefined;
+    var peer_sql_buf: [2048]u8 = undefined;
 
     const role_str = json_helpers.extractJsonString(request.body, "role");
     const region_str = json_helpers.extractJsonString(request.body, "region");
@@ -71,25 +66,6 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
 
     if (wg_public_key) |pub_key| {
         if (!common.validateClusterInput(pub_key)) return common.badRequest("invalid wg_public_key");
-
-        const db = node.stateMachineDb();
-        const nid = agent_registry.assignNodeId(db) catch {
-            return .{ .status = .internal_server_error, .body = "{\"error\":\"no available node_id\"}", .allocated = false };
-        };
-        assigned_node_id = nid;
-
-        if (nid <= 254) {
-            overlay_ip_str = std.fmt.bufPrint(&overlay_ip_buf, "10.40.0.{d}", .{nid}) catch null;
-        } else {
-            overlay_ip_str = std.fmt.bufPrint(&overlay_ip_buf, "10.40.{d}.{d}", .{ nid >> 8, nid & 0xFF }) catch null;
-        }
-
-        const subnet_cfg = @import("../../../network/ip.zig").subnetForNode(nid) catch {
-            return common.badRequest("node_id too large for subnet allocation");
-        };
-        container_subnet = std.fmt.bufPrint(&container_subnet_buf, "{d}.{d}.{d}.0/24", .{
-            subnet_cfg.base[0], subnet_cfg.base[1], subnet_cfg.base[2],
-        }) catch null;
 
         const port: u16 = if (wg_listen_port) |p| blk: {
             if (p <= 0 or p > 65535) return common.badRequest("invalid wg_listen_port");
@@ -100,17 +76,12 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
         else
             std.fmt.bufPrint(&endpoint_buf, "{s}:{d}", .{ address, port }) catch null;
 
-        if (endpoint_host != null and overlay_ip_str != null and container_subnet != null) {
-            peer_sql = agent_registry.wireguardPeerSql(
-                &peer_sql_buf,
-                nid,
-                &id_buf,
-                pub_key,
-                endpoint_host.?,
-                overlay_ip_str.?,
-                container_subnet.?,
-            ) catch return common.internalError();
-        }
+        peer_sql = agent_registry.allocateWireguardPeerSql(
+            &peer_sql_buf,
+            &id_buf,
+            pub_key,
+            endpoint_host orelse return common.badRequest("invalid wireguard endpoint"),
+        ) catch return common.internalError();
     }
 
     var sql_buf: [2048]u8 = undefined;
@@ -138,10 +109,7 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
         },
         nowRealSeconds(),
         .{
-            .node_id = assigned_node_id,
             .agent_api_port = if (agent_api_port) |port| @intCast(port) else null,
-            .wg_public_key = wg_public_key,
-            .overlay_ip = overlay_ip_str,
             .role = role_str,
             .region = region_str,
             .labels = labels_str,
@@ -152,8 +120,18 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
     defer std.crypto.secureZero(u8, &credential);
     const credential_hash = credentials.hash(&credential);
     var combined_buf: [4608]u8 = undefined;
-    const combined = std.fmt.bufPrint(&combined_buf, "{s} {s} UPDATE agents SET credential_hash = '{s}' WHERE id = '{s}';", .{ peer_sql orelse "", sql, credential_hash, id_buf }) catch return common.internalError();
-    _ = node.propose(combined) catch return common.notLeader(alloc, node);
+    const combined = std.fmt.bufPrint(&combined_buf, "{s} {s} UPDATE agents SET credential_hash = '{s}' WHERE id = '{s}';", .{ sql, peer_sql orelse "", credential_hash, id_buf }) catch return common.internalError();
+    _ = node.proposeCommitted(combined, 5000) catch |err| return switch (err) {
+        error.NotLeader, error.LeadershipLost => common.notLeader(alloc, node),
+        error.CommandRejected => common.conflict("registration conflicts with cluster state"),
+        error.CommitTimeout => .{ .status = .service_unavailable, .body = "{\"error\":\"registration outcome unknown; retry after cluster recovers\"}", .allocated = false },
+        else => common.internalError(),
+    };
+    const registered = (agent_registry.getAgent(alloc, node.stateMachineDb(), &id_buf) catch return common.internalError()) orelse
+        return .{ .status = .service_unavailable, .body = "{\"error\":\"no available node_id\"}", .allocated = false };
+    defer registered.deinit(alloc);
+    const assigned_node_id: ?u16 = if (registered.node_id) |nid| std.math.cast(u16, nid) else null;
+    const overlay_ip_str = registered.overlay_ip;
 
     var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
     defer json_buf_writer.deinit();
@@ -446,4 +424,33 @@ pub fn handleRevokeCredential(alloc: std.mem.Allocator, agent_id: []const u8, ct
     const sql = std.fmt.bufPrint(&sql_buf, "UPDATE agents SET credential_hash = NULL WHERE id = '{s}';", .{id}) catch return common.internalError();
     _ = node.propose(sql) catch return common.notLeader(alloc, node);
     return .{ .status = .ok, .body = "{\"revoked\":true}", .allocated = false };
+}
+
+test "registration returns credentials only after their row is applied" {
+    const node_mod = @import("../../../cluster/node.zig");
+    const alloc = std.testing.allocator;
+    var node = try node_mod.Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = "/unused-in-memory-registration",
+    });
+    defer node.deinit();
+    node.fixPointers();
+    for (0..61) |_| node.raft.tick();
+    const body = "{\"token\":\"join-secret\",\"address\":\"10.0.0.2\",\"cpu_cores\":2,\"memory_mb\":512,\"wg_public_key\":\"test-key\"}";
+    const response = handleAgentRegisterImpl(alloc, .{
+        .method = .POST,
+        .path = "/agents/register",
+        .body = body,
+        .headers_raw = "",
+    }, .{ .cluster = &node, .join_token = "join-secret" });
+    defer if (response.allocated) alloc.free(response.body);
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+    const id = extractJsonString(response.body, "id") orelse return error.MissingIdentity;
+    const secret = extractJsonString(response.body, "credential") orelse return error.MissingCredential;
+    const Row = struct { count: i64 };
+    const stored = (try node.state_machine.db.one(Row, "SELECT COUNT(*) AS count FROM agents WHERE id = ? AND credential_hash = ? AND node_id = 1;", .{}, .{ id, credentials.hash(secret) })).?;
+    try std.testing.expectEqual(@as(i64, 1), stored.count);
+    try std.testing.expectEqual(node.raft.commit_index, node.state_machine.last_applied);
 }
