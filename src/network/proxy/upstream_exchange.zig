@@ -607,7 +607,10 @@ test "proxy transport policy uses final HTTP2 status after informational headers
     const responses = @import("http2_response.zig");
     const interim = try responses.formatSimpleResponse(alloc, 1, 103, "text/plain", "");
     defer alloc.free(interim);
-    const final = try responses.formatSimpleResponse(alloc, 1, 503, "text/plain", "unavailable");
+    // Keep the stream open after the informational HEADERS. The first frame
+    // is SETTINGS, followed by HEADERS whose flags byte is at offset 4.
+    interim[@import("http2.zig").frame_header_len + 4] &= ~@as(u8, 1);
+    const final = try responses.formatSimpleStreamResponse(alloc, 1, 503, "text/plain", "unavailable");
     defer alloc.free(final);
     const combined = try std.mem.concat(alloc, u8, &.{ interim, final });
     defer alloc.free(combined);
