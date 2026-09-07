@@ -31,6 +31,12 @@ pub const Session = struct {
         if (self.node.snapshot_failed.load(.acquire) or self.node.raft.storage_failed) return error.InternalError;
     }
 
+    /// Apply an entry in this term before making a decision from local state.
+    /// This includes inherited proposals that a new leader has not applied yet.
+    pub fn synchronize(self: Session) Error!void {
+        try self.commit("UPDATE agents SET id = id WHERE 0;");
+    }
+
     pub fn check(self: Session) Error!void {
         self.node.mu.lockUncancelable(std.Options.debug_io);
         defer self.node.mu.unlock(std.Options.debug_io);

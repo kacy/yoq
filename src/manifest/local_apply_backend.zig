@@ -779,7 +779,7 @@ fn reportProgressDetailsIfSupported(
         const rollout_targets_json = rollout_targets.toOwnedJson() catch return;
         defer if (rollout_targets_json) |json| alloc.free(json);
         const control_state = if (@hasField(std.meta.Child(@TypeOf(runner)), "progress"))
-            if (runner.progress) |progress| progress.controlState() else apply_release.RolloutControlState.active
+            if (runner.progress) |progress| progress.controlState() catch return else apply_release.RolloutControlState.active
         else
             apply_release.RolloutControlState.active;
         const checkpoint_json = apply_release.buildRolloutCheckpointJson(

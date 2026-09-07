@@ -4,6 +4,8 @@ const http = @import("../../http.zig");
 const apply_release = @import("../../../manifest/apply_release.zig");
 const store = @import("../../../state/store.zig");
 const common = @import("../common.zig");
+const mutations = @import("../../../cluster/deployment_mutations.zig");
+const mutation_session = @import("../../../cluster/mutation_session.zig");
 const deploy_routes = @import("deploy_routes.zig");
 
 const Response = common.Response;
@@ -16,22 +18,42 @@ pub fn handleRolloutControl(
     ctx: RouteContext,
 ) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+    const session = mutation_session.Session.begin(node) catch return common.notLeader(alloc, node);
+    session.synchronize() catch |err| return deploy_routes.mutationFailure(alloc, node, err);
     const active = store.getActiveDeploymentByAppInDb(node.stateMachineDb(), alloc, app_name) catch |err| return switch (err) {
         error.NotFound => common.notFound(),
         else => common.internalError(),
     };
     defer active.deinit(alloc);
 
-    if (shouldResumeStoredRollout(active, control_state)) {
+    const command = mutations.control(alloc, active.id, control_state) catch return common.internalError();
+    defer alloc.free(command);
+    session.commit(command) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
+    // The rollout may finish while this command waits for its quorum. Report
+    // the applied state instead of acknowledging a control that did not apply.
+    node.mu.lockUncancelable(std.Options.debug_io);
+    const applied = store.getDeploymentInDb(node.stateMachineDb(), alloc, active.id) catch {
+        node.mu.unlock(std.Options.debug_io);
+        return common.internalError();
+    };
+    node.mu.unlock(std.Options.debug_io);
+    defer applied.deinit(alloc);
+    if (!std.mem.eql(u8, applied.status, "pending") and !std.mem.eql(u8, applied.status, "in_progress"))
+        return common.conflict("rollout already finished");
+    if (!std.mem.eql(u8, applied.rollout_control_state orelse "active", control_state))
+        return common.conflict("rollout control changed concurrently");
+    if (shouldResumeStoredRollout(active, control_state) and !deploy_routes.isClusterRolloutActive(active.id)) {
         return resumeStoredClusterRollout(alloc, active, ctx);
     }
 
-    store.updateDeploymentRolloutControlStateInDb(node.stateMachineDb(), active.id, control_state) catch return common.internalError();
     return rolloutControlResponse(alloc, app_name, active.id, control_state);
 }
 
 pub fn recoverActiveClusterRolloutsOnce(alloc: std.mem.Allocator, ctx: RouteContext) !usize {
     const node = ctx.cluster orelse return 0;
+    if (!node.isLeader()) return 0;
+    const session = try mutation_session.Session.begin(node);
+    try session.synchronize();
     var deployments = try store.listRecoverableActiveDeploymentsByAppInDb(node.stateMachineDb(), alloc);
     defer {
         for (deployments.items) |dep| dep.deinit(alloc);

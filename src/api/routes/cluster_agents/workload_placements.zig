@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const mutation_session = @import("../../../cluster/mutation_session.zig");
 const scheduler = @import("../../../cluster/scheduler.zig");
 const cluster_node = @import("../../../cluster/node.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
@@ -29,7 +30,7 @@ pub fn run(
 
     var backend = deploy_routes.ClusterApplyBackend{
         .alloc = alloc,
-        .node = node,
+        .session = try mutation_session.Session.begin(node),
         .requests = owned_requests,
         .agents = agents,
     };

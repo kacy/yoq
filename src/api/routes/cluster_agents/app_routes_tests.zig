@@ -1164,11 +1164,11 @@ test "readiness-gated apply keeps prior assignments when cutover fails" {
     try expectJsonContains(apply_response.body, "\"message\":\"one or more rollout targets failed readiness checks\"");
     try expectJsonContains(
         apply_response.body,
-        "\"failure_details\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"reason\":\"assignment_missing\"}]",
+        "\"failure_details\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"reason\":\"readiness_timeout\"}]",
     );
     try expectJsonContains(
         apply_response.body,
-        "\"rollout_targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"failed\",\"reason\":\"assignment_missing\"}]",
+        "\"rollout_targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"failed\",\"reason\":\"readiness_timeout\"}]",
     );
 
     const after = try agent_registry.countAssignmentsForWorkload(harness.node.stateMachineDb(), "demo-app", "service", "web");
