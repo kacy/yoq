@@ -173,6 +173,20 @@ pub fn build(b: *std.Build) void {
     const run_tests = createArtifactRunner(b, tests, "run test", false);
     test_step.dependOn(&run_tests.step);
 
+    // Keep the durable recovery contracts independently runnable and bounded.
+    // These include real SQLite restore/reopen, failed commits, partitions,
+    // divergent logs, and interrupted snapshot activation.
+    const recovery_tests = b.addTest(.{
+        .root_module = test_mod,
+        .filters = if (test_filter) |filter| &.{filter} else &.{
+            "cluster.log.",  "cluster.raft.", "cluster.state_machine.",
+            "cluster.node.", "state.backup.",
+        },
+    });
+    const recovery_step = b.step("test-recovery", "Run durable state and partition recovery contracts");
+    const run_recovery = createArtifactRunner(b, recovery_tests, "run recovery contracts", true);
+    recovery_step.dependOn(&run_recovery.step);
+
     const hardening_test_step = b.step(
         "test-hardening",
         "Run deterministic non-privileged hardening tests",

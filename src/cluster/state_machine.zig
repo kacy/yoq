@@ -359,16 +359,16 @@ test "takeSnapshot and restoreFromSnapshot round-trip" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path_len = tmp.dir.realPathFile(std.testing.io, ".", &path_buf) catch return;
+    const tmp_path_len = try tmp.dir.realPathFile(std.testing.io, ".", &path_buf);
     const tmp_path = path_buf[0..tmp_path_len];
 
     // set up state machine with some data
     var sm_path_buf: [512]u8 = undefined;
-    const sm_path_slice = std.fmt.bufPrint(&sm_path_buf, "{s}/state.db", .{tmp_path}) catch return;
+    const sm_path_slice = try std.fmt.bufPrint(&sm_path_buf, "{s}/state.db", .{tmp_path});
     sm_path_buf[sm_path_slice.len] = 0;
     const sm_path: [:0]const u8 = sm_path_buf[0..sm_path_slice.len :0];
 
-    var sm = StateMachine.init(sm_path) catch return;
+    var sm = try StateMachine.init(sm_path);
     defer sm.deinit();
 
     // apply some entries using allowed SQL patterns
@@ -380,7 +380,7 @@ test "takeSnapshot and restoreFromSnapshot round-trip" {
 
     // take a snapshot
     var snap_path_buf: [512]u8 = undefined;
-    const snap_path = std.fmt.bufPrint(&snap_path_buf, "{s}/100.snap", .{tmp_path}) catch return;
+    const snap_path = try std.fmt.bufPrint(&snap_path_buf, "{s}/100.snap", .{tmp_path});
 
     const meta = SnapshotMeta{
         .last_included_index = 1,
@@ -388,37 +388,37 @@ test "takeSnapshot and restoreFromSnapshot round-trip" {
         .data_len = 0, // will be filled by takeSnapshot
     };
 
-    sm.takeSnapshot(snap_path, meta) catch return;
+    try sm.takeSnapshot(snap_path, meta);
 
     // verify snapshot file exists and has correct header
-    const read_meta = readSnapshotMeta(snap_path) catch return;
+    const read_meta = try readSnapshotMeta(snap_path);
     try std.testing.expectEqual(@as(LogIndex, 1), read_meta.last_included_index);
     try std.testing.expectEqual(@as(types.Term, 1), read_meta.last_included_term);
     try std.testing.expect(read_meta.data_len > 0);
 
     // create a new empty state machine and restore from snapshot
     var sm2_path_buf: [512]u8 = undefined;
-    const sm2_path_slice = std.fmt.bufPrint(&sm2_path_buf, "{s}/state2.db", .{tmp_path}) catch return;
+    const sm2_path_slice = try std.fmt.bufPrint(&sm2_path_buf, "{s}/state2.db", .{tmp_path});
     sm2_path_buf[sm2_path_slice.len] = 0;
     const sm2_path: [:0]const u8 = sm2_path_buf[0..sm2_path_slice.len :0];
 
-    var sm2 = StateMachine.init(sm2_path) catch return;
+    var sm2 = try StateMachine.init(sm2_path);
     defer sm2.deinit();
 
-    const restored_meta = sm2.restoreFromSnapshot(snap_path) catch return;
+    const restored_meta = try sm2.restoreFromSnapshot(snap_path);
     try std.testing.expectEqual(@as(LogIndex, 1), restored_meta.last_included_index);
     try std.testing.expectEqual(@as(LogIndex, 1), sm2.last_applied);
 
     // verify the restored database has the data
     const Row = struct { id: sqlite.Text };
     const alloc = std.testing.allocator;
-    const row = (sm2.db.oneAlloc(
+    const row = (try sm2.db.oneAlloc(
         Row,
         alloc,
         "SELECT id FROM agents WHERE id = ?;",
         .{},
         .{"snap_agent"},
-    ) catch return).?;
+    )).?;
     defer alloc.free(row.id.data);
 
     try std.testing.expectEqualStrings("snap_agent", row.id.data);
@@ -529,16 +529,16 @@ test "snapshot round-trip preserves last_applied" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path_len = tmp.dir.realPathFile(std.testing.io, ".", &path_buf) catch return;
+    const tmp_path_len = try tmp.dir.realPathFile(std.testing.io, ".", &path_buf);
     const tmp_path = path_buf[0..tmp_path_len];
 
     // create source state machine with data
     var sm_path_buf: [512]u8 = undefined;
-    const sm_path_slice = std.fmt.bufPrint(&sm_path_buf, "{s}/src.db", .{tmp_path}) catch return;
+    const sm_path_slice = try std.fmt.bufPrint(&sm_path_buf, "{s}/src.db", .{tmp_path});
     sm_path_buf[sm_path_slice.len] = 0;
     const sm_path: [:0]const u8 = sm_path_buf[0..sm_path_slice.len :0];
 
-    var sm = StateMachine.init(sm_path) catch return;
+    var sm = try StateMachine.init(sm_path);
     defer sm.deinit();
 
     // apply several entries to advance last_applied
@@ -549,23 +549,23 @@ test "snapshot round-trip preserves last_applied" {
 
     // take snapshot at index 3
     var snap_path_buf: [512]u8 = undefined;
-    const snap_path = std.fmt.bufPrint(&snap_path_buf, "{s}/snap.dat", .{tmp_path}) catch return;
-    sm.takeSnapshot(snap_path, .{
+    const snap_path = try std.fmt.bufPrint(&snap_path_buf, "{s}/snap.dat", .{tmp_path});
+    try sm.takeSnapshot(snap_path, .{
         .last_included_index = 3,
         .last_included_term = 1,
         .data_len = 0,
-    }) catch return;
+    });
 
     // restore into a new state machine
     var sm2_path_buf: [512]u8 = undefined;
-    const sm2_path_slice = std.fmt.bufPrint(&sm2_path_buf, "{s}/dst.db", .{tmp_path}) catch return;
+    const sm2_path_slice = try std.fmt.bufPrint(&sm2_path_buf, "{s}/dst.db", .{tmp_path});
     sm2_path_buf[sm2_path_slice.len] = 0;
     const sm2_path: [:0]const u8 = sm2_path_buf[0..sm2_path_slice.len :0];
 
-    var sm2 = StateMachine.init(sm2_path) catch return;
+    var sm2 = try StateMachine.init(sm2_path);
     defer sm2.deinit();
 
-    const meta = sm2.restoreFromSnapshot(snap_path) catch return;
+    const meta = try sm2.restoreFromSnapshot(snap_path);
 
     // last_applied should be restored from the snapshot header
     try std.testing.expectEqual(@as(LogIndex, 3), sm2.last_applied);
@@ -577,16 +577,16 @@ test "init reloads persisted last_applied from disk" {
     defer tmp.cleanup();
 
     var path_buf: [512]u8 = undefined;
-    const tmp_path_len = tmp.dir.realPathFile(std.testing.io, ".", &path_buf) catch return;
+    const tmp_path_len = try tmp.dir.realPathFile(std.testing.io, ".", &path_buf);
     const tmp_path = path_buf[0..tmp_path_len];
 
     var sm_path_buf: [512]u8 = undefined;
-    const sm_path_slice = std.fmt.bufPrint(&sm_path_buf, "{s}/persisted.db", .{tmp_path}) catch return;
+    const sm_path_slice = try std.fmt.bufPrint(&sm_path_buf, "{s}/persisted.db", .{tmp_path});
     sm_path_buf[sm_path_slice.len] = 0;
     const sm_path: [:0]const u8 = sm_path_buf[0..sm_path_slice.len :0];
 
     {
-        var sm = StateMachine.init(sm_path) catch return;
+        var sm = try StateMachine.init(sm_path);
         defer sm.deinit();
 
         sm.apply(.{ .index = 1, .term = 1, .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at) VALUES ('persisted', 'h', 'active', 1, 1024, 0, 0, 0, 1, 1);" });
@@ -594,7 +594,7 @@ test "init reloads persisted last_applied from disk" {
         try std.testing.expectEqual(@as(LogIndex, 2), sm.last_applied);
     }
 
-    var reopened = StateMachine.init(sm_path) catch return;
+    var reopened = try StateMachine.init(sm_path);
     defer reopened.deinit();
     try std.testing.expectEqual(@as(LogIndex, 2), reopened.last_applied);
 }
