@@ -214,6 +214,13 @@ pub const ApplicationSpec = struct {
             try json_helpers.writeJsonEscaped(writer, svc.image);
             try writer.writeAll("\",\"command\":");
             try writeJsonStringArray(writer, svc.command);
+            try writer.writeAll(",\"env\":");
+            try writeJsonStringArray(writer, svc.env);
+            if (svc.working_dir) |dir| {
+                try writer.writeAll(",\"working_dir\":\"");
+                try json_helpers.writeJsonEscaped(writer, dir);
+                try writer.writeByte('"');
+            }
             try writer.print(",\"cpu_limit\":{d},\"memory_limit_mb\":{d}", .{
                 svc.cpu_limit,
                 svc.memory_limit_mb,
