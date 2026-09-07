@@ -126,8 +126,15 @@ def inside(root, outer_mount, outer_net):
     run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
         "-keyout", str(key), "-out", str(cert), "-subj", "/CN=127.0.0.1",
         "-addext", "subjectAltName=IP:127.0.0.1", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    run("mount", "--bind", str(cert), "/etc/ssl/certs/ca-certificates.crt")
     registry, image = start_registry(cert, key)
+    # The same real client/image must fail before its CA is trusted, then pass
+    # through the agent after the private trust bind below.
+    untrusted_home = root / "untrusted"
+    untrusted_home.mkdir()
+    rejected = subprocess.run([str(YOQ), "pull", image], env=dict(os.environ, HOME=str(untrusted_home)),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+    assert rejected.returncode != 0, "registry certificate was accepted without trust"
+    run("mount", "--bind", str(cert), "/etc/ssl/certs/ca-certificates.crt")
     processes = []
     logs = []
     homes = {}
@@ -160,6 +167,12 @@ def inside(root, outer_mount, outer_net):
         spawn("server", ["init-server", "--id", "1", "--port", "19700", "--api-port", "17700",
                          "--peers", "", "--token", enrollment, "--api-token", token])
         wait_for("server API", lambda: api("/agents") == [])
+        try:
+            client.open("http://127.0.0.1:17700/agents", timeout=2)
+        except urllib.error.HTTPError as error:
+            assert error.code == 401, error.code
+        else:
+            raise AssertionError("unauthenticated API request was accepted")
         wait_for("single-voter leader", lambda: api("/cluster/status").get("role") == "leader")
         spawn("agent", ["join", "127.0.0.1", "--port", "17700", "--agent-port", "17701",
                         "--token", enrollment, "--role", "agent"])
@@ -195,7 +208,7 @@ def inside(root, outer_mount, outer_net):
             assert (cgroup / "memory.max").read_text().strip() == str(64 * 1024 * 1024)
             run(str(YOQ), "stop", "web", env=dict(os.environ, HOME=str(homes["agent"])), stdout=subprocess.DEVNULL)
             wait_for("assignment exit", lambda: api(f"/agents/{agent_id}/assignments")[0]["status"] == "stopped")
-        print("scheduled runtime: OCI pull, readiness, routed HTTP, identity, limits, and exit passed", flush=True)
+        print("scheduled runtime: API authentication, registry certificate trust, OCI pull, readiness, routed HTTP, identity, limits, and exit passed", flush=True)
     finally:
         for process in reversed(processes):
             process.terminate()
