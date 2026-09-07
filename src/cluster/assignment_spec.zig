@@ -142,7 +142,39 @@ test "assignment execution runs preserved argv and image environment in a real p
         \\{"command":["-c","test \"$1\" = \"a b\" && test \"$MODE\" = image", "fixture", "a b"]}
     );
     defer alloc.free(encoded);
-    var decoded = try decode(alloc, encoded);
+    // Follow the production SQL, registry query, HTTP writer, and local cache
+    // boundaries before executing the resulting process arguments.
+    const registry = @import("registry.zig");
+    var sm = try @import("state_machine.zig").StateMachine.initMemory();
+    defer sm.deinit();
+    var sql: [sql_buffer_size]u8 = undefined;
+    sm.apply(.{ .index = 1, .term = 1, .data = try registry.registerSql(&sql, "worker", "127.0.0.1", .{ .cpu_cores = 2, .memory_mb = 2048 }, 0) });
+    sm.apply(.{ .index = 2, .term = 1, .data = try @import("scheduler.zig").assignmentSql(&sql, "assignment", "worker", .{ .image = "fixture", .command = encoded, .cpu_limit = 1500, .memory_limit_mb = 1024 }, 0) });
+    const assignments = try registry.getAssignments(alloc, &sm.db, "worker");
+    defer {
+        for (assignments) |assignment| assignment.deinit(alloc);
+        alloc.free(assignments);
+    }
+    try std.testing.expectEqual(@as(usize, 1), assignments.len);
+    var response = std.Io.Writer.Allocating.init(alloc);
+    defer response.deinit();
+    try @import("../api/routes/cluster_agents/writers.zig").writeAssignmentJson(&response.writer, assignments[0]);
+    const Fields = struct { command: []const u8, cpu_limit: i64, memory_limit_mb: i64 };
+    const fields = try std.json.parseFromSlice(Fields, alloc, response.written(), .{ .ignore_unknown_fields = true });
+    defer fields.deinit();
+    const cache = @import("agent_store.zig");
+    try cache.initTestDb();
+    defer cache.closeDb();
+    try cache.upsertAssignment(.{ .id = "assignment", .image = "fixture", .command = fields.value.command, .status = "pending", .cpu_limit = fields.value.cpu_limit, .memory_limit_mb = fields.value.memory_limit_mb, .synced_at = 0 });
+    const cached = try cache.listPendingAssignments(alloc);
+    defer {
+        for (cached) |assignment| assignment.deinit(alloc);
+        alloc.free(cached);
+    }
+    try std.testing.expectEqual(@as(usize, 1), cached.len);
+    try std.testing.expectEqual(@as(i64, 1500), cached[0].cpu_limit);
+    try std.testing.expectEqual(@as(i64, 1024), cached[0].memory_limit_mb);
+    var decoded = try decode(alloc, cached[0].command);
     defer decoded.deinit();
     var resolved = try resolve(alloc, decoded.value, .{ .Entrypoint = &.{"sh"}, .Env = &.{ "MODE=image", "PATH=/bin" } }, &.{});
     defer resolved.deinit(alloc);
