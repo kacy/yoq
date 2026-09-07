@@ -31,7 +31,7 @@ pub const WG_CMD = struct {
 };
 
 pub const WGDEVICE_A = struct {
-    pub const IFNAME: u16 = 1;
+    pub const IFNAME: u16 = 2;
     pub const PRIVATE_KEY: u16 = 3;
     pub const LISTEN_PORT: u16 = 6;
     pub const PEERS: u16 = 8;
@@ -42,7 +42,7 @@ pub const WGPEER_A = struct {
     pub const FLAGS: u16 = 3;
     pub const ENDPOINT: u16 = 4;
     pub const PERSISTENT_KEEPALIVE: u16 = 5;
-    pub const ALLOWED_IPS: u16 = 7;
+    pub const ALLOWED_IPS: u16 = 9;
 };
 
 pub const WGALLOWEDIP_A = struct {
