@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -7,9 +8,10 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 from release_metadata import documents, sqlite_dependency
-from security_gate import action_commits
+from security_gate import action_commits, lookup, sqlite_findings, sqlite_triage, SQLITE_REPOSITORY
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,6 +56,79 @@ class ReleaseSecurityTests(unittest.TestCase):
             (root / '.github/other.yaml').write_text('steps:\n  - uses: actions/checkout@v4\n')
             with self.assertRaises(ValueError):
                 action_commits(root)
+
+    @staticmethod
+    def sqlite_advisory(identifier, events):
+        return {'id': identifier, 'affected': [{'ranges': [{
+            'type': 'GIT', 'repo': SQLITE_REPOSITORY,
+            'database_specific': {'extracted_events': events},
+        }], 'versions': ['version-3.49.0']}]}
+
+    def test_sqlite_maintenance_release_is_checked_against_known_advisory_intervals(self):
+        # These are the published OSV intervals. The incomplete Git version
+        # list deliberately omits the affected maintenance release 3.49.2.
+        advisories = [
+            self.sqlite_advisory('CVE-2025-6965', [{'introduced': '0'}, {'fixed': '3.50.2'}]),
+            self.sqlite_advisory('CVE-2026-11822', [{'introduced': '0'}, {'fixed': '3.53.2'}]),
+        ]
+        self.assertEqual([v['id'] for v in sqlite_findings('3.49.2', advisories)],
+                         ['CVE-2025-6965', 'CVE-2026-11822'])
+        self.assertEqual([v['id'] for v in sqlite_findings('3.50.2', advisories)],
+                         ['CVE-2026-11822'])
+        self.assertEqual(sqlite_findings('3.53.2', advisories), [])
+        self.assertEqual(sqlite_findings('3.53.4', advisories), [])
+
+    def test_sqlite_inclusive_intervals_and_unmapped_records(self):
+        advisory = self.sqlite_advisory('CVE-2021-45346', [
+            {'introduced': '3.35.1'}, {'last_affected': '3.35.1'},
+            {'introduced': '3.37.0'}, {'last_affected': '3.37.0'},
+        ])
+        for version in ['3.35.1', '3.37.0']:
+            self.assertEqual(sqlite_findings(version, [advisory]), [advisory])
+        self.assertEqual(sqlite_findings('3.35.2', [advisory]), [])
+        with self.assertRaises(ValueError):
+            sqlite_findings('3.53.4', [])
+        for events in [None, [{'introduced': 'unknown'}], [{'fixed': '3.50.2'}],
+                       [{'introduced': '3.50.0'}, {'fixed': '3.49.0'}]]:
+            with self.subTest(events=events), self.assertRaises(ValueError):
+                sqlite_findings('3.53.4', [self.sqlite_advisory('unmapped', events)])
+
+    def test_sqlite_source_review_is_bound_to_version_and_build_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'tools').mkdir()
+            build = root / 'build.zig'
+            build.write_text('fixed build configuration')
+            reasons = {'extension-only': 'the optional extension is not compiled'}
+            triage = {'sqlite_version': '3.53.4',
+                      'build_sha256': hashlib.sha256(build.read_bytes()).hexdigest(),
+                      'not_affected': reasons}
+            (root / 'tools/sqlite_advisory_triage.json').write_text(json.dumps(triage))
+            self.assertEqual(sqlite_triage(root, '3.53.4'), reasons)
+            unknown = self.sqlite_advisory('extension-only', None)
+            self.assertEqual(sqlite_findings('3.53.4', [unknown], sqlite_triage(root, '3.53.4')), [])
+            with self.assertRaises(ValueError):
+                sqlite_triage(root, '3.49.2')
+            build.write_text('now enable the optional extension')
+            with self.assertRaises(ValueError):
+                sqlite_triage(root, '3.53.4')
+
+    def test_osv_lookup_follows_pagination_and_rejects_repeated_tokens(self):
+        query = {'package': {'name': SQLITE_REPOSITORY, 'ecosystem': 'GIT'}}
+        pages = [{'next_page_token': 'page-2'},
+                 {'vulns': [{'id': 'CVE-test'}], 'next_page_token': 'page-3'},
+                 {'vulns': [{'id': 'CVE-test'}, {'id': 'withdrawn', 'withdrawn': '2026-01-01'}]}]
+        with patch('security_gate.urllib.request.urlopen',
+                   side_effect=[io.BytesIO(json.dumps(page).encode()) for page in pages]) as request:
+            self.assertEqual(lookup(query), [{'id': 'CVE-test'}])
+            bodies = [json.loads(call.args[0].data) for call in request.call_args_list]
+            self.assertEqual(bodies, [query, dict(query, page_token='page-2'), dict(query, page_token='page-3')])
+            self.assertNotIn('page_token', query)
+        repeated = {'next_page_token': 'same'}
+        with patch('security_gate.urllib.request.urlopen',
+                   side_effect=[io.BytesIO(json.dumps(repeated).encode()) for _ in range(2)]):
+            with self.assertRaises(ValueError):
+                lookup(query)
 
     def run_installer(self, failure):
         with tempfile.TemporaryDirectory() as directory:
