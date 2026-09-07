@@ -35,19 +35,13 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
 
     const token = extractJsonString(request.body, "token") orelse return common.badRequest("missing token field");
     const address = extractJsonString(request.body, "address") orelse return common.badRequest("missing address field");
-    const agent_api_port = extractJsonInt(request.body, "agent_api_port");
-    const cpu_cores = extractJsonInt(request.body, "cpu_cores") orelse return common.badRequest("missing cpu_cores field");
-    const memory_mb = extractJsonInt(request.body, "memory_mb") orelse return common.badRequest("missing memory_mb field");
-    if (cpu_cores <= 0 or cpu_cores > 10000) return common.badRequest("invalid cpu_cores");
-    if (memory_mb <= 0 or memory_mb > 10_000_000) return common.badRequest("invalid memory_mb");
-    if (agent_api_port) |port| {
-        if (port <= 0 or port > 65535) return common.badRequest("invalid agent_api_port");
-    }
-    if (cpu_cores > std.math.maxInt(u32)) return common.badRequest("cpu_cores too large");
-    if (memory_mb > std.math.maxInt(u64)) return common.badRequest("memory_mb too large");
-
+    const parsed = numbers.parse(alloc, request.body) catch return common.badRequest("invalid resource snapshot");
+    defer parsed.deinit();
+    const agent_api_port = numbers.optional(u16, parsed.value, "agent_api_port", 1, 65535) catch return common.badRequest("invalid agent_api_port");
+    const cpu_cores = (numbers.optional(u32, parsed.value, "cpu_cores", 1, 10000) catch return common.badRequest("invalid cpu_cores")) orelse return common.badRequest("missing cpu_cores field");
+    const memory_mb = (numbers.optional(u64, parsed.value, "memory_mb", 1, 10_000_000) catch return common.badRequest("invalid memory_mb")) orelse return common.badRequest("missing memory_mb field");
     const wg_public_key = extractJsonString(request.body, "wg_public_key");
-    const wg_listen_port = extractJsonInt(request.body, "wg_listen_port");
+    const wg_listen_port = numbers.optional(u16, parsed.value, "wg_listen_port", 1, 65535) catch return common.badRequest("invalid wg_listen_port");
 
     if (!common.validateClusterInput(address)) return common.badRequest("invalid address");
     if (!agent_registry.validateToken(token, expected_token)) {
@@ -91,31 +85,24 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
     }
 
     var sql_buf: [2048]u8 = undefined;
-    const gpu_count_val = extractJsonInt(request.body, "gpu_count");
+    const gpu_count_val = numbers.optional(u32, parsed.value, "gpu_count", 0, std.math.maxInt(u32)) catch return common.badRequest("invalid gpu_count");
     const gpu_model_str = json_helpers.extractJsonString(request.body, "gpu_model");
-    const gpu_vram_val = extractJsonInt(request.body, "gpu_vram_mb");
-
-    if (gpu_count_val) |g| {
-        if (g > std.math.maxInt(u32)) return common.badRequest("gpu_count too large");
-    }
-    if (gpu_vram_val) |v| {
-        if (v > std.math.maxInt(u64)) return common.badRequest("gpu_vram_mb too large");
-    }
+    const gpu_vram_val = numbers.optional(u64, parsed.value, "gpu_vram_mb", 0, std.math.maxInt(i64)) catch return common.badRequest("invalid gpu_vram_mb");
 
     const sql = agent_registry.registerSqlFull(
         &sql_buf,
         &id_buf,
         address,
         .{
-            .cpu_cores = @intCast(cpu_cores),
-            .memory_mb = @intCast(memory_mb),
-            .gpu_count = if (gpu_count_val) |g| @intCast(@max(0, g)) else 0,
+            .cpu_cores = cpu_cores,
+            .memory_mb = memory_mb,
+            .gpu_count = gpu_count_val orelse 0,
             .gpu_model = gpu_model_str,
-            .gpu_vram_mb = if (gpu_vram_val) |v| @intCast(@max(0, v)) else 0,
+            .gpu_vram_mb = gpu_vram_val orelse 0,
         },
         nowRealSeconds(),
         .{
-            .agent_api_port = if (agent_api_port) |port| @intCast(port) else null,
+            .agent_api_port = agent_api_port,
             .role = role_str,
             .region = region_str,
             .labels = labels_str,
