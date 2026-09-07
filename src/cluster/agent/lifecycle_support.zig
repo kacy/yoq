@@ -41,6 +41,7 @@ pub fn initOwned(alloc: std.mem.Allocator, server_addr: [4]u8, server_port: u16,
 }
 
 pub fn start(self: anytype) !void {
+    self.assignment_workers.restart();
     self.running.store(true, .release);
     self.log_server = try log_server.LogServer.init(self.alloc, self.agent_api_port, self.token);
     errdefer {
@@ -71,10 +72,12 @@ fn runLogServer(self: anytype) void {
 
 pub fn stop(self: anytype) void {
     self.running.store(false, .release);
+    self.assignment_workers.cancel();
     if (self.loop_thread) |t| {
         t.join();
         self.loop_thread = null;
     }
+    self.assignment_workers.join();
     if (self.log_server) |*server| {
         server.deinit();
     }
@@ -99,6 +102,7 @@ pub fn wait(self: anytype) void {
         t.join();
         self.loop_thread = null;
     }
+    self.assignment_workers.join();
     if (self.log_server) |*server| {
         server.deinit();
     }

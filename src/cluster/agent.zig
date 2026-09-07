@@ -72,6 +72,7 @@ pub const Agent = struct {
     loop_thread: ?std.Thread,
     log_server: ?log_server_mod.LogServer = null,
     log_server_thread: ?std.Thread = null,
+    assignment_workers: @import("../lib/task_workers.zig").Group(128) = .{},
 
     /// tracks assignment_id → local container state.
     /// protected by mutex since container threads update it.
@@ -589,4 +590,22 @@ test "buildHeartbeatBody escapes gpu health string" {
     defer alloc.free(body);
 
     try std.testing.expect(std.mem.indexOf(u8, body, "warn\\\"ing") != null);
+}
+
+test "assignment worker ownership joins before clearing agent credentials" {
+    const Fixture = struct {
+        fn run(stopping: *const std.atomic.Value(bool), owner: *Agent, observed_token: *bool) void {
+            while (!stopping.load(.acquire)) {
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch return;
+            }
+            observed_token.* = std.mem.eql(u8, owner.token, "assignment-owner-test");
+        }
+    };
+    var owner = try Agent.initOwned(std.testing.allocator, .{ 127, 0, 0, 1 }, 7700, "assignment-owner-test");
+    defer owner.deinit();
+    var observed_token = false;
+    try owner.assignment_workers.spawn(Fixture.run, .{ &owner, &observed_token });
+    owner.stop();
+    try std.testing.expect(observed_token);
+    for (owner.token) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
