@@ -335,9 +335,9 @@ pub const Node = struct {
 
     /// submit a command through raft (leader only).
     pub fn propose(self: *Node, data: []const u8) !LogIndex {
-        self.fixPointers();
         self.mu.lockUncancelable(std.Options.debug_io);
         defer self.mu.unlock(std.Options.debug_io);
+        self.fixPointers();
 
         return self.proposeLocked(data);
     }
@@ -348,6 +348,44 @@ pub const Node = struct {
         if (self.snapshot_failed.load(.acquire)) return error.SnapshotRecoveryRequired;
         try command.validate(data);
         return try self.raft.propose(data);
+    }
+
+    /// A successful return means this leader's exact proposal was applied.
+    /// Timeouts and leadership loss leave an unknown outcome: callers must
+    /// inspect durable state before retrying a non-idempotent mutation.
+    pub fn proposeCommitted(self: *Node, data: []const u8, timeout_ms: u32) !LogIndex {
+        self.mu.lockUncancelable(std.Options.debug_io);
+        self.fixPointers();
+        const index = self.proposeLocked(data) catch |err| {
+            self.mu.unlock(std.Options.debug_io);
+            return err;
+        };
+        const term = self.raft.persistent_state.current_term;
+        self.mu.unlock(std.Options.debug_io);
+        return self.waitForApplied(index, term, timeout_ms);
+    }
+
+    pub fn waitForApplied(self: *Node, index: LogIndex, term: types.Term, timeout_ms: u32) !LogIndex {
+        const deadline = std.Io.Clock.awake.now(std.Options.debug_io).toMilliseconds() + @as(i64, timeout_ms);
+        while (true) {
+            {
+                self.mu.lockUncancelable(std.Options.debug_io);
+                defer self.mu.unlock(std.Options.debug_io);
+                if (self.snapshot_failed.load(.acquire)) return error.SnapshotRecoveryRequired;
+                if (self.raft.storage_failed) return error.ReadFailed;
+                if (self.raft.role != .leader or self.raft.persistent_state.current_term != term)
+                    return error.LeadershipLost;
+                // Also applies a single-server append without depending on the
+                // next tick. This never applies beyond Raft's quorum boundary.
+                action_loop.retryCommittedEntries(self);
+                if (self.state_machine.last_applied >= index) {
+                    if (try command.wasRejected(&self.state_machine.db, index, term)) return error.CommandRejected;
+                    return index;
+                }
+            }
+            if (std.Io.Clock.awake.now(std.Options.debug_io).toMilliseconds() >= deadline) return error.CommitTimeout;
+            try @import("../lib/runtime_wait.zig").sleepOrError(.fromMilliseconds(10), "waiting for committed mutation");
+        }
     }
 
     /// buffer a heartbeat for batch proposal. HTTP threads call this
@@ -1221,7 +1259,7 @@ test "applied snapshot retries failed commits without compacting unapplied entri
         try node.log.append(.{ .index = index, .term = 1, .data = increment });
     }
     try node.state_machine.db.exec(
-        "CREATE TRIGGER reject_snapshot_apply BEFORE UPDATE ON agents WHEN OLD.cpu_used = 999 " ++
+        "CREATE TRIGGER reject_snapshot_apply BEFORE UPDATE ON state_machine_meta WHEN OLD.last_applied = 999 " ++
             "BEGIN SELECT RAISE(ABORT, 'injected apply failure'); END;",
         .{},
         .{},
@@ -1248,7 +1286,7 @@ test "applied snapshot retries failed commits without compacting unapplied entri
     // 1000-entry snapshot threshold. No new commit action is delivered.
     try node.state_machine.db.exec("DROP TRIGGER reject_snapshot_apply;", .{}, .{});
     try node.state_machine.db.exec(
-        "CREATE TRIGGER reject_snapshot_apply BEFORE UPDATE ON agents WHEN OLD.cpu_used = 1000 " ++
+        "CREATE TRIGGER reject_snapshot_apply BEFORE UPDATE ON state_machine_meta WHEN OLD.last_applied = 1000 " ++
             "BEGIN SELECT RAISE(ABORT, 'injected apply failure'); END;",
         .{},
         .{},
@@ -1579,4 +1617,36 @@ test "gossip membership callbacks apply under the node lock" {
     const active = (try node.state_machine.db.one(Row, "SELECT COUNT(*) AS count FROM agents WHERE status = 'active';", .{}, .{})).?;
     try std.testing.expectEqual(@as(i64, 1), active.count);
     try std.testing.expectEqual(node.raft.commit_index, node.state_machine.last_applied);
+}
+
+test "committed mutation waits for quorum and fences leadership loss" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    var node = try Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{.{ .id = 2, .addr = .{ 127, 0, 0, 1 }, .port = 9700 }},
+        .shared_key = [_]u8{7} ** 32,
+        .data_dir = try testDirPath(tmp.dir, &path_buf),
+    });
+    defer node.deinit();
+    node.fixPointers();
+    for (0..61) |_| node.raft.tick();
+    const term = node.raft.persistent_state.current_term;
+    node.raft.handleRequestVoteReply(2, .{ .term = term, .vote_granted = true });
+    const sql = "UPDATE agents SET status = 'active' WHERE id = 'absent';";
+    try std.testing.expectError(error.CommitTimeout, node.proposeCommitted(sql, 0));
+    try std.testing.expectEqual(@as(u64, 0), node.state_machine.last_applied);
+    node.raft.handleAppendEntriesReply(2, .{ .term = term, .success = true, .match_index = 1 });
+    try std.testing.expectEqual(@as(u64, 1), try node.waitForApplied(1, term, 0));
+    _ = try node.propose(sql);
+    node.raft.handleAppendEntriesReply(2, .{ .term = term + 1, .success = false, .match_index = 0 });
+    try std.testing.expectError(error.LeadershipLost, node.waitForApplied(2, term, 0));
+    try std.testing.expectEqual(@as(u64, 1), node.state_machine.last_applied);
+    // Drain owned append payloads from this transport-free fixture.
+    node.mu.lockUncancelable(std.Options.debug_io);
+    action_loop.processActions(&node);
+    node.mu.unlock(std.Options.debug_io);
 }

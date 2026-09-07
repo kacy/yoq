@@ -61,6 +61,7 @@ pub fn initMemory() StateMachineError!sqlite.Db {
 
 pub fn initMeta(db: *sqlite.Db) MetaError!void {
     execStatement(db, meta_create_table_sql, .{}) catch return MetaError.WriteFailed;
+    execStatement(db, "CREATE TABLE IF NOT EXISTS rejected_commands (log_index INTEGER PRIMARY KEY, term INTEGER NOT NULL);", .{}) catch return MetaError.WriteFailed;
     execStatement(
         db,
         "INSERT OR IGNORE INTO state_machine_meta (id, last_applied) VALUES (1, 0);",

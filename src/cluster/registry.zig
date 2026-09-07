@@ -33,6 +33,7 @@ pub const deleteAgentAssignmentsSql = sql_mutations.deleteAgentAssignmentsSql;
 pub const deleteAssignmentsForWorkloadSql = sql_mutations.deleteAssignmentsForWorkloadSql;
 pub const deleteOtherAssignmentsForWorkloadSql = sql_mutations.deleteOtherAssignmentsForWorkloadSql;
 pub const deleteAssignmentsByIdsSql = sql_mutations.deleteAssignmentsByIdsSql;
+pub const allocateWireguardPeerSql = sql_mutations.allocateWireguardPeerSql;
 pub const wireguardPeerSql = sql_mutations.wireguardPeerSql;
 pub const removeWireguardPeerSql = sql_mutations.removeWireguardPeerSql;
 
