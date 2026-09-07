@@ -54,12 +54,7 @@ pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8
     return mount_ops.bindMount(target_root, source, target, read_only);
 }
 
-/// mount essential filesystems inside the container.
-/// call this after pivot_root.
-pub fn mountEssential() FilesystemError!void {
-    return essential_mounts.mountEssential();
-}
-
+/// Mount essential filesystems before pivot_root hides the host device sources.
 pub fn mountEssentialAt(target_root: []const u8) FilesystemError!void {
     return essential_mounts.mountEssentialAt(target_root);
 }

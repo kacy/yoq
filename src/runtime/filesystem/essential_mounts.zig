@@ -1,14 +1,10 @@
 const std = @import("std");
 const linux = std.os.linux;
 const syscall_util = @import("../../lib/syscall.zig");
-const log = @import("../../lib/log.zig");
+const platform = @import("linux_platform");
 const common = @import("common.zig");
 
 pub const FilesystemError = common.FilesystemError;
-
-pub fn mountEssential() FilesystemError!void {
-    return mountEssentialAt("");
-}
 
 pub fn mountEssentialAt(target_root: []const u8) FilesystemError!void {
     var proc_path_buf: [4096]u8 = undefined;
@@ -79,66 +75,9 @@ pub fn mountEssentialAt(target_root: []const u8) FilesystemError!void {
     );
     if (syscall_util.isError(rc5)) return FilesystemError.MountFailed;
 
-    createDeviceNodesAt(target_root);
-}
-
-fn createDeviceNodesAt(target_root: []const u8) void {
-    const DeviceNode = struct {
-        path: []const u8,
-        major: u32,
-        minor: u32,
-        mode: u32,
-    };
-
-    const devices = [_]DeviceNode{
-        .{ .path = "/dev/null", .major = 1, .minor = 3, .mode = 0o020666 },
-        .{ .path = "/dev/zero", .major = 1, .minor = 5, .mode = 0o020666 },
-        .{ .path = "/dev/random", .major = 1, .minor = 8, .mode = 0o020666 },
-        .{ .path = "/dev/urandom", .major = 1, .minor = 9, .mode = 0o020666 },
-    };
-
-    for (devices) |dev| {
-        var path_buf: [4096]u8 = undefined;
-        const path = joinTargetPath(target_root, dev.path, &path_buf) catch continue;
-        const device_num: u32 = (dev.major << 8) | dev.minor;
-        const rc = linux.syscall4(
-            .mknodat,
-            @as(usize, @bitCast(@as(isize, linux.AT.FDCWD))),
-            @intFromPtr(path.ptr),
-            dev.mode,
-            device_num,
-        );
-        if (syscall_util.isError(rc)) {
-            log.info("device node creation skipped (no CAP_MKNOD?): {s}", .{path});
-        }
-    }
-
-    const Symlink = struct {
-        target: []const u8,
-        path: []const u8,
-    };
-
-    const symlinks = [_]Symlink{
-        .{ .target = "/proc/self/fd", .path = "/dev/fd" },
-        .{ .target = "/proc/self/fd/0", .path = "/dev/stdin" },
-        .{ .target = "/proc/self/fd/1", .path = "/dev/stdout" },
-        .{ .target = "/proc/self/fd/2", .path = "/dev/stderr" },
-    };
-
-    for (symlinks) |link| {
-        var path_buf: [4096]u8 = undefined;
-        const path = joinTargetPath(target_root, link.path, &path_buf) catch continue;
-        const rc = linux.syscall4(
-            .symlinkat,
-            @intFromPtr(link.target.ptr),
-            @as(usize, @bitCast(@as(isize, linux.AT.FDCWD))),
-            @intFromPtr(path.ptr),
-            0,
-        );
-        if (syscall_util.isError(rc)) {
-            log.info("symlink creation failed: {s}", .{path});
-        }
-    }
+    const dev_fd = platform.posix.open(dev_path, .{ .PATH = true, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0) catch return FilesystemError.MountFailed;
+    defer platform.posix.close(dev_fd);
+    @import("devices.zig").populate(dev_fd) catch return FilesystemError.MountFailed;
 }
 
 fn mkdirIfNeeded(path: []const u8) !void {
