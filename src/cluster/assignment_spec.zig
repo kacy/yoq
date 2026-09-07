@@ -108,11 +108,12 @@ pub fn resolve(alloc: std.mem.Allocator, execution: Execution, image: ?image_spe
 
 pub fn resourceLimits(cpu_millicores: i64, memory_mb: i64) !@import("../runtime/cgroups.zig").ResourceLimits {
     if (cpu_millicores <= 0 or memory_mb < 4) return error.InvalidRequest;
-    // Linux requires at least 1 ms of quota. A one-second period represents
-    // even one millicore without rounding its requested share upward.
-    const cpu = try std.math.mul(u64, @intCast(cpu_millicores), 1000);
+    // Linux requires at least 1 ms of quota. Extend the usual 100 ms period
+    // only for tiny allocations that cannot meet that minimum otherwise.
+    const period: u64 = if (cpu_millicores < 10) 1_000_000 else 100_000;
+    const cpu = try std.math.mul(u64, @intCast(cpu_millicores), period / 1000);
     const memory = try std.math.mul(u64, @intCast(memory_mb), 1024 * 1024);
-    return .{ .cpu_max_usec = cpu, .cpu_max_period = 1_000_000, .memory_max = memory };
+    return .{ .cpu_max_usec = cpu, .cpu_max_period = period, .memory_max = memory };
 }
 
 test "assignment execution preserves escaped argv and OCI defaults" {
@@ -132,7 +133,7 @@ test "assignment execution preserves escaped argv and OCI defaults" {
     try std.testing.expectEqualStrings("KEEP=yes", resolved.env.items[1]);
     try std.testing.expectEqualStrings("RANK=2", resolved.env.items[2]);
     const limits = try resourceLimits(1500, 1024);
-    try std.testing.expectEqual(@as(?u64, 1500000), limits.cpu_max_usec);
+    try std.testing.expectEqual(@as(?u64, 150000), limits.cpu_max_usec);
     try std.testing.expectEqual(@as(?u64, 1073741824), limits.memory_max);
     try std.testing.expectError(error.InvalidRequest, resourceLimits(-1, 128));
     try std.testing.expectError(error.Overflow, resourceLimits(1, std.math.maxInt(i64)));
@@ -194,7 +195,7 @@ test "assignment resource limits reach actual kernel cgroup controls" {
     const cgroups = @import("../runtime/cgroups.zig");
     var id: [12]u8 = undefined;
     try runtime.generateId(&id);
-    var group = try cgroups.Cgroup.create(&id);
+    const group = try cgroups.Cgroup.create(&id);
     defer group.destroy() catch {};
     for ([_]i64{ 1, 1500 }) |cpu| {
         const limits = try resourceLimits(cpu, 1024);
