@@ -12,9 +12,7 @@ on:
         type: string
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event.inputs.version || github.ref }}
@@ -211,6 +209,10 @@ jobs:
           retention-days: 7
 
   package:
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     name: package
     needs:
       - validate-tag
@@ -265,6 +267,8 @@ jobs:
             dist/out/sbom.spdx.json
 
   publish-release:
+    permissions:
+      contents: write
     name: publish-release
     needs:
       - validate-tag
