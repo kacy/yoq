@@ -94,14 +94,14 @@ def start_registry(cert, key):
         def log_message(self, *_):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Registry)
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), Registry)
     server.request_paths = []
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, key)
     server.socket = context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    return server, f"127.0.0.1:{server.server_port}/fixture@{digest(manifest)}"
+    return server, f"192.0.2.1:{server.server_port}/fixture@{digest(manifest)}"
 
 
 def wait_for(description, operation, timeout=45):
@@ -124,10 +124,24 @@ def inside(root, outer_mount, outer_net):
     assert os.readlink("/proc/self/ns/net") != outer_net
     run("mount", "--make-rprivate", "/")
     run("ip", "link", "set", "lo", "up")
+    # Give the server and worker independent bridges, WireGuard devices, and
+    # routes, as they have on separate hosts. The veth pair is private to us.
+    worker_net = subprocess.Popen(["unshare", "--net", "sleep", "infinity"])
+    wait_for("worker network namespace", lambda:
+             os.readlink(f"/proc/{worker_net.pid}/ns/net") != os.readlink("/proc/self/ns/net"))
+    worker_prefix = ["nsenter", "--net=" + f"/proc/{worker_net.pid}/ns/net", "--"]
+    run("ip", "link", "add", "fixture-server", "type", "veth", "peer", "name", "fixture-worker")
+    run("ip", "link", "set", "fixture-worker", "netns", str(worker_net.pid))
+    run("ip", "addr", "add", "192.0.2.1/24", "dev", "fixture-server")
+    run("ip", "link", "set", "fixture-server", "up")
+    run(*worker_prefix, "ip", "link", "set", "lo", "up")
+    run(*worker_prefix, "ip", "addr", "add", "192.0.2.2/24", "dev", "fixture-worker")
+    run(*worker_prefix, "ip", "link", "set", "fixture-worker", "up")
+    run(*worker_prefix, "ip", "route", "add", "default", "via", "192.0.2.1")
     cert, key = root / "cert.pem", root / "key.pem"
     run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
         "-keyout", str(key), "-out", str(cert), "-subj", "/CN=127.0.0.1",
-        "-addext", "subjectAltName=IP:127.0.0.1", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        "-addext", "subjectAltName=IP:192.0.2.1", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     registry, image = start_registry(cert, key)
     # The same real client/image must fail before its CA is trusted, then pass
     # through the agent after the private trust bind below.
@@ -138,7 +152,7 @@ def inside(root, outer_mount, outer_net):
     assert rejected.returncode != 0, "registry certificate was accepted without trust"
     assert not registry.request_paths, "untrusted registry received an HTTP request"
     run("mount", "--bind", str(cert), "/etc/ssl/certs/ca-certificates.crt")
-    processes = []
+    processes = [worker_net]
     logs = []
     homes = {}
     token, enrollment = secrets.token_hex(32), secrets.token_hex(32)
@@ -158,7 +172,8 @@ def inside(root, outer_mount, outer_net):
         output = open(root / (name + ".log"), "ab", buffering=0)
         logs.append(output)
         env = dict(os.environ, HOME=str(home))
-        processes.append(subprocess.Popen([str(YOQ), *args], env=env, stdout=output, stderr=output))
+        prefix = worker_prefix if name == "agent" else []
+        processes.append(subprocess.Popen([*prefix, str(YOQ), *args], env=env, stdout=output, stderr=output))
 
     def container_row():
         path = homes["agent"] / ".local/share/yoq/yoq.db"
@@ -177,7 +192,7 @@ def inside(root, outer_mount, outer_net):
         else:
             raise AssertionError("unauthenticated API request was accepted")
         wait_for("single-voter leader", lambda: api("/cluster/status").get("role") == "leader")
-        spawn("agent", ["join", "127.0.0.1", "--port", "17700", "--agent-port", "17701",
+        spawn("agent", ["join", "192.0.2.1", "--port", "17700", "--agent-port", "17701",
                         "--token", enrollment, "--role", "agent"])
         agents = wait_for("registered agent", lambda: api("/agents"))
         agent_id = agents[0]["id"]
@@ -202,8 +217,9 @@ def inside(root, outer_mount, outer_net):
             url = f"http://{row['ip_address']}:8080/"
 
             def reachable():
-                with client.open(url, timeout=1) as response:
-                    return response.read() == b"scheduled-ready"
+                response = subprocess.run([*worker_prefix, "curl", "--noproxy", "*", "--silent", "--max-time", "1", url],
+                                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                return response.returncode == 0 and response.stdout == b"scheduled-ready"
 
             wait_for("HTTP across the container network", reachable)
             result = apply.result(timeout=35)
@@ -217,7 +233,7 @@ def inside(root, outer_mount, outer_net):
             cgroup = Path("/sys/fs/cgroup/yoq") / row["id"]
             assert (cgroup / "cpu.max").read_text().strip() == "25000 100000"
             assert (cgroup / "memory.max").read_text().strip() == str(64 * 1024 * 1024)
-            run(str(YOQ), "stop", "web", env=dict(os.environ, HOME=str(homes["agent"])), stdout=subprocess.DEVNULL)
+            run(*worker_prefix, str(YOQ), "stop", "web", env=dict(os.environ, HOME=str(homes["agent"])), stdout=subprocess.DEVNULL)
             wait_for("assignment exit", lambda: api(f"/agents/{agent_id}/assignments")[0]["status"] == "stopped")
         print("scheduled runtime: API authentication, registry certificate trust, OCI pull, readiness, routed HTTP, identity, limits, and exit passed", flush=True)
     finally:

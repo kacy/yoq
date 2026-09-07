@@ -44,6 +44,7 @@ jobs:
         run: |
           set -o pipefail
           zig_bin="$(command -v zig)"
+          mkdir -p "$RUNNER_TEMP/zig-global-cache-root/tmp" "$RUNNER_TEMP/zig-local-cache-root/tmp"
           sudo env YOQ_SKIP_SLOW_TESTS=1 \
             ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zig-global-cache-root" \
             ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zig-local-cache-root" \
