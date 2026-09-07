@@ -202,6 +202,12 @@ pub const Container = struct {
         if (self.net_info != null or self.runtime.cgroup != null) return ContainerError.StartFailed;
 
         const config = self.config;
+        // Reject aliases of the host root before creating directories or spawning
+        // a mount namespace. A private mount namespace does not protect files.
+        if (!config.host_mode and !exec_runtime.isSafeRoot(config.rootfs)) return ContainerError.StartFailed;
+        for (config.lower_dirs) |lower| {
+            if (!exec_runtime.isSafeRoot(lower)) return ContainerError.StartFailed;
+        }
         if (!config.host_mode and !config.namespaces.mount) return ContainerError.StartFailed;
         errdefer if (config.lower_dirs.len > 0) cleanupContainerDirs(config.id);
         const overlay = start_support.prepareOverlayRuntime(config, containers_subdir) catch return ContainerError.StartFailed;
@@ -655,4 +661,19 @@ test "startup poll finalizes exited child before another start can replace handl
     defer survivor.close(std.testing.io);
     try instance.poll();
     try survivor.writeStreamingAll(std.testing.io, "repeated poll is harmless");
+}
+
+test "container start rejects host root and aliases before runtime setup" {
+    for ([_][]const u8{ "", "/", "//", "/tmp/.." }) |root| {
+        var c = Container{
+            .config = .{ .id = "invalid", .rootfs = root, .command = "/bin/true" },
+            .status = .created,
+            .pid = null,
+            .exit_code = null,
+            .created_at = 0,
+        };
+        try std.testing.expectError(ContainerError.StartFailed, c.start());
+        try std.testing.expect(c.pid == null);
+        try std.testing.expect(c.runtime.cgroup == null);
+    }
 }

@@ -94,7 +94,7 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
 
 fn mountFilesystem(ctx: *const ChildExecContext) ExitCode {
     const root = if (ctx.has_overlay) ctx.fs_config.merged_dir else ctx.rootfs;
-    if (root.len == 0) return .filesystem_error;
+    if (!isSafeRoot(root)) return .filesystem_error;
     // Do this before the first mount, not just when pivoting the finished root.
     if (linux.errno(linux.mount(null, "/", null, linux.MS.REC | linux.MS.PRIVATE, 0)) != .SUCCESS) return .filesystem_error;
     if (ctx.has_overlay) filesystem.mountOverlay(ctx.fs_config) catch return .filesystem_error;
@@ -266,4 +266,23 @@ test "startup mounted overlay and raw root retain generated network and device f
             try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "merged/etc/hosts", .{}));
         }
     }
+}
+
+pub fn isSafeRoot(root: []const u8) bool {
+    if (root.len == 0 or std.mem.indexOfScalar(u8, root, 0) != null) return false;
+    var canonical: [4096]u8 = undefined;
+    const length = std.Io.Dir.cwd().realPathFile(std.Options.debug_io, root, &canonical) catch return false;
+    return !std.mem.eql(u8, canonical[0..length], "/");
+}
+
+test "root validation accepts a disposable directory and rejects root symlinks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.symLink(std.testing.io, "/", "root", .{});
+    var path: [4096]u8 = undefined;
+    const length = try tmp.dir.realPathFile(std.testing.io, ".", &path);
+    try std.testing.expect(isSafeRoot(path[0..length]));
+    const link = try std.fmt.allocPrint(std.testing.allocator, "{s}/root", .{path[0..length]});
+    defer std.testing.allocator.free(link);
+    try std.testing.expect(!isSafeRoot(link));
 }
