@@ -134,6 +134,7 @@ const PreparedService = struct {
                 .args = self.resolved.args.items,
                 .env = self.merged_env.items,
                 .working_dir = self.working_dir,
+                .user = self.img.user,
                 .lower_dirs = self.img.layer_paths,
                 .network = self.net_config,
                 .hostname = hostname,

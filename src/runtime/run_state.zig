@@ -36,6 +36,7 @@ pub const SavedRunConfig = struct {
     command: []const u8,
     hostname: []const u8,
     working_dir: []const u8,
+    user: ?[]const u8 = null,
     args: [][]const u8,
     env: [][]const u8,
     lower_dirs: [][]const u8,
@@ -50,6 +51,7 @@ pub const SavedRunConfig = struct {
         alloc.free(self.command);
         alloc.free(self.hostname);
         alloc.free(self.working_dir);
+        if (self.user) |user| alloc.free(user);
         freeStringList(alloc, self.args);
         freeStringList(alloc, self.env);
         freeStringList(alloc, self.lower_dirs);
@@ -73,7 +75,7 @@ pub const RunStateError = error{
 };
 
 const configs_subdir = "run_configs";
-const format_version: u32 = 1;
+const format_version: u32 = 2;
 const max_serialized_string_bytes: u32 = 64 * 1024;
 const max_serialized_list_items: u32 = 1024;
 const max_serialized_mounts: u32 = 256;
@@ -117,6 +119,7 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     writePortMaps(out, cfg.port_maps) catch return RunStateError.WriteFailed;
     writeLimits(out, cfg.limits) catch return RunStateError.WriteFailed;
     out.writeByte(@intFromEnum(cfg.restart_policy)) catch return RunStateError.WriteFailed;
+    writeString(out, cfg.user orelse "") catch return RunStateError.WriteFailed;
     out.flush() catch return RunStateError.WriteFailed;
     file.sync(std.Options.debug_io) catch return RunStateError.WriteFailed;
     cwd().rename(tmp_path, cwd(), path, std.Options.debug_io) catch return RunStateError.WriteFailed;
@@ -140,7 +143,7 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     const input = &reader.interface;
 
     const version = readInt(input, u32) catch return RunStateError.ReadFailed;
-    if (version != format_version) return RunStateError.InvalidFormat;
+    if (version != 1 and version != format_version) return RunStateError.InvalidFormat;
 
     const rootfs = readString(alloc, input) catch |err| return mapReadError(err);
     errdefer alloc.free(rootfs);
@@ -172,7 +175,14 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     const restart_policy = std.enums.fromInt(RestartPolicy, restart_raw) orelse
         return RunStateError.InvalidFormat;
 
+    const user_text = if (version >= 2) readString(alloc, input) catch |err| return mapReadError(err) else null;
+    const user = if (user_text) |text| if (text.len > 0) text else blk: {
+        alloc.free(text);
+        break :blk null;
+    } else null;
+
     return .{
+        .user = user,
         .rootfs = rootfs,
         .command = command,
         .hostname = hostname,
@@ -407,6 +417,7 @@ test "save and load config round-trips" {
         .command = "/bin/sh",
         .hostname = "test",
         .working_dir = "/work",
+        .user = "app:staff",
         .args = args,
         .env = env,
         .lower_dirs = lower_dirs,
@@ -428,6 +439,7 @@ test "save and load config round-trips" {
     try std.testing.expectEqualStrings("/bin/sh", loaded.command);
     try std.testing.expectEqualStrings("test", loaded.hostname);
     try std.testing.expectEqualStrings("/work", loaded.working_dir);
+    try std.testing.expectEqualStrings("app:staff", loaded.user.?);
     try std.testing.expectEqual(@as(usize, 2), loaded.args.len);
     try std.testing.expectEqualStrings("sleep", loaded.args[0]);
     try std.testing.expectEqualStrings("FOO=bar", loaded.env[0]);

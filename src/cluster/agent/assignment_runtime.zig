@@ -394,6 +394,7 @@ fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignm
             .command = resolved.command.command,
             .args = resolved.command.args.items,
             .working_dir = resolved.working_dir,
+            .user = if (config_parsed.value.config) |config| if (config.User) |user| if (user.len > 0) user else null else null else null,
             .limits = limits,
             .network = .{ .node_id = self.node_id },
             .hostname = hostname,

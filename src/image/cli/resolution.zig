@@ -13,6 +13,7 @@ pub const ImageResolution = struct {
     default_cmd: []const []const u8 = &.{},
     image_env: []const []const u8 = &.{},
     working_dir: []const u8 = "/",
+    user: ?[]const u8 = null,
     layer_paths: []const []const u8 = &.{},
     pull_result: ?registry.PullResult = null,
     config_parsed: ?spec.ParseResult(spec.ImageConfig) = null,
@@ -46,6 +47,9 @@ pub fn pullAndResolveImage(io: std.Io, alloc: std.mem.Allocator, target: []const
     };
 
     if (result.config_parsed.?.value.config) |cc| {
+        if (cc.User) |user| {
+            if (user.len > 0) result.user = user;
+        }
         if (cc.Entrypoint) |ep| result.entrypoint = ep;
         if (cc.Cmd) |cmd| result.default_cmd = cmd;
         if (cc.Env) |env| result.image_env = env;
