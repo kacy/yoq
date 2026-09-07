@@ -161,10 +161,10 @@ test "training scale route replaces prior scheduled assignments" {
     try std.testing.expectEqual(@as(usize, 2), try countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
     const pause = try harness.trainingPause("demo-app", "finetune");
     defer freeResponse(alloc, pause);
-    const resume = route(makeRequest(.POST, "/apps/demo-app/training/finetune/resume", "", ""), alloc, harness.ctx()).?;
-    defer freeResponse(alloc, resume);
-    try std.testing.expectEqual(http.StatusCode.ok, resume.status);
-    try expectJsonContains(resume.body, "\"gpus\":2");
+    const resumed = route(makeRequest(.POST, "/apps/demo-app/training/finetune/resume", "", ""), alloc, harness.ctx()).?;
+    defer freeResponse(alloc, resumed);
+    try std.testing.expectEqual(http.StatusCode.ok, resumed.status);
+    try expectJsonContains(resumed.body, "\"gpus\":2");
     try std.testing.expectEqual(@as(usize, 2), try countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
 }
 

@@ -88,7 +88,7 @@ fn schedule(
     const node = session.node;
     const latest = readLatestRelease(alloc, session, app_name) catch |err| return switch (err) {
         error.NotFound => common.notFound(),
-        else => deploy_routes.mutationFailure(alloc, node, err),
+        else => deploy_routes.mutationFailure(alloc, node, mutation.mapError(err)),
     };
     defer latest.deinit(alloc);
 
