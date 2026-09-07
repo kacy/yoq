@@ -14,9 +14,7 @@ pub fn authenticate(
         return error.OutOfMemory;
 
     const uri = std.Uri.parse(ping_url) catch return error.AuthFailed;
-    const conn = http_helpers.connectWithTimeout(client, uri) catch return error.NetworkError;
-    var req = client.request(.GET, uri, .{
-        .connection = conn,
+    var req = http_helpers.requestWithTimeout(client, .GET, uri, .{
         .redirect_behavior = .not_allowed,
         .keep_alive = false,
     }) catch return error.NetworkError;

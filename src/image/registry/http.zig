@@ -3,21 +3,17 @@ const common = @import("common.zig");
 
 const posix = std.posix;
 
-pub fn connectWithTimeout(
+/// Let the HTTP client initialize its clock and system trust bundle before TLS.
+/// Socket timeouts apply to subsequent request/response I/O, as before.
+pub fn requestWithTimeout(
     client: *std.http.Client,
+    method: std.http.Method,
     uri: std.Uri,
-) !*std.http.Client.Connection {
-    const protocol = std.http.Client.Protocol.fromUri(uri) orelse
-        return error.UnsupportedUriScheme;
-    var host_buf: [255]u8 = undefined;
-    const host_name = uri.getHost(&host_buf) catch return error.NetworkError;
-    const default_port: u16 = if (protocol == .tls) 443 else 80;
-    const port = uri.port orelse default_port;
-
-    const conn = client.connectTcp(host_name, port, protocol) catch
-        return error.NetworkError;
-    setSocketTimeouts(conn);
-    return conn;
+    options: std.http.Client.RequestOptions,
+) !std.http.Client.Request {
+    const request = try client.request(method, uri, options);
+    setSocketTimeouts(request.connection.?);
+    return request;
 }
 
 pub fn parseLocationHeader(host: []const u8, head: std.http.Client.Response.Head) ?[]const u8 {

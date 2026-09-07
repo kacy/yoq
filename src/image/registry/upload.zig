@@ -28,7 +28,7 @@ pub fn checkBlobExists(
     const auth_value = common.authHeaderValue(token, &auth_buf);
 
     const uri = std.Uri.parse(url) catch return common.RegistryError.NetworkError;
-    var req = client.request(.HEAD, uri, .{
+    var req = http_helpers.requestWithTimeout(client, .HEAD, uri, .{
         .redirect_behavior = @enumFromInt(3),
         .keep_alive = false,
         .headers = .{
@@ -66,13 +66,11 @@ pub fn uploadBlob(
         return common.RegistryError.UploadFailed;
 
     const put_uri = std.Uri.parse(put_url) catch return common.RegistryError.UploadFailed;
-    const put_conn = http_helpers.connectWithTimeout(client, put_uri) catch return common.RegistryError.UploadFailed;
 
     var auth_buf: [8192]u8 = undefined;
     const auth_value = common.authHeaderValue(token, &auth_buf);
 
-    var req = client.request(.PUT, put_uri, .{
-        .connection = put_conn,
+    var req = http_helpers.requestWithTimeout(client, .PUT, put_uri, .{
         .redirect_behavior = .not_allowed,
         .keep_alive = false,
         .headers = .{
@@ -103,13 +101,11 @@ pub fn uploadBlobFile(
         return common.RegistryError.UploadFailed;
 
     const put_uri = std.Uri.parse(put_url) catch return common.RegistryError.UploadFailed;
-    const put_conn = http_helpers.connectWithTimeout(client, put_uri) catch return common.RegistryError.UploadFailed;
 
     var auth_buf: [8192]u8 = undefined;
     const auth_value = common.authHeaderValue(token, &auth_buf);
 
-    var req = client.request(.PUT, put_uri, .{
-        .connection = put_conn,
+    var req = http_helpers.requestWithTimeout(client, .PUT, put_uri, .{
         .redirect_behavior = .not_allowed,
         .keep_alive = false,
         .headers = .{
@@ -210,9 +206,7 @@ fn initiateUpload(
     const auth_value = common.authHeaderValue(token, &auth_buf);
 
     const init_uri = std.Uri.parse(init_url) catch return common.RegistryError.UploadInitFailed;
-    const upload_conn = http_helpers.connectWithTimeout(client, init_uri) catch return common.RegistryError.UploadInitFailed;
-    var init_req = client.request(.POST, init_uri, .{
-        .connection = upload_conn,
+    var init_req = http_helpers.requestWithTimeout(client, .POST, init_uri, .{
         .redirect_behavior = @enumFromInt(3),
         .keep_alive = false,
         .headers = .{
