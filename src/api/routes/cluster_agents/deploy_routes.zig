@@ -489,8 +489,8 @@ test "cluster release completion rolls back when cron registration fails" {
 pub fn mutationFailure(alloc: std.mem.Allocator, node: *@import("../../../cluster/node.zig").Node, err: mutation_session.Error) Response {
     return switch (err) {
         error.NotLeader => common.notLeader(alloc, node),
-        error.CommitUnknown => .{ .status = .service_unavailable, .body = "{\"error\":\"rollout outcome unknown; inspect release state before retrying\"}", .allocated = false },
-        error.Conflict => common.conflict("rollout conflicts with cluster state"),
+        error.CommitUnknown => .{ .status = .service_unavailable, .body = "{\"error\":\"cluster mutation outcome unknown; inspect current state before retrying\"}", .allocated = false },
+        error.Conflict => common.conflict("mutation conflicts with cluster state"),
         error.InternalError => common.internalError(),
     };
 }

@@ -159,6 +159,13 @@ test "training scale route replaces prior scheduled assignments" {
     try expectJsonContains(scale_resp.body, "\"state\":\"running\"");
     try expectJsonContains(scale_resp.body, "\"gpus\":2");
     try std.testing.expectEqual(@as(usize, 2), try countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
+    const pause = try harness.trainingPause("demo-app", "finetune");
+    defer freeResponse(alloc, pause);
+    const resume = route(makeRequest(.POST, "/apps/demo-app/training/finetune/resume", "", ""), alloc, harness.ctx()).?;
+    defer freeResponse(alloc, resume);
+    try std.testing.expectEqual(http.StatusCode.ok, resume.status);
+    try expectJsonContains(resume.body, "\"gpus\":2");
+    try std.testing.expectEqual(@as(usize, 2), try countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
 }
 
 test "training logs route reports remote-hosted ranks explicitly" {
@@ -268,4 +275,92 @@ test "placement numbers reject invalid training scale then accept valid scale" {
     defer freeResponse(alloc, scaled);
     try std.testing.expectEqual(http.StatusCode.ok, scaled.status);
     try expectJsonContains(scaled.body, "\"gpus\":2");
+}
+
+fn replayTrainingCommands(leader: *RouteFlowHarness, replica: *RouteFlowHarness) !void {
+    const entries = try leader.node.log.getEntries(leader.alloc, replica.node.log.lastIndex() + 1, leader.node.raft.commit_index);
+    defer {
+        for (entries) |entry| leader.alloc.free(entry.data);
+        leader.alloc.free(entries);
+    }
+    for (entries) |entry| try replica.node.log.append(entry);
+    replica.node.state_machine.applyUpTo(&replica.node.log, replica.alloc, leader.node.raft.commit_index);
+    replica.node.raft.commit_index = leader.node.raft.commit_index;
+}
+
+test "training state and assignments survive replica promotion and pause together" {
+    const alloc = std.testing.allocator;
+    var leader = try RouteFlowHarness.initWithRuntimeStore(alloc);
+    defer leader.deinit();
+    var replica = try RouteFlowHarness.init(alloc);
+    defer replica.deinit();
+    try leader.seedTrainingRelease("replicated-training", "finetune", 2);
+    const start = try leader.trainingStart("replicated-training", "finetune");
+    defer freeResponse(alloc, start);
+    try std.testing.expectEqual(http.StatusCode.ok, start.status);
+    try replayTrainingCommands(&leader, &replica);
+    const original = (try store.findTrainingJobInDb(leader.node.stateMachineDb(), alloc, "replicated-training", "finetune")).?;
+    defer original.deinit(alloc);
+    const copied = (try store.findTrainingJobInDb(replica.node.stateMachineDb(), alloc, "replicated-training", "finetune")).?;
+    defer copied.deinit(alloc);
+    try std.testing.expectEqualStrings(original.id, copied.id);
+    try std.testing.expectEqualStrings("running", copied.state);
+    try std.testing.expectEqual(@as(i64, 2), copied.gpus);
+    try std.testing.expectEqual(@as(usize, 2), try countTrainingAssignments(replica.node.stateMachineDb(), "replicated-training", "finetune"));
+
+    leader.node.raft.role = .follower;
+    replica.node.raft.persistent_state.current_term = 1;
+    try std.testing.expect(replica.node.log.setCurrentTerm(1));
+    const pause = try replica.trainingPause("replicated-training", "finetune");
+    defer freeResponse(alloc, pause);
+    try std.testing.expectEqual(http.StatusCode.ok, pause.status);
+    try replayTrainingCommands(&replica, &leader);
+    const paused = (try store.findTrainingJobInDb(leader.node.stateMachineDb(), alloc, "replicated-training", "finetune")).?;
+    defer paused.deinit(alloc);
+    try std.testing.expectEqualStrings("paused", paused.state);
+    try std.testing.expectEqual(@as(usize, 0), try countTrainingAssignments(leader.node.stateMachineDb(), "replicated-training", "finetune"));
+}
+
+test "rejected training pause preserves assignments and running metadata atomically" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
+    defer harness.deinit();
+    try harness.seedTrainingRelease("pause-conflict", "finetune", 1);
+    const start = try harness.trainingStart("pause-conflict", "finetune");
+    defer freeResponse(alloc, start);
+    try std.testing.expectEqual(http.StatusCode.ok, start.status);
+    try harness.node.stateMachineDb().exec("CREATE TRIGGER reject_training_pause BEFORE UPDATE ON training_jobs WHEN NEW.state = 'paused' BEGIN SELECT RAISE(ABORT, 'injected conflict'); END;", .{}, .{});
+    const pause = try harness.trainingPause("pause-conflict", "finetune");
+    defer freeResponse(alloc, pause);
+    try std.testing.expectEqual(http.StatusCode.conflict, pause.status);
+    const unchanged = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "pause-conflict", "finetune")).?;
+    defer unchanged.deinit(alloc);
+    try std.testing.expectEqualStrings("running", unchanged.state);
+    try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(harness.node.stateMachineDb(), "pause-conflict", "finetune"));
+    const claims = (try harness.node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignment_claims;", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 1), claims.count);
+}
+
+test "training mutations reject follower and concurrent app apply before changing state" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
+    defer harness.deinit();
+    try harness.seedTrainingRelease("locked-training", "finetune", 1);
+    const start = try harness.trainingStart("locked-training", "finetune");
+    defer freeResponse(alloc, start);
+    try std.testing.expectEqual(http.StatusCode.ok, start.status);
+    const index = harness.node.log.lastIndex();
+    {
+        var app_lock = try @import("../../../manifest/apply_lock.zig").acquire(alloc, "locked-training");
+        defer app_lock.release();
+        const pause = try harness.trainingPause("locked-training", "finetune");
+        defer freeResponse(alloc, pause);
+        try std.testing.expectEqual(http.StatusCode.conflict, pause.status);
+    }
+    harness.node.raft.role = .follower;
+    const pause = try harness.trainingPause("locked-training", "finetune");
+    defer freeResponse(alloc, pause);
+    try std.testing.expectEqual(http.StatusCode.bad_request, pause.status);
+    try std.testing.expectEqual(index, harness.node.log.lastIndex());
+    try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(harness.node.stateMachineDb(), "locked-training", "finetune"));
 }
