@@ -99,6 +99,13 @@ fn readProcFile(path: []const u8) ![]u8 {
     return reader.interface.allocRemaining(std.testing.allocator, .limited(64 * 1024));
 }
 
+test "runtime preflight reads zero-size proc files" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const filesystems = try readProcFile("/proc/filesystems");
+    defer std.testing.allocator.free(filesystems);
+    try std.testing.expect(std.mem.indexOf(u8, filesystems, "proc") != null);
+}
+
 pub fn requirePortsAvailable(base: u16, count: usize) !void {
     var offset: usize = 0;
     while (offset < count) : (offset += 1) {
