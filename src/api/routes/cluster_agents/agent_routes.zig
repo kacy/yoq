@@ -442,6 +442,9 @@ test "registration returns credentials only after their row is applied" {
     const response = handleAgentRegisterImpl(alloc, .{
         .method = .POST,
         .path = "/agents/register",
+        .path_only = "/agents/register",
+        .query = "",
+        .content_length = body.len,
         .body = body,
         .headers_raw = "",
     }, .{ .cluster = &node, .join_token = "join-secret" });
