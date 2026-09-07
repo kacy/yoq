@@ -444,12 +444,12 @@ pub const TlsProxy = struct {
             linux_platform.posix.close(client_fd);
         }
 
-        // read ClientHello (up to 16KB — typical ClientHello is ~300 bytes)
-        var client_hello_buf: [16384]u8 = undefined;
-        const bytes_read = socket_support.readWithTimeout(client_fd, &client_hello_buf, 5000) catch return;
-        if (bytes_read == 0) return;
-
-        const client_hello = client_hello_buf[0..bytes_read];
+        // Read exactly one bounded record so fragmentation is transparent and
+        // a following compatibility CCS remains available to the handshake.
+        const record_transport = @import("record_transport.zig");
+        const transport = @import("../lib/socket_stream.zig");
+        var client_hello_buf: record_transport.Buffer = undefined;
+        const client_hello = record_transport.read(.{ .fd = client_fd, .deadline = transport.Deadline.afterMilliseconds(5000) }, &client_hello_buf) catch return;
 
         // extract SNI to determine which certificate to use
         const server_name = sni.extractSni(client_hello) catch {

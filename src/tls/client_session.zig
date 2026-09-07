@@ -22,6 +22,7 @@ const posix = std.posix;
 
 const record = @import("record.zig");
 const transport = @import("client_transport.zig");
+const record_transport = @import("record_transport.zig");
 const handshake = @import("handshake.zig");
 const message_build = @import("handshake/message_build.zig");
 const message_parse = @import("handshake/message_parse.zig");
@@ -108,13 +109,8 @@ pub const ClientSession = struct {
     pub fn write(self: *ClientSession, data: []const u8) ClientError!usize {
         if (self.failed) return error.SessionFailed;
         errdefer self.failed = true;
-        var sent: usize = 0;
-        while (sent < data.len) {
-            const chunk_len = @min(data.len - sent, record.max_record_size - 1);
-            try writeOneRecord(self, .application_data, data[sent .. sent + chunk_len]);
-            sent += chunk_len;
-        }
-        return sent;
+        try writeOneRecord(self, .application_data, data);
+        return data.len;
     }
 
     /// fill `buf` with up to `buf.len` bytes of decrypted application data.
@@ -221,10 +217,6 @@ fn doHandshakeInner(
     var server_seq: u64 = 0;
     var client_seq: u64 = 0;
 
-    // optional: peer may send a fake ChangeCipherSpec record before the
-    // first encrypted handshake. consume it silently if present.
-    try maybeConsumeChangeCipherSpec(alloc, wire);
-
     // 4) read encrypted handshake records until we see the server's Finished.
     var server_cert_pem: ?[]u8 = null;
     defer if (server_cert_pem) |p| alloc.free(p);
@@ -298,6 +290,10 @@ fn doHandshakeInner(
         }
     }
 
+    // RFC 8446 section 7.1 ends application-key derivation at server Finished,
+    // before client authentication or client Finished enter the transcript.
+    const app_transcript = transcript.peek();
+
     // 5) verify server certificate + signature
     const cert_pem = server_cert_pem orelse return ClientError.UntrustedServerCert;
     x509_verify.verifyLeafAgainstCa(alloc, cert_pem, opts.ca_cert_pem, opts.expected_server_identity, opts.now_unix) catch |err| return mapVerifyError(err);
@@ -320,8 +316,6 @@ fn doHandshakeInner(
     transcript.update(fin_buf[0..fin_len]);
 
     // 8) derive application keys
-    var app_transcript: [hash_len]u8 = undefined;
-    transcript.final(&app_transcript);
     const master = handshake.deriveMasterSecret(hs_secret);
     const app = handshake.deriveApplicationSecrets(master, app_transcript);
 
@@ -345,40 +339,25 @@ fn sendPlaintextHandshake(fd: anytype, msg: []const u8) ClientError!void {
 }
 
 fn sendEncryptedHandshakeOne(fd: anytype, msg: []const u8, keys: handshake.TrafficKeys, seq: *u64) ClientError!void {
-    var ct_buf: [record.max_ciphertext_size]u8 = undefined;
-    const ct_len = record.encryptRecord(keys.key, keys.iv, seq.*, msg, .handshake, &ct_buf) catch return ClientError.EncryptFailed;
-    var out: [5 + record.max_ciphertext_size]u8 = undefined;
-    record.writeHeader(&out, .application_data, @intCast(ct_len)) catch return ClientError.EncryptFailed;
-    @memcpy(out[5 .. 5 + ct_len], ct_buf[0..ct_len]);
-    try transport.stream(fd).writeAll(out[0 .. 5 + ct_len]);
-    seq.* += 1;
+    record_transport.write(transport.stream(fd), keys, seq, .handshake, msg) catch |err| return mapRecordError(err);
 }
 
-/// read exactly N bytes from fd into buf, looping until satisfied or the
-/// peer closes. EOF before N bytes is an error.
-fn readExactly(fd: anytype, buf: []u8) ClientError!void {
-    var off: usize = 0;
-    while (off < buf.len) {
-        const n = try transport.stream(fd).read(buf[off..]);
-        if (n == 0) return ClientError.UnexpectedEof;
-        off += n;
-    }
-}
-
-/// read a complete TLS record off the wire — 5-byte header plus the
-/// promised payload. returns the full record (header + payload) so
-/// callers can use the header bytes as AEAD additional data.
+/// Copy a bounded record for callers that retain it after their next read.
 fn readWireRecord(alloc: std.mem.Allocator, fd: anytype) ClientError![]u8 {
-    var hdr: [5]u8 = undefined;
-    try readExactly(fd, &hdr);
-    const payload_len = (@as(usize, hdr[3]) << 8) | @as(usize, hdr[4]);
-    if (payload_len > record.max_ciphertext_size) return ClientError.HandshakeFailed;
+    var buffer: record_transport.Buffer = undefined;
+    const full = record_transport.read(transport.stream(fd), &buffer) catch |err| return mapRecordError(err);
+    return alloc.dupe(u8, full) catch ClientError.AllocFailed;
+}
 
-    const full = alloc.alloc(u8, 5 + payload_len) catch return ClientError.AllocFailed;
-    errdefer alloc.free(full);
-    @memcpy(full[0..5], &hdr);
-    try readExactly(fd, full[5..]);
-    return full;
+fn mapRecordError(err: anyerror) ClientError {
+    return switch (err) {
+        error.TimedOut => error.TimedOut,
+        error.ReadFailed => error.ReadFailed,
+        error.WriteFailed => error.WriteFailed,
+        error.UnexpectedEof => error.UnexpectedEof,
+        error.DecryptionFailed => error.DecryptFailed,
+        else => error.HandshakeFailed,
+    };
 }
 
 /// read a plaintext handshake record (used for ServerHello) and return
@@ -392,31 +371,6 @@ fn readPlaintextHandshakeRecord(alloc: std.mem.Allocator, fd: anytype) ClientErr
     return alloc.dupe(u8, payload) catch ClientError.AllocFailed;
 }
 
-/// after ServerHello a server may send a fake ChangeCipherSpec record
-/// (TLS 1.3 middlebox compat). consume it if present, leave the wire
-/// untouched otherwise. detection is by peeking the next byte type.
-fn maybeConsumeChangeCipherSpec(alloc: std.mem.Allocator, fd: anytype) ClientError!void {
-    var hdr: [5]u8 = undefined;
-    try readExactly(fd, &hdr);
-    const ct: record.ContentType = @enumFromInt(hdr[0]);
-    const payload_len = (@as(usize, hdr[3]) << 8) | @as(usize, hdr[4]);
-
-    if (ct == .change_cipher_spec) {
-        const drain = alloc.alloc(u8, payload_len) catch return ClientError.AllocFailed;
-        defer alloc.free(drain);
-        try readExactly(fd, drain);
-        return;
-    }
-
-    // not a CCS — push the header back via a stash. simplest: extend the
-    // wire-read path so the next caller knows to use these bytes first.
-    // implemented by storing on a global-ish channel? cleaner: track via
-    // a tiny "peek buffer". keep this single-purpose: in this codebase
-    // CCS always arrives in TLS 1.3, so the else branch is dead in
-    // practice. log so a future regression doesn't go silent.
-    return ClientError.HandshakeFailed;
-}
-
 /// read one encrypted record, decrypt with the supplied handshake keys.
 /// returned plaintext is heap-allocated and owned by the caller.
 fn readEncryptedRecord(
@@ -425,41 +379,25 @@ fn readEncryptedRecord(
     keys: handshake.TrafficKeys,
     seq: *u64,
 ) ClientError!struct { plaintext: []u8, content_type: record.ContentType } {
-    const full = try readWireRecord(alloc, fd);
-    defer alloc.free(full);
-    var hdr: [5]u8 = undefined;
-    @memcpy(&hdr, full[0..5]);
-    const payload = full[5..];
-    const owned = alloc.dupe(u8, payload) catch return ClientError.AllocFailed;
-    defer alloc.free(owned);
-    const dec = record.decryptRecord(keys.key, keys.iv, seq.*, owned, hdr) catch return ClientError.DecryptFailed;
-    seq.* += 1;
-    const out_plain = alloc.dupe(u8, dec.plaintext) catch return ClientError.AllocFailed;
-    return .{ .plaintext = out_plain, .content_type = dec.content_type };
+    var buffer: record_transport.Buffer = undefined;
+    const dec = record_transport.readEncrypted(transport.stream(fd), &buffer, keys, seq, true) catch |err| return mapRecordError(err);
+    return .{
+        .plaintext = alloc.dupe(u8, dec.plaintext) catch return ClientError.AllocFailed,
+        .content_type = dec.content_type,
+    };
 }
 
 fn writeOneRecord(self: *ClientSession, ct: record.ContentType, data: []const u8) ClientError!void {
-    var ct_buf: [record.max_ciphertext_size]u8 = undefined;
-    const ct_len = record.encryptRecord(self.client_app.key, self.client_app.iv, self.client_seq, data, ct, &ct_buf) catch return ClientError.EncryptFailed;
-    var out: [5 + record.max_ciphertext_size]u8 = undefined;
-    record.writeHeader(&out, .application_data, @intCast(ct_len)) catch return ClientError.EncryptFailed;
-    @memcpy(out[5 .. 5 + ct_len], ct_buf[0..ct_len]);
-    try (transport.Stream{ .fd = self.fd, .deadline = self.deadline }).writeAll(out[0 .. 5 + ct_len]);
-    self.client_seq += 1;
+    record_transport.write(.{ .fd = self.fd, .deadline = self.deadline }, self.client_app, &self.client_seq, ct, data) catch |err| return mapRecordError(err);
 }
 
 fn readOneRecordAlloc(self: *ClientSession) ClientError!struct { plaintext: []u8, content_type: record.ContentType } {
-    const full = try readWireRecord(self.alloc, transport.Stream{ .fd = self.fd, .deadline = self.deadline });
-    defer self.alloc.free(full);
-    var hdr: [5]u8 = undefined;
-    @memcpy(&hdr, full[0..5]);
-    const payload = full[5..];
-    const owned = self.alloc.dupe(u8, payload) catch return ClientError.AllocFailed;
-    defer self.alloc.free(owned);
-    const dec = record.decryptRecord(self.server_app.key, self.server_app.iv, self.server_seq, owned, hdr) catch return ClientError.DecryptFailed;
-    self.server_seq += 1;
-    const out_plain = self.alloc.dupe(u8, dec.plaintext) catch return ClientError.AllocFailed;
-    return .{ .plaintext = out_plain, .content_type = dec.content_type };
+    var buffer: record_transport.Buffer = undefined;
+    const dec = record_transport.readEncrypted(.{ .fd = self.fd, .deadline = self.deadline }, &buffer, self.server_app, &self.server_seq, false) catch |err| return mapRecordError(err);
+    return .{
+        .plaintext = self.alloc.dupe(u8, dec.plaintext) catch return ClientError.AllocFailed,
+        .content_type = dec.content_type,
+    };
 }
 
 /// verify the server's CertificateVerify by recomputing the signed prefix
@@ -726,6 +664,7 @@ fn serverHandshakeImpl(fd: posix.fd_t, opts: ServerOpts, result: *ServerResult, 
     var fin_buf: [128]u8 = undefined;
     const fin_len = try message_build.buildFinished(&fin_buf, verify_data);
     transcript.update(fin_buf[0..fin_len]);
+    const app_transcript = transcript.peek();
     try sendEncryptedHandshakeOne(fd, fin_buf[0..fin_len], server_hs, &server_seq);
 
     // read client Finished
@@ -744,8 +683,6 @@ fn serverHandshakeImpl(fd: posix.fd_t, opts: ServerOpts, result: *ServerResult, 
     transcript.update(c_dec.plaintext);
 
     // derive application keys; read one app-data record from the client.
-    var app_transcript: [hash_len]u8 = undefined;
-    transcript.final(&app_transcript);
     const master = handshake.deriveMasterSecret(hs_secret);
     const app = handshake.deriveApplicationSecrets(master, app_transcript);
 
@@ -911,7 +848,7 @@ test "TLS deadline on a partially written record preserves sequence and poisons 
         .deadline = transport.Deadline.afterMilliseconds(30),
     };
     defer session.deinit();
-    const data = [_]u8{42} ** (record.max_record_size - 1);
+    const data = [_]u8{42} ** (record.max_record_size);
     try std.testing.expectError(error.TimedOut, session.write(&data));
     try std.testing.expectEqual(@as(u64, 0), session.client_seq);
     try std.testing.expect(session.failed);

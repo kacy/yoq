@@ -103,7 +103,7 @@ pub fn encryptRecord(
     const total_len = inner_len + aead_tag_size;
 
     if (out.len < total_len) return RecordError.BufferTooShort;
-    if (inner_len > max_record_size) return RecordError.RecordTooLarge;
+    if (plaintext.len > max_record_size) return RecordError.RecordTooLarge;
 
     // build inner plaintext: data + content_type byte
     @memcpy(out[0..plaintext.len], plaintext);
@@ -304,4 +304,17 @@ test "encrypt preserves content type" {
     const result = try decryptRecord(key, iv, 5, out[0..ct_len], header);
     try std.testing.expectEqual(ContentType.handshake, result.content_type);
     try std.testing.expectEqualStrings(plaintext, result.plaintext);
+}
+
+test "full size application record includes inner content type overhead" {
+    const key = [_]u8{0} ** aead_key_size;
+    const iv = [_]u8{0} ** aead_nonce_size;
+    const plaintext = [_]u8{'x'} ** max_record_size;
+    var ciphertext: [max_ciphertext_size]u8 = undefined;
+    const n = try encryptRecord(key, iv, 0, &plaintext, .application_data, &ciphertext);
+    var header: [5]u8 = undefined;
+    try writeHeader(&header, .application_data, @intCast(n));
+    const decrypted = try decryptRecord(key, iv, 0, ciphertext[0..n], header);
+    try std.testing.expectEqualSlices(u8, &plaintext, decrypted.plaintext);
+    try std.testing.expectError(error.RecordTooLarge, encryptRecord(key, iv, 1, &([_]u8{'x'} ** (max_record_size + 1)), .application_data, &ciphertext));
 }
