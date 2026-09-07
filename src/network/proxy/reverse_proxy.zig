@@ -702,11 +702,9 @@ fn runMirrorTask(stopping: *const std.atomic.Value(bool), input: MirrorTask) voi
     };
     defer task.allocator.free(request);
 
-    var proxy = ReverseProxy.init(task.allocator, &.{});
-    proxy.peer_key = task.peer_key;
-    proxy.max_response_bytes = task.max_response_bytes;
-    defer proxy.deinit();
-    const response = proxy.upstreamClient().forward(request, .{ .connect_timeout_ms = task.connect_timeout_ms, .request_timeout_ms = task.request_timeout_ms, .head = task.method == .HEAD, .protocol = task.protocol }, &upstream);
+    var client = upstream_exchange.Client{ .allocator = task.allocator, .peer_key = task.peer_key, .max_response_bytes = task.max_response_bytes };
+    defer if (client.peer_key) |*key| std.crypto.secureZero(u8, key);
+    const response = client.forward(request, .{ .connect_timeout_ms = task.connect_timeout_ms, .request_timeout_ms = task.request_timeout_ms, .head = task.method == .HEAD, .protocol = task.protocol }, &upstream);
     const bytes = response catch {
         proxy_runtime.recordMirrorRouteUpstreamFailure(task.route_name, task.route_service, task.mirror_service);
         return;
@@ -4664,6 +4662,8 @@ test "listener lifecycle exchange deadline is reported as a receive timeout" {
 }
 
 test "proxy transport policy propagates response allocation failure instead of retrying" {
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
     var failed = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
     const alloc = failed.allocator();
     var proxy = ReverseProxy.init(alloc, &.{});
