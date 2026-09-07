@@ -452,8 +452,7 @@ test "registration returns credentials only after their row is applied" {
     try std.testing.expectEqual(http.StatusCode.ok, response.status);
     const id = extractJsonString(response.body, "id") orelse return error.MissingIdentity;
     const secret = extractJsonString(response.body, "credential") orelse return error.MissingCredential;
-    const Row = struct { count: i64 };
-    const stored = (try node.state_machine.db.one(Row, "SELECT COUNT(*) AS count FROM agents WHERE id = ? AND credential_hash = ? AND node_id = 1;", .{}, .{ id, credentials.hash(secret) })).?;
-    try std.testing.expectEqual(@as(i64, 1), stored.count);
+    try std.testing.expect(try credentials.authenticates(&node.state_machine.db, secret, id));
+    try std.testing.expectEqual(@as(?i64, 1), extractJsonInt(response.body, "node_id"));
     try std.testing.expectEqual(node.raft.commit_index, node.state_machine.last_applied);
 }
