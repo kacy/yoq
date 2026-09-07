@@ -289,7 +289,7 @@ fn runAssignment(stopping: *const std.atomic.Value(bool), self: anytype, assignm
         return;
     };
     defer pull_result.deinit();
-    const config_parsed = image_spec.parseImageConfig(self.alloc, pull_result.config_bytes) catch {
+    var config_parsed = image_spec.parseImageConfig(self.alloc, pull_result.config_bytes) catch {
         setContainerState(self, assignment_id, .failed);
         reportStatus(self, assignment_id, "failed", "invalid_image_config");
         return;
