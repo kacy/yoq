@@ -145,6 +145,7 @@ pub const Node = struct {
             break :blk Log.init(log_path) catch return NodeError.InitFailed;
         };
         errdefer log.deinit();
+        try @import("static_membership.zig").check(alloc, &log.db, config.id, config.peers);
 
         // open state machine database
         var sm = if (skip_transport_bind)
@@ -1649,4 +1650,8 @@ test "committed mutation waits for quorum and fences leadership loss" {
     node.mu.lockUncancelable(std.Options.debug_io);
     action_loop.processActions(&node);
     node.mu.unlock(std.Options.debug_io);
+}
+
+test {
+    _ = @import("static_membership.zig");
 }

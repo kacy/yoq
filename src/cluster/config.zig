@@ -55,6 +55,7 @@ pub fn parsePeers(alloc: std.mem.Allocator, peers_str: []const u8) ![]PeerConfig
     if (peers_str.len == 0) return &.{};
 
     var peers: std.ArrayList(PeerConfig) = .empty;
+    errdefer peers.deinit(alloc);
 
     var iter = std.mem.splitScalar(u8, peers_str, ',');
     while (iter.next()) |peer_str| {
