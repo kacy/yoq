@@ -160,8 +160,7 @@ def inside(root, outer_mount, outer_net):
         spawn("server", ["init-server", "--id", "1", "--port", "19700", "--api-port", "17700",
                          "--peers", "", "--token", enrollment, "--api-token", token])
         wait_for("server API", lambda: api("/agents") == [])
-        # Let the single voter elect itself before enrollment.
-        time.sleep(2)
+        wait_for("single-voter leader", lambda: api("/cluster/status").get("role") == "leader")
         spawn("agent", ["join", "127.0.0.1", "--port", "17700", "--agent-port", "17701",
                         "--token", enrollment, "--role", "agent"])
         agents = wait_for("registered agent", lambda: api("/agents"))
