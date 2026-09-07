@@ -52,6 +52,7 @@ jobs:
             "test-runtime-$RUNTIME_LANE" 2>&1 | tee "$RUNNER_TEMP/runtime-kernel.log"
           if [ "$RUNTIME_LANE" = core ]; then
             bash tools/namespace_stack_smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+            bash tools/standard_devices_smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
           fi
           if [ "$RUNTIME_LANE" = network ]; then
             bash scripts/bpf-load-balancer-smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"

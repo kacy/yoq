@@ -137,6 +137,14 @@ jobs:
           set -e
           exit "$status"
 
+      - name: verify namespace and standard device contracts
+        if: matrix.lane == 'core'
+        shell: bash
+        run: |
+          set -o pipefail
+          bash tools/namespace_stack_smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/namespace-stack.log"
+          bash tools/standard_devices_smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/standard-devices.log"
+
       - name: verify scheduled runtime end to end
         if: matrix.lane == 'network'
         shell: bash
