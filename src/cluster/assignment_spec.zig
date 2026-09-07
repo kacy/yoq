@@ -144,7 +144,7 @@ test "assignment execution runs preserved argv and image environment in a real p
     defer alloc.free(encoded);
     var decoded = try decode(alloc, encoded);
     defer decoded.deinit();
-    var resolved = try resolve(alloc, decoded.value, .{ .Entrypoint = &.{"/bin/sh"}, .Env = &.{"MODE=image"} }, &.{});
+    var resolved = try resolve(alloc, decoded.value, .{ .Entrypoint = &.{"sh"}, .Env = &.{ "MODE=image", "PATH=/bin" } }, &.{});
     defer resolved.deinit(alloc);
     const linux = std.os.linux;
     const pid = linux.fork();

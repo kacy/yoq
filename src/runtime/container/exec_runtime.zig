@@ -143,23 +143,34 @@ pub fn execCommand(command: []const u8, args: []const []const u8, env: []const [
 
     var argv_idx: usize = 1;
     for (args) |arg| {
-        if (argv_idx >= argv.len - 1) break;
+        if (argv_idx >= argv.len - 1) return 126;
         argv[argv_idx] = exec_helpers.packString(&str_buf, &str_pos, arg) orelse return 127;
         argv_idx += 1;
     }
 
     var envp: [max_entries]?[*:0]const u8 = .{null} ** max_entries;
     for (env, 0..) |e, i| {
-        if (i >= envp.len - 1) break;
+        if (i >= envp.len - 1) return 126;
         envp[i] = exec_helpers.packString(&str_buf, &str_pos, e) orelse return 127;
     }
 
-    _ = linux.syscall3(
-        .execve,
-        @intFromPtr(argv[0].?),
-        @intFromPtr(&argv),
-        @intFromPtr(&envp),
-    );
+    if (std.mem.indexOfScalar(u8, command, '/') != null) {
+        _ = linux.execve(argv[0].?, @ptrCast(&argv), @ptrCast(&envp));
+        return 127;
+    }
+    var path: []const u8 = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    for (env) |entry| {
+        if (std.mem.startsWith(u8, entry, "PATH=")) {
+            path = entry[5..];
+            break;
+        }
+    }
+    var dirs = std.mem.splitScalar(u8, path, ':');
+    var executable: [4096]u8 = undefined;
+    while (dirs.next()) |dir| {
+        const candidate = std.fmt.bufPrintZ(&executable, "{s}/{s}", .{ if (dir.len > 0) dir else ".", command }) catch continue;
+        _ = linux.execve(candidate, @ptrCast(&argv), @ptrCast(&envp));
+    }
     return 127;
 }
 
