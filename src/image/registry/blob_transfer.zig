@@ -128,15 +128,14 @@ fn fetchBlobFromUrl(
     };
 
     if (common.isRedirectStatus(response.head.status)) {
-        const location = http_helpers.parseLocationHeader(host, response.head) orelse {
-            log.warn("blob fetch: redirect missing location for {s}", .{url_summary});
+        var location_buf: [8192]u8 = undefined;
+        const location = http_helpers.parseLocationHeader(host, response.head, &location_buf) orelse {
+            log.warn("blob fetch: redirect missing or oversized location for {s}", .{url_summary});
             return error.NetworkError;
         };
-        const location_copy = alloc.dupe(u8, location) catch return error.NetworkError;
-        defer alloc.free(location_copy);
 
         var location_summary_buf: [256]u8 = undefined;
-        const location_summary = common.summarizeUrl(location_copy, &location_summary_buf);
+        const location_summary = common.summarizeUrl(location, &location_summary_buf);
         log.debug("blob fetch: redirect {d} from {s} to {s} (auth={})", .{
             @intFromEnum(response.head.status),
             url_summary,
@@ -144,7 +143,7 @@ fn fetchBlobFromUrl(
             send_auth,
         });
 
-        return fetchBlobFromUrl(alloc, client, host, location_copy, token, false, redirect_count + 1);
+        return fetchBlobFromUrl(alloc, client, host, location, token, false, redirect_count + 1);
     }
 
     if (response.head.status != .ok) {
@@ -225,13 +224,12 @@ fn downloadBlobUrlToStore(
     };
 
     if (common.isRedirectStatus(response.head.status)) {
-        const location = http_helpers.parseLocationHeader(host, response.head) orelse {
-            log.warn("layer fetch: redirect missing location for {s}", .{url_summary});
+        var location_buf: [8192]u8 = undefined;
+        const location = http_helpers.parseLocationHeader(host, response.head, &location_buf) orelse {
+            log.warn("layer fetch: redirect missing or oversized location for {s}", .{url_summary});
             return error.NetworkError;
         };
-        const location_copy = alloc.dupe(u8, location) catch return error.NetworkError;
-        defer alloc.free(location_copy);
-        return downloadBlobUrlToStore(alloc, client, host, location_copy, expected, token, false, redirect_count + 1);
+        return downloadBlobUrlToStore(alloc, client, host, location, expected, token, false, redirect_count + 1);
     }
 
     if (response.head.status != .ok) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare production registry pulls against a disposable TLS registry."""
+"""Check production registry transfers against a disposable TLS registry."""
 import argparse
 import gzip
 import hashlib
@@ -54,15 +54,70 @@ def inside(binary, root, outer_namespace):
                     "-keyout", str(key), "-out", str(cert), "-subj", "/CN=localhost",
                     "-addext", "subjectAltName=DNS:localhost"], check=True, capture_output=True)
     manifest, contents = blobs()
+    parsed_manifest = json.loads(manifest)
+    redirected_blobs = {"/redirected/config": parsed_manifest["config"]["digest"],
+                        "/redirected/layer": parsed_manifest["layers"][0]["digest"]}
+    redirects = {"/v2/fixture/blobs/" + key: path for path, key in redirected_blobs.items()}
     requests = []
+    uploads = []
+    short_upload_sizes = []
+    short_upload_finished = threading.Event()
+    upload_cases = ("relative", "absolute", "other-port", "bad-init", "bad-complete")
 
     class Registry(http.server.BaseHTTPRequestHandler):
+        def empty_response(self, status, location=None):
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            if location is not None:
+                self.send_header("Location", location)
+            self.end_headers()
+
+        def record_upload(self):
+            data = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            uploads.append((self.command, self.server.server_port, self.path,
+                            self.headers.get("Authorization"), data, self.headers.get("Content-Type")))
+
+        def do_POST(self):
+            self.record_upload()
+            case = self.path.removeprefix("/v2/").removesuffix("/blobs/uploads/")
+            if case not in upload_cases and case != "short-file":
+                self.send_error(404)
+                return
+            location = f"/uploads/{case}?state=fixture%2Bstate&part=1"
+            if case != "relative":
+                port = other_server.server_port if case == "other-port" else server.server_port
+                location = f"https://localhost:{port}{location}"
+            self.empty_response(200 if case == "bad-init" else 202, location)
+
+        def do_PUT(self):
+            if self.path.startswith("/uploads/short-file?"):
+                short_upload_sizes.append(int(self.headers["Content-Length"]))
+                self.connection.settimeout(30)
+                try:
+                    # the client closes the connection when the file ends early.
+                    while self.rfile.read1(8192):
+                        pass
+                except (ConnectionResetError, ssl.SSLEOFError):
+                    pass
+                short_upload_finished.set()
+                return
+            self.record_upload()
+            self.empty_response(200 if self.path.startswith("/uploads/bad-complete?") else 201)
+
         def do_GET(self):
             requests.append(self.path)
+            if self.path in redirects:
+                location = redirects[self.path]
+                if location == "/redirected/config":
+                    location = f"https://localhost:{server.server_port}{location}"
+                self.empty_response(307, location)
+                return
             if self.path == "/v2/":
                 data = b"{}"
             elif self.path == "/v2/fixture/manifests/" + digest(manifest):
                 data = manifest
+            elif self.path in redirected_blobs:
+                data = contents[redirected_blobs[self.path]]
             else:
                 data = contents.get(self.path.removeprefix("/v2/fixture/blobs/"))
             if data is None:
@@ -78,12 +133,17 @@ def inside(binary, root, outer_namespace):
         def log_message(self, *_):
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Registry)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, key)
-    server.socket = context.wrap_socket(server.socket, server_side=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    servers = []
+
+    def start_server():
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Registry)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        servers.append((server, thread))
+        return server
 
     def pull(host, home):
         home.mkdir()
@@ -91,6 +151,8 @@ def inside(binary, root, outer_namespace):
         return subprocess.run([str(binary), image], env=dict(os.environ, HOME=str(home)), capture_output=True, timeout=30)
 
     try:
+        server = start_server()
+        other_server = start_server()
         rejected = pull("localhost", root / "untrusted")
         assert rejected.returncode == 2, rejected.stderr.decode()
         assert b"registry pull rejected: NetworkError" in rejected.stderr
@@ -102,17 +164,51 @@ def inside(binary, root, outer_namespace):
         accepted = pull("localhost", root / "trusted")
         assert accepted.returncode == 0, accepted.stderr.decode()
         assert set(requests) == {"/v2/", "/v2/fixture/manifests/" + digest(manifest),
-                                 *("/v2/fixture/blobs/" + key for key in contents)}, requests
+                                 *("/v2/fixture/blobs/" + key for key in contents), *redirected_blobs}, requests
         for key, data in contents.items():
-            if key == json.loads(manifest)["config"]["digest"]:
+            if key == parsed_manifest["config"]["digest"]:
                 continue
             cached = root / "trusted/.local/share/yoq/blobs/sha256" / key.split(":")[1]
             assert cached.read_bytes() == data
-        print("registry TLS: untrusted and wrong-host rejected; trusted manifest, config, and parallel layers verified", flush=True)
+
+        # the file body crosses several streaming buffers and ends with a short chunk.
+        for mode, data in (("upload-bytes", b"config upload\x00\xff"),
+                           ("upload-file", bytes(range(256)) * 97 + b"tail"),
+                           ("upload-bytes", b""), ("upload-file", b"")):
+            source = root / mode
+            source.write_bytes(data)
+            for case in upload_cases:
+                uploads.clear()
+                result = subprocess.run([str(binary), mode, f"localhost:{server.server_port}", case,
+                                         digest(data), str(source)], capture_output=True, timeout=30)
+                failure = {"bad-init": b"UploadInitFailed", "bad-complete": b"UploadFailed"}.get(case)
+                assert result.returncode == (2 if failure else 0), result.stderr.decode()
+                if failure:
+                    assert b"registry upload rejected: " + failure in result.stderr, result.stderr.decode()
+                expected = [("POST", server.server_port, f"/v2/{case}/blobs/uploads/",
+                             "Bearer fixture-token", b"", "application/octet-stream")]
+                if case != "bad-init":
+                    port = other_server.server_port if case == "other-port" else server.server_port
+                    auth = None if case == "other-port" else "Bearer fixture-token"
+                    expected.append(("PUT", port, f"/uploads/{case}?state=fixture%2Bstate&part=1&digest={digest(data)}",
+                                     auth, data, "application/octet-stream"))
+                assert uploads == expected, (mode, case, uploads)
+
+        source = root / "short-file"
+        data = bytes(range(256)) * 97
+        source.write_bytes(data)
+        result = subprocess.run([str(binary), "upload-file-short", f"localhost:{server.server_port}",
+                                 "short-file", digest(data), str(source)], capture_output=True, timeout=30)
+        assert result.returncode == 2, result.stderr.decode()
+        assert b"registry upload rejected: UploadFailed" in result.stderr, result.stderr.decode()
+        assert short_upload_finished.wait(30), "short upload connection did not close"
+        assert short_upload_sizes == [len(data) + 1], short_upload_sizes
+        print("registry TLS: certificate checks, parallel pulls, byte and file uploads, and upload auth verified", flush=True)
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
+        for server, thread in servers:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
 
 def main():
