@@ -59,7 +59,10 @@ pub fn currentOwnedRunningPid(record: *const store.ContainerRecord) ?i32 {
 pub fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
     var attempts: usize = 0;
     while (attempts < 100) : (attempts += 1) {
-        const record = store.load(alloc, id) catch {
+        const record = store.load(alloc, id) catch |err| {
+            // The process has already exited. An assignment owner may remove
+            // its completed record before the stop command observes it.
+            if (err == error.NotFound) return true;
             if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container stopped-state load wait")) return false;
             continue;
         };
@@ -215,4 +218,23 @@ test "currentOwnedRunningPid preserves running state when ownership cannot be ve
     defer updated.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("running", updated.status);
     try std.testing.expectEqual(@as(?i32, 12345), updated.pid);
+}
+
+test "stopped state accepts a record already removed by its owner" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const id = "cleaned-stop";
+    try store.save(.{
+        .id = id,
+        .hostname = "completed",
+        .rootfs = "/fixture",
+        .command = "/bin/sh",
+        .status = "stopped",
+        .created_at = 1,
+        .pid = null,
+        .exit_code = 0,
+    });
+    try std.testing.expect(waitForStoppedState(std.testing.allocator, id));
+    try store.remove(id);
+    try std.testing.expect(waitForStoppedState(std.testing.allocator, id));
 }
