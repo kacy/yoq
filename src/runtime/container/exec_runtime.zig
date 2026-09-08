@@ -6,6 +6,7 @@ const linux = std.os.linux;
 const filesystem = @import("../filesystem.zig");
 const security = @import("../security.zig");
 const init = @import("../init.zig");
+const identity = @import("../identity.zig");
 const exec_helpers = @import("../../lib/exec_helpers.zig");
 const log = @import("../../lib/log.zig");
 const startup = @import("startup_channel.zig");
@@ -34,6 +35,8 @@ pub const BindMount = struct {
 };
 
 pub const ChildExecContext = struct {
+    user: ?[]const u8 = null,
+    rootless: bool = false,
     startup_fd: posix.fd_t = -1,
     parent_startup_fd: posix.fd_t = -1,
     gpu_indices: []const u32 = &.{},
@@ -71,6 +74,7 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     }
 
     if (host_mode) {
+        if (ctx.user != null) return @intFromEnum(ExitCode.security_failed);
         startup.notify(ctx.startup_fd, .prepared) catch return @intFromEnum(ExitCode.general_error);
         startup.expect(ctx.startup_fd, .execute) catch return @intFromEnum(ExitCode.general_error);
         linux_platform.posix.chdir(ctx.working_dir) catch {
@@ -86,7 +90,9 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
         linux_platform.posix.chdir("/") catch {};
     };
 
+    const account = identity.resolve(ctx.user) catch return @intFromEnum(ExitCode.security_failed);
     security.apply() catch return @intFromEnum(ExitCode.security_failed);
+    identity.apply(account, ctx.rootless and ctx.user == null) catch return @intFromEnum(ExitCode.security_failed);
     startup.notify(ctx.startup_fd, .prepared) catch return @intFromEnum(ExitCode.general_error);
     startup.expect(ctx.startup_fd, .execute) catch return @intFromEnum(ExitCode.general_error);
     return init.run(execCommandWrapper, @ptrCast(@constCast(ctx)));

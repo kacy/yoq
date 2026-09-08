@@ -316,6 +316,9 @@ fn buildSavedRunConfig(
     const working_dir = alloc.dupe(u8, img.working_dir) catch return ContainerError.OutOfMemory;
     errdefer alloc.free(working_dir);
 
+    const user = if (img.user) |value| alloc.dupe(u8, value) catch return ContainerError.OutOfMemory else null;
+    errdefer if (user) |value| alloc.free(value);
+
     const args = dupStringList(alloc, resolved.args.items) catch |e| return e;
     errdefer freeOwnedStringList(alloc, args);
 
@@ -333,6 +336,7 @@ fn buildSavedRunConfig(
         .command = command,
         .hostname = hostname,
         .working_dir = working_dir,
+        .user = user,
         .args = args,
         .env = merged_env,
         .lower_dirs = lower_dirs,

@@ -21,6 +21,7 @@ pub const ServiceImageConfig = struct {
     default_cmd: []const []const u8 = &.{},
     image_env: []const []const u8 = &.{},
     working_dir: []const u8 = "/",
+    user: ?[]const u8 = null,
     layer_paths: []const []const u8 = &.{},
     pull_result: ?registry.PullResult = null,
     config_parsed: ?image_spec.ParseResult(image_spec.ImageConfig) = null,
@@ -103,6 +104,9 @@ pub fn resolveServiceImageWithIo(io: std.Io, alloc: std.mem.Allocator, image: []
     result.config_parsed = image_spec.parseImageConfig(alloc, result.pull_result.?.config_bytes) catch return null;
 
     if (result.config_parsed.?.value.config) |cc| {
+        if (cc.User) |user| {
+            if (user.len > 0) result.user = user;
+        }
         if (cc.Entrypoint) |ep| result.entrypoint = ep;
         if (cc.Cmd) |cmd| result.default_cmd = cmd;
         if (cc.Env) |env| result.image_env = env;
@@ -313,6 +317,7 @@ pub fn runOneShotWithIo(
             .args = resolved.args.items,
             .env = merged_env.items,
             .working_dir = wd,
+            .user = img.user,
             .lower_dirs = img.layer_paths,
             .hostname = hostname,
             .mounts = vols.bind_mounts.items,

@@ -27,6 +27,7 @@ fn containerFromSaved(id: []const u8, cfg: *const run_state.SavedRunConfig, mirr
             .args = cfg.args,
             .env = cfg.env,
             .working_dir = cfg.working_dir,
+            .user = cfg.user,
             .lower_dirs = cfg.lower_dirs,
             .network = net_config,
             .hostname = cfg.hostname,

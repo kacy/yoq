@@ -42,6 +42,8 @@ pub fn initChildContext(config: anytype, overlay: *const OverlayRuntime) exec_ru
     return .{
         .has_overlay = overlay.has_overlay,
         .host_mode = config.host_mode,
+        .user = config.user,
+        .rootless = std.os.linux.geteuid() != 0,
         .fs_config = overlay.filesystemConfig(config.lower_dirs),
         .gpu_indices = config.gpu_indices,
         .rootfs = config.rootfs,

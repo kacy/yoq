@@ -104,6 +104,8 @@ pub const ContainerConfig = struct {
     env: []const []const u8 = &.{},
     /// working directory inside the container
     working_dir: []const u8 = "/",
+    /// OCI user or user:group, resolved from accounts inside the mounted image.
+    user: ?[]const u8 = null,
     /// image layer paths for overlayfs (bottom to top)
     lower_dirs: []const []const u8 = &.{},
     /// Requested networking is required: any setup failure prevents execution.
@@ -228,7 +230,14 @@ pub const Container = struct {
             log.err("cgroup setup failed for {s}: {}", .{ config.id, err });
             return ContainerError.StartFailed;
         };
-        spawned = namespaces.spawn(config.namespaces, null, exec_runtime.childMain, @ptrCast(&child_ctx)) catch return ContainerError.StartFailed;
+        const mapping: ?namespaces.UserMapping = if (linux.geteuid() == 0) .{
+            .outer_uid = 0,
+            .outer_gid = 0,
+            .count = std.math.maxInt(u32),
+            .gid_count = std.math.maxInt(u32),
+            .allow_setgroups = true,
+        } else null;
+        spawned = namespaces.spawn(config.namespaces, mapping, exec_runtime.childMain, @ptrCast(&child_ctx)) catch return ContainerError.StartFailed;
         const child = &spawned.?;
         startup.closeOwned(&channel.child);
         self.pid = child.pid;
