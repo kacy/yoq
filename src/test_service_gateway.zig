@@ -13,6 +13,10 @@ pub fn main(init: std.process.Init) !void {
             try parseIp(args[4]),
             try std.fmt.parseInt(u8, args[5], 10),
         );
+    } else if (args.len == 2 and std.mem.eql(u8, args[1], "forward")) {
+        const nat = @import("network/nat.zig");
+        try nat.ensureContainerForwarding(bridge.default_bridge, "10.42.0.0/16");
+        try nat.ensureMasquerade(bridge.default_bridge, "10.42.0.0/16");
     } else if (args.len == 2 and std.mem.eql(u8, args[1], "load")) {
         const socket = try nl.openSocket();
         defer platform.posix.close(socket);

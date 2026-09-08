@@ -115,6 +115,8 @@ each agent gets an IP from the `10.40.0.0/16` overlay and a `/24` subnet for its
 
 Containers keep their assigned subnet mask but route peer traffic through the bridge gateway. This keeps service VIP requests and replies on the load balancer path, including containers on the same node. Existing containers need to be recreated to receive this routing setup.
 
+Container setup appends forwarding rules for traffic originating on `yoq0` from the container subnet and for established replies returning to it. A host default-drop forwarding policy remains in place, as do existing rules and their ordering. Earlier explicit administrator drops still take precedence; administrators must permit the intended container traffic through those rules.
+
 after joining, verify the agent appears:
 
 ```

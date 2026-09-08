@@ -60,6 +60,18 @@ pub fn ensureMasquerade(bridge: []const u8, subnet: []const u8) NatError!void {
     // rule already exists, nothing to do
 }
 
+/// Permit container-originated forwarding and established replies. Append rules
+/// so explicit administrator drops keep precedence over runtime connectivity.
+pub fn ensureContainerForwarding(bridge: []const u8, subnet: []const u8) NatError!void {
+    for ([_]bool{ false, true }) |returning| {
+        const check = buildContainerForwardArgs(.check, bridge, subnet, returning);
+        exec(&check) catch {
+            const add = buildContainerForwardArgs(.add, bridge, subnet, returning);
+            try exec(&add);
+        };
+    }
+}
+
 /// add port mapping rules (DNAT + FORWARD).
 ///
 /// equivalent to:
@@ -227,6 +239,31 @@ fn buildMasqueradeArgs(action: Action, bridge: []const u8, subnet: []const u8) A
     args[9] = bridge;
     args[10] = "-j";
     args[11] = "MASQUERADE";
+    return args;
+}
+
+fn buildContainerForwardArgs(action: Action, bridge: []const u8, subnet: []const u8, returning: bool) ArgList {
+    var args: ArgList = .{null} ** max_args;
+    args[0] = "iptables";
+    args[1] = "-w";
+    args[2] = "5";
+    args[3] = actionFlag(action);
+    args[4] = "FORWARD";
+    args[5] = if (returning) "-o" else "-i";
+    args[6] = bridge;
+    args[7] = if (returning) "-d" else "-s";
+    args[8] = subnet;
+    if (returning) {
+        args[9] = "-m";
+        args[10] = "conntrack";
+        args[11] = "--ctstate";
+        args[12] = "ESTABLISHED,RELATED";
+        args[13] = "-j";
+        args[14] = "ACCEPT";
+    } else {
+        args[9] = "-j";
+        args[10] = "ACCEPT";
+    }
     return args;
 }
 
