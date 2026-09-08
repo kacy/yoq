@@ -742,8 +742,43 @@ pub const posix = struct {
         return fdResult(rc);
     }
 
-    pub fn bind(fd: std.posix.fd_t, addr: *const std.posix.sockaddr, len: std.posix.socklen_t) !void {
-        try voidResult(std.os.linux.bind(fd, addr, len));
+    pub const BindError = error{
+        PermissionDenied,
+        AddressInUse,
+        AddressNotAvailable,
+        AddressFamilyNotSupported,
+        InvalidFileDescriptor,
+        InvalidArgument,
+        NotSocket,
+        InvalidAddress,
+        SymLinkLoop,
+        NameTooLong,
+        FileNotFound,
+        SystemResources,
+        NotDir,
+        ReadOnlyFileSystem,
+        Unexpected,
+    };
+
+    pub fn bind(fd: std.posix.fd_t, addr: *const std.posix.sockaddr, len: std.posix.socklen_t) BindError!void {
+        return switch (syscallErrno(std.os.linux.bind(fd, addr, len))) {
+            .SUCCESS => {},
+            .ACCES, .PERM => error.PermissionDenied,
+            .ADDRINUSE => error.AddressInUse,
+            .ADDRNOTAVAIL => error.AddressNotAvailable,
+            .AFNOSUPPORT => error.AddressFamilyNotSupported,
+            .BADF => error.InvalidFileDescriptor,
+            .INVAL => error.InvalidArgument,
+            .NOTSOCK => error.NotSocket,
+            .FAULT => error.InvalidAddress,
+            .LOOP => error.SymLinkLoop,
+            .NAMETOOLONG => error.NameTooLong,
+            .NOENT => error.FileNotFound,
+            .NOMEM, .NOBUFS => error.SystemResources,
+            .NOTDIR => error.NotDir,
+            .ROFS => error.ReadOnlyFileSystem,
+            else => error.Unexpected,
+        };
     }
 
     pub fn listen(fd: std.posix.fd_t, backlog: u32) !void {
