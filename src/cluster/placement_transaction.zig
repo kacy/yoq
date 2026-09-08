@@ -1,12 +1,16 @@
-// Placement decisions are serialized through their committed assignment batch.
-// A new leader first commits a barrier, so inherited proposals participate in
-// the next capacity calculation. The assignments themselves reserve capacity.
+// placement holds a lease until its assignment batch commits.
+// a new leader commits a barrier before reading capacity, so inherited
+// assignments count toward the next placement decision.
 const std = @import("std");
 const sqlite = @import("sqlite");
 const registry = @import("registry.zig");
 const scheduler = @import("scheduler.zig");
 const mutation = @import("mutation_session.zig");
 const sql = @import("sql_command.zig");
+const capacity = @import("placement_capacity.zig");
+
+pub const Resources = capacity.Resources;
+pub const isTerminal = capacity.isTerminal;
 
 pub const max_gang_ranks = 4096;
 const max_batch_bytes = 1024 * 1024;
@@ -22,8 +26,8 @@ pub const Lease = struct {
     pub fn begin(session: mutation.Session) mutation.Error!Lease {
         placement_mu.lockUncancelable(std.Options.debug_io);
         errdefer placement_mu.unlock(std.Options.debug_io);
-        // The schema command also supplies the current-term read barrier and
-        // upgrades snapshots created before durable GPU claims existed.
+        // committing the schema also establishes the current-term read barrier
+        // and upgrades snapshots that predate durable gpu claims.
         try session.commit(schema_sql);
         return .{ .session = session };
     }
@@ -40,26 +44,7 @@ pub const Lease = struct {
         const records = try registry.listAgents(alloc, node.stateMachineDb());
         errdefer freeAgents(alloc, records);
         for (records) |*agent| {
-            var pending: Resources = .{};
-            var running: Resources = .{};
-            const Row = struct { id: sqlite.Text, status: sqlite.Text, cpu: i64, memory: i64, gpu: ?i64 };
-            var stmt = try node.stateMachineDb().prepare("SELECT a.id, a.status, a.cpu_limit AS cpu, a.memory_limit_mb AS memory, c.gpu_count AS gpu FROM assignments a LEFT JOIN assignment_claims c ON c.assignment_id = a.id WHERE a.agent_id = ?;");
-            defer stmt.deinit();
-            var rows = try stmt.iterator(Row, .{agent.id});
-            while (try rows.nextAlloc(alloc, .{})) |row| {
-                defer alloc.free(row.id.data);
-                defer alloc.free(row.status.data);
-                if (containsId(excluded_ids, row.id.data) or isTerminal(row.status.data)) continue;
-                // Old assignments did not record GPU requests. Preserve their
-                // worker's GPU capacity conservatively until they are replaced.
-                const used: Resources = .{ .cpu = row.cpu, .memory = row.memory, .gpu = row.gpu orelse agent.gpu_count };
-                if (std.mem.eql(u8, row.status.data, "pending")) pending.add(used) else running.add(used);
-            }
-            // Heartbeats can lag starts and omit pending assignments. Running
-            // claims form a floor; pending claims reserve additional capacity.
-            agent.cpu_used = if (agent.cpu_used < 0) std.math.maxInt(i64) else pending.cpu +| @max(agent.cpu_used, running.cpu);
-            agent.memory_used_mb = if (agent.memory_used_mb < 0) std.math.maxInt(i64) else pending.memory +| @max(agent.memory_used_mb, running.memory);
-            agent.gpu_used = if (agent.gpu_used < 0) std.math.maxInt(i64) else pending.gpu +| @max(agent.gpu_used, running.gpu);
+            try capacity.includeClaims(alloc, node.stateMachineDb(), agent, excluded_ids);
         }
         return .{ .records = records, .index = node.state_machine.last_applied };
     }
@@ -69,34 +54,6 @@ pub const Lease = struct {
         try self.session.commit(command);
     }
 };
-
-pub const Resources = struct {
-    cpu: i64 = 0,
-    memory: i64 = 0,
-    gpu: i64 = 0,
-
-    fn add(self: *Resources, other: Resources) void {
-        self.cpu = addUsage(self.cpu, other.cpu);
-        self.memory = addUsage(self.memory, other.memory);
-        self.gpu = addUsage(self.gpu, other.gpu);
-    }
-
-    fn addUsage(left: i64, right: i64) i64 {
-        return if (right < 0) std.math.maxInt(i64) else left +| right;
-    }
-};
-
-pub fn isTerminal(status: []const u8) bool {
-    for ([_][]const u8{ "failed", "stopped", "exited", "completed", "canceled" }) |terminal| {
-        if (std.mem.eql(u8, status, terminal)) return true;
-    }
-    return false;
-}
-
-fn containsId(ids: []const []const u8, id: []const u8) bool {
-    for (ids) |candidate| if (std.mem.eql(u8, candidate, id)) return true;
-    return false;
-}
 
 pub fn freeAgents(alloc: std.mem.Allocator, agents: []registry.AgentRecord) void {
     for (agents) |agent| agent.deinit(alloc);
@@ -117,13 +74,30 @@ pub fn appendClaim(writer: *std.Io.Writer, assignment_id: []const u8, claim: Cla
     try sql.write(writer, "INSERT OR REPLACE INTO assignment_claims (assignment_id, gpu_count, release_id, group_id, request_json) VALUES (?, ?, ?, ?, ?);", .{ assignment_id, claim.gpu_count, claim.release_id, claim.group_id, claim.request_json });
 }
 
-/// The NOT NULL agent_id constraint turns a stale read into an atomic command
-/// rejection. A heartbeat or membership change between selection and apply
-/// cannot silently invalidate the capacity decision.
+/// reject stale capacity decisions through the agent_id not-null constraint.
+/// the state index is checked when the assignment batch is applied.
 pub fn appendAssignment(writer: *std.Io.Writer, id: []const u8, agent_id: []const u8, request: scheduler.PlacementRequest, gang: ?@import("../gpu/scheduler.zig").GangPlacement, index: u64, now: i64) !void {
-    try sql.write(writer, "INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, app_name, workload_kind, workload_name, health_check_json, gang_rank, gang_world_size, gang_master_addr, gang_master_port, created_at) VALUES (?, CASE WHEN (SELECT last_applied FROM state_machine_meta WHERE id = 1) = ? THEN ? ELSE NULL END, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);", .{
-        id,                                        index,                                           agent_id,                                                request.image,                                    request.command, request.cpu_limit, request.memory_limit_mb, request.app_name, request.workload_kind, request.workload_name, request.health_check_json,
-        @as(?u32, if (gang) |g| g.rank else null), @as(?u32, if (gang) |g| g.world_size else null), @as(?[]const u8, if (gang) |g| g.master_addr else null), @as(?u16, if (gang) |g| g.master_port else null), now,
+    try sql.write(writer, "INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, " ++
+        "app_name, workload_kind, workload_name, health_check_json, " ++
+        "gang_rank, gang_world_size, gang_master_addr, gang_master_port, created_at) " ++
+        "VALUES (?, CASE WHEN (SELECT last_applied FROM state_machine_meta WHERE id = 1) = ? " ++
+        "THEN ? ELSE NULL END, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);", .{
+        id,
+        index,
+        agent_id,
+        request.image,
+        request.command,
+        request.cpu_limit,
+        request.memory_limit_mb,
+        request.app_name,
+        request.workload_kind,
+        request.workload_name,
+        request.health_check_json,
+        @as(?u32, if (gang) |g| g.rank else null),
+        @as(?u32, if (gang) |g| g.world_size else null),
+        @as(?[]const u8, if (gang) |g| g.master_addr else null),
+        @as(?u16, if (gang) |g| g.master_port else null),
+        now,
     });
 }
 
@@ -300,23 +274,9 @@ pub fn readClaim(alloc: std.mem.Allocator, db: *sqlite.Db, assignment: registry.
     return .{ .gpu_count = agent.gpu_count, .release_id = null };
 }
 
-/// Reserve a rollback's original placement on its original worker. A failed
-/// check leaves all current assignments intact, rather than partially restoring.
+/// reserve a rollback's original worker capacity before committing its batch.
 pub fn consume(agents: []registry.AgentRecord, agent_id: []const u8, resources: Resources) mutation.Error!void {
-    for (agents) |*agent| {
-        if (!std.mem.eql(u8, agent.id, agent_id)) continue;
-        if (!@import("scheduler/placement.zig").validCapacity(agent.*) or !std.mem.eql(u8, agent.status, "active") or
-            resources.cpu < 0 or resources.memory < 0 or resources.gpu < 0 or
-            agent.cpu_used < 0 or agent.memory_used_mb < 0 or agent.gpu_used < 0 or
-            resources.cpu > agent.cpu_cores * 1000 -| agent.cpu_used or
-            resources.memory > agent.memory_mb -| agent.memory_used_mb or
-            resources.gpu > agent.gpu_count -| agent.gpu_used) return error.Conflict;
-        agent.cpu_used += resources.cpu;
-        agent.memory_used_mb += resources.memory;
-        agent.gpu_used += resources.gpu;
-        return;
-    }
-    return error.Conflict;
+    try capacity.consume(agents, agent_id, resources);
 }
 
 pub fn reconcileOrphans(alloc: std.mem.Allocator, session: mutation.Session) !void {
