@@ -19,13 +19,13 @@ yoq is a young project that is still being hardened. it has a smaller ecosystem 
 
 ### install
 
+if the github cli is not signed in yet, run `gh auth login`. then install yoq:
+
 ```bash
 curl -fsSL https://yoq.dev/install | bash
 ```
 
-the installer selects the latest published [github release](https://github.com/kacy/yoq/releases/latest), checks the archive checksum, and verifies its publisher attestations and release metadata before installing it.
-
-the current v0.2.0 release is missing the provenance file required by this installer. until a release includes the required metadata and attestations, use the source build below.
+the installer selects the latest published [github release](https://github.com/kacy/yoq/releases/latest). it verifies the publisher and release metadata before downloading the archive, then checks the archive before installing it. if verification fails, installation stops with an explanation.
 
 when run as a regular user, the installer puts `yoq` in `~/.local/bin`; as root, it uses `/usr/local/bin`. add the installation directory to your path if needed.
 
