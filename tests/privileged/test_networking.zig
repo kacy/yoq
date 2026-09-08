@@ -311,6 +311,7 @@ test "service discovery stops resolving after backend removal" {
 
     const server_name = try helpers.uniqueName(alloc, "test-http-remove");
     defer alloc.free(server_name);
+    defer stopAndRemoveContainer(&fixture.env, server_name);
 
     try startLocalHttpServer(&fixture.env, fixture.rootfs.rootfs_path, server_name, null, "hello-before-remove");
     try waitForServiceDiscoveryHttpBody(&fixture.env, fixture.rootfs.rootfs_path, server_name, "hello-before-remove");
