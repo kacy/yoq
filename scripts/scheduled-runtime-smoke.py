@@ -282,12 +282,16 @@ def inside(root, outer_mount, outer_net):
             resolved = probe_service("resolve", "web").splitlines()
             assert any(address.startswith(b"10.43.") for address in resolved), resolved
             assert b"scheduled-ready" in probe_service("http-get", "web", "8080", "/")
+            assert b"scheduled-ready" in probe_service("http-get", row["ip_address"], "8080", "/")
             worker_cli("policy", "deny", "scheduled-probe", "web")
             wait_for("service VIP policy enforcement", lambda: policy_blocks("web"))
             wait_for("direct endpoint policy enforcement", lambda: policy_blocks(row["ip_address"]))
             worker_cli("policy", "rm", "scheduled-probe", "web")
             wait_for("policy removal restores traffic", lambda:
                      (response := probe_result("http-get", "web", "8080", "/")).returncode == 0 and
+                     b"scheduled-ready" in response.stdout)
+            wait_for("policy removal restores direct traffic", lambda:
+                     (response := probe_result("http-get", row["ip_address"], "8080", "/")).returncode == 0 and
                      b"scheduled-ready" in response.stdout)
             assert any("/manifests/" in path for path in registry.request_paths)
             assert sum("/blobs/" in path for path in registry.request_paths) >= 2
