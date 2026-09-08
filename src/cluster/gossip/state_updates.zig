@@ -37,7 +37,10 @@ pub fn applyStateUpdate(self: anytype, update: anytype) !void {
         const old_state = member.state;
         member.incarnation = update.incarnation;
         member.state = update.state;
-        member.addr = update.addr;
+        // A self-refutation may advertise an overlay or wildcard address.
+        // It can update liveness, but cannot replace an authoritative endpoint
+        // used to validate the source of authenticated transport packets.
+        if (!member.endpoint_pinned) member.addr = update.addr;
         member.state_changed_at = self.tick_count;
         try emitStateChange(self, update.id, old_state, update.state);
     } else if (update.incarnation == member.incarnation) {

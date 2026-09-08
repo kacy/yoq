@@ -28,11 +28,16 @@ pub fn addMember(self: anytype, addr: anytype, id: u64) !void {
     if (id == self.self_id) return;
 
     const result = try self.members.getOrPut(id);
-    if (result.found_existing) return;
+    if (result.found_existing) {
+        result.value_ptr.addr = addr;
+        result.value_ptr.endpoint_pinned = true;
+        return;
+    }
 
     result.value_ptr.* = .{
         .id = id,
         .addr = addr,
+        .endpoint_pinned = true,
         .state = .alive,
         .incarnation = 0,
         .state_changed_at = self.tick_count,

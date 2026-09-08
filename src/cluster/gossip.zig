@@ -50,6 +50,8 @@ pub const MemberAddr = struct {
 pub const Member = struct {
     id: u64,
     addr: MemberAddr,
+    // Configuration, registration, and bootstrap own known peer endpoints.
+    endpoint_pinned: bool = false,
     state: MemberState,
     incarnation: u64,
     /// tick at which the state last changed (for suspect → dead timeout)
@@ -1745,4 +1747,31 @@ test "codec encode decode round-trip for ping_req with updates" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "gossip endpoint survives refutation with overlay or wildcard addresses" {
+    var g = Gossip.init(std.testing.allocator, 1, .{ .ip = .{ 192, 0, 2, 1 }, .port = 19800 }, .{});
+    defer g.deinit();
+    const endpoint = MemberAddr{ .ip = .{ 192, 0, 2, 2 }, .port = 9800 };
+    try g.addMember(2, endpoint);
+    for ([_][4]u8{ .{ 10, 40, 0, 2 }, .{ 0, 0, 0, 0 } }, 1..) |advertised, incarnation| {
+        try g.applyStateUpdate(.{ .id = 2, .addr = endpoint, .state = .suspect, .incarnation = incarnation - 1 });
+        try g.applyStateUpdate(.{ .id = 2, .addr = .{ .ip = advertised, .port = 9800 }, .state = .alive, .incarnation = incarnation });
+        try std.testing.expectEqualDeep(endpoint, g.getMemberAddr(2).?);
+        try std.testing.expectEqual(MemberState.alive, g.members.get(2).?.state);
+        try std.testing.expectEqual(incarnation, g.members.get(2).?.incarnation);
+    }
+}
+
+test "gossip endpoint discovery yields to authoritative membership" {
+    var g = Gossip.init(std.testing.allocator, 1, .{ .ip = .{ 192, 0, 2, 1 }, .port = 19800 }, .{});
+    defer g.deinit();
+    const hint = MemberAddr{ .ip = .{ 10, 40, 0, 2 }, .port = 9800 };
+    const registered = MemberAddr{ .ip = .{ 192, 0, 2, 2 }, .port = 19800 };
+    try g.applyStateUpdate(.{ .id = 2, .addr = hint, .state = .alive, .incarnation = 1 });
+    try std.testing.expect(!g.members.get(2).?.endpoint_pinned);
+    try g.addMember(2, registered);
+    try g.applyStateUpdate(.{ .id = 2, .addr = hint, .state = .alive, .incarnation = 2 });
+    try std.testing.expectEqualDeep(registered, g.getMemberAddr(2).?);
+    try std.testing.expect(g.members.get(2).?.endpoint_pinned);
 }
