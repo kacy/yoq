@@ -153,10 +153,10 @@ fn schedule(
     }, batch.written()) catch |err| return deploy_routes.mutationFailure(alloc, node, err)) orelse return common.conflict("insufficient capacity for training job");
     defer scheduled.deinit(alloc);
 
-    const rec = readRecord(alloc, session, job_id) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
-    defer rec.deinit(alloc);
+    const record = readRecord(alloc, session, job_id) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
+    defer record.deinit(alloc);
 
-    return formatRecordResponse(alloc, rec, "training job scheduled");
+    return formatRecordResponse(alloc, record, "training job scheduled");
 }
 
 fn findRecord(alloc: std.mem.Allocator, session: mutation.Session, app_name: []const u8, job_name: []const u8) mutation.Error!?store.TrainingJobRecord {

@@ -12,7 +12,7 @@ const route = workload_routes.route;
 const setTestProxyTrainingLogsResponse = workload_routes.setTestProxyTrainingLogsResponse;
 const clearTestProxyTrainingLogsResponse = workload_routes.clearTestProxyTrainingLogsResponse;
 const RouteFlowHarness = test_support.Harness;
-const makeRequest = test_support.makeRequestWithQuery;
+const makeRequest = test_support.makeRequest;
 const freeResponse = test_support.freeResponse;
 const expectJsonContains = test_support.expectJsonContains;
 
@@ -53,14 +53,14 @@ fn seedTrainingAssignment(harness: *RouteFlowHarness, app_name: []const u8, job_
 
 test "route rejects worker run without cluster" {
     const ctx: RouteContext = .{ .cluster = null, .join_token = null };
-    const req = makeRequest(.POST, "/apps/demo-app/workers/migrate/run", "", "");
+    const req = makeRequest(.POST, "/apps/demo-app/workers/migrate/run", "");
     const resp = route(req, std.testing.allocator, ctx).?;
     try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
 }
 
 test "route rejects training status without cluster" {
     const ctx: RouteContext = .{ .cluster = null, .join_token = null };
-    const req = makeRequest(.GET, "/apps/demo-app/training/finetune/status", "", "");
+    const req = makeRequest(.GET, "/apps/demo-app/training/finetune/status", "");
     const resp = route(req, std.testing.allocator, ctx).?;
     try std.testing.expectEqual(http.StatusCode.bad_request, resp.status);
 }
@@ -161,7 +161,7 @@ test "training scale route replaces prior scheduled assignments" {
     try std.testing.expectEqual(@as(usize, 2), try countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
     const pause = try harness.trainingPause("demo-app", "finetune");
     defer freeResponse(alloc, pause);
-    const resumed = route(makeRequest(.POST, "/apps/demo-app/training/finetune/resume", "", ""), alloc, harness.ctx()).?;
+    const resumed = route(makeRequest(.POST, "/apps/demo-app/training/finetune/resume", ""), alloc, harness.ctx()).?;
     defer freeResponse(alloc, resumed);
     try std.testing.expectEqual(http.StatusCode.ok, resumed.status);
     try expectJsonContains(resumed.body, "\"gpus\":2");
@@ -267,7 +267,7 @@ test "placement numbers reject invalid training scale then accept valid scale" {
     for ([_][]const u8{ "4294967296", "184467440737095516160", "-1", "0", "1.5", "1e2", "null", "\"2\"" }) |value| {
         const body = try std.fmt.allocPrint(alloc, "{{\"gpus\":{s}}}", .{value});
         defer alloc.free(body);
-        const response = route(makeRequest(.POST, "/apps/numeric-training/training/train/scale", "", body), alloc, harness.ctx()).?;
+        const response = route(makeRequest(.POST, "/apps/numeric-training/training/train/scale", body), alloc, harness.ctx()).?;
         defer freeResponse(alloc, response);
         try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
     }
@@ -429,7 +429,7 @@ test "running training replacement waits for heartbeat capacity after pause" {
     const pause = try harness.trainingPause("running-training", "finetune");
     defer freeResponse(alloc, pause);
     try std.testing.expectEqual(http.StatusCode.ok, pause.status);
-    const req = makeRequest(.POST, "/apps/running-training/training/finetune/resume", "", "");
+    const req = makeRequest(.POST, "/apps/running-training/training/finetune/resume", "");
     const busy = route(req, alloc, harness.ctx()).?;
     defer freeResponse(alloc, busy);
     try std.testing.expectEqual(http.StatusCode.conflict, busy.status);
@@ -463,7 +463,7 @@ test "training controls retain job identity until a new start" {
     for ([_][]const u8{ "stop", "resume" }) |action| {
         const path = try std.fmt.allocPrint(alloc, "/apps/job-controls/training/finetune/{s}", .{action});
         defer alloc.free(path);
-        const response = route(makeRequest(.POST, path, "", ""), alloc, harness.ctx()).?;
+        const response = route(makeRequest(.POST, path, ""), alloc, harness.ctx()).?;
         defer freeResponse(alloc, response);
         try std.testing.expectEqual(http.StatusCode.ok, response.status);
         const record = (try store.findTrainingJobInDb(db, alloc, "job-controls", "finetune")).?;
@@ -498,7 +498,7 @@ test "training controls require an existing job except for start" {
     for ([_][]const u8{ "resume", "scale", "pause", "stop" }) |action| {
         const path = try std.fmt.allocPrint(alloc, "/apps/missing-job/training/finetune/{s}", .{action});
         defer alloc.free(path);
-        const response = route(makeRequest(.POST, path, "{\"gpus\":2}", ""), alloc, harness.ctx()).?;
+        const response = route(makeRequest(.POST, path, "{\"gpus\":2}"), alloc, harness.ctx()).?;
         defer freeResponse(alloc, response);
         try std.testing.expectEqual(http.StatusCode.not_found, response.status);
     }
