@@ -27,8 +27,6 @@ curl -fsSL https://yoq.dev/install | bash
 
 the installer selects the latest published [github release](https://github.com/kacy/yoq/releases/latest). it verifies the publisher and release metadata before downloading the archive, then checks the archive before installing it. if verification fails, installation stops with an explanation.
 
-the current v0.2.0 release is missing the provenance file required by this installer. until a release includes the required metadata and attestations, use the source build below.
-
 when run as a regular user, the installer puts `yoq` in `~/.local/bin`; as root, it uses `/usr/local/bin`. add the installation directory to your path if needed.
 
 ### build from source
