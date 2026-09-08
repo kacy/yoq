@@ -4,7 +4,7 @@ const std = @import("std");
 pub const SchemaError = error{InitFailed};
 
 pub fn apply(db: *sqlite.Db) SchemaError!void {
-    migrateContainers(db);
+    try migrateContainers(db);
     migrateAgents(db);
     migrateAssignments(db);
     migrateServices(db);
@@ -15,7 +15,8 @@ pub fn apply(db: *sqlite.Db) SchemaError!void {
     migrateClusterCa(db);
 }
 
-fn migrateContainers(db: *sqlite.Db) void {
+fn migrateContainers(db: *sqlite.Db) SchemaError!void {
+    try addColumnIfMissing(db, "ALTER TABLE containers ADD COLUMN startup_outcome INTEGER NOT NULL DEFAULT 0;");
     addColumnIfMissing(db, "ALTER TABLE containers ADD COLUMN app_name TEXT;") catch {};
 }
 
@@ -246,7 +247,7 @@ test "migrateServices adds http proxy columns" {
         .{},
     ) catch unreachable;
 
-    try apply(&db);
+    migrateServices(&db);
 
     db.exec(
         "INSERT INTO services (" ++
@@ -281,7 +282,7 @@ test "migrateDeployments adds release transition columns" {
         .{},
     ) catch unreachable;
 
-    try apply(&db);
+    migrateDeployments(&db);
 
     db.exec(
         "INSERT INTO deployments (id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, status, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",

@@ -16,6 +16,9 @@ const service_types = @import("store/services_types.zig");
 
 pub const StoreError = common.StoreError;
 
+pub const StartupOutcome = @import("store/containers.zig").StartupOutcome;
+pub const setStartupOutcome = @import("store/containers.zig").setStartupOutcome;
+pub const recordStartupFailure = @import("store/containers.zig").recordStartupFailure;
 pub const ContainerRecord = @import("store/containers.zig").ContainerRecord;
 pub const ImageRecord = @import("store/images.zig").ImageRecord;
 pub const BuildCacheEntry = @import("store/cache.zig").BuildCacheEntry;

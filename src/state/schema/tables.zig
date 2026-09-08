@@ -26,7 +26,8 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    ip_address TEXT,
         \\    veth_host TEXT,
         \\    app_name TEXT,
-        \\    created_at INTEGER NOT NULL
+        \\    created_at INTEGER NOT NULL,
+        \\    startup_outcome INTEGER NOT NULL DEFAULT 0
         \\);
     );
     try exec(db,

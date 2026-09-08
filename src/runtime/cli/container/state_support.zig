@@ -94,10 +94,13 @@ pub fn waitForContainerStart(alloc: std.mem.Allocator, id: []const u8) Container
         };
         defer record.deinit(alloc);
 
-        if (std.mem.eql(u8, record.status, "running") and record.pid != null) return;
-        if (std.mem.eql(u8, record.status, "stopped")) {
-            writeErr("failed to start detached container\n", .{});
-            return ContainerError.ProcessNotFound;
+        switch (record.startup_outcome) {
+            .succeeded => return,
+            .failed => {
+                writeErr("failed to start detached container\n", .{});
+                return ContainerError.ProcessNotFound;
+            },
+            .pending => {},
         }
 
         if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container start wait")) break;
@@ -237,4 +240,44 @@ test "stopped state accepts a record already removed by its owner" {
     try std.testing.expect(waitForStoppedState(std.testing.allocator, id));
     try store.remove(id);
     try std.testing.expect(waitForStoppedState(std.testing.allocator, id));
+}
+
+test "detached startup outcome survives immediate process exit and rejects real failures" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const id = "fast-started";
+    for ([_]u8{ 0, 1, 255 }) |exit_code| {
+        try store.save(.{
+            .id = id,
+            .rootfs = "/fixture",
+            .hostname = "fast",
+            .command = "/bin/sh",
+            .status = "created",
+            .pid = null,
+            .exit_code = null,
+            .created_at = 1,
+        });
+        try store.setStartupOutcome(id, .succeeded);
+        try store.updateStatus(id, "stopped", null, exit_code);
+        try waitForContainerStart(std.testing.allocator, id);
+    }
+
+    // A later automatic restart failure does not erase the first launch result.
+    try store.recordStartupFailure(id);
+    try waitForContainerStart(std.testing.allocator, id);
+
+    // An explicit launch starts a new pending outcome and preserves failed cleanup.
+    try store.setStartupOutcome(id, .pending);
+    try store.updateStatus(id, "cleanup_failed", null, null);
+    try store.recordStartupFailure(id);
+    const failed = try store.load(std.testing.allocator, id);
+    defer failed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("cleanup_failed", failed.status);
+    try std.testing.expectEqual(@as(?u8, null), failed.exit_code);
+    try std.testing.expectEqual(store.StartupOutcome.failed, failed.startup_outcome);
+    try std.testing.expectError(ContainerError.ProcessNotFound, waitForContainerStart(std.testing.allocator, id));
+
+    try store.remove(id);
+    try std.testing.expectError(error.NotFound, store.setStartupOutcome(id, .succeeded));
+    try std.testing.expectError(error.NotFound, store.setStartupOutcome(id, .pending));
 }
