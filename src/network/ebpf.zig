@@ -306,7 +306,7 @@ pub fn ipToNetworkOrder(ip_bytes: [4]u8) u32 {
 // -- metrics collector --
 //
 // per-IP packet and byte counting via an LRU hash map. attached to the
-// bridge ingress at priority 2 (after DNS and LB). purely passive —
+// bridge ingress at priority 40 (after DNS and LB). purely passive —
 // never drops packets.
 //
 // userspace reads the map to report per-container network traffic
@@ -358,7 +358,7 @@ pub fn getMetricsCollector() ?*const MetricsCollector {
 // -- policy enforcer --
 //
 // per-IP-pair allow/deny enforcement. attached to the bridge ingress
-// at priority 0 (before DNS, LB, and metrics). drops packets matching
+// at priority 10 (before DNS, LB, and metrics). drops packets matching
 // deny rules or packets from isolated sources without an allow entry.
 
 pub const PolicyKey = policy_runtime.PolicyKey;
@@ -368,7 +368,7 @@ pub const PolicyEnforcer = policy_runtime.PolicyEnforcer;
 var policy_enforcer: ?PolicyEnforcer = null;
 
 /// load and attach the policy enforcer BPF program to the bridge.
-/// attaches at priority 0 (runs before DNS/LB at 1 and metrics at 2).
+/// attaches at priority 10 (before DNS at 20, LB at 30, and metrics at 40).
 pub fn loadPolicyEnforcer(bridge_if_index: u32) EbpfError!void {
     global_mutex.lockUncancelable(std.Options.debug_io);
     defer global_mutex.unlock(std.Options.debug_io);

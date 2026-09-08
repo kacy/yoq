@@ -38,13 +38,13 @@ pub fn main() !void {
             if (result.action != 2) return error.InvalidCountWasNotDropped;
             continue;
         }
-        if (result.action != 0) return error.ValidCountWasDropped;
+        if (result.action != std.math.maxInt(u32)) return error.ValidCountWasDropped;
         const expected = backends.ips[clientHash(client) % count];
         if (!std.mem.eql(u8, result.packet[30..34], &expected)) return error.WrongBackend;
         // The same compiled map set also restores the VIP on return traffic.
         const reply = tcpPacket(expected, client, 8080, 12000);
         const reverse = try runPacket(egress, &reply);
-        if (reverse.action != 0 or !std.mem.eql(u8, reverse.packet[26..30], &vip)) return error.ReverseTranslationFailed;
+        if (reverse.action != std.math.maxInt(u32) or !std.mem.eql(u8, reverse.packet[26..30], &vip)) return error.ReverseTranslationFailed;
     }
     std.debug.print("load balancer kernel load, bounded backend selection, invalid counts and reverse translation passed\n", .{});
 }

@@ -2,7 +2,7 @@ const std = @import("std");
 const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const log = @import("../../lib/log.zig");
-const attach_support = @import("attach_support.zig");
+const tc_attachment = @import("tc_attachment.zig");
 const common = @import("common.zig");
 const map_support = @import("map_support.zig");
 const program_support = @import("program_support.zig");
@@ -39,6 +39,7 @@ pub const MetricsCollector = struct {
     metrics_fd: posix.fd_t,
     pair_metrics_fd: posix.fd_t,
     if_index: u32,
+    attachment: tc_attachment.Attachment,
 
     pub fn readMetrics(self: *const MetricsCollector, ip_net: u32) ?IpMetrics {
         var value: IpMetrics = std.mem.zeroes(IpMetrics);
@@ -77,7 +78,7 @@ pub const MetricsCollector = struct {
     }
 
     pub fn deinit(self: *MetricsCollector) void {
-        attach_support.detachTC(self.if_index) catch |e| {
+        self.attachment.detach() catch |e| {
             log.debug("ebpf: failed to detach metrics collector: {}", .{e});
         };
         if (self.prog_fd >= 0) {
@@ -127,12 +128,13 @@ pub fn load(bridge_if_index: u32) common.EbpfError!MetricsCollector {
         resource_support.releaseBpfFd();
     }
 
-    try attach_support.attachTC(bridge_if_index, .ingress, prog_fd, 2);
+    const attachment = try tc_attachment.attach(bridge_if_index, .ingress, prog_fd, .metrics);
 
     return .{
         .prog_fd = prog_fd,
         .metrics_fd = map_fd,
         .pair_metrics_fd = pair_fd,
         .if_index = bridge_if_index,
+        .attachment = attachment,
     };
 }

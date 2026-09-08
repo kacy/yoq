@@ -3,6 +3,8 @@ pub const EbpfError = error{
     MapUpdateFailed,
     ProgramLoadFailed,
     AttachFailed,
+    /// Replacement is installed, but one or more legacy filters remain.
+    LegacyCleanupFailed,
     DetachFailed,
     NotSupported,
     InvalidParameter,

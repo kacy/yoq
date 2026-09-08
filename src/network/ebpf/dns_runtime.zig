@@ -2,7 +2,7 @@ const std = @import("std");
 const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const log = @import("../../lib/log.zig");
-const attach_support = @import("attach_support.zig");
+const tc_attachment = @import("tc_attachment.zig");
 const common = @import("common.zig");
 const map_support = @import("map_support.zig");
 const program_support = @import("program_support.zig");
@@ -14,6 +14,7 @@ pub const DnsInterceptor = struct {
     prog_fd: posix.fd_t,
     map_fd: posix.fd_t,
     if_index: u32,
+    attachment: tc_attachment.Attachment,
 
     pub fn updateService(self: *const DnsInterceptor, name: []const u8, ip_addr: [4]u8) void {
         var key = makeKey(name) orelse return;
@@ -36,7 +37,7 @@ pub const DnsInterceptor = struct {
     }
 
     pub fn deinit(self: *DnsInterceptor) void {
-        attach_support.detachTC(self.if_index) catch |e| {
+        self.attachment.detach() catch |e| {
             log.debug("ebpf: failed to detach DNS interceptor: {}", .{e});
         };
         if (self.prog_fd >= 0) {
@@ -103,11 +104,12 @@ pub fn load(bridge_if_index: u32) common.EbpfError!DnsInterceptor {
         resource_support.releaseBpfFd();
     }
 
-    try attach_support.attachTC(bridge_if_index, .ingress, prog_fd, 1);
+    const attachment = try tc_attachment.attach(bridge_if_index, .ingress, prog_fd, .dns);
 
     return .{
         .prog_fd = prog_fd,
         .map_fd = map_fd,
         .if_index = bridge_if_index,
+        .attachment = attachment,
     };
 }

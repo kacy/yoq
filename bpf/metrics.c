@@ -1,9 +1,9 @@
 // metrics.c — per-IP and per-service-pair packet/byte counters
 //
-// attached to the bridge ingress at priority 2 (after DNS interceptor
+// attached to the bridge ingress at priority 40 (after DNS interceptor
 // and load balancer). counts packets and bytes per source IP using an
 // LRU hash map, and per (src, dst, port) pair for service-to-service
-// visibility. always returns TC_ACT_OK — this is a passive observer
+// visibility. always returns TC_ACT_UNSPEC — this is a passive observer
 // that never drops or modifies packets.
 //
 // SECURITY HARDENING:
@@ -74,38 +74,38 @@ int metrics_count(struct __sk_buff *skb)
     // parse ethernet header
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // only count IPv4 packets
     if (eth->h_proto != htons(ETH_P_IP))
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // parse IP header
     struct iphdr *iph = (void *)(eth + 1);
     if ((void *)(iph + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     __u32 src_ip = iph->saddr;
     
     // SECURITY: Validate IP total length before using it
     __u16 ip_tot_len = ntohs(iph->tot_len);
     if (ip_tot_len < 20 || ip_tot_len > 65535) // Minimum IP header is 20 bytes
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Validate TTL is reasonable
-    if (iph->ttl < 1 || iph->ttl > 128)
-        return TC_ACT_OK;
+    if (iph->ttl < 1)
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Validate IHL (header length) is at least 5 (20 bytes)
     __u8 ihl = iph->ihl_version & 0x0F;
     if (ihl < 5 || ihl > 15) // RFC 791: IHL is 4 bits, min 5, max 15
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Ensure IHL matches the actual header size we're reading
     // We need at least eth(14) + ip_header(ihl*4) bytes
     __u32 ip_header_len = ihl * 4;
     if ((void *)((char *)iph + ip_header_len) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     // Calculate payload length safely (avoid underflow)
     __u32 pkt_bytes;
@@ -133,23 +133,23 @@ int metrics_count(struct __sk_buff *skb)
     // -- per-pair counting (TCP only) --
 
     if (iph->protocol != IPPROTO_TCP)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // SECURITY: Calculate TCP header offset safely using validated IHL
     struct tcphdr *tcp = (void *)((char *)iph + ip_header_len);
     if ((void *)(tcp + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Validate TCP data offset (header length)
     __u16 tcp_flags = ntohs(tcp->flags);
     __u8 tcp_doff = (tcp_flags >> 12) & 0x0F; // Data offset in upper 4 bits
     if (tcp_doff < 5 || tcp_doff > 15) // Min 20 bytes, max 60 bytes
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Ensure TCP header doesn't exceed packet bounds
     __u32 tcp_header_len = tcp_doff * 4;
     if ((void *)((char *)tcp + tcp_header_len) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     struct pair_key pk = {
         .src_ip   = iph->saddr,
@@ -184,7 +184,7 @@ int metrics_count(struct __sk_buff *skb)
         bpf_map_update_elem(&pair_metrics_map, &pk, &new_pm, 0);
     }
 
-    return TC_ACT_OK;
+    return TC_ACT_UNSPEC;
 }
 
 char _license[] SEC("license") = "GPL";
