@@ -243,6 +243,12 @@ int dns_intercept(struct __sk_buff *skb)
     if (wire_len == 0 || wire_len > 63) // 63 = max we can handle in our 64-byte key
         return TC_ACT_UNSPEC;
 
+    // Stored keys contain only the wire name and zero padding. The initial
+    // bounded read also copied QTYPE/QCLASS; reload just the parsed name.
+    __builtin_memset(key_buf, 0, sizeof(key_buf));
+    if (bpf_skb_load_bytes(skb, DNS_QUESTION_OFFSET, key_buf, wire_len) != 0)
+        return TC_ACT_UNSPEC;
+
     // -- map lookup --
     __u32 *ip_addr = bpf_map_lookup_elem(&service_names, key_buf);
     if (!ip_addr)
