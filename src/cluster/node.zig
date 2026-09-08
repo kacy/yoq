@@ -355,8 +355,22 @@ pub const Node = struct {
     /// Timeouts and leadership loss leave an unknown outcome: callers must
     /// inspect durable state before retrying a non-idempotent mutation.
     pub fn proposeCommitted(self: *Node, data: []const u8, timeout_ms: u32) !LogIndex {
+        return self.proposeCommittedWithTerm(data, null, timeout_ms);
+    }
+
+    pub fn proposeCommittedInTerm(self: *Node, data: []const u8, term: types.Term, timeout_ms: u32) !LogIndex {
+        return self.proposeCommittedWithTerm(data, term, timeout_ms);
+    }
+
+    fn proposeCommittedWithTerm(self: *Node, data: []const u8, expected_term: ?types.Term, timeout_ms: u32) !LogIndex {
         self.mu.lockUncancelable(std.Options.debug_io);
         self.fixPointers();
+        if (expected_term) |term| {
+            if (self.raft.persistent_state.current_term != term) {
+                self.mu.unlock(std.Options.debug_io);
+                return error.LeadershipLost;
+            }
+        }
         const index = self.proposeLocked(data) catch |err| {
             self.mu.unlock(std.Options.debug_io);
             return err;

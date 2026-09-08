@@ -1,5 +1,4 @@
 const std = @import("std");
-const sqlite = @import("sqlite");
 const apply_release = @import("../../../manifest/apply_release.zig");
 const app_diff = @import("../../../manifest/app_diff.zig");
 const app_snapshot = @import("../../../manifest/app_snapshot.zig");
@@ -9,6 +8,9 @@ const apply_response = @import("apply_response.zig");
 const apply_request = @import("apply_request.zig");
 const volumes_mod = @import("../../../state/volumes.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
+const mutations = @import("../../../cluster/deployment_mutations.zig");
+const mutation_session = @import("../../../cluster/mutation_session.zig");
+const sql_command = @import("../../../cluster/sql_command.zig");
 const deployment_store = @import("../../../manifest/update/deployment_store.zig");
 const store = @import("../../../state/store.zig");
 const audit = @import("../../../state/audit.zig");
@@ -35,13 +37,27 @@ pub const ClusterApplyBackend = apply_backend.ClusterApplyBackend;
 
 const ClusterReleaseTracker = struct {
     alloc: std.mem.Allocator,
-    db: *sqlite.Db,
+    session: mutation_session.Session,
     app_name: ?[]const u8,
     config_snapshot: []const u8,
     context: apply_release.ApplyContext = .{},
 
     pub fn begin(self: *const ClusterReleaseTracker) !?[]const u8 {
         if (self.context.continue_release_id) |existing_id| {
+            // The caller already holds the app lock. Recheck the durable row
+            // now: a recovery request may have waited behind a finishing apply.
+            const node = self.session.node;
+            node.mu.lockUncancelable(std.Options.debug_io);
+            defer node.mu.unlock(std.Options.debug_io);
+            try self.session.checkLocked();
+            const existing = store.getDeploymentInDb(node.stateMachineDb(), self.alloc, existing_id) catch |err| return switch (err) {
+                error.NotFound => error.Conflict,
+                else => error.InternalError,
+            };
+            defer existing.deinit(self.alloc);
+            if ((!std.mem.eql(u8, existing.status, "pending") and !std.mem.eql(u8, existing.status, "in_progress")) or
+                !std.mem.eql(u8, existing.app_name orelse "", self.app_name orelse "") or
+                !std.mem.eql(u8, existing.config_snapshot, self.config_snapshot)) return error.Conflict;
             const resumed_id = self.alloc.dupe(u8, existing_id) catch return ClusterApplyError.InternalError;
             errdefer self.alloc.free(resumed_id);
             markClusterRolloutActive(existing_id) catch return ClusterApplyError.InternalError;
@@ -54,24 +70,21 @@ const ClusterReleaseTracker = struct {
         const id = deployment_store.generateDeploymentId(self.alloc) catch return ClusterApplyError.InternalError;
         errdefer self.alloc.free(id);
 
-        deployment_store.recordDeploymentInDb(
-            self.db,
-            id,
-            name,
-            name,
-            self.context.trigger.toString(),
-            self.context.source_release_id,
-            self.context.resumed_from_release_id,
-            manifest_hash,
-            self.config_snapshot,
-            0,
-            0,
-            .pending,
-            null,
-            null,
-            null,
-            null,
-        ) catch return ClusterApplyError.InternalError;
+        const command = mutations.insert(self.alloc, .{
+            .id = id,
+            .app_name = name,
+            .service_name = name,
+            .trigger = self.context.trigger.toString(),
+            .source_release_id = self.context.source_release_id,
+            .resumed_from_release_id = self.context.resumed_from_release_id,
+            .manifest_hash = manifest_hash,
+            .config_snapshot = self.config_snapshot,
+            .status = "pending",
+            .message = null,
+            .created_at = nowRealSeconds(),
+        }) catch return ClusterApplyError.InternalError;
+        defer self.alloc.free(command);
+        try self.session.commit(command);
 
         markClusterRolloutActive(id) catch return ClusterApplyError.InternalError;
 
@@ -106,20 +119,54 @@ const ClusterReleaseTracker = struct {
     ) !void {
         const resolved_message = apply_release.materializeMessage(self.alloc, self.context, status, message) catch return ClusterApplyError.InternalError;
         defer if (resolved_message) |msg| self.alloc.free(msg);
-        deployment_store.updateDeploymentProgressInDb(
-            self.db,
-            id,
-            status,
-            resolved_message,
-            completed_targets,
-            failed_targets,
-            failure_details_json,
-            rollout_targets_json,
-            rollout_checkpoint_json,
-        ) catch return ClusterApplyError.InternalError;
+        const command = mutations.progress(self.alloc, id, .{
+            .status = status.toString(),
+            .message = resolved_message,
+            .completed_targets = completed_targets,
+            .failed_targets = failed_targets,
+            .failure_details_json = failure_details_json,
+            .rollout_targets_json = rollout_targets_json,
+            .rollout_checkpoint_json = rollout_checkpoint_json,
+        }) catch return ClusterApplyError.InternalError;
+        defer self.alloc.free(command);
+        var batch = std.Io.Writer.Allocating.init(self.alloc);
+        defer batch.deinit();
+        batch.writer.writeAll(command) catch return error.InternalError;
+        if (isTerminalStatus(status) and status != .failed) {
+            if (self.app_name) |name| appendCronSchedules(&batch.writer, self.alloc, name, self.config_snapshot) catch return error.InternalError;
+        }
+        try self.session.commit(batch.written());
         if (isTerminalStatus(status)) {
             markClusterRolloutInactive(id);
         }
+    }
+
+    pub fn controlState(self: *const ClusterReleaseTracker, id: []const u8) !apply_release.RolloutControlState {
+        const node = self.session.node;
+        node.mu.lockUncancelable(std.Options.debug_io);
+        defer node.mu.unlock(std.Options.debug_io);
+        try self.session.checkLocked();
+        const dep = try store.getDeploymentInDb(node.stateMachineDb(), self.alloc, id);
+        defer dep.deinit(self.alloc);
+        const state = dep.rollout_control_state orelse "active";
+        if (!std.mem.eql(u8, state, "active") and !std.mem.eql(u8, state, "paused") and !std.mem.eql(u8, state, "cancel_requested")) return error.InternalError;
+        return apply_release.RolloutControlState.fromString(state);
+    }
+
+    pub fn preserveProgressOnError(_: *const ClusterReleaseTracker) bool {
+        return true;
+    }
+
+    pub fn isResuming(self: *const ClusterReleaseTracker) bool {
+        return self.context.continue_release_id != null;
+    }
+
+    pub fn finish(_: *const ClusterReleaseTracker, id: []const u8) void {
+        markClusterRolloutInactive(id);
+    }
+
+    pub fn freeOutcome(self: *const ClusterReleaseTracker, outcome: apply_release.ApplyOutcome) void {
+        outcome.deinit(self.alloc);
     }
 
     pub fn freeReleaseId(self: *const ClusterReleaseTracker, id: []const u8) void {
@@ -140,7 +187,10 @@ fn markClusterRolloutActive(id: []const u8) !void {
 
     const entry = try active_rollouts.getOrPut(std.heap.page_allocator, id);
     if (!entry.found_existing) {
-        entry.key_ptr.* = try std.heap.page_allocator.dupe(u8, id);
+        entry.key_ptr.* = std.heap.page_allocator.dupe(u8, id) catch |err| {
+            _ = active_rollouts.remove(id);
+            return err;
+        };
     }
 }
 
@@ -179,6 +229,8 @@ fn handleApply(
     };
     defer parsed.deinit(alloc);
 
+    const session = mutation_session.Session.begin(node) catch return common.notLeader(alloc, node);
+    session.synchronize() catch |err| return mutationFailure(alloc, node, err);
     const db = node.stateMachineDb();
 
     var app_lock: ?apply_lock.ApplyLock = null;
@@ -213,29 +265,20 @@ fn handleApply(
 
     var tracker = ClusterReleaseTracker{
         .alloc = alloc,
-        .db = db,
+        .session = session,
         .app_name = parsed.app_name,
         .config_snapshot = request.body,
         .context = apply_context,
     };
     var backend = ClusterApplyBackend{
         .alloc = alloc,
-        .node = node,
+        .session = session,
         .requests = parsed.requests.items,
         .agents = agents,
     };
-    const apply_result = apply_release.execute(&tracker, &backend) catch |err| switch (err) {
-        ClusterApplyError.NotLeader => return common.notLeader(alloc, node),
-        ClusterApplyError.InternalError => return common.internalError(),
-    };
+    const apply_result = apply_release.execute(&tracker, &backend) catch |err| return mutationFailure(alloc, node, err);
     const apply_report = apply_result.toReport(parsed.app_name orelse "", parsed.requests.items.len, apply_context);
     defer apply_report.deinit(alloc);
-
-    if (parsed.app_name) |app_name| {
-        if (apply_result.outcome.status != .failed) {
-            reconcileCronSchedules(db, alloc, app_name, request.body) catch return common.internalError();
-        }
-    }
 
     const body = switch (response_mode) {
         .legacy => formatLegacyApplyResponse(alloc, apply_report.placed, apply_report.failed) catch return common.internalError(),
@@ -244,20 +287,15 @@ fn handleApply(
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
-fn reconcileCronSchedules(db: *sqlite.Db, alloc: std.mem.Allocator, app_name: []const u8, config_snapshot: []const u8) !void {
+fn appendCronSchedules(writer: *std.Io.Writer, alloc: std.mem.Allocator, app_name: []const u8, config_snapshot: []const u8) !void {
     var schedules = try app_snapshot.listCronSchedules(alloc, config_snapshot);
     defer {
         for (schedules.items) |schedule| schedule.deinit(alloc);
         schedules.deinit(alloc);
     }
-
-    try store.replaceCronSchedulesForAppInDb(
-        db,
-        alloc,
-        app_name,
-        schedules.items,
-        nowRealSeconds(),
-    );
+    try sql_command.write(writer, "DELETE FROM cron_schedules WHERE app_name = ?;", .{app_name});
+    const now = nowRealSeconds();
+    for (schedules.items) |schedule| try sql_command.write(writer, "INSERT INTO cron_schedules (app_name, name, every, spec_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?);", .{ app_name, schedule.name, schedule.every, schedule.spec_json, now, now });
 }
 
 pub fn handleAppApply(alloc: std.mem.Allocator, request: @import("../../http.zig").Request, ctx: RouteContext) Response {
@@ -351,4 +389,118 @@ fn formatAppApplyResponse(
     summary: app_snapshot.Summary,
 ) ![]u8 {
     return apply_response.formatApp(alloc, report, summary);
+}
+
+test "cluster release progress and control survive replica promotion" {
+    const alloc = std.testing.allocator;
+    const Node = @import("../../../cluster/node.zig").Node;
+    var leader = try Node.initForTests(alloc, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/tmp" });
+    defer leader.deinit();
+    leader.raft.role = .leader;
+    leader.raft.persistent_state.current_term = 1;
+    try std.testing.expect(leader.log.setCurrentTerm(1));
+    var replica = try Node.initForTests(alloc, .{ .id = 2, .port = 0, .peers = &.{}, .data_dir = "/tmp" });
+    defer replica.deinit();
+    const snapshot = "{\"app_name\":\"demo\",\"services\":[],\"crons\":[{\"name\":\"cleanup\",\"image\":\"alpine\",\"every\":60}]}";
+    var tracker = ClusterReleaseTracker{
+        .alloc = alloc,
+        .session = try mutation_session.Session.begin(&leader),
+        .app_name = "demo",
+        .config_snapshot = snapshot,
+    };
+    const id = (try tracker.begin()).?;
+    defer tracker.freeReleaseId(id);
+    defer tracker.finish(id);
+    try tracker.markProgressDetails(id, .in_progress, "it's progressing", 2, 0, null, "[]", "{\"batch_start\":2}");
+    const pause = try mutations.control(alloc, id, "paused");
+    defer alloc.free(pause);
+    try tracker.session.commit(pause);
+
+    // A conflicting local runtime record must never control a cluster rollout.
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try store.saveDeployment(.{ .id = id, .service_name = "demo", .manifest_hash = "local", .trigger = "apply", .config_snapshot = snapshot, .status = "in_progress", .message = null, .created_at = 0, .rollout_control_state = "active" });
+    var completed: usize = 0;
+    var failed: usize = 0;
+    const recorder = apply_release.makeProgressRecorder(&tracker, id, &completed, &failed);
+    try std.testing.expectEqual(.paused, try recorder.controlState());
+
+    // Replay exactly the acknowledged prefix into an independent node DB.
+    replica.state_machine.applyUpTo(&leader.log, alloc, leader.raft.commit_index);
+    try std.testing.expectEqual(leader.state_machine.last_applied, replica.state_machine.last_applied);
+    const recovered = try store.getDeploymentInDb(replica.stateMachineDb(), alloc, id);
+    defer recovered.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 2), recovered.completed_targets);
+    try std.testing.expectEqualStrings("{\"batch_start\":2}", recovered.rollout_checkpoint_json.?);
+    try std.testing.expectEqualStrings("it's progressing", recovered.message.?);
+
+    // The promoted replica reads the pause from replicated state. The old
+    // operation stays fenced even if its server becomes leader again later.
+    replica.raft.role = .leader;
+    replica.raft.persistent_state.current_term = 2;
+    try std.testing.expect(replica.log.setCurrentTerm(2));
+    var promoted = tracker;
+    promoted.session = try mutation_session.Session.begin(&replica);
+    try std.testing.expectEqual(.paused, try promoted.controlState(id));
+    leader.raft.persistent_state.current_term = 2;
+    try std.testing.expect(leader.log.setCurrentTerm(2));
+    const previous_index = leader.log.lastIndex();
+    try std.testing.expectError(error.NotLeader, tracker.mark(id, .completed, null));
+    try std.testing.expectEqual(previous_index, leader.log.lastIndex());
+    try std.testing.expectError(error.NotLeader, recorder.controlState());
+
+    // Complete on the original server in a new term, then replay the final
+    // release and cron registration together to the replica.
+    tracker.session = try mutation_session.Session.begin(&leader);
+    try tracker.markProgressDetails(id, .completed, null, 3, 0, null, "[]", null);
+    replica.state_machine.applyUpTo(&leader.log, alloc, leader.raft.commit_index);
+    const final = try store.getDeploymentInDb(replica.stateMachineDb(), alloc, id);
+    defer final.deinit(alloc);
+    try std.testing.expectEqualStrings("completed", final.status);
+    var crons = try store.listCronSchedulesByAppInDb(replica.stateMachineDb(), alloc, "demo");
+    defer {
+        for (crons.items) |cron| cron.deinit(alloc);
+        crons.deinit(alloc);
+    }
+    try std.testing.expectEqual(@as(usize, 1), crons.items.len);
+    try std.testing.expectEqualStrings("cleanup", crons.items[0].name);
+    tracker.context.continue_release_id = id;
+    const final_index = leader.log.lastIndex();
+    try std.testing.expectError(error.Conflict, tracker.begin());
+    try std.testing.expectEqual(final_index, leader.log.lastIndex());
+}
+
+test "cluster release completion rolls back when cron registration fails" {
+    const alloc = std.testing.allocator;
+    const Node = @import("../../../cluster/node.zig").Node;
+    var node = try Node.initForTests(alloc, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/tmp" });
+    defer node.deinit();
+    node.raft.role = .leader;
+    var tracker = ClusterReleaseTracker{
+        .alloc = alloc,
+        .session = try mutation_session.Session.begin(&node),
+        .app_name = "demo",
+        .config_snapshot = "{\"app_name\":\"demo\",\"crons\":[{\"name\":\"duplicate\",\"every\":60},{\"name\":\"duplicate\",\"every\":120}]}",
+    };
+    const id = (try tracker.begin()).?;
+    defer tracker.freeReleaseId(id);
+    defer tracker.finish(id);
+    try tracker.markProgressDetails(id, .in_progress, null, 1, 0, null, "[]", "checkpoint");
+    try std.testing.expectError(error.Conflict, tracker.mark(id, .completed, null));
+    const dep = try store.getDeploymentInDb(node.stateMachineDb(), alloc, id);
+    defer dep.deinit(alloc);
+    try std.testing.expectEqualStrings("in_progress", dep.status);
+    try std.testing.expectEqualStrings("checkpoint", dep.rollout_checkpoint_json.?);
+    var crons = try store.listCronSchedulesByAppInDb(node.stateMachineDb(), alloc, "demo");
+    defer crons.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), crons.items.len);
+}
+
+pub fn mutationFailure(alloc: std.mem.Allocator, node: *@import("../../../cluster/node.zig").Node, err: mutation_session.Error) Response {
+    return switch (err) {
+        error.NotLeader => common.notLeader(alloc, node),
+        error.CommitUnknown => .{ .status = .service_unavailable, .body = "{\"error\":\"rollout outcome unknown; inspect release state before retrying\"}", .allocated = false },
+        error.Conflict => common.conflict("rollout conflicts with cluster state"),
+        error.InternalError => common.internalError(),
+    };
 }

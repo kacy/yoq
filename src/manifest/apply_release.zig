@@ -56,6 +56,12 @@ pub const ApplyOutcome = struct {
     failed: usize = 0,
     completed_targets: usize = 0,
     failed_targets: usize = 0,
+
+    pub fn deinit(self: ApplyOutcome, alloc: std.mem.Allocator) void {
+        if (self.failure_details_json) |json| alloc.free(json);
+        if (self.rollout_targets_json) |json| alloc.free(json);
+        if (self.rollout_checkpoint_json) |json| alloc.free(json);
+    }
 };
 
 pub const ApplyResult = struct {
@@ -88,9 +94,7 @@ pub const ApplyResult = struct {
 
     pub fn deinit(self: ApplyResult, alloc: std.mem.Allocator) void {
         if (self.release_id) |id| alloc.free(id);
-        if (self.outcome.failure_details_json) |failure_details_json| alloc.free(failure_details_json);
-        if (self.outcome.rollout_targets_json) |rollout_targets_json| alloc.free(rollout_targets_json);
-        if (self.outcome.rollout_checkpoint_json) |rollout_checkpoint_json| alloc.free(rollout_checkpoint_json);
+        self.outcome.deinit(alloc);
     }
 };
 
@@ -355,6 +359,7 @@ fn markReleaseIfPresent(
 pub const ProgressRecorder = struct {
     ctx: *anyopaque,
     release_id: []const u8,
+    controlFn: ?*const fn (ctx: *anyopaque, release_id: []const u8) anyerror!RolloutControlState = null,
     completed_targets_ptr: ?*usize = null,
     failed_targets_ptr: ?*usize = null,
     markFn: *const fn (
@@ -394,15 +399,16 @@ pub const ProgressRecorder = struct {
         try self.markFn(self.ctx, self.release_id, status, message, completed_targets, failed_targets, failure_details_json, rollout_targets_json, rollout_checkpoint_json);
     }
 
-    pub fn controlState(self: ProgressRecorder) RolloutControlState {
-        const dep = store.getDeployment(std.heap.page_allocator, self.release_id) catch return .active;
+    pub fn controlState(self: ProgressRecorder) !RolloutControlState {
+        if (self.controlFn) |read| return read(self.ctx, self.release_id);
+        const dep = try store.getDeployment(std.heap.page_allocator, self.release_id);
         defer dep.deinit(std.heap.page_allocator);
         return RolloutControlState.fromString(dep.rollout_control_state);
     }
 
     pub fn waitWhilePaused(self: ProgressRecorder) !bool {
         while (true) {
-            const state = self.controlState();
+            const state = try self.controlState();
             switch (state) {
                 .active => return false,
                 .cancel_requested => return true,
@@ -412,7 +418,7 @@ pub const ProgressRecorder = struct {
     }
 };
 
-fn makeProgressRecorder(
+pub fn makeProgressRecorder(
     tracker: anytype,
     release_id: []const u8,
     completed_targets_ptr: *usize,
@@ -420,6 +426,11 @@ fn makeProgressRecorder(
 ) ProgressRecorder {
     const TrackerPtr = @TypeOf(tracker);
     const Adapter = struct {
+        fn control(ctx: *anyopaque, id: []const u8) anyerror!RolloutControlState {
+            const typed: TrackerPtr = @ptrCast(@alignCast(ctx));
+            return typed.controlState(id);
+        }
+
         fn mark(
             ctx: *anyopaque,
             id: []const u8,
@@ -442,6 +453,7 @@ fn makeProgressRecorder(
         .completed_targets_ptr = completed_targets_ptr,
         .failed_targets_ptr = failed_targets_ptr,
         .markFn = Adapter.mark,
+        .controlFn = if (@hasDecl(std.meta.Child(TrackerPtr), "controlState")) Adapter.control else null,
     };
 }
 
@@ -454,6 +466,9 @@ fn attachProgressRecorderIfSupported(backend: anytype, recorder: ProgressRecorde
 pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
     const release_id = try tracker.begin();
     errdefer if (release_id) |id| tracker.freeReleaseId(id);
+    defer if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "finish")) {
+        if (release_id) |id| tracker.finish(id);
+    };
     var completed_targets: usize = 0;
     var failed_targets: usize = 0;
 
@@ -464,9 +479,14 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
         );
     }
 
-    try markReleaseIfPresent(tracker, release_id, .in_progress, null, 0, 0, null, null, null);
+    const resuming = if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "isResuming")) tracker.isResuming() else false;
+    if (!resuming) try markReleaseIfPresent(tracker, release_id, .in_progress, null, 0, 0, null, null, null);
 
     const outcome = backend.apply() catch |err| {
+        // An uncertain commit or lost term must retain its checkpoint for the
+        // current leader to inspect, never publish a guessed terminal result.
+        const preserve = if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "preserveProgressOnError")) tracker.preserveProgressOnError() else false;
+        if (preserve or err == error.NotLeader or err == error.CommitUnknown) return err;
         try markReleaseIfPresent(
             tracker,
             release_id,
@@ -480,6 +500,8 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
         );
         return err;
     };
+
+    errdefer if (@hasDecl(std.meta.Child(@TypeOf(tracker)), "freeOutcome")) tracker.freeOutcome(outcome);
 
     try markReleaseIfPresent(
         tracker,
@@ -507,6 +529,16 @@ const TestTracker = struct {
     completed_targets: [4]usize = [_]usize{0} ** 4,
     failed_targets: [4]usize = [_]usize{0} ** 4,
     mark_count: usize = 0,
+    resuming: bool = false,
+    finished: bool = false,
+
+    fn isResuming(self: *@This()) bool {
+        return self.resuming;
+    }
+
+    fn finish(self: *@This(), _: []const u8) void {
+        self.finished = true;
+    }
 
     fn begin(self: *@This()) !?[]const u8 {
         const id = try self.alloc.dupe(u8, self.release_id);
@@ -843,4 +875,24 @@ test "reportFromDeployment preserves paused control as blocked rollout state" {
     const report = reportFromDeployment(dep);
     try std.testing.expectEqual(RolloutControlState.paused, report.rollout_control_state);
     try std.testing.expectEqualStrings("blocked", report.rolloutState());
+}
+
+test "resumed release retains checkpoint until backend progress and releases ownership on uncertainty" {
+    const Backend = struct {
+        tracker: *TestTracker,
+
+        fn apply(self: *@This()) !ApplyOutcome {
+            try std.testing.expectEqual(@as(usize, 0), self.tracker.mark_count);
+            return error.CommitUnknown;
+        }
+
+        fn failureMessage(_: *@This(), _: anytype) ?[]const u8 {
+            return "unknown commit";
+        }
+    };
+    var tracker = TestTracker{ .alloc = std.testing.allocator, .release_id = "resume", .resuming = true };
+    var backend = Backend{ .tracker = &tracker };
+    try std.testing.expectError(error.CommitUnknown, execute(&tracker, &backend));
+    try std.testing.expectEqual(@as(usize, 0), tracker.mark_count);
+    try std.testing.expect(tracker.finished);
 }

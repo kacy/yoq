@@ -2,7 +2,7 @@ const std = @import("std");
 const sqlite = @import("sqlite");
 
 const scheduler = @import("../../../cluster/scheduler.zig");
-const cluster_node = @import("../../../cluster/node.zig");
+const mutation_session = @import("../../../cluster/mutation_session.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
 const apply_request = @import("apply_request.zig");
 const rollout_targets_mod = @import("rollout_targets.zig");
@@ -11,10 +11,7 @@ const ActivatedTarget = rollout_targets_mod.ActivatedTarget;
 const RolloutTargetBuilder = rollout_targets_mod.RolloutTargetBuilder;
 const ScheduledTarget = rollout_targets_mod.ScheduledTarget;
 
-pub const ApplyError = error{
-    NotLeader,
-    InternalError,
-};
+pub const ApplyError = mutation_session.Error;
 
 fn nowRealSeconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
@@ -84,12 +81,12 @@ pub const RollbackState = struct {
         }) catch return ApplyError.InternalError;
     }
 
-    pub fn rollbackActivatedTargets(self: *RollbackState, node: *cluster_node.Node) ApplyError!void {
+    pub fn rollbackActivatedTargets(self: *RollbackState, session: mutation_session.Session) ApplyError!void {
         for (self.activated_targets.items) |target| {
-            try deleteAssignmentsForRequest(node, target.request);
+            try deleteAssignmentsForRequest(session, target.request);
             if (self.findSnapshot(target.request)) |snapshot| {
                 for (snapshot.assignments) |assignment| {
-                    try restoreAssignment(node, assignment);
+                    try restoreAssignment(session, assignment);
                 }
             }
         }
@@ -122,12 +119,12 @@ pub const RollbackState = struct {
     }
 };
 
-pub fn activateTarget(node: *cluster_node.Node, target: ScheduledTarget) ApplyError!void {
-    try reconcilePriorAssignments(node, target.request, target.assignment_ids);
+pub fn activateTarget(session: mutation_session.Session, target: ScheduledTarget) ApplyError!void {
+    try reconcilePriorAssignments(session, target.request, target.assignment_ids);
 }
 
 fn reconcilePriorAssignments(
-    node: *cluster_node.Node,
+    session: mutation_session.Session,
     request: scheduler.PlacementRequest,
     keep_ids: []const []const u8,
 ) ApplyError!void {
@@ -143,16 +140,16 @@ fn reconcilePriorAssignments(
         workload_name,
         keep_ids,
     ) catch return ApplyError.InternalError;
-    _ = node.propose(sql) catch return ApplyError.NotLeader;
+    try session.commit(sql);
 }
 
-pub fn discardTarget(node: *cluster_node.Node, target: ScheduledTarget) ApplyError!void {
+pub fn discardTarget(session: mutation_session.Session, target: ScheduledTarget) ApplyError!void {
     var sql_buf: [2048]u8 = undefined;
     const sql = agent_registry.deleteAssignmentsByIdsSql(&sql_buf, target.assignment_ids) catch return ApplyError.InternalError;
-    _ = node.propose(sql) catch return ApplyError.NotLeader;
+    try session.commit(sql);
 }
 
-fn deleteAssignmentsForRequest(node: *cluster_node.Node, request: scheduler.PlacementRequest) ApplyError!void {
+fn deleteAssignmentsForRequest(session: mutation_session.Session, request: scheduler.PlacementRequest) ApplyError!void {
     const app_name = request.app_name orelse return;
     const workload_kind = request.workload_kind orelse return;
     const workload_name = request.workload_name orelse return;
@@ -164,10 +161,10 @@ fn deleteAssignmentsForRequest(node: *cluster_node.Node, request: scheduler.Plac
         workload_kind,
         workload_name,
     ) catch return ApplyError.InternalError;
-    _ = node.propose(sql) catch return ApplyError.NotLeader;
+    try session.commit(sql);
 }
 
-fn restoreAssignment(node: *cluster_node.Node, assignment: agent_registry.Assignment) ApplyError!void {
+fn restoreAssignment(session: mutation_session.Session, assignment: agent_registry.Assignment) ApplyError!void {
     var sql_buf: [@import("../../../cluster/assignment_spec.zig").sql_buffer_size]u8 = undefined;
     const request: scheduler.PlacementRequest = .{
         .image = assignment.image,
@@ -206,7 +203,7 @@ fn restoreAssignment(node: *cluster_node.Node, assignment: agent_registry.Assign
             nowRealSeconds(),
         ) catch return ApplyError.InternalError;
 
-    _ = node.propose(sql) catch return ApplyError.NotLeader;
+    try session.commit(sql);
 }
 
 fn copyAssignmentIds(alloc: std.mem.Allocator, ids: []const []const u8) ![]const []const u8 {

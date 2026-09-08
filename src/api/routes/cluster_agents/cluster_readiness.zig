@@ -59,7 +59,7 @@ pub fn resolveTargetReadinessStates(
 
     while (remaining > 0) {
         if (progress) |recorder| {
-            if (recorder.waitWhilePaused() catch false) return states;
+            if (try recorder.waitWhilePaused()) return states;
         }
         for (targets, 0..) |target, i| {
             if (states[i] != .pending) continue;
