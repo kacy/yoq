@@ -19,7 +19,7 @@ pub fn init(alloc: std.mem.Allocator, server_addr: [4]u8, server_port: u16, toke
         .loop_thread = null,
         .log_server = null,
         .log_server_thread = null,
-        .local_containers = std.StringHashMap(agent_mod.ContainerState).init(alloc),
+        .local_containers = std.StringHashMap(*agent_mod.LocalAssignment).init(alloc),
         .container_lock = .init,
         .node_id = null,
         .wg_keypair = null,
@@ -104,6 +104,7 @@ pub fn deinit(self: anytype) void {
     var it = self.local_containers.iterator();
     while (it.next()) |entry| {
         self.alloc.free(entry.key_ptr.*);
+        self.alloc.destroy(entry.value_ptr.*);
     }
     self.local_containers.deinit();
 
