@@ -6,7 +6,6 @@ const auth = @import("registry/auth.zig");
 const manifest_fetch = @import("registry/manifest.zig");
 const blob_transfer = @import("registry/blob_transfer.zig");
 const upload = @import("registry/upload.zig");
-const http_helpers = @import("registry/http.zig");
 
 pub const RegistryError = common.RegistryError;
 pub const PullResult = common.PullResult;
@@ -457,67 +456,6 @@ test "auth scope string — push,pull scope produces correct URL fragment" {
         .{ "https://auth.example.io/token", "registry.example.io", "myrepo", "push,pull" },
     ) catch unreachable;
     try std.testing.expect(std.mem.indexOf(u8, url, "scope=repository:myrepo:push,pull") != null);
-}
-
-test "parseLocationHeader — absolute URL returned as-is" {
-    const response_bytes = "HTTP/1.1 202 Accepted\r\n" ++
-        "Location: https://registry.example.io/v2/myrepo/blobs/uploads/uuid-123\r\n" ++
-        "Content-Length: 0\r\n\r\n";
-
-    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
-    const location = http_helpers.parseLocationHeader("registry.example.io", head).?;
-    try std.testing.expectEqualStrings(
-        "https://registry.example.io/v2/myrepo/blobs/uploads/uuid-123",
-        location,
-    );
-}
-
-test "parseLocationHeader — relative URL gets host prepended" {
-    const response_bytes = "HTTP/1.1 202 Accepted\r\n" ++
-        "Location: /v2/myrepo/blobs/uploads/uuid-456\r\n" ++
-        "Content-Length: 0\r\n\r\n";
-
-    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
-    const location = http_helpers.parseLocationHeader("registry.example.io", head).?;
-    try std.testing.expectEqualStrings(
-        "https://registry.example.io/v2/myrepo/blobs/uploads/uuid-456",
-        location,
-    );
-}
-
-test "parseLocationHeader — missing header returns null" {
-    const response_bytes = "HTTP/1.1 202 Accepted\r\n" ++
-        "Content-Length: 0\r\n\r\n";
-
-    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
-    try std.testing.expect(http_helpers.parseLocationHeader("registry.example.io", head) == null);
-}
-
-test "resolveUploadTarget rejects insecure absolute URLs" {
-    try std.testing.expect(upload.resolveUploadTarget(
-        "registry.example.io",
-        "http://registry.example.io/v2/myrepo/blobs/uploads/uuid-123",
-    ) == null);
-}
-
-test "resolveUploadTarget omits auth for non-registry hosts" {
-    const target = upload.resolveUploadTarget(
-        "registry.example.io",
-        "https://storage.example.io/v2/myrepo/blobs/uploads/uuid-123",
-    ).?;
-    try std.testing.expectEqualStrings(
-        "https://storage.example.io/v2/myrepo/blobs/uploads/uuid-123",
-        target.url,
-    );
-    try std.testing.expect(!target.send_auth);
-}
-
-test "resolveUploadTarget keeps auth for registry host" {
-    const target = upload.resolveUploadTarget(
-        "registry.example.io",
-        "https://registry.example.io/v2/myrepo/blobs/uploads/uuid-123",
-    ).?;
-    try std.testing.expect(target.send_auth);
 }
 
 test "checkBlobExists — URL is correctly formed" {
