@@ -442,3 +442,66 @@ test "running training replacement waits for heartbeat capacity after pause" {
     try std.testing.expectEqual(http.StatusCode.ok, resumed.status);
     try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(harness.node.stateMachineDb(), "running-training", "finetune"));
 }
+
+test "training controls retain job identity until a new start" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
+    defer harness.deinit();
+    try harness.seedTrainingRelease("job-controls", "finetune", 1);
+    const started = try harness.trainingStart("job-controls", "finetune");
+    defer freeResponse(alloc, started);
+    try std.testing.expectEqual(http.StatusCode.ok, started.status);
+
+    const db = harness.node.stateMachineDb();
+    try db.exec("UPDATE training_jobs SET created_at = 100, restart_count = 3;", .{}, .{});
+    const original = (try store.findTrainingJobInDb(db, alloc, "job-controls", "finetune")).?;
+    defer original.deinit(alloc);
+
+    const scaled = try harness.trainingScale("job-controls", "finetune", 2);
+    defer freeResponse(alloc, scaled);
+    try std.testing.expectEqual(http.StatusCode.ok, scaled.status);
+    for ([_][]const u8{ "stop", "resume" }) |action| {
+        const path = try std.fmt.allocPrint(alloc, "/apps/job-controls/training/finetune/{s}", .{action});
+        defer alloc.free(path);
+        const response = route(makeRequest(.POST, path, "", ""), alloc, harness.ctx()).?;
+        defer freeResponse(alloc, response);
+        try std.testing.expectEqual(http.StatusCode.ok, response.status);
+        const record = (try store.findTrainingJobInDb(db, alloc, "job-controls", "finetune")).?;
+        defer record.deinit(alloc);
+        try std.testing.expectEqualStrings(original.id, record.id);
+        try std.testing.expectEqual(original.created_at, record.created_at);
+        try std.testing.expectEqual(original.restart_count, record.restart_count);
+        try std.testing.expectEqual(@as(i64, 2), record.gpus);
+        const stopped = std.mem.eql(u8, action, "stop");
+        try std.testing.expectEqualStrings(if (stopped) "stopped" else "running", record.state);
+        try std.testing.expectEqual(@as(usize, if (stopped) 0 else 2), try countTrainingAssignments(db, "job-controls", "finetune"));
+        try expectJsonContains(response.body, if (stopped) "\"message\":\"training job stopped\"" else "\"message\":\"training job scheduled\"");
+    }
+
+    const restarted = try harness.trainingStart("job-controls", "finetune");
+    defer freeResponse(alloc, restarted);
+    try std.testing.expectEqual(http.StatusCode.ok, restarted.status);
+    const fresh = (try store.findTrainingJobInDb(db, alloc, "job-controls", "finetune")).?;
+    defer fresh.deinit(alloc);
+    try std.testing.expect(!std.mem.eql(u8, original.id, fresh.id));
+    try std.testing.expect(fresh.created_at > original.created_at);
+    try std.testing.expectEqual(original.restart_count, fresh.restart_count);
+    try std.testing.expectEqual(@as(i64, 1), fresh.gpus);
+    try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(db, "job-controls", "finetune"));
+}
+
+test "training controls require an existing job except for start" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
+    defer harness.deinit();
+    try harness.seedTrainingRelease("missing-job", "finetune", 1);
+    for ([_][]const u8{ "resume", "scale", "pause", "stop" }) |action| {
+        const path = try std.fmt.allocPrint(alloc, "/apps/missing-job/training/finetune/{s}", .{action});
+        defer alloc.free(path);
+        const response = route(makeRequest(.POST, path, "{\"gpus\":2}", ""), alloc, harness.ctx()).?;
+        defer freeResponse(alloc, response);
+        try std.testing.expectEqual(http.StatusCode.not_found, response.status);
+    }
+    try std.testing.expectEqual(@as(usize, 0), try countTrainingAssignments(harness.node.stateMachineDb(), "missing-job", "finetune"));
+    try std.testing.expect((try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "missing-job", "finetune")) == null);
+}
