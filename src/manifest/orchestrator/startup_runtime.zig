@@ -149,7 +149,7 @@ pub fn startTlsProxy(
     registerTlsBackends(alloc, resources.backend_registry, services, states, start_set);
     if (hasManagedAcmeService(services, start_set)) resources.proxy.setRenewalConfig(.{});
     resources.proxy.start();
-    provisionAcmeCerts(alloc, resources.tls_certs, &resources.proxy.challenges, services, start_set);
+    provisionAcmeCerts(alloc, resources.certs, &resources.proxy.challenges, services, start_set);
     return resources;
 }
 

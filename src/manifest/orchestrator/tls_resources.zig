@@ -24,8 +24,8 @@ const InitDeps = struct {
 pub const TlsResources = struct {
     backend_registry: *tls_backend.BackendRegistry,
     proxy: *tls_proxy.TlsProxy,
-    tls_certs: *cert_store.CertStore,
-    tls_db: *sqlite.Db,
+    certs: *cert_store.CertStore,
+    db: *sqlite.Db,
 
     /// bind both listeners without starting workers. callers register backends
     /// and configure renewal before starting the proxy.
@@ -53,15 +53,15 @@ pub const TlsResources = struct {
         errdefer alloc.destroy(proxy);
         proxy.* = deps.init_proxy(alloc, registry, certs, 443, 80) catch return error.BindProxyFailed;
 
-        return .{ .backend_registry = registry, .proxy = proxy, .tls_certs = certs, .tls_db = db };
+        return .{ .backend_registry = registry, .proxy = proxy, .certs = certs, .db = db };
     }
 
     pub fn deinit(self: *TlsResources, alloc: std.mem.Allocator) void {
         self.proxy.deinit();
         alloc.destroy(self.proxy);
-        std.crypto.secureZero(u8, &self.tls_certs.key);
-        alloc.destroy(self.tls_certs);
-        store.closeOwnedDb(alloc, self.tls_db);
+        std.crypto.secureZero(u8, &self.certs.key);
+        alloc.destroy(self.certs);
+        store.closeOwnedDb(alloc, self.db);
         self.backend_registry.deinit();
         alloc.destroy(self.backend_registry);
     }
@@ -120,4 +120,24 @@ test "tls resources release partial state on allocation and initialization failu
     inline for (.{ FailureStage.database, FailureStage.certificates, FailureStage.listener }) |stage| {
         try std.testing.checkAllAllocationFailures(std.testing.allocator, checkTlsRollback, .{stage});
     }
+}
+
+test "tls resources own populated dependencies until normal cleanup" {
+    const LocalProxy = struct {
+        fn init(alloc: std.mem.Allocator, registry: *tls_backend.BackendRegistry, certs: *cert_store.CertStore, _: u16, _: u16) tls_proxy.ProxyError!tls_proxy.TlsProxy {
+            return tls_proxy.TlsProxy.init(alloc, registry, certs, 0, 0);
+        }
+    };
+    const alloc = std.testing.allocator;
+    var resources = try TlsResources.initWithDeps(alloc, .{
+        .open_db = TestDeps.openMemory,
+        .init_certs = TestDeps.initCerts,
+        .init_proxy = LocalProxy.init,
+    });
+    defer resources.deinit(alloc);
+    try resources.backend_registry.register("example.test", "127.0.0.1", 8080, .off);
+    try resources.proxy.challenges.set("token", "key-authorization");
+    try std.testing.expect(resources.proxy.backends == resources.backend_registry);
+    try std.testing.expect(resources.proxy.certs == resources.certs);
+    try std.testing.expect(resources.certs.db == resources.db);
 }
