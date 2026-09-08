@@ -62,6 +62,8 @@ pub const setLinkUp = link_ops.setLinkUp;
 pub const deleteLink = link_ops.deleteLink;
 
 pub const addAddress = route_ops.addAddress;
+pub const addRoutedAddress = route_ops.addRoutedAddress;
+pub const addLinkRoute = route_ops.addLinkRoute;
 pub const hasAddress = route_ops.hasAddress;
 pub const getFirstIpv4Address = route_ops.getFirstIpv4Address;
 pub const addRoute = route_ops.addRoute;

@@ -338,8 +338,11 @@ pub fn configurableContainer(pid: posix.pid_t, ip: [4]u8, gw: [4]u8, plen: u8) B
         const eth0_idx = nl.getIfIndex(fd, "eth0") catch break :blk BridgeError.InterfaceNotFound;
         if (eth0_idx == 0) break :blk BridgeError.InterfaceNotFound;
 
-        nl.addAddress(fd, eth0_idx, &ip, plen) catch break :blk BridgeError.AddressFailed;
+        // Route peer traffic through the bridge so replies traverse its
+        // load-balancer return path instead of switching directly between veths.
+        nl.addRoutedAddress(fd, eth0_idx, &ip, plen) catch break :blk BridgeError.AddressFailed;
         nl.setLinkUp(fd, eth0_idx) catch break :blk BridgeError.LinkSetFailed;
+        nl.addLinkRoute(fd, eth0_idx, &gw, 32) catch break :blk BridgeError.RouteFailed;
 
         // add default route via gateway (0.0.0.0/0)
         nl.addRoute(fd, null, 0, &gw) catch break :blk BridgeError.RouteFailed;
