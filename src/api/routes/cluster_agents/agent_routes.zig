@@ -524,7 +524,7 @@ test "enrollment retry after lost response and replica promotion keeps one ident
     defer if (retried.allocated) alloc.free(retried.body);
     try std.testing.expectEqual(http.StatusCode.ok, retried.status);
     try std.testing.expectEqualStrings(first_id, extractJsonString(retried.body, "id").?);
-    try std.testing.expectEqual(@as(?i64, 2), extractJsonInt(retried.body, "node_id"));
+    try std.testing.expectEqual(@as(?i64, 2), json_helpers.extractJsonInt(retried.body, "node_id"));
     const row = (try replica.stateMachineDb().one(struct { agents: i64, peers: i64 }, "SELECT (SELECT COUNT(*) FROM agents) AS agents, (SELECT COUNT(*) FROM wireguard_peers) AS peers;", .{}, .{})).?;
     try std.testing.expectEqual(@as(i64, 1), row.agents);
     try std.testing.expectEqual(@as(i64, 1), row.peers);
