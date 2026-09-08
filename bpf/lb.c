@@ -97,11 +97,11 @@ struct bpf_map_def SEC("maps") rev_conntrack_map = {
 static __attribute__((always_inline)) __u32
 select_backend(__u32 src_ip, struct service_backends *svc)
 {
-    // SECURITY: Validate backend count
-    if (svc->count == 0 || svc->count > 64)
+    __u32 count = svc->count;
+    if (count == 0 || count > 64)
         return 0;
 
-    if (svc->count == 1)
+    if (count == 1)
         return svc->ips[0];
 
     // FNV-1a hash of source IP
@@ -115,8 +115,11 @@ select_backend(__u32 src_ip, struct service_backends *svc)
     hash ^= ((src_ip >> 24) & 0xFF);
     hash *= 16777619U;
 
-    // mask with 0x3F so the verifier can prove idx < 64 (array bounds).
-    __u32 idx = (hash % svc->count) & 0x3F;
+    __u32 idx = hash % count;
+    // Clang can prove the remainder is below 64 and otherwise removes the
+    // mask. The kernel verifier needs this explicit bound after variable modulo.
+    asm volatile("" : "+r"(idx));
+    idx &= 0x3F;
     return svc->ips[idx];
 }
 
