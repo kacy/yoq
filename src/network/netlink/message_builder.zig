@@ -135,7 +135,7 @@ pub const MessageBuilder = struct {
 
         const rta: *common.RtAttr = @ptrCast(@alignCast(&self.buf[self.pos]));
         rta.len = @intCast(rta_size);
-        rta.type = attr_type;
+        rta.type = attr_type | (1 << 15); // NLA_F_NESTED
 
         self.pos += rta_size;
         hdr.len = @intCast(@as(usize, hdr.len) + rta_size);

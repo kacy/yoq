@@ -235,3 +235,20 @@ jobs:
 
   interoperability:
     uses: ./.github/workflows/_interoperability.yml
+
+  wireguard-kernel:
+    name: wireguard-kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+      - name: install independent kernel reader
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y wireguard-tools
+      - name: verify native wireguard configuration
+        run: bash scripts/wireguard-kernel-smoke.sh
+
