@@ -113,6 +113,49 @@ pub fn openDb() StoreError!sqlite.Db {
     return db;
 }
 
+pub const OwnedDbError = error{ AllocateDbFailed, DbOpenFailed };
+
+/// open a separate connection at a stable address for stores that borrow it.
+/// the caller owns the connection and must release it with closeOwnedDb.
+pub fn openOwnedDb(alloc: std.mem.Allocator) OwnedDbError!*sqlite.Db {
+    return openOwnedDbWith(alloc, openDb);
+}
+
+fn openOwnedDbWith(alloc: std.mem.Allocator, open_fn: *const fn () StoreError!sqlite.Db) OwnedDbError!*sqlite.Db {
+    const db = alloc.create(sqlite.Db) catch return error.AllocateDbFailed;
+    errdefer alloc.destroy(db);
+    db.* = open_fn() catch return error.DbOpenFailed;
+    return db;
+}
+
+pub fn closeOwnedDb(alloc: std.mem.Allocator, db: *sqlite.Db) void {
+    db.deinit();
+    alloc.destroy(db);
+}
+
+test "owned database releases its allocation when opening fails" {
+    const FailedOpen = struct {
+        fn open() StoreError!sqlite.Db {
+            return error.DbOpenFailed;
+        }
+    };
+    try std.testing.expectError(error.DbOpenFailed, openOwnedDbWith(std.testing.allocator, FailedOpen.open));
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.AllocateDbFailed, openOwnedDbWith(failing.allocator(), FailedOpen.open));
+}
+
+test "owned database keeps a usable connection until closed" {
+    const MemoryDb = struct {
+        fn open() StoreError!sqlite.Db {
+            return sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } }) catch error.DbOpenFailed;
+        }
+    };
+    const db = try openOwnedDbWith(std.testing.allocator, MemoryDb.open);
+    defer closeOwnedDb(std.testing.allocator, db);
+    try db.exec("CREATE TABLE owned_connection (value INTEGER);", .{}, .{});
+}
+
 test "DbLease holds database lifetime until deinit" {
     try initTestDb();
     defer deinitTestDb();

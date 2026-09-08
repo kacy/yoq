@@ -1,7 +1,7 @@
 // store — persistent state facade
 //
-// this file now exposes the stable state-store API while the
-// implementations live in smaller domain modules under `state/store/`.
+// public state operations and record types. database access and queries
+// live in the modules under `state/store/`.
 
 const common = @import("store/common.zig");
 const service_core = @import("store/services_core.zig");
@@ -47,6 +47,9 @@ pub const initTestDb = common.initTestDb;
 pub const deinitTestDb = common.deinitTestDb;
 pub const closeDb = common.closeDb;
 pub const openDb = common.openDb;
+pub const OwnedDbError = common.OwnedDbError;
+pub const openOwnedDb = common.openOwnedDb;
+pub const closeOwnedDb = common.closeOwnedDb;
 
 pub const save = @import("store/containers.zig").save;
 pub const load = @import("store/containers.zig").load;
