@@ -4,7 +4,7 @@ const blob_store = @import("../store.zig");
 const common = @import("common.zig");
 const http_helpers = @import("http.zig");
 
-pub const UploadTarget = struct {
+const UploadTarget = struct {
     /// borrows the location passed to resolveUploadTarget.
     url: []const u8,
     send_auth: bool,
@@ -164,7 +164,7 @@ pub fn uploadManifest(
     if (result.status != .created) return common.RegistryError.UploadFailed;
 }
 
-pub fn resolveUploadTarget(registry_host: []const u8, location: []const u8) ?UploadTarget {
+fn resolveUploadTarget(registry_host: []const u8, location: []const u8) ?UploadTarget {
     const uri = std.Uri.parse(location) catch return null;
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return null;
     if (protocol != .tls) return null;
@@ -242,7 +242,7 @@ test "resolveUploadTarget omits auth for non-registry hosts" {
     const target = resolveUploadTarget(
         "registry.example.io",
         "https://storage.example.io/v2/myrepo/blobs/uploads/uuid-123",
-    ).?;
+    ) orelse return error.ExpectedUploadTarget;
     try std.testing.expectEqualStrings(
         "https://storage.example.io/v2/myrepo/blobs/uploads/uuid-123",
         target.url,
@@ -254,7 +254,7 @@ test "resolveUploadTarget keeps auth for registry host" {
     const target = resolveUploadTarget(
         "registry.example.io",
         "https://registry.example.io/v2/myrepo/blobs/uploads/uuid-123",
-    ).?;
+    ) orelse return error.ExpectedUploadTarget;
     try std.testing.expect(target.send_auth);
 }
 
@@ -269,7 +269,7 @@ test "resolveUploadTarget forwards credentials only to the same https origin" {
         .{ .registry = "registry.example.io", .location = "https://REGISTRY.EXAMPLE.IO:443/upload", .send_auth = true },
         .{ .registry = "[::1]:5443", .location = "https://[::1]:5443/upload", .send_auth = true },
     }) |case| {
-        const target = resolveUploadTarget(case.registry, case.location).?;
+        const target = resolveUploadTarget(case.registry, case.location) orelse return error.ExpectedUploadTarget;
         try std.testing.expectEqual(case.send_auth, target.send_auth);
     }
 }

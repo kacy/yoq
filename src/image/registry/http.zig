@@ -77,8 +77,8 @@ test "parseLocationHeader copies absolute locations" {
         "Content-Length: 0\r\n\r\n";
 
     var location_buf: [8192]u8 = undefined;
-    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
-    const location = parseLocationHeader("registry.example.io", head, &location_buf).?;
+    const head = try std.http.Client.Response.Head.parse(response_bytes);
+    const location = parseLocationHeader("registry.example.io", head, &location_buf) orelse return error.ExpectedLocation;
     try std.testing.expectEqualStrings(
         "https://registry.example.io/v2/myrepo/blobs/uploads/uuid-123",
         location,
@@ -91,8 +91,8 @@ test "parseLocationHeader — relative URL gets host prepended" {
         "Content-Length: 0\r\n\r\n";
 
     var location_buf: [8192]u8 = undefined;
-    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
-    const location = parseLocationHeader("registry.example.io", head, &location_buf).?;
+    const head = try std.http.Client.Response.Head.parse(response_bytes);
+    const location = parseLocationHeader("registry.example.io", head, &location_buf) orelse return error.ExpectedLocation;
     try std.testing.expectEqualStrings(
         "https://registry.example.io/v2/myrepo/blobs/uploads/uuid-456",
         location,
@@ -104,7 +104,7 @@ test "parseLocationHeader — missing header returns null" {
         "Content-Length: 0\r\n\r\n";
 
     var location_buf: [8192]u8 = undefined;
-    const head = std.http.Client.Response.Head.parse(response_bytes) catch unreachable;
+    const head = try std.http.Client.Response.Head.parse(response_bytes);
     try std.testing.expect(parseLocationHeader("registry.example.io", head, &location_buf) == null);
 }
 
@@ -114,7 +114,7 @@ test "parseLocationHeader keeps locations after response storage is reused" {
         "Content-Length: 0\r\n\r\n").*;
     const head = try std.http.Client.Response.Head.parse(&response_bytes);
     var location_buf: [128]u8 = undefined;
-    const location = parseLocationHeader("registry.example.io", head, &location_buf).?;
+    const location = parseLocationHeader("registry.example.io", head, &location_buf) orelse return error.ExpectedLocation;
     @memset(&response_bytes, 'x');
     try std.testing.expectEqualStrings("https://registry.example.io/upload?id=123", location);
 }
@@ -123,8 +123,8 @@ test "parseLocationHeader keeps separate results in caller buffers" {
     const head = try std.http.Client.Response.Head.parse("HTTP/1.1 202 Accepted\r\nLocation: /upload\r\n\r\n");
     var first_buf: [128]u8 = undefined;
     var second_buf: [128]u8 = undefined;
-    const first = parseLocationHeader("first.example.io", head, &first_buf).?;
-    const second = parseLocationHeader("second.example.io", head, &second_buf).?;
+    const first = parseLocationHeader("first.example.io", head, &first_buf) orelse return error.ExpectedLocation;
+    const second = parseLocationHeader("second.example.io", head, &second_buf) orelse return error.ExpectedLocation;
     try std.testing.expectEqualStrings("https://first.example.io/upload", first);
     try std.testing.expectEqualStrings("https://second.example.io/upload", second);
 }
