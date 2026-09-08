@@ -15,14 +15,21 @@ const http = @import("../../http.zig");
 const Response = common.Response;
 const RouteContext = common.RouteContext;
 
-const Action = enum { start, resume_job, scale, pause, stop };
+const Action = union(enum) { start, resume_job, scale: u32, pause, stop };
+
+const ScheduleOptions = struct {
+    id: ?[]const u8 = null,
+    gpus: ?i64 = null,
+    restart_count: i64 = 0,
+    created_at: ?i64 = null,
+};
 
 pub fn handleStart(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8, ctx: RouteContext) Response {
-    return mutate(alloc, app_name, job_name, .start, null, ctx);
+    return mutate(alloc, app_name, job_name, .start, ctx);
 }
 
 pub fn handleResume(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8, ctx: RouteContext) Response {
-    return mutate(alloc, app_name, job_name, .resume_job, null, ctx);
+    return mutate(alloc, app_name, job_name, .resume_job, ctx);
 }
 
 pub fn handleScale(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8, request: http.Request, ctx: RouteContext) Response {
@@ -30,15 +37,15 @@ pub fn handleScale(alloc: std.mem.Allocator, app_name: []const u8, job_name: []c
     const parsed = numbers.parse(alloc, request.body) catch return common.badRequest("invalid gpus");
     defer parsed.deinit();
     const gpus = (numbers.optional(u32, parsed.value, "gpus", 1, placement.max_gang_ranks) catch return common.badRequest("invalid gpus")) orelse return common.badRequest("missing gpus");
-    return mutate(alloc, app_name, job_name, .scale, gpus, ctx);
+    return mutate(alloc, app_name, job_name, .{ .scale = gpus }, ctx);
 }
 
 pub fn handleStateChange(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8, state: []const u8, ctx: RouteContext) Response {
     const action: Action = if (std.mem.eql(u8, state, "paused")) .pause else if (std.mem.eql(u8, state, "stopped")) .stop else return common.badRequest("invalid training state");
-    return mutate(alloc, app_name, job_name, action, null, ctx);
+    return mutate(alloc, app_name, job_name, action, ctx);
 }
 
-fn mutate(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8, action: Action, gpus_override: ?u32, ctx: RouteContext) Response {
+fn mutate(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8, action: Action, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     var lock = apply_lock.acquire(alloc, app_name) catch |err| return switch (err) {
         error.AlreadyLocked => common.conflict("app mutation already in progress"),
@@ -49,30 +56,40 @@ fn mutate(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8, 
     session.synchronize() catch |err| return deploy_routes.mutationFailure(alloc, node, err);
     const existing = findRecord(alloc, session, app_name, job_name) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
     defer if (existing) |record| record.deinit(alloc);
-    if (action != .start and existing == null) return common.notFound();
-
-    if (action == .pause or action == .stop) {
-        const state = if (action == .pause) "paused" else "stopped";
-        var batch = std.Io.Writer.Allocating.init(alloc);
-        defer batch.deinit();
-        appendClearAssignments(&batch.writer, app_name, job_name) catch return common.internalError();
-        appendState(&batch.writer, existing.?.id, state, nowRealSeconds()) catch return common.internalError();
-        session.commit(batch.written()) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
-        const updated = readRecord(alloc, session, existing.?.id) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
-        defer updated.deinit(alloc);
-        return formatRecordResponse(alloc, updated, updated.state, if (action == .pause) "training job paused" else "training job stopped");
+    var options: ScheduleOptions = .{
+        .restart_count = if (existing) |record| record.restart_count else 0,
+    };
+    switch (action) {
+        .start => {},
+        .resume_job, .scale => {
+            const record = existing orelse return common.notFound();
+            options.id = record.id;
+            options.gpus = if (action == .scale) action.scale else record.gpus;
+            options.created_at = record.created_at;
+        },
+        .pause => return changeState(alloc, session, existing orelse return common.notFound(), "paused", "training job paused"),
+        .stop => return changeState(alloc, session, existing orelse return common.notFound(), "stopped", "training job stopped"),
     }
-    return schedule(alloc, session, app_name, job_name, if (action == .start) null else existing.?.id, gpus_override, existing);
+    return schedule(alloc, session, app_name, job_name, options);
+}
+
+fn changeState(alloc: std.mem.Allocator, session: mutation.Session, record: store.TrainingJobRecord, state: []const u8, message: []const u8) Response {
+    var batch = std.Io.Writer.Allocating.init(alloc);
+    defer batch.deinit();
+    // remove assignments and change the job state in the same replicated commit.
+    appendClearAssignments(&batch.writer, record.app_name, record.name) catch return common.internalError();
+    appendState(&batch.writer, record.id, state, nowRealSeconds()) catch return common.internalError();
+    session.commit(batch.written()) catch |err| return deploy_routes.mutationFailure(alloc, session.node, err);
+    const updated = readRecord(alloc, session, record.id) catch |err| return deploy_routes.mutationFailure(alloc, session.node, err);
+    defer updated.deinit(alloc);
+    return formatRecordResponse(alloc, updated, message);
 }
 
 pub fn handleStatus(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
-    const rec = store.findTrainingJobInDb(node.stateMachineDb(), alloc, app_name, job_name) catch return common.internalError();
-    if (rec == null) return common.notFound();
-    defer rec.?.deinit(alloc);
-
-    const body = formatRecordJson(alloc, rec.?, null, null) catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    const record = (store.findTrainingJobInDb(node.stateMachineDb(), alloc, app_name, job_name) catch return common.internalError()) orelse return common.notFound();
+    defer record.deinit(alloc);
+    return formatRecordResponse(alloc, record, null);
 }
 
 fn schedule(
@@ -80,9 +97,7 @@ fn schedule(
     session: mutation.Session,
     app_name: []const u8,
     job_name: []const u8,
-    existing_job_id: ?[]const u8,
-    gpus_override: ?u32,
-    existing: ?store.TrainingJobRecord,
+    options: ScheduleOptions,
 ) Response {
     const node = session.node;
     const latest = readLatestRelease(alloc, session, app_name) catch |err| return switch (err) {
@@ -91,22 +106,21 @@ fn schedule(
     };
     defer latest.deinit(alloc);
 
-    const job = app_snapshot.findTrainingJobSpec(alloc, latest.config_snapshot, job_name) catch return common.internalError();
-    if (job == null) return common.notFound();
-    defer job.?.deinit(alloc);
+    const job = (app_snapshot.findTrainingJobSpec(alloc, latest.config_snapshot, job_name) catch return common.internalError()) orelse return common.notFound();
+    defer job.deinit(alloc);
 
-    const job_id = if (existing_job_id) |id|
+    const job_id = if (options.id) |id|
         alloc.dupe(u8, id) catch return common.internalError()
     else
         generateJobId(alloc, app_name, job_name) catch return common.internalError();
     defer alloc.free(job_id);
 
-    const desired_gpus = gpus_override orelse if (existing_job_id != null)
-        std.math.cast(u32, existing.?.gpus) orelse return common.internalError()
+    const desired_gpus = if (options.gpus) |gpus|
+        std.math.cast(u32, gpus) orelse return common.internalError()
     else
-        job.?.gpus;
+        job.gpus;
     if (desired_gpus == 0 or desired_gpus > placement.max_gang_ranks) return common.badRequest("invalid gpus");
-    if (job.?.cpu_limit <= 0 or job.?.memory_limit_mb <= 0) return common.badRequest("invalid training resources");
+    if (job.cpu_limit <= 0 or job.memory_limit_mb <= 0) return common.badRequest("invalid training resources");
     const now = nowRealSeconds();
     var batch = std.Io.Writer.Allocating.init(alloc);
     defer batch.deinit();
@@ -115,25 +129,25 @@ fn schedule(
         .name = job_name,
         .app_name = app_name,
         .state = "running",
-        .image = job.?.image,
+        .image = job.image,
         .gpus = desired_gpus,
-        .checkpoint_path = job.?.checkpoint_path,
+        .checkpoint_path = job.checkpoint_path,
         .checkpoint_interval = null,
         .checkpoint_keep = null,
-        .restart_count = if (existing) |record| record.restart_count else 0,
-        .created_at = if (existing_job_id != null and existing != null) existing.?.created_at else now,
+        .restart_count = options.restart_count,
+        .created_at = options.created_at orelse now,
         .updated_at = now,
     }) catch return common.internalError();
     const scheduled = (placement.replaceWorkload(alloc, session, .{
-        .image = job.?.image,
-        .command = job.?.command,
-        .cpu_limit = job.?.cpu_limit,
-        .memory_limit_mb = job.?.memory_limit_mb,
+        .image = job.image,
+        .command = job.command,
+        .cpu_limit = job.cpu_limit,
+        .memory_limit_mb = job.memory_limit_mb,
         .app_name = app_name,
         .workload_kind = "training",
         .workload_name = job_name,
         .gpu_limit = desired_gpus,
-        .gpu_model = job.?.gpu_type,
+        .gpu_model = job.gpu_type,
         .gang_world_size = desired_gpus,
         .gpus_per_rank = 1,
     }, batch.written()) catch |err| return deploy_routes.mutationFailure(alloc, node, err)) orelse return common.conflict("insufficient capacity for training job");
@@ -142,12 +156,7 @@ fn schedule(
     const rec = readRecord(alloc, session, job_id) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
     defer rec.deinit(alloc);
 
-    return formatRecordResponse(
-        alloc,
-        rec,
-        rec.state,
-        "training job scheduled",
-    );
+    return formatRecordResponse(alloc, rec, "training job scheduled");
 }
 
 fn findRecord(alloc: std.mem.Allocator, session: mutation.Session, app_name: []const u8, job_name: []const u8) mutation.Error!?store.TrainingJobRecord {
@@ -181,7 +190,23 @@ fn appendClearAssignments(writer: *std.Io.Writer, app_name: []const u8, job_name
 }
 
 fn appendRecord(writer: *std.Io.Writer, record: store.TrainingJobRecord) !void {
-    try sql.write(writer, "INSERT OR REPLACE INTO training_jobs (id, name, app_name, state, image, gpus, checkpoint_path, checkpoint_interval, checkpoint_keep, restart_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);", .{ record.id, record.name, record.app_name, record.state, record.image, record.gpus, record.checkpoint_path, record.checkpoint_interval, record.checkpoint_keep, record.restart_count, record.created_at, record.updated_at });
+    try sql.write(writer, "INSERT OR REPLACE INTO training_jobs (" ++
+        "id, name, app_name, state, image, gpus, checkpoint_path, checkpoint_interval, " ++
+        "checkpoint_keep, restart_count, created_at, updated_at) " ++
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);", .{
+        record.id,
+        record.name,
+        record.app_name,
+        record.state,
+        record.image,
+        record.gpus,
+        record.checkpoint_path,
+        record.checkpoint_interval,
+        record.checkpoint_keep,
+        record.restart_count,
+        record.created_at,
+        record.updated_at,
+    });
 }
 
 fn appendState(writer: *std.Io.Writer, id: []const u8, state: []const u8, now: i64) !void {
@@ -197,17 +222,15 @@ fn generateJobId(alloc: std.mem.Allocator, app_name: []const u8, job_name: []con
 fn formatRecordResponse(
     alloc: std.mem.Allocator,
     record: store.TrainingJobRecord,
-    state: []const u8,
-    message: []const u8,
+    message: ?[]const u8,
 ) Response {
-    const body = formatRecordJson(alloc, record, state, message) catch return common.internalError();
+    const body = formatRecordJson(alloc, record, message) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
 fn formatRecordJson(
     alloc: std.mem.Allocator,
     record: store.TrainingJobRecord,
-    state_override: ?[]const u8,
     message: ?[]const u8,
 ) ![]u8 {
     var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
@@ -222,7 +245,7 @@ fn formatRecordJson(
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "job_id", record.id);
     try writer.writeByte(',');
-    try json_helpers.writeJsonStringField(writer, "state", state_override orelse record.state);
+    try json_helpers.writeJsonStringField(writer, "state", record.state);
     try writer.print(",\"gpus\":{d},\"restart_count\":{d}", .{ record.gpus, record.restart_count });
     try writer.writeByte(',');
     try json_helpers.writeNullableJsonStringField(writer, "checkpoint_path", record.checkpoint_path);
