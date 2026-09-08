@@ -53,7 +53,7 @@ path = "/"
 port = 80
 ```
 
-the commands below use root's home directory so runtime and status commands share the same state. `command -v yoq` resolves the binary even if it was installed in your user's `~/.local/bin`.
+the commands below use root's home directory so runtime and status commands share the same state. `command -v yoq` resolves the binary even if it was installed in `~/.local/bin`.
 
 ```bash
 sudo -H "$(command -v yoq)" doctor -f manifest.toml
