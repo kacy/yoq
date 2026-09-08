@@ -247,7 +247,7 @@ test "migrateServices adds http proxy columns" {
         .{},
     ) catch unreachable;
 
-    try apply(&db);
+    migrateServices(&db);
 
     db.exec(
         "INSERT INTO services (" ++
@@ -282,7 +282,7 @@ test "migrateDeployments adds release transition columns" {
         .{},
     ) catch unreachable;
 
-    try apply(&db);
+    migrateDeployments(&db);
 
     db.exec(
         "INSERT INTO deployments (id, app_name, service_name, trigger, source_release_id, manifest_hash, config_snapshot, status, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
