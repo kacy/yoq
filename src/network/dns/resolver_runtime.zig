@@ -19,8 +19,14 @@ const RateLimitEntry = struct {
 
 var upstream_dns: [4]u8 = .{ 8, 8, 8, 8 };
 var upstream_initialized: bool = false;
-var resolver_thread: ?std.Thread = null;
-var resolver_socket: ?linux_platform.posix.socket_t = null;
+const Listener = struct {
+    address: [4]u8,
+    socket: ?linux_platform.posix.socket_t = null,
+    thread: ?std.Thread = null,
+};
+// A process serves local workloads and its own cluster subnet. Keep both
+// gateways available without a wildcard socket occupying host DNS addresses.
+var listeners: [2]?Listener = .{ null, null };
 var resolver_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var external_resolver_available: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var resolver_mutex: std.Io.Mutex = .init;
@@ -32,10 +38,25 @@ var rate_limits: [256]RateLimitEntry = [_]RateLimitEntry{.{
 var rate_limit_mutex: std.Io.Mutex = .init;
 
 pub fn startResolver() void {
+    startResolverAt(bridge.gateway_ip);
+}
+
+pub fn startResolverAt(address: [4]u8) void {
     resolver_mutex.lockUncancelable(std.Options.debug_io);
     defer resolver_mutex.unlock(std.Options.debug_io);
 
-    if (resolver_running.load(.acquire) or external_resolver_available.load(.acquire)) return;
+    var available: ?*?Listener = null;
+    for (&listeners) |*entry| {
+        if (entry.*) |listener| {
+            if (std.mem.eql(u8, &listener.address, &address)) return;
+        } else {
+            available = entry;
+        }
+    }
+    const slot = available orelse {
+        log.warn("dns: local and cluster gateway listeners are already occupied", .{});
+        return;
+    };
 
     initUpstreamDns();
 
@@ -44,8 +65,8 @@ pub fn startResolver() void {
         return;
     };
 
-    // Cluster workers have node-specific gateway addresses. Listen on every
-    // address of the container bridge, while rejecting other ingress devices.
+    // Bind an explicit gateway so host DNS listeners on loopback can coexist.
+    // Device binding also rejects packets arriving through unrelated interfaces.
     // Failure must close the socket, never expose an unrestricted DNS listener.
     linux_platform.posix.setsockopt(sock, posix.SOL.SOCKET, posix.SO.BINDTODEVICE, bridge.default_bridge ++ "\x00") catch |e| {
         log.warn("dns: failed to bind socket to container bridge: {}", .{e});
@@ -54,11 +75,12 @@ pub fn startResolver() void {
     };
     const addr = posix.sockaddr.in{
         .port = std.mem.nativeToBig(u16, listen_port),
-        .addr = 0,
+        .addr = @bitCast(address),
     };
 
     linux_platform.posix.bind(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch |e| {
         if (e == error.AddressInUse) {
+            slot.* = .{ .address = address };
             external_resolver_available.store(true, .release);
             log.info("dns resolver already available on {s}:53", .{bridge.default_bridge});
         } else {
@@ -68,19 +90,28 @@ pub fn startResolver() void {
         return;
     };
 
-    resolver_socket = sock;
-    resolver_running.store(true, .release);
-    external_resolver_available.store(false, .release);
-
-    resolver_thread = std.Thread.spawn(.{}, resolverLoop, .{sock}) catch |e| {
+    const was_running = resolver_running.swap(true, .acq_rel);
+    const thread = std.Thread.spawn(.{}, resolverLoop, .{sock}) catch |e| {
         log.warn("dns: failed to spawn resolver thread: {}", .{e});
-        resolver_running.store(false, .release);
+        resolver_running.store(was_running, .release);
         linux_platform.posix.close(sock);
-        resolver_socket = null;
         return;
     };
+    slot.* = .{ .address = address, .socket = sock, .thread = thread };
+    log.info("dns resolver started on {d}.{d}.{d}.{d}:53 via {s}", .{
+        address[0], address[1], address[2], address[3], bridge.default_bridge,
+    });
+}
 
-    log.info("dns resolver started on {s}:53", .{bridge.default_bridge});
+pub fn isRunningAt(address: [4]u8) bool {
+    resolver_mutex.lockUncancelable(std.Options.debug_io);
+    defer resolver_mutex.unlock(std.Options.debug_io);
+    for (listeners) |entry| {
+        if (entry) |listener| {
+            if (std.mem.eql(u8, &listener.address, &address)) return true;
+        }
+    }
+    return false;
 }
 
 pub fn isRunning() bool {
@@ -93,37 +124,24 @@ pub fn isOwnedByCurrentProcess() bool {
 
 pub fn stopResolver() void {
     resolver_mutex.lockUncancelable(std.Options.debug_io);
-
-    if (!resolver_running.load(.acquire)) {
-        external_resolver_available.store(false, .release);
-        resolver_mutex.unlock(std.Options.debug_io);
-        return;
-    }
+    defer resolver_mutex.unlock(std.Options.debug_io);
 
     resolver_running.store(false, .release);
-
-    // shut down the socket to unblock any recvfrom() in the resolver thread
-    // before closing it, so the thread sees ENOTCONN instead of EBADF
-    if (resolver_socket) |sock| {
-        _ = std.os.linux.shutdown(sock, std.os.linux.SHUT.RDWR);
+    // Resolver workers never take resolver_mutex. Hold it across joins so a
+    // concurrent start cannot replace a socket while shutdown still owns it.
+    for (listeners) |entry| {
+        if (entry) |listener| {
+            if (listener.socket) |sock| _ = std.os.linux.shutdown(sock, std.os.linux.SHUT.RDWR);
+        }
     }
-
-    const thread = resolver_thread;
-    resolver_thread = null;
-    resolver_mutex.unlock(std.Options.debug_io);
-
-    if (thread) |t| {
-        t.join();
-    }
-
-    // close socket after thread has exited
-    resolver_mutex.lockUncancelable(std.Options.debug_io);
-    if (resolver_socket) |sock| {
-        linux_platform.posix.close(sock);
-        resolver_socket = null;
+    for (&listeners) |*entry| {
+        if (entry.*) |listener| {
+            if (listener.thread) |thread| thread.join();
+            if (listener.socket) |sock| linux_platform.posix.close(sock);
+        }
+        entry.* = null;
     }
     external_resolver_available.store(false, .release);
-    resolver_mutex.unlock(std.Options.debug_io);
 }
 
 fn initUpstreamDns() void {
