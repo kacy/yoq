@@ -47,6 +47,17 @@ jobs:
               - 'scripts/bpf-load-balancer-smoke.sh'
               - 'src/network/bpf/**'
 
+  veth-namespace:
+    name: veth-namespace
+    needs: changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-zig
+      - name: verify veth creation in destination namespaces
+        run: bash scripts/veth-namespace-smoke.sh
+
   fmt-check:
     name: fmt-check
     runs-on: ubuntu-latest
