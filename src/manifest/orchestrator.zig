@@ -1,14 +1,14 @@
 // orchestrator — multi-service lifecycle management
 //
 // starts and stops services defined in a manifest.toml. each service
-// runs in its own thread because Container.start() blocks until exit.
+// runs in its own thread to supervise its container and handle restarts.
 //
 // startup ordering follows the manifest's topological sort — services
 // are started in dependency order, waiting for each to reach "running"
 // before starting its dependents.
 //
 // usage:
-//   var orch = Orchestrator.init(alloc, &manifest, app_name);
+//   var orch = try Orchestrator.init(alloc, &manifest, app_name);
 //   defer orch.deinit();
 //   orch.startAll() catch |err| { ... };
 //   orch.waitForShutdown();
@@ -20,12 +20,8 @@ const cli = @import("../lib/cli.zig");
 const spec = @import("spec.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const health = @import("health.zig");
-const tls_proxy = @import("../tls/proxy.zig");
-const tls_backend = @import("../tls/backend.zig");
-const cert_store_mod = @import("../tls/cert_store.zig");
 const cron_scheduler = @import("cron_scheduler.zig");
 const backup_scheduler = @import("backup_scheduler.zig");
-const sqlite = @import("sqlite");
 const lifecycle_support = @import("orchestrator/lifecycle_support.zig");
 const runtime_loop = @import("orchestrator/runtime_loop.zig");
 const signal_support = @import("orchestrator/signal_support.zig");
@@ -59,7 +55,7 @@ pub const ServiceState = struct {
 };
 
 /// orchestrates the lifecycle of all services in a manifest.
-/// each service gets its own thread for Container.start() which blocks.
+/// service threads handle container exit and restart policy.
 pub const Orchestrator = struct {
     alloc: std.mem.Allocator,
     manifest: *spec.Manifest,
@@ -67,10 +63,7 @@ pub const Orchestrator = struct {
     states: []ServiceState,
     dev_mode: bool = false,
     restart_requested: []std.atomic.Value(bool),
-    backend_registry: ?*tls_backend.BackendRegistry = null,
-    proxy: ?*tls_proxy.TlsProxy = null,
-    tls_certs: ?*cert_store_mod.CertStore = null,
-    tls_db: ?*sqlite.Db = null,
+    tls_resources: ?startup_runtime.TlsResources = null,
     cron_sched: ?*cron_scheduler.CronScheduler = null,
     backup_sched: ?*backup_scheduler.BackupScheduler = null,
     /// when set, only start these services (+ transitive deps).
@@ -82,6 +75,7 @@ pub const Orchestrator = struct {
 
     pub fn init(alloc: std.mem.Allocator, manifest: *spec.Manifest, app_name: []const u8) !Orchestrator {
         const states = try alloc.alloc(ServiceState, manifest.services.len);
+        errdefer alloc.free(states);
         for (states) |*s| {
             s.* = .{
                 .container_id = undefined,
@@ -105,24 +99,7 @@ pub const Orchestrator = struct {
     }
 
     pub fn deinit(self: *Orchestrator) void {
-        // clean up TLS resources in reverse init order
-        if (self.proxy) |p| {
-            p.deinit();
-            self.alloc.destroy(p);
-        }
-        if (self.tls_certs) |c| {
-            // zero the master key before freeing
-            std.crypto.secureZero(u8, &c.key);
-            self.alloc.destroy(c);
-        }
-        if (self.tls_db) |db| {
-            db.deinit();
-            self.alloc.destroy(db);
-        }
-        if (self.backend_registry) |r| {
-            r.deinit();
-            self.alloc.destroy(r);
-        }
+        if (self.tls_resources) |*resources| resources.deinit(self.alloc);
         if (self.cron_sched) |cs| {
             cs.deinit();
             self.alloc.destroy(cs);
@@ -188,10 +165,7 @@ pub const Orchestrator = struct {
             self.start_set,
         ) orelse return;
 
-        self.backend_registry = resources.backend_registry;
-        self.tls_db = resources.tls_db;
-        self.tls_certs = resources.tls_certs;
-        self.proxy = resources.proxy;
+        self.tls_resources = resources;
     }
 
     pub fn finishRuntimeSetup(self: *Orchestrator) void {
@@ -732,4 +706,24 @@ test "finishRuntimeSetup starts cron scheduler when crons are present" {
     try std.testing.expect(orch.cron_sched != null);
     orch.stopAll();
     try std.testing.expect(orch.cron_sched != null);
+}
+
+fn checkOrchestratorInit(alloc: std.mem.Allocator) !void {
+    var services = [_]spec.Service{testSvc("web", &.{})};
+    var manifest = spec.Manifest{
+        .services = &services,
+        .workers = &.{},
+        .crons = &.{},
+        .training_jobs = &.{},
+        .volumes = &.{},
+        .alloc = alloc,
+    };
+    var orch = try Orchestrator.init(alloc, &manifest, "test");
+    defer orch.deinit();
+    try std.testing.expectEqual(ServiceState.Status.pending, orch.states[0].status);
+    try std.testing.expect(!orch.restart_requested[0].load(.acquire));
+}
+
+test "orchestrator init releases service states if restart allocation fails" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkOrchestratorInit, .{});
 }

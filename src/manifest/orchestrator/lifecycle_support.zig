@@ -207,8 +207,8 @@ pub fn stopAll(self: anytype) void {
         writeErr("stopped backup scheduler\n", .{});
     }
 
-    if (self.proxy) |p| {
-        p.stop();
+    if (self.tls_resources) |resources| {
+        resources.proxy.stop();
         writeErr("stopped tls proxy\n", .{});
     }
 
