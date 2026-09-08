@@ -17,9 +17,9 @@ run `yoq doctor` on each machine to verify kernel version, permissions, and port
 
 ---
 
-## smallest cluster (3 servers)
+## fault-tolerant cluster (3 servers)
 
-a yoq cluster needs at least 3 server nodes for Raft consensus (tolerates 1 failure). we'll use these machines:
+A single server can commit writes but cannot tolerate a server failure. For one-server fault tolerance, start three voters with a complete, fixed membership configuration. We will use these machines:
 
 | node | IP | role |
 |------|----|------|
@@ -39,19 +39,20 @@ echo $TOKEN
 
 use the same token on every node.
 
-### step 2: initialize the first server
+### step 2: configure the first voter
 
 ```
 yoq init-server \
   --id 1 \
   --port 9700 \
   --api-port 7700 \
+  --peers 2@10.0.0.2:9700,3@10.0.0.3:9700 \
   --token $TOKEN
 ```
 
-this starts the Raft leader, the API server, and the gossip protocol. the first server bootstraps itself as a single-node cluster.
+This starts the first voter, the API server, and gossip. It waits for a majority of the configured three voters before electing a leader and committing writes. Start all servers from fresh data directories with the same voter set.
 
-### step 3: add the second and third servers
+### step 3: start the other configured voters
 
 on s2:
 
@@ -60,7 +61,7 @@ yoq init-server \
   --id 2 \
   --port 9700 \
   --api-port 7700 \
-  --peers 1@10.0.0.1:9700 \
+  --peers 1@10.0.0.1:9700,3@10.0.0.3:9700 \
   --token $TOKEN
 ```
 
@@ -75,15 +76,21 @@ yoq init-server \
   --token $TOKEN
 ```
 
-the `--peers` flag tells each new server where to find the existing cluster. format is `id@host:port`, comma-separated.
+The `--peers` flag lists **every other Raft voter**, including servers that have not started yet. Its format is `id@host:port`, comma-separated. Each server's own ID plus its peer IDs must describe the same set. Do not include its own ID in `--peers`.
+
+Server membership is static. Starting a server with no peers creates a separate single-server cluster; starting another server pointed at it does not join that cluster. Gossip and `yoq join` discover workers, not Raft voters. Dynamic voter additions and removals are not supported. The local Raft database records its node ID and voter IDs and rejects changes on restart. Peer addresses may change while the voter IDs remain fixed.
+
+For existing installations, preserve the original voter configuration on the first upgrade that records it. A configuration that was already inconsistent needs operator-led recovery; editing peer flags on individual running members is not a safe repair. To change the server count, provision a separate cluster and migrate workloads and application data. Keep the existing cluster intact until that migration is validated.
 
 ### step 4: verify
 
+Run this locally on each server, using the API token saved during its startup:
+
 ```
-yoq nodes
+yoq cluster status
 ```
 
-you should see all 3 servers, one marked as leader. the cluster is ready.
+Check that exactly one server reports `role: "leader"` and that all three settle on the same term. After a registration or deployment, compare their `commit_index` and `last_applied`; they should converge with no apply backlog. `yoq nodes` lists registered workers and is not a Raft voter-membership check.
 
 ---
 
@@ -177,13 +184,14 @@ gossip converges in under a second. all 10 nodes can run workloads (agents run c
 
 ### 500 nodes (5 servers + 495 agents)
 
-at this scale, bump the server count to 5 for better fault tolerance (tolerates 2 failures) and tune gossip:
+For a new cluster at this scale, configure five voters from the start to tolerate two failures. Each server lists the other four; for s1:
 
 ```
 yoq init-server \
   --id 1 \
   --port 9700 \
   --api-port 7700 \
+  --peers 2@10.0.0.2:9700,3@10.0.0.3:9700,4@10.0.0.4:9700,5@10.0.0.5:9700 \
   --gossip-fanout 5 \
   --gossip-suspicion-multiplier 6 \
   --token $TOKEN
@@ -280,24 +288,15 @@ keep in mind:
 | eu-west-1 | s4, s5, s6 (10.1.0.1-3) | 50 agents |
 | ap-southeast-1 | s7, s8, s9 (10.2.0.1-3) | 30 agents |
 
-initialize servers with all peers:
+Configure all nine voters before starting them. For s1, list all eight other servers:
 
 ```
-# us-east-1
-yoq init-server --id 1 --port 9700 --api-port 7700 --token $TOKEN
-
-yoq init-server --id 2 --port 9700 --api-port 7700 \
-  --peers 1@10.0.0.1:9700 --token $TOKEN
-
-yoq init-server --id 3 --port 9700 --api-port 7700 \
-  --peers 1@10.0.0.1:9700,2@10.0.0.2:9700 --token $TOKEN
-
-# eu-west-1
-yoq init-server --id 4 --port 9700 --api-port 7700 \
-  --peers 1@10.0.0.1:9700,2@10.0.0.2:9700,3@10.0.0.3:9700 --token $TOKEN
-
-# ... and so on for remaining servers
+yoq init-server --id 1 --port 9700 --api-port 7700 \
+  --peers 2@10.0.0.2:9700,3@10.0.0.3:9700,4@10.1.0.1:9700,5@10.1.0.2:9700,6@10.1.0.3:9700,7@10.2.0.1:9700,8@10.2.0.2:9700,9@10.2.0.3:9700 \
+  --token $TOKEN
 ```
+
+For each remaining server, use its own ID and list the other eight, including s1. This configuration needs five reachable voters for writes. It is a new nine-voter cluster, not an expansion of an existing three-voter cluster.
 
 join agents with region labels:
 
@@ -322,7 +321,7 @@ yoq join 10.2.0.1 --token $TOKEN --region ap-southeast-1
 yoq nodes
 ```
 
-shows all servers and agents, their status (online, offline, draining), resource usage, and which node is the Raft leader.
+Lists registered workers and their resource usage and status. Run `yoq cluster status` on each server to inspect its Raft role and apply progress.
 
 you can also query any server's API directly:
 

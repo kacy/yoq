@@ -228,6 +228,10 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
         return ServerCommandError.InvalidArgument;
     };
     defer alloc.free(peers);
+    @import("../static_membership.zig").validate(node_id, peers) catch |err| {
+        writeErr("invalid static raft membership: {} (list every other voter exactly once)\n", .{err});
+        return ServerCommandError.InvalidArgument;
+    };
 
     if (join_token == null) {
         writeErr("cluster mode requires --token for join authentication and raft transport auth\n", .{});
