@@ -113,26 +113,17 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
     if (total == buf.len) {
         var overflow_buf: [1]u8 = undefined;
         const extra = posix.read(fd, &overflow_buf) catch 0;
-        if (extra > 0) {
-            alloc.free(buf);
-            return HttpClientError.ResponseTooLarge;
-        }
+        if (extra > 0) return HttpClientError.ResponseTooLarge;
     }
 
-    if (total == 0) {
-        alloc.free(buf);
-        return HttpClientError.ReceiveFailed;
-    }
+    if (total == 0) return HttpClientError.ReceiveFailed;
 
     // shrink to actual size
     if (alloc.resize(buf, total)) {
         buf = buf[0..total];
     }
 
-    return parseResponse(buf[0..total], buf) catch {
-        alloc.free(buf);
-        return HttpClientError.InvalidResponse;
-    };
+    return parseResponse(buf[0..total], buf) catch return HttpClientError.InvalidResponse;
 }
 
 fn writeAll(fd: linux_platform.posix.socket_t, data: []const u8) !void {
@@ -219,4 +210,43 @@ test "parseResponse allows empty body when separator is missing" {
 test "parseResponse rejects invalid status line" {
     var raw = "not http".*;
     try std.testing.expectError(error.InvalidResponse, parseResponse(raw[0..], raw[0..]));
+}
+
+test "http client frees failed responses once and handles the next request" {
+    const socket = linux_platform.posix;
+    const listener = try socket.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer socket.close(listener);
+    var address = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    try socket.bind(listener, &address.any, address.getOsSockLen());
+    try socket.listen(listener, 8);
+    const timeout = posix.timeval{ .sec = 3, .usec = 0 };
+    try socket.setsockopt(listener, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+    var address_len = address.getOsSockLen();
+    try socket.getsockname(listener, &address.any, &address_len);
+
+    const oversized = [_]u8{'x'} ** (64 * 1024 + 1);
+    const failures = [_][]const u8{ "", "not an HTTP response", &oversized };
+    const healthy = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+    const Peer = struct {
+        fn serve(fd: posix.fd_t, bad_responses: []const []const u8, good_response: []const u8) void {
+            for (bad_responses) |bad| {
+                for ([_][]const u8{ bad, good_response }) |response| {
+                    const client = linux_platform.posix.accept(fd, null, null, posix.SOCK.CLOEXEC) catch return;
+                    defer linux_platform.posix.close(client);
+                    var request: [2048]u8 = undefined;
+                    _ = linux_platform.posix.read(client, &request) catch return;
+                    writeAll(client, response) catch return;
+                }
+            }
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Peer.serve, .{ listener, &failures, healthy });
+    defer thread.join();
+    for ([_]HttpClientError{ error.ReceiveFailed, error.InvalidResponse, error.ResponseTooLarge }) |expected| {
+        try std.testing.expectError(expected, get(std.testing.allocator, .{ 127, 0, 0, 1 }, std.mem.bigToNative(u16, address.in.port), "/"));
+        var response = try get(std.testing.allocator, .{ 127, 0, 0, 1 }, std.mem.bigToNative(u16, address.in.port), "/");
+        defer response.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u16, 200), response.status_code);
+        try std.testing.expectEqualStrings("ok", response.body);
+    }
 }
