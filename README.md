@@ -14,7 +14,7 @@ yoq is a young project that is still being hardened. it has a smaller ecosystem 
 
 - linux kernel 6.1+ with cgroups v2; yoq does not run natively on macos or windows
 - root privileges for local container, filesystem, and network setup
-- curl, python3, and the github cli (`gh`) with attestation support for the installer
+- curl, python3, and an authenticated github cli (`gh`) with attestation support for the installer
 - zig 0.16.0 and make if building from source
 
 ### install
