@@ -160,6 +160,7 @@ comptime {
     _ = @import("api/routes/security.zig");
     _ = @import("api/routes/security/audit_routes.zig");
     _ = @import("api/routes/cluster_agents.zig");
+    _ = @import("api/routes/cluster_agents/agent_routes.zig");
     _ = @import("api/routes/cluster_agents/cluster_routes.zig");
     _ = @import("api/routes/cluster_agents/apply_backend.zig");
     _ = @import("api/routes/cluster_agents/apply_response.zig");
@@ -202,6 +203,7 @@ comptime {
     _ = @import("cluster/http_client.zig");
     _ = @import("cluster/agent.zig");
     _ = @import("cluster/agent/gossip_support.zig");
+    _ = @import("cluster/agent/enrollment_identity.zig");
     _ = @import("cluster/agent/assignment_runtime.zig");
     _ = @import("cluster/agent/log_server.zig");
     _ = @import("cluster/scheduler.zig");

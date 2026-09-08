@@ -17,6 +17,7 @@ pub fn buildRegisterBody(
     wg_listen_port: u16,
     role: cluster_config.NodeRole,
     region: ?[]const u8,
+    registration_key: ?[]const u8,
 ) ![]u8 {
     var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
     defer json_buf_writer.deinit();
@@ -25,6 +26,10 @@ pub fn buildRegisterBody(
 
     try writer.writeAll("{\"token\":\"");
     try json_helpers.writeJsonEscaped(writer, token);
+    if (registration_key) |key| {
+        try writer.writeAll("\",\"registration_key\":\"");
+        try json_helpers.writeJsonEscaped(writer, key);
+    }
     try writer.writeAll("\",\"address\":\"");
     try json_helpers.writeJsonEscaped(writer, address);
     try writer.writeAll("\",\"agent_api_port\":");

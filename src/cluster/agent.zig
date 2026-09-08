@@ -15,6 +15,7 @@
 // running containers — same code path as the local orchestrator.
 
 const std = @import("std");
+const enrollment_identity = @import("agent/enrollment_identity.zig");
 const http_client = @import("http_client.zig");
 const agent_types = @import("agent_types.zig");
 const cli = @import("../lib/cli.zig");
@@ -69,6 +70,7 @@ pub const Agent = struct {
     id: [12]u8,
     server_addr: [4]u8,
     server_port: u16,
+    enrollment_target: ?struct { address: [4]u8, port: u16 } = null,
     token: []const u8,
     owned_token: ?[]u8 = null,
     /// Server-issued operational credential, owned independently of enrollment.
@@ -126,26 +128,28 @@ pub const Agent = struct {
 
     /// register this agent with the cluster server.
     /// on success, self.id is set to the server-assigned agent ID.
-    /// generates a wireguard keypair and sends the public key to the
+    /// loads its durable wireguard identity and sends the public key to the
     /// server, which assigns a node_id and overlay IP in response.
     pub fn register(self: *Agent) AgentError!void {
         const resources = resource_support.getSystemResources();
 
-        // generate a wireguard keypair for mesh networking
-        var threaded_io = std.Io.Threaded.init(self.alloc, .{});
-        defer threaded_io.deinit();
-
-        const kp = wireguard.generateKeyPair(threaded_io.io()) catch {
-            writeErr("failed to generate wireguard keypair\n", .{});
+        // Publish identity before the request so an uncertain commit can be retried.
+        // Keep the original join scope when a leader hint changes the API peer.
+        if (self.enrollment_target == null)
+            self.enrollment_target = .{ .address = self.server_addr, .port = self.server_port };
+        const target = self.enrollment_target.?;
+        var identity = enrollment_identity.loadOrCreate(target.address, target.port, self.token) catch |err| {
+            writeErr("failed to load enrollment identity: {s}\n", .{@errorName(err)});
             return AgentError.RegisterFailed;
         };
-        const pub_key = &kp.public_key;
+        defer identity.deinit();
+        const pub_key = &identity.keypair.public_key;
 
         // detect our local IP for the wireguard endpoint
         var local_ip_buf: [16]u8 = undefined;
         const local_ip = resource_support.detectLocalIp(self.server_addr, &local_ip_buf);
 
-        const body = request_support.buildRegisterBody(self.alloc, self.token, local_ip, self.agent_api_port, resources, pub_key, self.wg_listen_port, self.role, self.region) catch
+        const body = request_support.buildRegisterBody(self.alloc, self.token, local_ip, self.agent_api_port, resources, pub_key, self.wg_listen_port, self.role, self.region, &identity.registration_key) catch
             return AgentError.RegisterFailed;
         defer self.alloc.free(body);
 
@@ -200,6 +204,7 @@ pub const Agent = struct {
         for (secret) |byte| {
             if (!std.ascii.isHex(byte)) return AgentError.InvalidResponse;
         }
+        identity.validateResponse(self.alloc, resp.body, secret) catch return AgentError.InvalidResponse;
         const owned_credential = self.alloc.dupe(u8, secret) catch return AgentError.InvalidResponse;
         if (self.worker_credential) |old| {
             std.crypto.secureZero(u8, old);
@@ -210,7 +215,7 @@ pub const Agent = struct {
         @memcpy(&self.id, id_str);
 
         // store wireguard state
-        self.wg_keypair = kp;
+        self.wg_keypair = identity.keypair;
 
         // parse optional node_id and overlay_ip from the response
         if (extractJsonInt(resp.body, "node_id")) |nid| {
@@ -357,7 +362,7 @@ fn buildRegisterBody(
     role: cluster_config.NodeRole,
     region: ?[]const u8,
 ) ![]u8 {
-    return request_support.buildRegisterBody(alloc, token, address, agent_api_port, resources, pub_key, wg_listen_port, role, region);
+    return request_support.buildRegisterBody(alloc, token, address, agent_api_port, resources, pub_key, wg_listen_port, role, region, null);
 }
 
 fn buildHeartbeatBody(alloc: Allocator, resources: AgentResources, gpu_health_label: []const u8) ![]u8 {

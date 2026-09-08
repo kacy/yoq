@@ -8,6 +8,9 @@ const json_helpers = @import("../../../lib/json_helpers.zig");
 const audit = @import("../../../state/audit.zig");
 const common = @import("../common.zig");
 const writers = @import("writers.zig");
+const enrollment = @import("../../../cluster/enrollment_identity.zig");
+const mutation = @import("../../../cluster/mutation_session.zig");
+const deploy_routes = @import("deploy_routes.zig");
 const credentials = @import("../../../cluster/agent_credentials.zig");
 
 const Response = common.Response;
@@ -47,10 +50,17 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
         return .{ .status = .bad_request, .body = "{\"error\":\"invalid token\"}", .allocated = false };
     }
 
+    var registration_key = enrollment.parseKey(alloc, request.body) catch return common.badRequest("invalid registration_key");
+    defer if (registration_key) |*key| std.crypto.secureZero(u8, key);
+    if (registration_key != null and wg_public_key == null) return common.badRequest("retryable registration requires wg_public_key");
+    var credential = registration_key orelse credentials.issue();
+    defer std.crypto.secureZero(u8, &credential);
+    const credential_hash = credentials.hash(&credential);
     var id_buf: [12]u8 = undefined;
-    agent_registry.generateAgentId(&id_buf);
+    if (registration_key != null) @memcpy(&id_buf, credential_hash[0..12]) else agent_registry.generateAgentId(&id_buf);
 
     var endpoint_buf: [64]u8 = undefined;
+    var wireguard_endpoint: ?[]const u8 = null;
     var peer_sql: ?[]const u8 = null;
     var peer_sql_buf: [6144]u8 = undefined;
 
@@ -67,6 +77,7 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
         else
             std.fmt.bufPrint(&endpoint_buf, "{s}:{d}", .{ address, port }) catch null;
 
+        wireguard_endpoint = endpoint_host orelse return common.badRequest("invalid wireguard endpoint");
         const reserved_nodes = alloc.alloc(u64, node.config.peers.len + 1) catch return common.internalError();
         defer alloc.free(reserved_nodes);
         reserved_nodes[0] = node.config.id;
@@ -85,39 +96,45 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
     const gpu_model_str = json_helpers.extractJsonString(request.body, "gpu_model");
     const gpu_vram_val = numbers.optional(u64, parsed.value, "gpu_vram_mb", 0, std.math.maxInt(i64)) catch return common.badRequest("invalid gpu_vram_mb");
 
-    const sql = agent_registry.registerSqlFull(
-        &sql_buf,
-        &id_buf,
-        address,
-        .{
-            .cpu_cores = cpu_cores,
-            .memory_mb = memory_mb,
-            .gpu_count = gpu_count_val orelse 0,
-            .gpu_model = gpu_model_str,
-            .gpu_vram_mb = gpu_vram_val orelse 0,
-        },
-        nowRealSeconds(),
-        .{
-            .agent_api_port = agent_api_port,
-            .role = role_str,
-            .region = region_str,
-            .labels = labels_str,
-        },
-    ) catch return common.internalError();
-
-    var credential = credentials.issue();
-    defer std.crypto.secureZero(u8, &credential);
-    const credential_hash = credentials.hash(&credential);
+    const resources: agent_registry.AgentResources = .{
+        .cpu_cores = cpu_cores,
+        .memory_mb = memory_mb,
+        .gpu_count = gpu_count_val orelse 0,
+        .gpu_model = gpu_model_str,
+        .gpu_vram_mb = gpu_vram_val orelse 0,
+    };
+    const options: agent_registry.RegisterOpts = .{
+        .agent_api_port = agent_api_port,
+        .role = role_str,
+        .region = region_str,
+        .labels = labels_str,
+    };
+    const now = nowRealSeconds();
+    const sql = agent_registry.registerSqlFull(&sql_buf, &id_buf, address, resources, now, options) catch return common.internalError();
     var combined_buf: [9216]u8 = undefined;
     const combined = std.fmt.bufPrint(&combined_buf, "{s} {s} UPDATE agents SET credential_hash = '{s}' WHERE id = '{s}';", .{ sql, peer_sql orelse "", credential_hash, id_buf }) catch return common.internalError();
-    _ = node.proposeCommitted(combined, 5000) catch |err| return switch (err) {
-        error.NotLeader, error.LeadershipLost => common.notLeader(alloc, node),
-        error.CommandRejected => common.conflict("registration conflicts with cluster state"),
-        error.CommitTimeout => .{ .status = .service_unavailable, .body = "{\"error\":\"registration outcome unknown; retry after cluster recovers\"}", .allocated = false },
-        else => common.internalError(),
+    const session = mutation.Session.begin(node) catch return common.notLeader(alloc, node);
+    session.commit(combined) catch |err| {
+        if (err == error.Conflict and registration_key != null) {
+            enrollment.refresh(alloc, session, &id_buf, &credential, .{
+                .address = address,
+                .endpoint = wireguard_endpoint.?,
+                .public_key = wg_public_key.?,
+                .resources = resources,
+                .options = options,
+                .now = now,
+            }) catch |refresh_error| return deploy_routes.mutationFailure(alloc, node, refresh_error);
+        } else return deploy_routes.mutationFailure(alloc, node, err);
     };
-    const registered = (agent_registry.getAgent(alloc, node.stateMachineDb(), &id_buf) catch return common.internalError()) orelse
-        return .{ .status = .service_unavailable, .body = "{\"error\":\"no available node_id\"}", .allocated = false };
+    // Keep credential validation, assigned identity and peer bootstrap in the
+    // same applied-state snapshot while constructing the response.
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
+    const registered = (enrollment.readRegisteredLocked(alloc, session, &id_buf, &credential, if (registration_key != null) wg_public_key else null) catch |err| return switch (err) {
+        error.NotLeader => common.badRequest("not leader"),
+        error.Conflict => common.conflict("registration credential does not own this identity"),
+        else => common.internalError(),
+    }) orelse return common.conflict("registration identity unavailable");
     defer registered.deinit(alloc);
     const assigned_node_id: ?u16 = if (registered.node_id) |nid| std.math.cast(u16, nid) else null;
     const overlay_ip_str = registered.overlay_ip;
@@ -130,6 +147,7 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
     writer.writeAll("{\"id\":\"") catch return common.internalError();
     writer.writeAll(&id_buf) catch return common.internalError();
     writer.print("\",\"credential\":\"{s}\"", .{credential}) catch return common.internalError();
+    if (registration_key != null) writer.writeAll(",\"registration_key_accepted\":true") catch return common.internalError();
 
     if (assigned_node_id) |nid| {
         writer.print(",\"node_id\":{d}", .{nid}) catch return common.internalError();
@@ -454,4 +472,126 @@ test "registration returns credentials only after their row is applied" {
     try std.testing.expectEqual(@as(?i64, 1), json_helpers.extractJsonInt(gossip, "id"));
     try std.testing.expectEqual(@as(?i64, 19877), json_helpers.extractJsonInt(gossip, "port"));
     try std.testing.expectEqual(node.raft.commit_index, node.state_machine.last_applied);
+}
+
+const retry_test_key = "0123456789abcdef" ** 4;
+
+fn registerRetryForTest(node: *@import("../../../cluster/node.zig").Node, key: []const u8, public_key: []const u8, address: []const u8) !Response {
+    const alloc = std.testing.allocator;
+    const body = try std.fmt.allocPrint(alloc, "{{\"token\":\"join-secret\",\"address\":\"{s}\",\"cpu_cores\":2,\"memory_mb\":512,\"registration_key\":\"{s}\",\"wg_public_key\":\"{s}\"}}", .{ address, key, public_key });
+    defer alloc.free(body);
+    return handleAgentRegisterImpl(alloc, .{
+        .method = .POST,
+        .path = "/agents/register",
+        .path_only = "/agents/register",
+        .query = "",
+        .content_length = body.len,
+        .body = body,
+        .headers_raw = "",
+    }, .{ .cluster = node, .join_token = "join-secret" });
+}
+
+test "enrollment retry after lost response and replica promotion keeps one identity" {
+    const node_mod = @import("../../../cluster/node.zig");
+    const alloc = std.testing.allocator;
+    var leader = try node_mod.Node.initForTests(alloc, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/unused" });
+    defer leader.deinit();
+    leader.fixPointers();
+    leader.raft.role = .leader;
+    const first = try registerRetryForTest(&leader, retry_test_key, "test-key", "10.0.0.2");
+    defer if (first.allocated) alloc.free(first.body);
+    try std.testing.expectEqual(http.StatusCode.ok, first.status);
+    const first_id = extractJsonString(first.body, "id").?;
+    try std.testing.expectEqualStrings(retry_test_key, extractJsonString(first.body, "credential").?);
+    try std.testing.expect(std.mem.indexOf(u8, first.body, "\"registration_key_accepted\":true") != null);
+
+    var replica = try node_mod.Node.initForTests(alloc, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/unused" });
+    defer replica.deinit();
+    replica.fixPointers();
+    const entries = try leader.log.getEntries(alloc, 1, leader.raft.commit_index);
+    defer {
+        for (entries) |entry| alloc.free(entry.data);
+        alloc.free(entries);
+    }
+    for (entries) |entry| try replica.log.append(entry);
+    replica.state_machine.applyUpTo(&replica.log, alloc, leader.raft.commit_index);
+    replica.raft.commit_index = leader.raft.commit_index;
+    replica.raft.role = .leader;
+    replica.raft.persistent_state.current_term = 1;
+    try std.testing.expect(replica.log.setCurrentTerm(1));
+    leader.raft.role = .follower;
+    const retried = try registerRetryForTest(&replica, retry_test_key, "test-key", "10.0.0.3");
+    defer if (retried.allocated) alloc.free(retried.body);
+    try std.testing.expectEqual(http.StatusCode.ok, retried.status);
+    try std.testing.expectEqualStrings(first_id, extractJsonString(retried.body, "id").?);
+    try std.testing.expectEqual(@as(?i64, 2), json_helpers.extractJsonInt(retried.body, "node_id"));
+    const row = (try replica.stateMachineDb().one(struct { agents: i64, peers: i64 }, "SELECT (SELECT COUNT(*) FROM agents) AS agents, (SELECT COUNT(*) FROM wireguard_peers) AS peers;", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 1), row.agents);
+    try std.testing.expectEqual(@as(i64, 1), row.peers);
+    const endpoint = (try replica.stateMachineDb().oneAlloc(struct { endpoint: []const u8 }, alloc, "SELECT endpoint FROM wireguard_peers;", .{}, .{})).?;
+    defer alloc.free(endpoint.endpoint);
+    try std.testing.expectEqualStrings("10.0.0.3:51820", endpoint.endpoint);
+}
+
+test "enrollment retries cannot replace wireguard identity or revive revoked credentials" {
+    const alloc = std.testing.allocator;
+    var node = try @import("../../../cluster/node.zig").Node.initForTests(alloc, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/unused" });
+    defer node.deinit();
+    node.fixPointers();
+    node.raft.role = .leader;
+    const first = try registerRetryForTest(&node, retry_test_key, "original-key", "10.0.0.2");
+    defer if (first.allocated) alloc.free(first.body);
+    try std.testing.expectEqual(http.StatusCode.ok, first.status);
+    const id = extractJsonString(first.body, "id").?;
+    const replacement = try registerRetryForTest(&node, retry_test_key, "different-key", "10.0.0.9");
+    defer if (replacement.allocated) alloc.free(replacement.body);
+    try std.testing.expectEqual(http.StatusCode.conflict, replacement.status);
+    const session = try mutation.Session.begin(&node);
+    try session.commit("UPDATE agents SET credential_hash = NULL;");
+    const revoked = try registerRetryForTest(&node, retry_test_key, "original-key", "10.0.0.9");
+    defer if (revoked.allocated) alloc.free(revoked.body);
+    try std.testing.expectEqual(http.StatusCode.conflict, revoked.status);
+    try std.testing.expect(!(try credentials.authenticates(node.stateMachineDb(), retry_test_key, id)));
+    const unchanged = (try agent_registry.getAgent(alloc, node.stateMachineDb(), id)).?;
+    defer unchanged.deinit(alloc);
+    try std.testing.expectEqualStrings("10.0.0.2", unchanged.address);
+    try std.testing.expectEqualStrings("original-key", unchanged.wg_public_key.?);
+}
+
+test "simultaneous enrollment retries converge on the same applied identity" {
+    const alloc = std.testing.allocator;
+    var node = try @import("../../../cluster/node.zig").Node.initForTests(alloc, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/unused" });
+    defer node.deinit();
+    node.fixPointers();
+    node.raft.role = .leader;
+    const Worker = struct {
+        node: *@import("../../../cluster/node.zig").Node,
+        response: ?Response = null,
+        fn run(self: *@This()) void {
+            self.response = registerRetryForTest(self.node, retry_test_key, "test-key", "10.0.0.2") catch null;
+        }
+    };
+    var workers = [_]Worker{ .{ .node = &node }, .{ .node = &node } };
+    var first_thread = try std.Thread.spawn(.{}, Worker.run, .{&workers[0]});
+    var second_thread = std.Thread.spawn(.{}, Worker.run, .{&workers[1]}) catch |err| {
+        first_thread.join();
+        if (workers[0].response) |response| if (response.allocated) alloc.free(response.body);
+        return err;
+    };
+    first_thread.join();
+    second_thread.join();
+    defer for (workers) |worker| if (worker.response) |response| {
+        if (response.allocated) alloc.free(response.body);
+    };
+    for (workers) |worker| try std.testing.expectEqual(http.StatusCode.ok, (worker.response orelse return error.MissingResponse).status);
+    try std.testing.expectEqualStrings(extractJsonString(workers[0].response.?.body, "id").?, extractJsonString(workers[1].response.?.body, "id").?);
+    const count = (try node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM agents;", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 1), count.count);
+}
+
+test "enrollment rejects malformed retry keys instead of creating a legacy identity" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{ "{\"registration_key\":7}", "{\"registration_key\":\"short\"}", "{\"registration_key\":null}" }) |body|
+        try std.testing.expectError(error.InvalidKey, enrollment.parseKey(alloc, body));
+    try std.testing.expect((try enrollment.parseKey(alloc, "{}")) == null);
 }
