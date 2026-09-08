@@ -20,11 +20,8 @@ pub const OpenedStore = struct {
 };
 
 pub fn openCertStore(alloc: std.mem.Allocator) OpenStoreError!OpenedStore {
-    const db_ptr = alloc.create(sqlite.Db) catch return OpenStoreError.AllocateDbFailed;
-    errdefer alloc.destroy(db_ptr);
-
-    db_ptr.* = store.openDb() catch return OpenStoreError.DbOpenFailed;
-    errdefer db_ptr.deinit();
+    const db_ptr = try store.openOwnedDb(alloc);
+    errdefer store.closeOwnedDb(alloc, db_ptr);
 
     const opened_store = cert_store.CertStore.init(db_ptr, alloc) catch |err| return switch (err) {
         cert_store.CertError.HomeDirNotFound => OpenStoreError.HomeDirNotFound,
@@ -38,8 +35,7 @@ pub fn openCertStore(alloc: std.mem.Allocator) OpenStoreError!OpenedStore {
 }
 
 pub fn closeCertStore(alloc: std.mem.Allocator, opened: *OpenedStore) void {
-    opened.store.db.deinit();
-    alloc.destroy(opened.store.db);
+    store.closeOwnedDb(alloc, opened.db);
 }
 
 pub fn reportOpenStoreError(err: OpenStoreError) common.TlsCommandsError {

@@ -10,18 +10,13 @@ const health = @import("../health.zig");
 const tls_proxy = @import("../../tls/proxy.zig");
 const tls_backend = @import("../../tls/backend.zig");
 const cert_store_mod = @import("../../tls/cert_store.zig");
-const sqlite = @import("sqlite");
 const cli = @import("../../lib/cli.zig");
+const RouteInputs = @import("route_inputs.zig").RouteInputs;
 const tls_support = @import("tls_support.zig");
 
 const writeErr = cli.writeErr;
 
-pub const TlsResources = struct {
-    backend_registry: *tls_backend.BackendRegistry,
-    proxy: *tls_proxy.TlsProxy,
-    tls_certs: *cert_store_mod.CertStore,
-    tls_db: *sqlite.Db,
-};
+pub const TlsResources = @import("tls_resources.zig").TlsResources;
 
 pub fn registerHealthChecks(
     alloc: std.mem.Allocator,
@@ -65,103 +60,13 @@ pub fn syncServiceDefinitions(
     for (services) |svc| {
         if (!shouldStart(start_set, svc.name)) continue;
 
-        var route_inputs: std.ArrayList(store.ServiceHttpRouteInput) = .empty;
+        const target_port = if (svc.ports.len > 0) svc.ports[0].container_port else null;
+        const route_inputs = RouteInputs.init(alloc, svc.http_routes, target_port) catch {
+            log.warn("orchestrator: failed to allocate http routes for {s}", .{svc.name});
+            continue;
+        };
         defer route_inputs.deinit(alloc);
-        var route_alloc_failed = false;
-        for (svc.http_routes) |route| {
-            var match_methods: std.ArrayList(store.ServiceHttpRouteMethodInput) = .empty;
-            errdefer match_methods.deinit(alloc);
-            for (route.match_methods) |method_match| {
-                match_methods.append(alloc, .{
-                    .method = method_match.method,
-                }) catch {
-                    log.warn("orchestrator: failed to allocate http route method matches for {s}", .{svc.name});
-                    route_alloc_failed = true;
-                    break;
-                };
-            }
-            if (route_alloc_failed) {
-                match_methods.deinit(alloc);
-                break;
-            }
-            var match_headers: std.ArrayList(store.ServiceHttpRouteHeaderInput) = .empty;
-            errdefer match_headers.deinit(alloc);
-            for (route.match_headers) |header_match| {
-                match_headers.append(alloc, .{
-                    .header_name = header_match.name,
-                    .header_value = header_match.value,
-                }) catch {
-                    log.warn("orchestrator: failed to allocate http route header matches for {s}", .{svc.name});
-                    route_alloc_failed = true;
-                    break;
-                };
-            }
-            if (route_alloc_failed) {
-                match_headers.deinit(alloc);
-                break;
-            }
-            var backend_services: std.ArrayList(store.ServiceHttpRouteBackendInput) = .empty;
-            errdefer backend_services.deinit(alloc);
-            for (route.backend_services) |backend| {
-                backend_services.append(alloc, .{
-                    .backend_service = backend.service_name,
-                    .weight = backend.weight,
-                }) catch {
-                    log.warn("orchestrator: failed to allocate http route backends for {s}", .{svc.name});
-                    route_alloc_failed = true;
-                    break;
-                };
-            }
-            if (route_alloc_failed) {
-                match_methods.deinit(alloc);
-                match_headers.deinit(alloc);
-                backend_services.deinit(alloc);
-                break;
-            }
-            route_inputs.append(alloc, .{
-                .route_name = route.name,
-                .host = route.host,
-                .path_prefix = route.path_prefix,
-                .rewrite_prefix = route.rewrite_prefix,
-                .match_methods = match_methods.toOwnedSlice(alloc) catch {
-                    log.warn("orchestrator: failed to allocate http route method matches for {s}", .{svc.name});
-                    route_alloc_failed = true;
-                    break;
-                },
-                .match_headers = match_headers.toOwnedSlice(alloc) catch {
-                    log.warn("orchestrator: failed to allocate http route header matches for {s}", .{svc.name});
-                    route_alloc_failed = true;
-                    break;
-                },
-                .backend_services = backend_services.toOwnedSlice(alloc) catch {
-                    log.warn("orchestrator: failed to allocate http route backends for {s}", .{svc.name});
-                    route_alloc_failed = true;
-                    break;
-                },
-                .mirror_service = route.mirror_service,
-                .retries = route.retries,
-                .connect_timeout_ms = route.connect_timeout_ms,
-                .request_timeout_ms = route.request_timeout_ms,
-                .target_port = if (svc.ports.len > 0) svc.ports[0].container_port else null,
-                .preserve_host = route.preserve_host,
-                .retry_on_5xx = route.retry_on_5xx,
-                .circuit_breaker_threshold = route.circuit_breaker_threshold,
-                .circuit_breaker_timeout_ms = route.circuit_breaker_timeout_ms,
-            }) catch {
-                alloc.free(match_methods.items);
-                alloc.free(match_headers.items);
-                alloc.free(backend_services.items);
-                log.warn("orchestrator: failed to allocate http routes for {s}", .{svc.name});
-                route_alloc_failed = true;
-                break;
-            };
-        }
-        defer {
-            for (route_inputs.items) |route| if (route.match_methods.len > 0) alloc.free(route.match_methods);
-            for (route_inputs.items) |route| if (route.match_headers.len > 0) alloc.free(route.match_headers);
-            for (route_inputs.items) |route| if (route.backend_services.len > 0) alloc.free(route.backend_services);
-        }
-        if (route_alloc_failed) continue;
+
         const peer_mode_label = if (svc.tls) |tls| tls.peer.label() else "off";
         const record = store.syncServiceConfig(
             alloc,
@@ -227,62 +132,25 @@ pub fn startTlsProxy(
 ) ?TlsResources {
     if (!hasTlsServices(services, start_set)) return null;
 
-    const reg = alloc.create(tls_backend.BackendRegistry) catch {
-        writeErr("failed to allocate backend registry\n", .{});
-        return null;
-    };
-    reg.* = tls_backend.BackendRegistry.init(alloc);
-    errdefer {
-        reg.deinit();
-        alloc.destroy(reg);
-    }
-
-    registerTlsBackends(alloc, reg, services, states, start_set);
-
-    const db_ptr = alloc.create(sqlite.Db) catch {
-        writeErr("failed to allocate database for cert store\n", .{});
-        return null;
-    };
-    errdefer alloc.destroy(db_ptr);
-    db_ptr.* = store.openDb() catch {
-        writeErr("failed to open database for cert store\n", .{});
-        return null;
-    };
-    errdefer db_ptr.deinit();
-
-    const certs = alloc.create(cert_store_mod.CertStore) catch {
-        writeErr("failed to allocate cert store\n", .{});
-        return null;
-    };
-    errdefer alloc.destroy(certs);
-    certs.* = cert_store_mod.CertStore.init(db_ptr, alloc) catch {
-        writeErr("failed to init cert store (is the master key set?)\n", .{});
-        return null;
-    };
-    errdefer std.crypto.secureZero(u8, &certs.key);
-
-    const proxy = alloc.create(tls_proxy.TlsProxy) catch {
-        writeErr("failed to allocate TLS proxy\n", .{});
-        return null;
-    };
-    errdefer alloc.destroy(proxy);
-    proxy.* = tls_proxy.TlsProxy.init(alloc, reg, certs, 443, 80) catch {
-        writeErr("failed to bind TLS proxy ports (443/80)\n", .{});
+    const resources = TlsResources.init(alloc) catch |err| {
+        const message = switch (err) {
+            error.AllocateRegistryFailed => "failed to allocate backend registry",
+            error.AllocateDbFailed => "failed to allocate database for cert store",
+            error.DbOpenFailed => "failed to open database for cert store",
+            error.AllocateCertStoreFailed => "failed to allocate cert store",
+            error.InitCertStoreFailed => "failed to init cert store (is the master key set?)",
+            error.AllocateProxyFailed => "failed to allocate TLS proxy",
+            error.BindProxyFailed => "failed to bind TLS proxy ports (443/80)",
+        };
+        writeErr("{s}\n", .{message});
         return null;
     };
 
-    if (hasManagedAcmeService(services, start_set)) {
-        proxy.setRenewalConfig(.{});
-    }
-
-    proxy.start();
-    provisionAcmeCerts(alloc, certs, &proxy.challenges, services, start_set);
-    return .{
-        .backend_registry = reg,
-        .proxy = proxy,
-        .tls_certs = certs,
-        .tls_db = db_ptr,
-    };
+    registerTlsBackends(alloc, resources.backend_registry, services, states, start_set);
+    if (hasManagedAcmeService(services, start_set)) resources.proxy.setRenewalConfig(.{});
+    resources.proxy.start();
+    provisionAcmeCerts(alloc, resources.certs, &resources.proxy.challenges, services, start_set);
+    return resources;
 }
 
 fn shouldStart(start_set: ?std.StringHashMapUnmanaged(void), name: []const u8) bool {

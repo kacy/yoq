@@ -140,6 +140,8 @@ comptime {
     _ = @import("manifest/cli/ops.zig");
     _ = @import("manifest/loader.zig");
     _ = @import("manifest/orchestrator.zig");
+    _ = @import("manifest/orchestrator/route_inputs.zig");
+    _ = @import("manifest/orchestrator/tls_resources.zig");
     _ = @import("manifest/gpu_runtime.zig");
     _ = @import("manifest/health.zig");
     _ = @import("manifest/update.zig");

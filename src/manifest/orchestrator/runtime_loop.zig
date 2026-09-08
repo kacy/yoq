@@ -204,7 +204,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             orch.alloc,
             svc,
             &orch.states[idx],
-            orch.backend_registry,
+            if (orch.tls_resources) |resources| resources.backend_registry else null,
         );
 
         const exit_code = c.wait() catch 255;
