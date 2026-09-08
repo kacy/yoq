@@ -213,7 +213,7 @@ fn initiateUpload(
     }) catch return common.RegistryError.UploadInitFailed;
     defer init_req.deinit();
 
-    init_req.sendBodiless() catch return common.RegistryError.UploadInitFailed;
+    init_req.sendBodyComplete(&.{}) catch return common.RegistryError.UploadInitFailed;
 
     var redirect_buf: [8192]u8 = undefined;
     const init_response = init_req.receiveHead(&redirect_buf) catch

@@ -119,7 +119,7 @@ test "parseLocationHeader keeps locations after response storage is reused" {
     try std.testing.expectEqualStrings("https://registry.example.io/upload?id=123", location);
 }
 
-test "parseLocationHeader keeps concurrent locations in separate caller buffers" {
+test "parseLocationHeader keeps separate results in caller buffers" {
     const head = try std.http.Client.Response.Head.parse("HTTP/1.1 202 Accepted\r\nLocation: /upload\r\n\r\n");
     var first_buf: [128]u8 = undefined;
     var second_buf: [128]u8 = undefined;
