@@ -98,6 +98,18 @@ jobs:
       timeout-minutes: 30
       failure-artifact-name: unit-tests-log
 
+  namespace-stack:
+    name: namespace-stack
+    needs:
+      - changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: namespace-stack
+      command: bash tools/namespace_stack_smoke.sh
+      timeout-minutes: 10
+      failure-artifact-name: namespace-stack-log
+
   operator-smoke:
     name: operator-smoke
     needs:

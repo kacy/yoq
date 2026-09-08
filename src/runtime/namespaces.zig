@@ -13,18 +13,6 @@ const posix = std.posix;
 const syscall_util = @import("../lib/syscall.zig");
 const log = @import("../lib/log.zig");
 
-/// child process stack size (1MB).
-/// must be large enough for the child process to set up filesystem,
-/// apply security restrictions, and exec the container command.
-const child_stack_size = 1024 * 1024;
-
-comptime {
-    // minimum: 128KB (should fit basic setup)
-    // maximum: 16MB (reasonable upper bound)
-    std.debug.assert(child_stack_size >= 128 * 1024);
-    std.debug.assert(child_stack_size <= 16 * 1024 * 1024);
-}
-
 pub const NamespaceError = error{
     CloneFailed,
     PipeFailed,
@@ -164,17 +152,6 @@ pub fn spawn(
         }
     }
 
-    // allocate child stack. clone3 needs an explicit stack for the child.
-    const stack_mem = posix.mmap(
-        null,
-        child_stack_size,
-        .{ .READ = true, .WRITE = true },
-        .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
-        -1,
-        0,
-    ) catch return NamespaceError.CloneFailed;
-    defer posix.munmap(@alignCast(stack_mem));
-
     // pack child context into a struct on the stack so child_fn can access it.
     // we pass the pipe read fd and the real child function through a trampoline.
     const ChildContext = struct {
@@ -221,11 +198,12 @@ pub fn spawn(
         .real_arg = child_arg,
     };
 
+    // This is a fork-style raw syscall: the child resumes inside this function.
+    // Without CLONE_VM it must keep its copied caller stack. Switching to an
+    // empty stack would invalidate compiler locals before the trampoline runs.
     var args = CloneArgs{
         .flags = ns_flags.toCloneFlags(),
         .exit_signal = @intFromEnum(linux.SIG.CHLD),
-        .stack = @intFromPtr(stack_mem.ptr),
-        .stack_size = child_stack_size,
     };
 
     const rc = linux.syscall2(
@@ -396,4 +374,74 @@ test "user mapping defaults" {
     try std.testing.expectEqual(@as(u32, 1), mapping.count);
     try std.testing.expectEqual(@as(u32, 0), mapping.inner_gid);
     try std.testing.expectEqual(@as(u32, 1000), mapping.outer_gid);
+}
+
+fn testChildContinuation(isolated: bool) !void {
+    const Context = struct {
+        marker: u64,
+        isolated: bool,
+
+        fn child(arg: ?*anyopaque) callconv(.c) u8 {
+            const context: *@This() = @ptrCast(@alignCast(arg));
+            if (context.marker != 0x123456789abcdef0) return 41;
+            if (context.isolated and linux.getpid() != 1) return 42;
+            var output: [64]u8 = undefined;
+            const message = std.fmt.bufPrint(&output, "child:{x}\n", .{context.marker}) catch return 43;
+            _ = linux_platform.posix.write(posix.STDOUT_FILENO, message) catch return 44;
+            _ = linux_platform.posix.write(posix.STDERR_FILENO, "child stderr\n") catch return 45;
+            return 37;
+        }
+    };
+    var context = Context{ .marker = 0x123456789abcdef0, .isolated = isolated };
+    var child = try spawn(.{
+        .user = false,
+        .pid = isolated,
+        .net = isolated,
+        .mount = isolated,
+        .uts = isolated,
+        .ipc = isolated,
+        .cgroup = false,
+    }, null, Context.child, &context);
+    defer linux_platform.posix.close(child.stdout_fd);
+    defer linux_platform.posix.close(child.stderr_fd);
+    var reaped = false;
+    defer {
+        if (child.ready_fd != -1) child.signalReady();
+        if (!reaped) {
+            _ = linux.kill(child.pid, linux.SIG.KILL);
+            while (linux.errno(linux.syscall4(.wait4, @intCast(child.pid), 0, 0, 0)) == .INTR) {}
+        }
+    }
+    // The child must wait for setup and retain its own copy of caller locals.
+    context.marker = 0;
+    var status: u32 = 0;
+    const before_ready = try syscall_util.unwrap(linux.syscall4(.wait4, @intCast(child.pid), @intFromPtr(&status), linux.W.NOHANG, 0));
+    reaped = before_ready != 0;
+    try std.testing.expectEqual(@as(usize, 0), before_ready);
+    child.signalReady();
+    for (0..500) |_| {
+        const waited = try syscall_util.unwrap(linux.syscall4(.wait4, @intCast(child.pid), @intFromPtr(&status), linux.W.NOHANG, 0));
+        if (waited != 0) {
+            reaped = true;
+            break;
+        }
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
+    }
+    try std.testing.expect(reaped);
+    try std.testing.expect(linux.W.IFEXITED(status));
+    try std.testing.expectEqual(@as(u8, 37), linux.W.EXITSTATUS(status));
+    var output: [64]u8 = undefined;
+    const stdout_len = try posix.read(child.stdout_fd, &output);
+    try std.testing.expectEqualStrings("child:123456789abcdef0\n", output[0..stdout_len]);
+    const stderr_len = try posix.read(child.stderr_fd, &output);
+    try std.testing.expectEqualStrings("child stderr\n", output[0..stderr_len]);
+}
+
+test "namespace child preserves caller stack and callback context" {
+    try testChildContinuation(false);
+}
+
+test "namespace child preserves callback inside isolated namespaces" {
+    if (linux.geteuid() != 0) return error.SkipZigTest;
+    try testChildContinuation(true);
 }
