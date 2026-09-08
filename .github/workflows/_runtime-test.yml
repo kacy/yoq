@@ -59,6 +59,7 @@ jobs:
             bash scripts/dns-bridge-kernel-smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
             bash scripts/wireguard-kernel-smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
             bash scripts/veth-namespace-smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+            bash scripts/service-gateway-smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
             sudo env RUNNER_TEMP="$RUNNER_TEMP" python3 scripts/scheduled-runtime-smoke.py \
               2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
           fi
