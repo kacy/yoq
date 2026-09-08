@@ -192,20 +192,38 @@ def inside(root, outer_mount, outer_net):
         with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
             return db.execute("SELECT count(*) FROM containers WHERE id = ?", (container_id,)).fetchone()[0] == 0
 
-    def probe_service(*arguments):
-        probe_root = root / "probe-rootfs"
-        (probe_root / "bin").mkdir(parents=True, exist_ok=True)
-        shutil.copy2(PROBE, probe_root / "bin/probe")
-        env = dict(os.environ, HOME=str(homes["agent"]))
-        try:
-            response = subprocess.run([*worker_prefix, str(YOQ), "run", "--name", "scheduled-probe",
-                                       str(probe_root), "/bin/probe", *arguments],
-                                      env=env, capture_output=True, timeout=15)
+    probe_started = False
+
+    def worker_cli(*arguments, check=True):
+        response = subprocess.run([*worker_prefix, str(YOQ), *arguments],
+                                  env=dict(os.environ, HOME=str(homes["agent"])),
+                                  capture_output=True, timeout=15)
+        if check:
             assert response.returncode == 0, response.stderr.decode()
-            return response.stdout
-        finally:
-            subprocess.run([*worker_prefix, str(YOQ), "rm", "scheduled-probe"],
-                           env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        return response
+
+    def probe_result(*arguments):
+        nonlocal probe_started
+        if not probe_started:
+            probe_root = root / "probe-rootfs"
+            (probe_root / "bin").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(PROBE, probe_root / "bin/probe")
+            shutil.copy2(HELPER, probe_root / "bin/server")
+            probe_started = True
+            worker_cli("run", "-d", "--name", "scheduled-probe", str(probe_root),
+                       "/bin/server", "8081", "probe")
+        # Keep one source address across policy changes and execute real traffic
+        # in its container namespace, without changing service endpoints.
+        return worker_cli("exec", "scheduled-probe", "/bin/probe", *arguments, check=False)
+
+    def probe_service(*arguments):
+        response = probe_result(*arguments)
+        assert response.returncode == 0, response.stderr.decode()
+        return response.stdout
+
+    def policy_blocks(address):
+        response = probe_result("http-get", address, "8080", "/")
+        return response.returncode == 1 and b"ConnectionPending" in response.stderr
 
     def assignment_rows():
         # Worker assignment endpoints require worker credentials. Inspect this
@@ -261,10 +279,20 @@ def inside(root, outer_mount, outer_net):
             assert result.get("status") == "completed", result
             assignments = assignment_rows()
             assert assignments[0]["status"] == "running", assignments
-            # Foreground CLI output also includes its generated container ID.
             resolved = probe_service("resolve", "web").splitlines()
             assert any(address.startswith(b"10.43.") for address in resolved), resolved
             assert b"scheduled-ready" in probe_service("http-get", "web", "8080", "/")
+            assert b"scheduled-ready" in probe_service("http-get", row["ip_address"], "8080", "/")
+            worker_cli("policy", "deny", "scheduled-probe", "web")
+            wait_for("service VIP policy enforcement", lambda: policy_blocks("web"))
+            wait_for("direct endpoint policy enforcement", lambda: policy_blocks(row["ip_address"]))
+            worker_cli("policy", "rm", "scheduled-probe", "web")
+            wait_for("policy removal restores traffic", lambda:
+                     (response := probe_result("http-get", "web", "8080", "/")).returncode == 0 and
+                     b"scheduled-ready" in response.stdout)
+            wait_for("policy removal restores direct traffic", lambda:
+                     (response := probe_result("http-get", row["ip_address"], "8080", "/")).returncode == 0 and
+                     b"scheduled-ready" in response.stdout)
             assert any("/manifests/" in path for path in registry.request_paths)
             assert sum("/blobs/" in path for path in registry.request_paths) >= 2
             status = Path(f"/proc/{row['pid']}/status").read_text()
@@ -275,6 +303,7 @@ def inside(root, outer_mount, outer_net):
             while time.monotonic() - registered_at < 25:
                 assert api("/agents")[0]["status"] == "active", "healthy agent was marked offline by gossip"
                 time.sleep(0.5)
+            assert api("/agents")[0]["status"] == "active", "healthy agent was marked offline by gossip"
             run(*worker_prefix, str(YOQ), "stop", "web", env=dict(os.environ, HOME=str(homes["agent"])), stdout=subprocess.DEVNULL)
             # The fixture server has no graceful SIGTERM handler. Its signaled
             # exit must be reported as a process failure, never left running.
@@ -283,8 +312,14 @@ def inside(root, outer_mount, outer_net):
             assert terminal["status_reason"] == "process_failed", dict(terminal)
             assert not Path(f"/proc/{row['pid']}").exists(), "terminated process remains alive"
             wait_for("assignment cleanup", lambda: container_removed(row["id"]))
-        print("scheduled runtime: API authentication, registry certificate trust, OCI pull, readiness, routed and service-VIP HTTP, identity, limits, and exit passed", flush=True)
+        print("scheduled runtime: API authentication, registry certificate trust, OCI pull, readiness, routed and service-VIP HTTP, policy enforcement, identity, limits, and exit passed", flush=True)
     finally:
+        if probe_started:
+            for command in ("stop", "rm"):
+                try:
+                    worker_cli(command, "scheduled-probe", check=False)
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    print(f"probe cleanup {command} failed: {error}", file=sys.stderr)
         for process in reversed(processes):
             process.terminate()
         for process in reversed(processes):
