@@ -33,6 +33,7 @@ jobs:
               - 'src/**'
               - 'tests/**'
               - 'tools/**'
+              - 'scripts/**'
               - 'bpf/**'
               - 'examples/**'
               - 'build.zig'
