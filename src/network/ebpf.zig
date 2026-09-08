@@ -367,6 +367,8 @@ pub const PolicyEnforcer = policy_runtime.PolicyEnforcer;
 /// global policy enforcer instance.
 var policy_enforcer: ?PolicyEnforcer = null;
 const policy_rules = @import("policy_rules.zig");
+// Cache the last full snapshot. Incremental map updates invalidate it so
+// the next full synchronization restores the desired rules.
 var policy_snapshot: ?policy_rules.Snapshot = null;
 
 fn clearPolicySnapshot() void {
@@ -374,7 +376,8 @@ fn clearPolicySnapshot() void {
     policy_snapshot = null;
 }
 
-/// Pin the active map handles while incremental callers update them.
+/// Hold the global mutex while the caller updates the active policy maps.
+/// Call deinit to release the mutex.
 pub const PolicyUpdate = struct {
     enforcer: *const PolicyEnforcer,
 
