@@ -338,3 +338,11 @@ test "service discovery recovers after backend replacement" {
     try startLocalHttpServer(&fixture.env, fixture.rootfs.rootfs_path, server_name, null, "second-generation");
     try waitForServiceDiscoveryHttpBody(&fixture.env, fixture.rootfs.rootfs_path, server_name, "second-generation");
 }
+
+test "standalone policy owners reject unenforced configured workloads" {
+    try runtime_preflight.requireRuntimeNetwork();
+    var result = try helpers.run(alloc, &.{ "python3", "scripts/required-policy-smoke.py" });
+    defer result.deinit();
+    if (result.exit_code != 0) std.debug.print("required policy fixture failed:\n{s}\n{s}\n", .{ result.stdout, result.stderr });
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+}
