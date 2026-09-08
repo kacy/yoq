@@ -10,35 +10,48 @@ const agent_store = @import("../agent_store.zig");
 const default_gossip_port: u16 = 9800;
 
 pub fn parseGossipSeeds(self: anytype, body: []const u8) void {
-    const key = "\"gossip_seeds\":[";
-    const key_pos = std.mem.indexOf(u8, body, key) orelse return;
-    const arr_start = key_pos + key.len;
-    const arr_end = std.mem.indexOfPos(u8, body, arr_start, "]") orelse return;
-    const arr = body[arr_start..arr_end];
-    if (arr.len == 0) return;
-
+    const Registration = struct {
+        gossip_server: ?struct { id: u64, port: u16 } = null,
+        gossip_seeds: []const []const u8 = &.{},
+    };
+    const parsed = std.json.parseFromSlice(Registration, self.alloc, body, .{ .ignore_unknown_fields = true }) catch return;
+    defer parsed.deinit();
     var seeds: std.ArrayListUnmanaged([]const u8) = .empty;
-    var pos: usize = 0;
-    while (pos < arr.len) {
-        const quote_start = std.mem.indexOfPos(u8, arr, pos, "\"") orelse break;
-        const quote_end = std.mem.indexOfPos(u8, arr, quote_start + 1, "\"") orelse break;
-        const seed = arr[quote_start + 1 .. quote_end];
-        if (seed.len > 0) {
-            const duped = self.alloc.dupe(u8, seed) catch break;
-            seeds.append(self.alloc, duped) catch {
-                self.alloc.free(duped);
-                break;
+    const server = parsed.value.gossip_server;
+    if (server) |peer| {
+        if (peer.id != 0 and peer.port != 0 and peer.id != (self.node_id orelse 0)) {
+            const ip = self.server_addr;
+            const seed = std.fmt.allocPrint(self.alloc, "{d}@{d}.{d}.{d}.{d}:{d}", .{ peer.id, ip[0], ip[1], ip[2], ip[3], peer.port }) catch return;
+            seeds.append(self.alloc, seed) catch {
+                self.alloc.free(seed);
+                return;
             };
         }
-        pos = quote_end + 1;
+    }
+    for (parsed.value.gossip_seeds) |seed| {
+        const peer = parseSeedAddr(seed) orelse continue;
+        if (peer.id == (self.node_id orelse 0)) continue;
+        if (server) |pinned| {
+            if (peer.id == pinned.id) continue;
+        }
+        const duped = self.alloc.dupe(u8, seed) catch break;
+        seeds.append(self.alloc, duped) catch {
+            self.alloc.free(duped);
+            break;
+        };
     }
 
     if (seeds.items.len > 0) {
-        self.gossip_seeds = seeds.toOwnedSlice(self.alloc) catch {
+        const owned = seeds.toOwnedSlice(self.alloc) catch {
             for (seeds.items) |seed| self.alloc.free(seed);
             seeds.deinit(self.alloc);
             return;
         };
+        if (self.gossip_seeds) |previous| {
+            for (previous) |seed| self.alloc.free(seed);
+            self.alloc.free(previous);
+        }
+        self.gossip_seeds = owned;
         log.info("received {d} gossip seeds", .{self.gossip_seeds.?.len});
     } else {
         seeds.deinit(self.alloc);
@@ -81,7 +94,8 @@ pub fn initGossip(self: anytype) void {
     var added: u32 = 0;
     for (seeds) |seed| {
         const parsed = parseSeedAddr(seed) orelse continue;
-        gossip_state.addMember(parsed.id, .{ .ip = parsed.ip, .port = default_gossip_port }) catch continue;
+        if (parsed.id == nid) continue;
+        gossip_state.addMember(parsed.id, .{ .ip = parsed.ip, .port = parsed.port }) catch continue;
         added += 1;
     }
 
@@ -175,9 +189,58 @@ pub fn receiveGossipLoop(self: anytype) void {
     }
 }
 
-pub fn parseSeedAddr(seed: []const u8) ?struct { id: u64, ip: [4]u8 } {
-    const at_pos = std.mem.indexOf(u8, seed, "@") orelse return null;
+pub fn parseSeedAddr(seed: []const u8) ?struct { id: u64, ip: [4]u8, port: u16 } {
+    const at_pos = std.mem.indexOfScalar(u8, seed, '@') orelse return null;
     const id = std.fmt.parseInt(u64, seed[0..at_pos], 10) catch return null;
-    const ip = ip_mod.parseIp(seed[at_pos + 1 ..]) orelse return null;
-    return .{ .id = id, .ip = ip };
+    if (id == 0) return null;
+    const endpoint = seed[at_pos + 1 ..];
+    const colon = std.mem.indexOfScalar(u8, endpoint, ':');
+    const ip = ip_mod.parseIp(if (colon) |pos| endpoint[0..pos] else endpoint) orelse return null;
+    const port = if (colon) |pos| std.fmt.parseInt(u16, endpoint[pos + 1 ..], 10) catch return null else default_gossip_port;
+    if (port == 0) return null;
+    return .{ .id = id, .ip = ip, .port = port };
+}
+
+test "gossip bootstrap pins first worker to server identity and actual port" {
+    const alloc = std.testing.allocator;
+    var agent = struct {
+        alloc: std.mem.Allocator,
+        server_addr: [4]u8 = .{ 10, 0, 0, 1 },
+        node_id: ?u16 = 2,
+        gossip_seeds: ?[][]const u8 = null,
+    }{ .alloc = alloc };
+    defer if (agent.gossip_seeds) |seeds| {
+        for (seeds) |seed| alloc.free(seed);
+        alloc.free(seeds);
+    };
+    // A self seed and a conflicting server endpoint must not replace the API
+    // server's pinned address. Non-default server gossip ports are preserved.
+    parseGossipSeeds(&agent, "{\"gossip_server\":{\"id\":1,\"port\":19800},\"gossip_seeds\":[\"2@10.0.0.2\",\"1@10.0.0.99:9800\"]}");
+    const seeds = agent.gossip_seeds.?;
+    try std.testing.expectEqual(@as(usize, 1), seeds.len);
+    const server = parseSeedAddr(seeds[0]).?;
+    try std.testing.expectEqual(@as(u64, 1), server.id);
+    try std.testing.expectEqual(agent.server_addr, server.ip);
+    try std.testing.expectEqual(@as(u16, 19800), server.port);
+
+    var gossip = gossip_mod.Gossip.init(alloc, 2, .{ .ip = .{ 10, 0, 0, 2 }, .port = default_gossip_port }, .{});
+    defer gossip.deinit();
+    try gossip.addMember(server.id, .{ .ip = server.ip, .port = server.port });
+    const Address = @import("linux_platform").net.Address;
+    var packet = transport_mod.GossipReceiveResult{
+        .sender_id = 1,
+        .from_addr = Address.initIp4(server.ip, server.port),
+        .payload = "ping",
+    };
+    try std.testing.expect(gossip_sender_validation.isTrustedSender(&gossip, packet));
+    packet.from_addr = Address.initIp4(server.ip, default_gossip_port);
+    try std.testing.expect(!gossip_sender_validation.isTrustedSender(&gossip, packet));
+    packet.from_addr = Address.initIp4(.{ 10, 0, 0, 99 }, server.port);
+    try std.testing.expect(!gossip_sender_validation.isTrustedSender(&gossip, packet));
+}
+
+test "gossip bootstrap retains legacy ports and rejects invalid endpoints" {
+    try std.testing.expectEqual(@as(u16, 9800), parseSeedAddr("3@10.0.0.3").?.port);
+    for ([_][]const u8{ "0@10.0.0.1", "1@10.0.0.1:0", "1@10.0.0.1:65536", "1@10.0.0.1:no" }) |seed|
+        try std.testing.expect(parseSeedAddr(seed) == null);
 }
