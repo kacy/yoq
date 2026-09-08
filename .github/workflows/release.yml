@@ -170,6 +170,12 @@ jobs:
     with:
       ref: ${{ needs.validate-tag.outputs.commit }}
 
+  runtime-kernel:
+    needs: validate-tag
+    uses: ./.github/workflows/_runtime-test.yml
+    with:
+      ref: ${{ needs.validate-tag.outputs.commit }}
+
   release-build:
     name: release-build-${{ matrix.arch }}
     needs:
@@ -181,6 +187,7 @@ jobs:
       - docker-build
       - examples-validate
       - interoperability
+      - runtime-kernel
     strategy:
       fail-fast: false
       matrix:

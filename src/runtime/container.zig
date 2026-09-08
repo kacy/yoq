@@ -250,14 +250,26 @@ pub const Container = struct {
         // Release namespace mapping first. The child mounts its root and final
         // /dev, but cannot execute user code until the second explicit gate.
         child.signalReady();
-        startup.expect(channel.parent, .filesystem_ready) catch return ContainerError.StartFailed;
+        startup.expect(channel.parent, .filesystem_ready) catch |err| {
+            log.err("container {s}: waiting for filesystem_ready failed: {}", .{ config.id, err });
+            return ContainerError.StartFailed;
+        };
         var files: startup.NetworkFiles = .{};
         if (config.network != null) {
-            network_db = store.openDb() catch return ContainerError.StartFailed;
-            files = start_support.setupNetwork(config, child.pid, &self.net_info, &network_db.?) catch return ContainerError.StartFailed;
+            network_db = store.openDb() catch |err| {
+                log.err("container {s}: network database open failed: {}", .{ config.id, err });
+                return ContainerError.StartFailed;
+            };
+            files = start_support.setupNetwork(config, child.pid, &self.net_info, &network_db.?) catch |err| {
+                log.err("container {s}: network setup failed: {}", .{ config.id, err });
+                return ContainerError.StartFailed;
+            };
         }
         startup.sendNetwork(channel.parent, files) catch return ContainerError.StartFailed;
-        startup.expect(channel.parent, .prepared) catch return ContainerError.StartFailed;
+        startup.expect(channel.parent, .prepared) catch |err| {
+            log.err("container {s}: waiting for prepared failed: {}", .{ config.id, err });
+            return ContainerError.StartFailed;
+        };
 
         start_support.updateRunningStatus(config.id, child.pid) catch return ContainerError.StartFailed;
         startup.notify(channel.parent, .execute) catch return ContainerError.StartFailed;

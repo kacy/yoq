@@ -93,7 +93,7 @@ test "detached supervisor inherits process environment and exposes container jso
         fixture.rootfs.rootfs_path, "/bin/sh", "-c",     "while :; do :; done",
     });
     defer run_result.deinit();
-    try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+    try run_result.expectExitCode(0);
 
     const id = trimOutput(run_result.stdout);
     try std.testing.expect(id.len > 0);
@@ -158,18 +158,18 @@ test "stop followed by rm is deterministic for detached rootfs containers" {
         fixture.rootfs.rootfs_path, "/bin/sh", "-c",     "while :; do :; done",
     });
     defer run_result.deinit();
-    try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+    try run_result.expectExitCode(0);
 
     const id = trimOutput(run_result.stdout);
     try std.testing.expect(id.len > 0);
 
     var stop = try fixture.env.runYoq(&.{ "stop", name });
     defer stop.deinit();
-    try std.testing.expectEqual(@as(u8, 0), stop.exit_code);
+    try stop.expectExitCode(0);
 
     var rm = try fixture.env.runYoq(&.{ "rm", name });
     defer rm.deinit();
-    try std.testing.expectEqual(@as(u8, 0), rm.exit_code);
+    try rm.expectExitCode(0);
 
     var ps = try fixture.env.runYoq(&.{"ps"});
     defer ps.deinit();
@@ -189,7 +189,7 @@ test "name based lifecycle works for detached rootfs containers" {
         fixture.rootfs.rootfs_path, "/bin/sh", "-c",     "while :; do :; done",
     });
     defer run_result.deinit();
-    try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+    try run_result.expectExitCode(0);
 
     const id = trimOutput(run_result.stdout);
     try std.testing.expect(id.len > 0);
@@ -200,11 +200,11 @@ test "name based lifecycle works for detached rootfs containers" {
 
     var stop = try fixture.env.runYoq(&.{ "stop", name });
     defer stop.deinit();
-    try std.testing.expectEqual(@as(u8, 0), stop.exit_code);
+    try stop.expectExitCode(0);
 
     var rm = try fixture.env.runYoq(&.{ "rm", name });
     defer rm.deinit();
-    try std.testing.expectEqual(@as(u8, 0), rm.exit_code);
+    try rm.expectExitCode(0);
 }
 
 test "rm running container fails gracefully without corrupting state" {
@@ -220,7 +220,7 @@ test "rm running container fails gracefully without corrupting state" {
         fixture.rootfs.rootfs_path, "/bin/sh", "-c",     "while :; do :; done",
     });
     defer run_result.deinit();
-    try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+    try run_result.expectExitCode(0);
 
     var rm = try fixture.env.runYoq(&.{ "rm", name });
     defer rm.deinit();

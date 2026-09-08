@@ -6,8 +6,8 @@ const lposix = linux_platform.posix;
 pub fn main(init: std.process.Init) !void {
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
-    if (argv.len != 3) {
-        std.debug.print("usage: yoq-test-http-server <port> <body>\n", .{});
+    if (argv.len != 3 and argv.len != 4) {
+        std.debug.print("usage: yoq-test-http-server <port> <body> [startup-delay-seconds]\n", .{});
         std.process.exit(1);
     }
 
@@ -16,6 +16,10 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     const body = argv[2];
+    if (argv.len == 4) {
+        const delay = try std.fmt.parseUnsigned(u32, argv[3], 10);
+        try std.Io.sleep(init.io, std.Io.Duration.fromSeconds(delay), .awake);
+    }
 
     const fd = lposix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch |err| {
         std.debug.print("socket failed: {}\n", .{err});

@@ -106,6 +106,12 @@ jobs:
         with:
           cache-prefix: zig-runtime-${{ matrix.lane }}
 
+      - name: install scheduled network fixture tools
+        if: matrix.lane == 'network'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes iproute2 iptables openssl python3 curl wireguard-tools libsqlite3-dev
+
       - name: build yoq
         shell: bash
         run: zig build -Doptimize=ReleaseSafe
@@ -130,6 +136,27 @@ jobs:
           status=${PIPESTATUS[0]}
           set -e
           exit "$status"
+
+      - name: verify namespace and standard device contracts
+        if: matrix.lane == 'core'
+        shell: bash
+        run: |
+          set -o pipefail
+          bash tools/namespace_stack_smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/namespace-stack.log"
+          bash tools/standard_devices_smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/standard-devices.log"
+
+      - name: verify scheduled runtime end to end
+        if: matrix.lane == 'network'
+        shell: bash
+        run: |
+          set -o pipefail
+          bash scripts/bpf-load-balancer-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/bpf-load-balancer.log"
+          bash scripts/dns-bridge-kernel-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/dns-bridge-kernel.log"
+          bash scripts/wireguard-kernel-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/wireguard-kernel.log"
+          bash scripts/veth-namespace-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/veth-namespace.log"
+          bash scripts/service-gateway-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/service-gateway.log"
+          sudo env RUNNER_TEMP="$RUNNER_TEMP" python3 scripts/scheduled-runtime-smoke.py \
+            2>&1 | tee "$RUNNER_TEMP/runtime-logs/scheduled-runtime.log"
 
       - name: upload privileged runtime logs
         if: always()

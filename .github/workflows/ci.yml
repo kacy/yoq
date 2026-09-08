@@ -33,6 +33,7 @@ jobs:
               - 'src/**'
               - 'tests/**'
               - 'tools/**'
+              - 'scripts/**'
               - 'bpf/**'
               - 'examples/**'
               - 'build.zig'
@@ -170,6 +171,11 @@ jobs:
       command: YOQ_SKIP_SLOW_TESTS=1 zig build test-network -Doptimize=ReleaseSafe
       timeout-minutes: 30
       failure-artifact-name: network-smoke-log
+
+  runtime-kernel:
+    needs: changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    uses: ./.github/workflows/_runtime-test.yml
 
   hardening-smoke:
     name: hardening-smoke

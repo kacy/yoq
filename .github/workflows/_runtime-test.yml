@@ -1,0 +1,85 @@
+name: _runtime-test
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: immutable commit to check out
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  kernel:
+    name: runtime-kernel-${{ matrix.lane }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [core, network]
+    steps:
+      - name: check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: set up zig
+        uses: ./.github/actions/setup-zig
+        with:
+          cache-prefix: zig-kernel-${{ matrix.lane }}
+
+      - name: install runtime fixture tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes iproute2 iptables openssl python3 curl wireguard-tools libsqlite3-dev
+
+      - name: run kernel fixtures
+        shell: bash
+        env:
+          RUNTIME_LANE: ${{ matrix.lane }}
+        run: |
+          set -o pipefail
+          zig_bin="$(command -v zig)"
+          mkdir -p "$RUNNER_TEMP/zig-global-cache-root/tmp" "$RUNNER_TEMP/zig-local-cache-root/tmp"
+          sudo env YOQ_SKIP_SLOW_TESTS=1 \
+            ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/zig-global-cache-root" \
+            ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/zig-local-cache-root" \
+            "$zig_bin" build -j1 -Doptimize=ReleaseSafe -Drun-privileged-tests=true \
+            "test-runtime-$RUNTIME_LANE" 2>&1 | tee "$RUNNER_TEMP/runtime-kernel.log"
+          if [ "$RUNTIME_LANE" = core ]; then
+            bash tools/namespace_stack_smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+            bash tools/standard_devices_smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+          fi
+          if [ "$RUNTIME_LANE" = network ]; then
+            bash scripts/bpf-load-balancer-smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+            bash scripts/dns-bridge-kernel-smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+            bash scripts/wireguard-kernel-smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+            bash scripts/veth-namespace-smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+            bash scripts/service-gateway-smoke.sh 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+            sudo env RUNNER_TEMP="$RUNNER_TEMP" python3 scripts/scheduled-runtime-smoke.py \
+              2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+          fi
+
+      - name: collect kernel failure diagnostics
+        if: failure()
+        run: |
+          {
+            sudo dmesg | tail -100
+            sudo iptables -nvL FORWARD --line-numbers
+            sudo iptables-save -t filter
+            ip route show
+            sudo tc -s filter show dev yoq0 ingress
+            sudo tc -s filter show dev yoq0 egress
+          } 2>&1 | tee -a "$RUNNER_TEMP/runtime-kernel.log"
+
+      - name: upload runtime log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-kernel-${{ matrix.lane }}-log
+          path: ${{ runner.temp }}/runtime-kernel.log
+          retention-days: 7

@@ -197,7 +197,7 @@ fn startLocalHttpServer(env: *helpers.TestEnv, rootfs_path: []const u8, name: []
             "run", "-d", "--name", name, "-p", port_map, rootfs_path, "/bin/yoq-test-http-server", port_str, body,
         });
         defer run_result.deinit();
-        try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+        try run_result.expectExitCode(0);
         try std.testing.expect(trimOutput(run_result.stdout).len > 0);
         try waitForContainerRunning(env, name);
         return;
@@ -207,7 +207,7 @@ fn startLocalHttpServer(env: *helpers.TestEnv, rootfs_path: []const u8, name: []
         "run", "-d", "--name", name, rootfs_path, "/bin/yoq-test-http-server", port_str, body,
     });
     defer run_result.deinit();
-    try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+    try run_result.expectExitCode(0);
     try std.testing.expect(trimOutput(run_result.stdout).len > 0);
     try waitForContainerRunning(env, name);
 }
@@ -311,6 +311,7 @@ test "service discovery stops resolving after backend removal" {
 
     const server_name = try helpers.uniqueName(alloc, "test-http-remove");
     defer alloc.free(server_name);
+    defer stopAndRemoveContainer(&fixture.env, server_name);
 
     try startLocalHttpServer(&fixture.env, fixture.rootfs.rootfs_path, server_name, null, "hello-before-remove");
     try waitForServiceDiscoveryHttpBody(&fixture.env, fixture.rootfs.rootfs_path, server_name, "hello-before-remove");

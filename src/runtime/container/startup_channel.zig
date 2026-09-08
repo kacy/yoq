@@ -4,6 +4,7 @@ const std = @import("std");
 const platform = @import("linux_platform");
 const posix = std.posix;
 const linux = std.os.linux;
+const log = @import("../../lib/log.zig");
 
 pub const Error = error{ ChannelFailed, StartupAborted };
 pub const Stage = enum(u8) { filesystem_ready = 1, prepared = 2, execute = 3 };
@@ -41,13 +42,19 @@ pub fn closeOwned(fd: *posix.fd_t) void {
 }
 
 fn send(fd: posix.fd_t, bytes: []const u8) Error!void {
-    const count = platform.posix.send(fd, bytes, posix.MSG.NOSIGNAL) catch return error.ChannelFailed;
+    const count = platform.posix.send(fd, bytes, posix.MSG.NOSIGNAL) catch |err| {
+        log.err("startup channel send failed on fd {d}: {}", .{ fd, err });
+        return error.ChannelFailed;
+    };
     if (count != bytes.len) return error.ChannelFailed;
 }
 
 fn receive(fd: posix.fd_t, bytes: []u8) Error!void {
     // MSG_TRUNC exposes oversized packets rather than accepting a prefix.
-    const count = platform.posix.recv(fd, bytes, posix.MSG.TRUNC) catch return error.ChannelFailed;
+    const count = platform.posix.recv(fd, bytes, posix.MSG.TRUNC) catch |err| {
+        log.err("startup channel receive failed on fd {d}: {}", .{ fd, err });
+        return error.ChannelFailed;
+    };
     if (count != bytes.len) return error.StartupAborted;
 }
 

@@ -71,7 +71,7 @@ test "run with command that doesn't exist" {
     defer result.deinit();
 
     // command not found should return 127
-    try std.testing.expectEqual(@as(u8, 127), result.exit_code);
+    try result.expectExitCode(127);
 }
 
 test "run with extremely long command line" {
@@ -97,7 +97,7 @@ test "run with extremely long command line" {
     defer result.deinit();
 
     // long argv should still execute successfully with a shell-only rootfs
-    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+    try result.expectExitCode(0);
     try helpers.expectContains(result.stdout, "ok");
 }
 
@@ -186,7 +186,7 @@ test "run with resource limits enforced" {
     });
     defer result.deinit();
 
-    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+    try result.expectExitCode(0);
 }
 
 test "run with memory below minimum is rejected" {
@@ -226,7 +226,7 @@ test "run detached and cleanup" {
         "run", "-d", "--name", name, fixture.rootfs_path, "/bin/sh", "-c", ":",
     });
     defer run_result.deinit();
-    try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+    try run_result.expectExitCode(0);
 
     // wait a bit for it to complete
     std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(200 * std.time.ns_per_ms)), .awake) catch unreachable;
@@ -239,7 +239,7 @@ test "run detached and cleanup" {
     // rm should succeed
     var rm_result = try env.runYoq(&.{ "rm", name });
     defer rm_result.deinit();
-    try std.testing.expectEqual(@as(u8, 0), rm_result.exit_code);
+    try rm_result.expectExitCode(0);
 }
 
 test "rapid start/stop cycles don't leak" {
@@ -259,7 +259,7 @@ test "rapid start/stop cycles don't leak" {
             "run", "--name", name, fixture.rootfs_path, "/bin/sh", "-c", ":",
         });
         defer run_result.deinit();
-        try std.testing.expectEqual(@as(u8, 0), run_result.exit_code);
+        try run_result.expectExitCode(0);
 
         // cleanup
         var rm_result = try env.runYoq(&.{ "rm", name });
