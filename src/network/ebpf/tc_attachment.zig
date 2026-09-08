@@ -59,7 +59,19 @@ pub const Attachment = struct {
     }
 };
 
+pub const AttachResult = struct {
+    attachment: Attachment,
+    legacy_cleanup_pending: bool,
+};
+
 pub fn attach(if_index: u32, direction: common.Direction, program_fd: std.posix.fd_t, component: Component) common.EbpfError!Attachment {
+    const result = try attachWithStatus(if_index, direction, program_fd, component);
+    if (result.legacy_cleanup_pending) return error.LegacyCleanupFailed;
+    return result.attachment;
+}
+
+/// Preserve ownership after publication even when legacy cleanup needs a retry.
+pub fn attachWithStatus(if_index: u32, direction: common.Direction, program_fd: std.posix.fd_t, component: Component) common.EbpfError!AttachResult {
     const lock = acquireLock() catch return error.AttachFailed;
     defer platform.posix.close(lock);
     const program_id = programId(program_fd) catch |err| {
@@ -87,6 +99,7 @@ pub fn attach(if_index: u32, direction: common.Direction, program_fd: std.posix.
     // Only installing policy can retire the legacy ingress chain: DNS/LB
     // startup alone must not remove an old deny program. Install first so
     // attach failure preserves prior enforcement. Never delete clsact.
+    var legacy_cleanup_pending = false;
     for (filters.items) |filter| {
         if (std.mem.eql(u8, filter.name(), "yoq") and
             ((direction == .ingress and component == .policy) or
@@ -97,11 +110,14 @@ pub fn attach(if_index: u32, direction: common.Direction, program_fd: std.posix.
                 // the caller closes its FDs. A later load can rediscover it.
                 // Rollback here could remove enforcement after partial cleanup.
                 @import("../../lib/log.zig").warn("ebpf: legacy TC cleanup failed; replacement {s} remains installed: {}", .{ component.name(), err });
-                return error.LegacyCleanupFailed;
+                legacy_cleanup_pending = true;
             };
         }
     }
-    return .{ .if_index = if_index, .direction = direction, .component = component, .program_id = program_id };
+    return .{
+        .attachment = .{ .if_index = if_index, .direction = direction, .component = component, .program_id = program_id },
+        .legacy_cleanup_pending = legacy_cleanup_pending,
+    };
 }
 
 fn acquireLock() !std.posix.fd_t {

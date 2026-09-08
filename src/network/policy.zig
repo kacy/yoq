@@ -16,7 +16,7 @@
 //   - containers start (incremental — apply rules for new IP)
 //   - containers stop (remove entries for old IP)
 //
-// full sync rebuilds both policy_map and isolation_map from scratch.
+// full sync prepares a bounded generation before replacing active policy maps.
 // incremental operations add/remove entries for a single IP.
 
 const std = @import("std");
@@ -46,82 +46,78 @@ const store = @import("../state/store.zig");
 const ip_mod = @import("ip.zig");
 const log = @import("../lib/log.zig");
 
-const PolicyAction = enum { allow, deny };
+const policy_rules = @import("policy_rules.zig");
+const PolicyAction = policy_rules.Action;
 
-/// full sync: rebuild BPF maps from all policies in SQLite.
-///
-/// reads all network policy rules, resolves service names to IPs,
-/// and populates the policy_map and isolation_map from scratch.
-/// called after policy changes and during startup.
-pub fn syncPolicies(alloc: std.mem.Allocator) void {
-    const enforcer = ebpf.getPolicyEnforcer() orelse return;
-    syncPoliciesWithEnforcer(alloc, enforcer);
+/// Initial startup also populates maps before replacing another process's filter.
+pub fn installOnBridge(if_index: u32, alloc: std.mem.Allocator) !void {
+    if (comptime builtin.os.tag != .linux) return error.NotSupported;
+    const snapshot = try buildPolicySnapshot(alloc);
+    defer snapshot.deinit(alloc);
+    try ebpf.installPolicyRules(if_index, snapshot);
 }
 
+/// Prepare a complete policy generation and replace the active filters.
+///
+/// reads all network policy rules, resolves service names to IPs,
+/// and leaves the active generation intact if preparation fails.
+/// called after policy changes and during startup.
+pub fn syncPolicies(alloc: std.mem.Allocator) void {
+    if (ebpf.getPolicyEnforcer() == null) return;
+    var sink: GlobalPolicySink = .{};
+    syncPoliciesWithEnforcer(alloc, &sink);
+}
+
+const GlobalPolicySink = struct {
+    fn replace(_: *GlobalPolicySink, snapshot: policy_rules.Snapshot) !void {
+        if (comptime builtin.os.tag == .linux) try ebpf.replacePolicyRules(snapshot);
+    }
+};
+
 fn syncPoliciesWithEnforcer(alloc: std.mem.Allocator, enforcer: anytype) void {
-    var policies = store.listNetworkPolicies(alloc) catch {
-        log.warn("policy: failed to list policies for sync", .{});
+    const snapshot = buildPolicySnapshot(alloc) catch |err| {
+        log.warn("policy: retaining active rules because desired policy could not be prepared: {}", .{err});
         return;
     };
+    defer snapshot.deinit(alloc);
+    enforcer.replace(snapshot) catch |err| {
+        log.warn("policy: policy replacement failed: {}", .{err});
+    };
+}
+
+fn buildPolicySnapshot(alloc: std.mem.Allocator) !policy_rules.Snapshot {
+    var builder: policy_rules.Builder = .{};
+    defer builder.deinit(alloc);
+    var read = try store.NetworkPolicyReadSnapshot.begin();
+    defer read.deinit();
+    var policies = try read.policies(alloc);
     defer {
         for (policies.items) |p| p.deinit(alloc);
         policies.deinit(alloc);
     }
-
-    enforcer.clear();
-
-    // for each policy, resolve both service names to IPs and populate maps
     for (policies.items) |pol| {
-        var src_ips = store.lookupServicePolicyAddresses(alloc, pol.source_service, .source) catch {
-            log.warn("policy: failed to resolve source service '{s}' during sync", .{pol.source_service});
-            continue;
-        };
+        const action = parsePolicyAction(pol.action) orelse return error.InvalidPolicy;
+        var src_ips = try read.addresses(alloc, pol.source_service, .source);
         defer {
-            for (src_ips.items) |src_ip| alloc.free(src_ip);
+            for (src_ips.items) |address| alloc.free(address);
             src_ips.deinit(alloc);
         }
-
-        var dst_ips = store.lookupServicePolicyAddresses(alloc, pol.target_service, .target) catch {
-            log.warn("policy: failed to resolve target service '{s}' during sync", .{pol.target_service});
-            continue;
-        };
+        var dst_ips = try read.addresses(alloc, pol.target_service, .target);
         defer {
-            for (dst_ips.items) |dst_ip| alloc.free(dst_ip);
+            for (dst_ips.items) |address| alloc.free(address);
             dst_ips.deinit(alloc);
         }
-
-        const action = parsePolicyAction(pol.action) orelse {
-            log.warn("policy: ignoring invalid action '{s}' for {s} -> {s}", .{ pol.action, pol.source_service, pol.target_service });
-            continue;
-        };
-
-        // add entries for each (src, dst) pair
-        for (src_ips.items) |src_str| {
-            const src_addr = ip_mod.parseIp(src_str) orelse {
-                log.warn("policy: invalid source IP '{s}' in {s} -> {s}", .{ src_str, pol.source_service, pol.target_service });
-                continue;
-            };
-            const src_net = ebpf.ipToNetworkOrder(src_addr);
-
-            // if this is an allow rule, isolate the source
-            if (action == .allow) {
-                enforcer.isolate(src_net);
-            }
-
-            for (dst_ips.items) |dst_str| {
-                const dst_addr = ip_mod.parseIp(dst_str) orelse {
-                    log.warn("policy: invalid destination IP '{s}' in {s} -> {s}", .{ dst_str, pol.source_service, pol.target_service });
-                    continue;
-                };
-                const dst_net = ebpf.ipToNetworkOrder(dst_addr);
-
-                switch (action) {
-                    .allow => enforcer.addAllow(src_net, dst_net),
-                    .deny => enforcer.addDeny(src_net, dst_net),
-                }
+        for (src_ips.items) |source| {
+            const src = ip_mod.parseIp(source) orelse return error.InvalidPolicyAddress;
+            const src_net = ebpf.ipToNetworkOrder(src);
+            if (action == .allow) try builder.isolate(alloc, src_net);
+            for (dst_ips.items) |target| {
+                const dst = ip_mod.parseIp(target) orelse return error.InvalidPolicyAddress;
+                try builder.add(alloc, .{ .src_ip = src_net, .dst_ip = ebpf.ipToNetworkOrder(dst) }, action);
             }
         }
     }
+    return builder.finish(alloc);
 }
 
 /// incremental: apply relevant policy rules for a newly started container.
@@ -129,8 +125,10 @@ fn syncPoliciesWithEnforcer(alloc: std.mem.Allocator, enforcer: anytype) void {
 /// looks up all policies where the container's service name appears as
 /// either source or target, then adds BPF map entries for the new IP.
 pub fn applyForContainer(service_name: []const u8, container_ip: [4]u8, alloc: std.mem.Allocator) void {
-    const enforcer = ebpf.getPolicyEnforcer() orelse return;
-    applyForContainerWithEnforcer(service_name, container_ip, alloc, enforcer);
+    if (comptime builtin.os.tag != .linux) return;
+    var update = ebpf.leasePolicyUpdate() orelse return;
+    defer update.deinit();
+    applyForContainerWithEnforcer(service_name, container_ip, alloc, update.enforcer);
 }
 
 fn applyForContainerWithEnforcer(service_name: []const u8, container_ip: [4]u8, alloc: std.mem.Allocator, enforcer: anytype) void {
@@ -217,8 +215,10 @@ fn applyForContainerWithEnforcer(service_name: []const u8, container_ip: [4]u8, 
 /// called when a container stops. iterates all policies and removes
 /// any (src, dst) entries that reference this IP.
 pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
-    const enforcer = ebpf.getPolicyEnforcer() orelse return;
-    removeForContainerWithEnforcer(container_ip, alloc, enforcer);
+    if (comptime builtin.os.tag != .linux) return;
+    var update = ebpf.leasePolicyUpdate() orelse return;
+    defer update.deinit();
+    removeForContainerWithEnforcer(container_ip, alloc, update.enforcer);
 }
 
 fn removeForContainerWithEnforcer(container_ip: [4]u8, alloc: std.mem.Allocator, enforcer: anytype) void {
@@ -305,7 +305,7 @@ test "removeForContainer — no-op without enforcer" {
     removeForContainer(.{ 10, 42, 0, 5 }, std.testing.allocator);
 }
 
-test "syncPolicies clears stale maps before writing deny rules" {
+test "syncPolicies replaces stale rules with the prepared deny generation" {
     try store.initTestDb();
     defer store.deinitTestDb();
 
@@ -478,24 +478,27 @@ test "removeForContainer removes source and target policy entries" {
     });
 }
 
-test "policy sync skips unresolved services and malformed service IPs" {
+test "policy preparation failure retains the active generation" {
     try store.initTestDb();
     defer store.deinitTestDb();
-
+    try seedService("api", "10.43.0.10");
+    try seedEndpoint("api", "api-1", "10.42.0.10");
     try seedService("web", "10.43.0.20");
-    try store.registerServiceName("bad", "bad-1", "not-an-ip");
-    try store.addNetworkPolicy("missing", "web", "deny");
-    try store.addNetworkPolicy("bad", "web", "allow");
-    try store.addNetworkPolicy("web", "bad", "deny");
-
+    try store.addNetworkPolicy("api", "web", "deny");
     var recorder = RecordingSink.init();
     defer recorder.deinit();
-
     syncPoliciesWithEnforcer(std.testing.allocator, &recorder);
-
-    try recorder.expectOps(&.{
-        .{ .kind = .clear },
-    });
+    const applied_count = recorder.ops.items.len;
+    try seedEndpoint("web", "bad", "not-an-ip");
+    try std.testing.expectError(error.InvalidPolicyAddress, buildPolicySnapshot(std.testing.allocator));
+    syncPoliciesWithEnforcer(std.testing.allocator, &recorder);
+    try std.testing.expectEqual(applied_count, recorder.ops.items.len);
+    try recorder.expectOp(.{ .kind = .add_deny, .src = netIp("10.42.0.10"), .dst = netIp("10.43.0.20") });
+    try store.removeServiceEndpoint("web", "bad");
+    try store.addNetworkPolicy("api", "web", "invalid");
+    try std.testing.expectError(error.InvalidPolicy, buildPolicySnapshot(std.testing.allocator));
+    syncPoliciesWithEnforcer(std.testing.allocator, &recorder);
+    try std.testing.expectEqual(applied_count, recorder.ops.items.len);
 }
 
 const RecordedKind = enum {
@@ -523,6 +526,17 @@ const RecordingSink = struct {
 
     fn deinit(self: *RecordingSink) void {
         self.ops.deinit(std.testing.allocator);
+    }
+
+    fn replace(self: *RecordingSink, snapshot: policy_rules.Snapshot) !void {
+        self.clear();
+        for (snapshot.isolated) |source| self.isolate(source);
+        for (snapshot.rules) |rule| {
+            switch (rule.action) {
+                .allow => self.addAllow(rule.key.src_ip, rule.key.dst_ip),
+                .deny => self.addDeny(rule.key.src_ip, rule.key.dst_ip),
+            }
+        }
     }
 
     fn clear(self: *RecordingSink) void {

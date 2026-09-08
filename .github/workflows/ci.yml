@@ -84,6 +84,17 @@ jobs:
       - name: verify kernel dns cache questions
         run: bash scripts/dns-cache-kernel-smoke.sh
 
+  policy-generation-kernel:
+    name: policy-generation-kernel
+    needs: changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-zig
+      - name: verify prepared policy generation replacement
+        run: bash scripts/policy-generation-smoke.sh
+
   fmt-check:
     name: fmt-check
     runs-on: ubuntu-latest

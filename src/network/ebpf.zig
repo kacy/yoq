@@ -366,6 +366,64 @@ pub const PolicyEnforcer = policy_runtime.PolicyEnforcer;
 
 /// global policy enforcer instance.
 var policy_enforcer: ?PolicyEnforcer = null;
+const policy_rules = @import("policy_rules.zig");
+var policy_snapshot: ?policy_rules.Snapshot = null;
+
+fn clearPolicySnapshot() void {
+    if (policy_snapshot) |snapshot| snapshot.deinit(std.heap.page_allocator);
+    policy_snapshot = null;
+}
+
+/// Pin the active map handles while incremental callers update them.
+pub const PolicyUpdate = struct {
+    enforcer: *const PolicyEnforcer,
+
+    pub fn deinit(_: *PolicyUpdate) void {
+        global_mutex.unlock(std.Options.debug_io);
+    }
+};
+
+pub fn leasePolicyUpdate() ?PolicyUpdate {
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    if (policy_enforcer) |*enforcer| {
+        clearPolicySnapshot();
+        return .{ .enforcer = enforcer };
+    }
+    global_mutex.unlock(std.Options.debug_io);
+    return null;
+}
+
+pub fn installPolicyRules(bridge_if_index: u32, snapshot: policy_rules.Snapshot) !void {
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
+    try replacePolicyRulesLocked(bridge_if_index, snapshot);
+}
+
+pub fn replacePolicyRules(snapshot: policy_rules.Snapshot) !void {
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
+    const current = policy_enforcer orelse return;
+    try replacePolicyRulesLocked(current.if_index, snapshot);
+}
+
+fn replacePolicyRulesLocked(bridge_if_index: u32, snapshot: policy_rules.Snapshot) !void {
+    if (policy_enforcer) |current| {
+        if (current.if_index == bridge_if_index) {
+            if (policy_snapshot) |previous| {
+                if (!current.legacy_cleanup_pending and previous.eql(snapshot) and try current.attachment.isCurrent()) return;
+            }
+        }
+    }
+    // Allocate the cache before publishing, so allocation failure cannot leave
+    // an attached generation whose ownership we failed to record.
+    const copied = try snapshot.clone(std.heap.page_allocator);
+    errdefer copied.deinit(std.heap.page_allocator);
+    const replacement = try policy_runtime.loadWithRules(bridge_if_index, snapshot);
+    if (policy_enforcer) |*previous| previous.deinit();
+    clearPolicySnapshot();
+    policy_enforcer = replacement;
+    policy_snapshot = copied;
+}
 
 /// load and attach the policy enforcer BPF program to the bridge.
 /// attaches at priority 10 (before DNS at 20, LB at 30, and metrics at 40).
@@ -384,6 +442,7 @@ pub fn unloadPolicyEnforcer() void {
     global_mutex.lockUncancelable(std.Options.debug_io);
     defer global_mutex.unlock(std.Options.debug_io);
 
+    clearPolicySnapshot();
     if (policy_enforcer) |*pe| {
         pe.deinit();
         policy_enforcer = null;
