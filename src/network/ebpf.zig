@@ -399,6 +399,14 @@ pub fn installPolicyRules(bridge_if_index: u32, snapshot: policy_rules.Snapshot)
     try replacePolicyRulesLocked(bridge_if_index, snapshot);
 }
 
+/// Startup cannot release a workload while legacy classifiers may bypass policy.
+pub fn requirePolicyRules(bridge_if_index: u32, snapshot: policy_rules.Snapshot) !void {
+    global_mutex.lockUncancelable(std.Options.debug_io);
+    defer global_mutex.unlock(std.Options.debug_io);
+    try replacePolicyRulesLocked(bridge_if_index, snapshot);
+    if (policy_enforcer.?.legacy_cleanup_pending) return error.LegacyCleanupFailed;
+}
+
 pub fn replacePolicyRules(snapshot: policy_rules.Snapshot) !void {
     global_mutex.lockUncancelable(std.Options.debug_io);
     defer global_mutex.unlock(std.Options.debug_io);

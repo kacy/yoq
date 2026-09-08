@@ -12,9 +12,10 @@ import tempfile
 import time
 
 REPO = Path(__file__).resolve().parent.parent
-YOQ = REPO / "zig-out/bin/yoq"
-SERVER = REPO / "zig-out/bin/yoq-test-http-server"
-PROBE = REPO / "zig-out/bin/yoq-test-net-probe"
+BIN = Path(os.environ.get("YOQ_TEST_BINARY_DIR", REPO / "zig-out/bin"))
+YOQ = BIN / "yoq"
+SERVER = BIN / "yoq-test-http-server"
+PROBE = BIN / "yoq-test-net-probe"
 
 
 def inside(directory):
@@ -72,8 +73,8 @@ def inside(directory):
         result = start(name, check=False)
         assert result.returncode != 0, f"configured policy allowed {name} to start"
         with connection() as db:
-            row = db.execute("SELECT startup_outcome,pid FROM containers WHERE name=?", (name,)).fetchone()
-            assert row == ("failed", None), row
+            row = db.execute("SELECT startup_outcome,pid FROM containers WHERE hostname=?", (name,)).fetchone()
+            assert row == (2, None), row  # StartupOutcome.failed, with no live child
             assert db.execute("SELECT COUNT(*) FROM service_names WHERE name=?", (name,)).fetchone()[0] == 0
             assert db.execute("SELECT COUNT(*) FROM service_endpoints WHERE service_name=?", (name,)).fetchone()[0] == 0
 
@@ -81,7 +82,7 @@ def inside(directory):
         start("web")
         start("api")
         with connection() as db:
-            target = db.execute("SELECT ip_address FROM containers WHERE name='web'").fetchone()[0]
+            target = db.execute("SELECT ip_address FROM containers WHERE hostname='web'").fetchone()[0]
         wait_for("standalone service traffic", lambda: success("web") and success(target))
         cli("policy", "deny", "api", "web")
         wait_for("standalone VIP deny", lambda: denied("web"))
@@ -89,6 +90,7 @@ def inside(directory):
         cli("policy", "rm", "api", "web")
         wait_for("standalone policy removal", lambda: success("web") and success(target))
         stop_all()
+        print("standalone owner VIP/direct deny and removal passed", flush=True)
 
         # A held private namespace lock makes real BPF attachment fail. Optional
         # acceleration may fail for policy-free workloads; configured policy may not.
@@ -96,7 +98,7 @@ def inside(directory):
             fcntl.flock(lock, fcntl.LOCK_EX)
             start("optional-bpf")
             with connection() as db:
-                db.execute("INSERT INTO network_policies VALUES ('api','web','deny',1)")
+                db.execute("INSERT INTO network_policies (source_service,target_service,action,created_at) VALUES ('api','web','deny',1)")
                 db.commit()
             rejected("required-bpf")
         stop_all()
@@ -106,7 +108,7 @@ def inside(directory):
         rejected("invalid-policy")
         with connection() as db:
             db.execute("UPDATE network_policies SET action='deny'")
-            db.executemany("INSERT INTO service_names VALUES (?,?,?,1)",
+            db.executemany("INSERT INTO service_names (name,container_id,ip_address,registered_at) VALUES (?,?,?,1)",
                            [("api", f"source-{i}", f"10.42.10.{i+1}") for i in range(65)] +
                            [("web", f"target-{i}", f"10.42.20.{i+1}") for i in range(64)])
             db.commit()

@@ -69,7 +69,7 @@ pub fn requireForContainer(service_name: []const u8, address: [4]u8, alloc: std.
     const socket = try nl.openSocket();
     defer platform.posix.close(socket);
     const index = try nl.getIfIndex(socket, @import("bridge.zig").default_bridge);
-    try ebpf.installPolicyRules(index, prepared.snapshot);
+    try ebpf.requirePolicyRules(index, prepared.snapshot);
 }
 
 /// Initial startup also populates maps before replacing another process's filter.
