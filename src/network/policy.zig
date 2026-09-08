@@ -9,8 +9,8 @@
 // destinations are reachable. containers without any policy rules
 // can communicate freely with all other containers.
 //
-// service names are resolved to canonical service VIPs via
-// store.lookupServiceAddresses().
+// Source services resolve to their container endpoints. Targets resolve to both
+// endpoints and service VIPs, covering direct and load-balanced traffic.
 // BPF maps are updated when:
 //   - policies are added/removed (full sync from SQLite)
 //   - containers start (incremental — apply rules for new IP)
@@ -72,7 +72,7 @@ fn syncPoliciesWithEnforcer(alloc: std.mem.Allocator, enforcer: anytype) void {
 
     // for each policy, resolve both service names to IPs and populate maps
     for (policies.items) |pol| {
-        var src_ips = store.lookupServiceAddresses(alloc, pol.source_service) catch {
+        var src_ips = store.lookupServicePolicyAddresses(alloc, pol.source_service, .source) catch {
             log.warn("policy: failed to resolve source service '{s}' during sync", .{pol.source_service});
             continue;
         };
@@ -81,7 +81,7 @@ fn syncPoliciesWithEnforcer(alloc: std.mem.Allocator, enforcer: anytype) void {
             src_ips.deinit(alloc);
         }
 
-        var dst_ips = store.lookupServiceAddresses(alloc, pol.target_service) catch {
+        var dst_ips = store.lookupServicePolicyAddresses(alloc, pol.target_service, .target) catch {
             log.warn("policy: failed to resolve target service '{s}' during sync", .{pol.target_service});
             continue;
         };
@@ -161,7 +161,7 @@ fn applyForContainerWithEnforcer(service_name: []const u8, container_ip: [4]u8, 
                 enforcer.isolate(new_ip_net);
             }
 
-            var dst_ips = store.lookupServiceAddresses(alloc, pol.target_service) catch {
+            var dst_ips = store.lookupServicePolicyAddresses(alloc, pol.target_service, .target) catch {
                 log.warn("policy: failed to resolve target service '{s}' for container apply", .{pol.target_service});
                 continue;
             };
@@ -186,7 +186,7 @@ fn applyForContainerWithEnforcer(service_name: []const u8, container_ip: [4]u8, 
 
         if (is_target) {
             // this container is the target — resolve source IPs
-            var src_ips = store.lookupServiceAddresses(alloc, pol.source_service) catch {
+            var src_ips = store.lookupServicePolicyAddresses(alloc, pol.source_service, .source) catch {
                 log.warn("policy: failed to resolve source service '{s}' for container apply", .{pol.source_service});
                 continue;
             };
@@ -201,6 +201,7 @@ fn applyForContainerWithEnforcer(service_name: []const u8, container_ip: [4]u8, 
                     continue;
                 };
                 const src_net = ebpf.ipToNetworkOrder(src_addr);
+                if (action == .allow) enforcer.isolate(src_net);
 
                 switch (action) {
                     .allow => enforcer.addAllow(src_net, new_ip_net),
@@ -242,61 +243,39 @@ fn removeForContainerWithEnforcer(container_ip: [4]u8, alloc: std.mem.Allocator,
             continue;
         };
 
-        // check if this IP was a source
-        var src_ips = store.lookupServiceAddresses(alloc, pol.source_service) catch {
-            log.warn("policy: failed to resolve source service '{s}' for container removal", .{pol.source_service});
+        // The endpoint may already be removed from the registry. Remove its
+        // pairs against all remaining policy addresses without requiring that
+        // old address to still appear in a service lookup.
+        var src_ips = store.lookupServicePolicyAddresses(alloc, pol.source_service, .source) catch {
+            log.warn("policy: failed to resolve source service '{s}' during removal", .{pol.source_service});
             continue;
         };
         defer {
-            for (src_ips.items) |src_ip| alloc.free(src_ip);
+            for (src_ips.items) |address| alloc.free(address);
             src_ips.deinit(alloc);
         }
-
-        for (src_ips.items) |src_str| {
-            const src_addr = ip_mod.parseIp(src_str) orelse continue;
-            if (ebpf.ipToNetworkOrder(src_addr) == old_ip_net) {
-                // this IP was a source — remove all its entries for this policy's targets
-                var dst_ips = store.lookupServiceAddresses(alloc, pol.target_service) catch {
-                    log.warn("policy: failed to resolve target service '{s}' during removal", .{pol.target_service});
-                    continue;
-                };
-                defer {
-                    for (dst_ips.items) |dst_ip| alloc.free(dst_ip);
-                    dst_ips.deinit(alloc);
-                }
-                for (dst_ips.items) |dst_str| {
-                    const dst_addr = ip_mod.parseIp(dst_str) orelse continue;
-                    const dst_net = ebpf.ipToNetworkOrder(dst_addr);
-                    switch (action) {
-                        .allow => enforcer.removeAllow(old_ip_net, dst_net),
-                        .deny => enforcer.removeDeny(old_ip_net, dst_net),
-                    }
-                }
-            }
-        }
-
-        // check if this IP was a target
-        var dst_ips = store.lookupServiceAddresses(alloc, pol.target_service) catch {
+        var dst_ips = store.lookupServicePolicyAddresses(alloc, pol.target_service, .target) catch {
             log.warn("policy: failed to resolve target service '{s}' during removal", .{pol.target_service});
             continue;
         };
         defer {
-            for (dst_ips.items) |dst_ip| alloc.free(dst_ip);
+            for (dst_ips.items) |address| alloc.free(address);
             dst_ips.deinit(alloc);
         }
-
-        for (dst_ips.items) |dst_str| {
-            const dst_addr = ip_mod.parseIp(dst_str) orelse continue;
-            if (ebpf.ipToNetworkOrder(dst_addr) == old_ip_net) {
-                // this IP was a target — remove all entries pointing to it
-                for (src_ips.items) |src_str| {
-                    const src_addr = ip_mod.parseIp(src_str) orelse continue;
-                    const src_net = ebpf.ipToNetworkOrder(src_addr);
-                    switch (action) {
-                        .allow => enforcer.removeAllow(src_net, old_ip_net),
-                        .deny => enforcer.removeDeny(src_net, old_ip_net),
-                    }
-                }
+        for (src_ips.items) |address| {
+            const parsed = ip_mod.parseIp(address) orelse continue;
+            const src = ebpf.ipToNetworkOrder(parsed);
+            switch (action) {
+                .allow => enforcer.removeAllow(src, old_ip_net),
+                .deny => enforcer.removeDeny(src, old_ip_net),
+            }
+        }
+        for (dst_ips.items) |address| {
+            const parsed = ip_mod.parseIp(address) orelse continue;
+            const dst = ebpf.ipToNetworkOrder(parsed);
+            switch (action) {
+                .allow => enforcer.removeAllow(old_ip_net, dst),
+                .deny => enforcer.removeDeny(old_ip_net, dst),
             }
         }
     }
@@ -331,6 +310,7 @@ test "syncPolicies clears stale maps before writing deny rules" {
     defer store.deinitTestDb();
 
     try seedService("api", "10.43.0.10");
+    try seedEndpoint("api", "api-1", "10.42.0.10");
     try seedService("web", "10.43.0.20");
     try store.addNetworkPolicy("api", "web", "deny");
 
@@ -341,7 +321,7 @@ test "syncPolicies clears stale maps before writing deny rules" {
 
     try recorder.expectOps(&.{
         .{ .kind = .clear },
-        .{ .kind = .add_deny, .src = netIp("10.43.0.10"), .dst = netIp("10.43.0.20") },
+        .{ .kind = .add_deny, .src = netIp("10.42.0.10"), .dst = netIp("10.43.0.20") },
     });
 }
 
@@ -350,6 +330,7 @@ test "syncPolicies isolates allow-list sources and writes allow pairs" {
     defer store.deinitTestDb();
 
     try seedService("api", "10.43.0.10");
+    try seedEndpoint("api", "api-1", "10.42.0.10");
     try seedService("db", "10.43.0.30");
     try store.addNetworkPolicy("api", "db", "allow");
 
@@ -360,8 +341,8 @@ test "syncPolicies isolates allow-list sources and writes allow pairs" {
 
     try recorder.expectOps(&.{
         .{ .kind = .clear },
-        .{ .kind = .isolate, .src = netIp("10.43.0.10") },
-        .{ .kind = .add_allow, .src = netIp("10.43.0.10"), .dst = netIp("10.43.0.30") },
+        .{ .kind = .isolate, .src = netIp("10.42.0.10") },
+        .{ .kind = .add_allow, .src = netIp("10.42.0.10"), .dst = netIp("10.43.0.30") },
     });
 }
 
@@ -388,6 +369,44 @@ test "syncPolicies expands legacy service-name endpoints into all policy pairs" 
     try std.testing.expectEqual(@as(usize, 5), recorder.ops.items.len);
 }
 
+test "service policy addresses cover endpoint sources and vip plus direct targets" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try seedService("api", "10.43.0.10");
+    try seedService("web", "10.43.0.20");
+    try seedEndpoint("api", "api-1", "10.42.0.11");
+    try seedEndpoint("api", "api-2", "10.42.0.12");
+    try seedEndpoint("web", "web-1", "10.42.0.21");
+    try seedEndpoint("web", "web-2", "10.42.0.22");
+    // Mixed legacy/canonical registries must not duplicate rules.
+    try store.registerServiceName("api", "api-1", "10.42.0.11");
+    try store.registerServiceName("web", "web-1", "10.42.0.21");
+    try store.addNetworkPolicy("api", "web", "deny");
+    var recorder = RecordingSink.init();
+    defer recorder.deinit();
+    syncPoliciesWithEnforcer(std.testing.allocator, &recorder);
+    for ([_][]const u8{ "10.42.0.11", "10.42.0.12" }) |source| {
+        for ([_][]const u8{ "10.43.0.20", "10.42.0.21", "10.42.0.22" }) |target| {
+            try recorder.expectOp(.{ .kind = .add_deny, .src = netIp(source), .dst = netIp(target) });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 7), recorder.ops.items.len);
+
+    recorder.ops.clearRetainingCapacity();
+    applyForContainerWithEnforcer("api", .{ 10, 42, 0, 99 }, std.testing.allocator, &recorder);
+    for ([_][]const u8{ "10.43.0.20", "10.42.0.21", "10.42.0.22" }) |target| {
+        try recorder.expectOp(.{ .kind = .add_deny, .src = netIp("10.42.0.99"), .dst = netIp(target) });
+    }
+    try std.testing.expectEqual(@as(usize, 3), recorder.ops.items.len);
+
+    recorder.ops.clearRetainingCapacity();
+    try store.removeServiceEndpoint("web", "web-1");
+    try store.unregisterServiceName("web-1");
+    removeForContainerWithEnforcer(.{ 10, 42, 0, 21 }, std.testing.allocator, &recorder);
+    try recorder.expectOp(.{ .kind = .remove_deny, .src = netIp("10.42.0.11"), .dst = netIp("10.42.0.21") });
+    try recorder.expectOp(.{ .kind = .remove_deny, .src = netIp("10.42.0.12"), .dst = netIp("10.42.0.21") });
+}
+
 test "applyForContainer adds source-side policy entries for a new container" {
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -411,6 +430,7 @@ test "applyForContainer adds target-side policy entries for a new container" {
     defer store.deinitTestDb();
 
     try seedService("api", "10.43.0.10");
+    try seedEndpoint("api", "api-1", "10.42.0.10");
     try store.addNetworkPolicy("api", "web", "deny");
 
     var recorder = RecordingSink.init();
@@ -419,7 +439,22 @@ test "applyForContainer adds target-side policy entries for a new container" {
     applyForContainerWithEnforcer("web", .{ 10, 42, 0, 99 }, std.testing.allocator, &recorder);
 
     try recorder.expectOps(&.{
-        .{ .kind = .add_deny, .src = netIp("10.43.0.10"), .dst = netIp("10.42.0.99") },
+        .{ .kind = .add_deny, .src = netIp("10.42.0.10"), .dst = netIp("10.42.0.99") },
+    });
+}
+
+test "target startup isolates real endpoint sources for allow policies" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try seedService("api", "10.43.0.10");
+    try seedEndpoint("api", "api-1", "10.42.0.10");
+    try store.addNetworkPolicy("api", "web", "allow");
+    var recorder = RecordingSink.init();
+    defer recorder.deinit();
+    applyForContainerWithEnforcer("web", .{ 10, 42, 0, 99 }, std.testing.allocator, &recorder);
+    try recorder.expectOps(&.{
+        .{ .kind = .isolate, .src = netIp("10.42.0.10") },
+        .{ .kind = .add_allow, .src = netIp("10.42.0.10"), .dst = netIp("10.42.0.99") },
     });
 }
 
@@ -434,6 +469,7 @@ test "removeForContainer removes source and target policy entries" {
     var recorder = RecordingSink.init();
     defer recorder.deinit();
 
+    try store.unregisterServiceName("api-old");
     removeForContainerWithEnforcer(.{ 10, 42, 0, 99 }, std.testing.allocator, &recorder);
 
     try recorder.expectOps(&.{
@@ -553,6 +589,22 @@ fn seedService(name: []const u8, vip: []const u8) !void {
         .lb_policy = "consistent_hash",
         .created_at = 1000,
         .updated_at = 1000,
+    });
+}
+
+fn seedEndpoint(service: []const u8, id: []const u8, address: []const u8) !void {
+    try store.upsertServiceEndpoint(.{
+        .service_name = service,
+        .endpoint_id = id,
+        .container_id = id,
+        .node_id = null,
+        .ip_address = address,
+        .port = 8080,
+        .weight = 1,
+        .admin_state = "draining",
+        .generation = 1,
+        .registered_at = 1,
+        .last_seen_at = 1,
     });
 }
 
