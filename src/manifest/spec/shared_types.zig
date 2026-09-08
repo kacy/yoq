@@ -112,6 +112,28 @@ pub const HealthCheck = struct {
     retries: u32 = 3,
     start_period: u32 = 0,
 
+    /// Copy every borrowed string before retaining a check beyond its caller.
+    pub fn clone(self: HealthCheck, alloc: std.mem.Allocator) !HealthCheck {
+        var copy = self;
+        copy.check_type = switch (self.check_type) {
+            .http => |h| .{ .http = .{ .port = h.port, .path = try alloc.dupe(u8, h.path) } },
+            .grpc => |g| .{ .grpc = .{ .port = g.port, .service = if (g.service) |service| try alloc.dupe(u8, service) else null } },
+            .tcp => self.check_type,
+            .exec => |e| blk: {
+                const command = try alloc.alloc([]const u8, e.command.len);
+                errdefer alloc.free(command);
+                var copied: usize = 0;
+                errdefer for (command[0..copied]) |arg| alloc.free(arg);
+                for (e.command, 0..) |arg, index| {
+                    command[index] = try alloc.dupe(u8, arg);
+                    copied += 1;
+                }
+                break :blk .{ .exec = .{ .command = command } };
+            },
+        };
+        return copy;
+    }
+
     pub fn deinit(self: HealthCheck, alloc: std.mem.Allocator) void {
         switch (self.check_type) {
             .http => |h| alloc.free(h.path),
@@ -369,3 +391,22 @@ pub const Volume = struct {
         self.driver.deinit(alloc);
     }
 };
+
+fn testHealthCheckClones(alloc: std.mem.Allocator) !void {
+    const checks = [_]HealthCheck{
+        .{ .check_type = .{ .http = .{ .path = "/ready", .port = 80 } } },
+        .{ .check_type = .{ .grpc = .{ .service = "fixture.Health", .port = 90 } } },
+        .{ .check_type = .{ .grpc = .{ .port = 90 } } },
+        .{ .check_type = .{ .exec = .{ .command = &.{ "sh", "-c", "exit 0" } } } },
+        .{ .check_type = .{ .tcp = .{ .port = 80 } } },
+    };
+    for (checks) |check| {
+        const copy = try check.clone(alloc);
+        defer copy.deinit(alloc);
+        try std.testing.expectEqualDeep(check, copy);
+    }
+}
+
+test "health configuration cloning owns strings and cleans allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testHealthCheckClones, .{});
+}

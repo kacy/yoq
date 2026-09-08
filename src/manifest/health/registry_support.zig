@@ -27,8 +27,10 @@ pub fn registerService(
     service_name: []const u8,
     container_id: [12]u8,
     container_ip: [4]u8,
-    config: anytype,
+    config: @import("../spec.zig").HealthCheck,
 ) types.HealthError!void {
+    const owned_config = try config.clone(std.heap.page_allocator);
+    errdefer owned_config.deinit(std.heap.page_allocator);
     var endpoint_id_buf: [96]u8 = undefined;
     const endpoint_id = activeEndpointId(&container_id, &endpoint_id_buf);
     const generation = resolveEndpointGeneration(service_name, endpoint_id);
@@ -56,7 +58,8 @@ pub fn registerService(
         entry.started_at = now;
         entry.container_id = container_id;
         entry.container_ip = container_ip;
-        entry.config = config;
+        entry.config.deinit(std.heap.page_allocator);
+        entry.config = owned_config;
         entry.name_len = @intCast(len);
         @memcpy(entry.name_buf[0..len], service_name[0..len]);
         entry.endpoint_id_len = @intCast(endpoint_len);
@@ -78,7 +81,7 @@ pub fn registerService(
         .started_at = now,
         .container_id = container_id,
         .container_ip = container_ip,
-        .config = config,
+        .config = owned_config,
         .generation = generation,
         .registration_epoch = 1,
         .next_check_at = now,
@@ -97,7 +100,8 @@ pub fn unregisterService(service_name: []const u8) void {
     defer health_mutex.unlock(std.Options.debug_io);
 
     const index = findServiceIndex(service_name) orelse return;
-    _ = health_states.orderedRemove(index);
+    const removed = health_states.orderedRemove(index);
+    removed.config.deinit(std.heap.page_allocator);
 }
 
 pub fn getStatus(service_name: []const u8) ?types.HealthStatus {
@@ -108,19 +112,22 @@ pub fn getStatus(service_name: []const u8) ?types.HealthStatus {
     return health_states.items[index].status;
 }
 
-pub fn getServiceHealth(service_name: []const u8) ?types.ServiceHealth {
+pub fn getServiceHealth(alloc: std.mem.Allocator, service_name: []const u8) !?types.ServiceHealth {
     health_mutex.lockUncancelable(std.Options.debug_io);
     defer health_mutex.unlock(std.Options.debug_io);
 
     const index = findServiceIndex(service_name) orelse return null;
-    return health_states.items[index];
+    var snapshot = health_states.items[index];
+    snapshot.config = try snapshot.config.clone(alloc);
+    return snapshot;
 }
 
 pub fn snapshotChecker() types.CheckerSnapshot {
-    work_mutex.lockUncancelable(std.Options.debug_io);
-    defer work_mutex.unlock(std.Options.debug_io);
+    // Match the scheduler's health-state then work-queue lock order.
     health_mutex.lockUncancelable(std.Options.debug_io);
     defer health_mutex.unlock(std.Options.debug_io);
+    work_mutex.lockUncancelable(std.Options.debug_io);
+    defer work_mutex.unlock(std.Options.debug_io);
 
     var in_flight: usize = 0;
     for (health_states.items) |entry| {
@@ -163,7 +170,9 @@ pub fn resetForTest() void {
     work_mutex.lockUncancelable(std.Options.debug_io);
     defer work_mutex.unlock(std.Options.debug_io);
 
+    for (health_states.items) |entry| entry.config.deinit(std.heap.page_allocator);
     health_states.clearRetainingCapacity();
+    for (work_queue.items) |item| item.config.deinit(std.heap.page_allocator);
     work_queue.clearRetainingCapacity();
     scheduled_total = 0;
     completed_total = 0;

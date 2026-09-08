@@ -23,6 +23,7 @@ const check_runtime = @import("health/check_runtime.zig");
 
 comptime {
     _ = @import("health/check_runtime.zig");
+    _ = @import("health/checker_runtime.zig");
 }
 
 pub const HealthStatus = types.HealthStatus;
@@ -53,10 +54,10 @@ pub fn getStatus(service_name: []const u8) ?HealthStatus {
     return registry_support.getStatus(service_name);
 }
 
-/// get the full health state for a service (for API responses).
+/// Get an owned health snapshot. The caller frees snapshot.config with alloc.
 /// returns null if the service is not being health-checked.
-pub fn getServiceHealth(service_name: []const u8) ?ServiceHealth {
-    return registry_support.getServiceHealth(service_name);
+pub fn getServiceHealth(alloc: std.mem.Allocator, service_name: []const u8) !?ServiceHealth {
+    return registry_support.getServiceHealth(alloc, service_name);
 }
 
 pub fn snapshotChecker() CheckerSnapshot {
@@ -214,8 +215,9 @@ test "get status returns null for unknown service" {
     try std.testing.expect(getStatus("nonexistent") == null);
 }
 
-test "getServiceHealth returns full state" {
+test "getServiceHealth returns owned state after unregister" {
     registry_support.resetForTest();
+    defer registry_support.resetForTest();
 
     try registerService("api", "abcdef123456".*, .{ 10, 42, 0, 10 }, .{
         .check_type = .{ .http = .{
@@ -225,8 +227,11 @@ test "getServiceHealth returns full state" {
         .interval = 15,
     });
 
-    const sh = getServiceHealth("api");
+    const sh = try getServiceHealth(std.testing.allocator, "api");
+    defer if (sh) |snapshot| snapshot.config.deinit(std.testing.allocator);
+    unregisterService("api");
     try std.testing.expect(sh != null);
+    try std.testing.expectEqualStrings("/health", sh.?.config.check_type.http.path);
     try std.testing.expectEqual(HealthStatus.starting, sh.?.status);
     try std.testing.expectEqual(@as(u32, 15), sh.?.config.interval);
     try std.testing.expect(sh.?.started_at != null);

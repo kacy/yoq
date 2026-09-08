@@ -21,8 +21,8 @@ pub fn writeContainerJson(writer: anytype, record: store.ContainerRecord) !void 
     try writer.writeAll(",\"created_at\":");
     try writer.print("{d}", .{record.created_at});
 
-    if (health.getServiceHealth(record.hostname)) |service_health| {
-        const health_str = switch (service_health.status) {
+    if (health.getStatus(record.hostname)) |status| {
+        const health_str = switch (status) {
             .starting => "starting",
             .healthy => "healthy",
             .unhealthy => "unhealthy",
