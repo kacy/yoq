@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import sqlite3
 import ssl
 import subprocess
@@ -25,6 +26,7 @@ import urllib.request
 REPO = Path(__file__).resolve().parent.parent
 YOQ = REPO / "zig-out/bin/yoq"
 HELPER = REPO / "zig-out/bin/yoq-test-http-server"
+PROBE = REPO / "zig-out/bin/yoq-test-net-probe"
 
 
 def run(*args, **kwargs):
@@ -190,6 +192,21 @@ def inside(root, outer_mount, outer_net):
         with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
             return db.execute("SELECT count(*) FROM containers WHERE id = ?", (container_id,)).fetchone()[0] == 0
 
+    def probe_service(*arguments):
+        probe_root = root / "probe-rootfs"
+        (probe_root / "bin").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PROBE, probe_root / "bin/probe")
+        env = dict(os.environ, HOME=str(homes["agent"]))
+        try:
+            response = subprocess.run([*worker_prefix, str(YOQ), "run", "--name", "scheduled-probe",
+                                       str(probe_root), "/bin/probe", *arguments],
+                                      env=env, capture_output=True, timeout=15)
+            assert response.returncode == 0, response.stderr.decode()
+            return response.stdout
+        finally:
+            subprocess.run([*worker_prefix, str(YOQ), "rm", "scheduled-probe"],
+                           env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+
     def assignment_rows():
         # Worker assignment endpoints require worker credentials. Inspect this
         # fixture's committed state without giving the administrator that secret.
@@ -244,6 +261,10 @@ def inside(root, outer_mount, outer_net):
             assert result.get("status") == "completed", result
             assignments = assignment_rows()
             assert assignments[0]["status"] == "running", assignments
+            # Foreground CLI output also includes its generated container ID.
+            resolved = probe_service("resolve", "web").splitlines()
+            assert any(address.startswith(b"10.43.") for address in resolved), resolved
+            assert b"scheduled-ready" in probe_service("http-get", "web", "8080", "/")
             assert any("/manifests/" in path for path in registry.request_paths)
             assert sum("/blobs/" in path for path in registry.request_paths) >= 2
             status = Path(f"/proc/{row['pid']}/status").read_text()
@@ -262,7 +283,7 @@ def inside(root, outer_mount, outer_net):
             assert terminal["status_reason"] == "process_failed", dict(terminal)
             assert not Path(f"/proc/{row['pid']}").exists(), "terminated process remains alive"
             wait_for("assignment cleanup", lambda: container_removed(row["id"]))
-        print("scheduled runtime: API authentication, registry certificate trust, OCI pull, readiness, routed HTTP, identity, limits, and exit passed", flush=True)
+        print("scheduled runtime: API authentication, registry certificate trust, OCI pull, readiness, routed and service-VIP HTTP, identity, limits, and exit passed", flush=True)
     finally:
         for process in reversed(processes):
             process.terminate()
@@ -288,8 +309,8 @@ def main():
         return
     if os.geteuid() != 0:
         raise SystemExit("scheduled runtime fixture requires root")
-    if not YOQ.is_file() or not HELPER.is_file():
-        raise SystemExit("build yoq and the runtime-network helper before running this fixture")
+    if not all(path.is_file() for path in (YOQ, HELPER, PROBE)):
+        raise SystemExit("build yoq and the runtime-network helpers before running this fixture")
     with tempfile.TemporaryDirectory(prefix="yoq-scheduled-", dir=os.environ.get("RUNNER_TEMP")) as directory:
         try:
             run("unshare", "--mount", "--net", "--pid", "--fork", "--mount-proc", sys.executable,
