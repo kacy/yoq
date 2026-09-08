@@ -120,25 +120,55 @@ test "multiple containers with different limits coexist" {
     var fixture = try helpers.createShellRootfs(alloc);
     defer fixture.deinit();
 
-    // start several containers with different resource limits
-    const names = [_][]const u8{ "limit-multi-1", "limit-multi-2", "limit-multi-3" };
     const limits = [_][]const u8{ "8m", "16m", "32m" };
+    const expected_bytes = [_]u64{ 8 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024 };
+    var names: [limits.len]?[]const u8 = @splat(null);
+    defer for (names) |maybe_name| {
+        if (maybe_name) |name| {
+            if (env.runYoq(&.{ "stop", name })) |value| {
+                var stopped = value;
+                stopped.deinit();
+            } else |_| {}
+            if (env.runYoq(&.{ "rm", name })) |value| {
+                var removed = value;
+                removed.deinit();
+            } else |_| {}
+            alloc.free(name);
+        }
+    };
 
-    for (names, limits) |name_base, limit| {
-        const name = try helpers.uniqueName(alloc, name_base);
-        defer alloc.free(name);
-
+    for (limits, 0..) |limit, index| {
+        const name = try helpers.uniqueName(alloc, "limit-multi");
+        names[index] = name;
         var result = try env.runYoq(&.{
-            "run",      "-d",        "--name",            name,
-            "--memory", limit,       fixture.rootfs_path, "/bin/sh",
-            "-c",       "sleep 0.1",
+            "run",      "-d",                  "--name",            name,
+            "--memory", limit,                 fixture.rootfs_path, "/bin/sh",
+            "-c",       "while :; do :; done",
         });
         defer result.deinit();
         try result.expectExitCode(0);
+    }
 
-        // cleanup
-        var rm = try env.runYoq(&.{ "rm", name });
-        defer rm.deinit();
+    // Keep all three workloads alive together and read the actual kernel limits.
+    var ps = try env.runYoq(&.{ "ps", "--json" });
+    defer ps.deinit();
+    try ps.expectExitCode(0);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, ps.stdout, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(names.len, parsed.value.array.items.len);
+    for (names, expected_bytes) |maybe_name, expected| {
+        const record = for (parsed.value.array.items) |item| {
+            if (std.mem.eql(u8, item.object.get("name").?.string, maybe_name.?)) break item;
+        } else return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("running", record.object.get("status").?.string);
+        const id = record.object.get("id").?.string;
+        const path = try std.fmt.allocPrint(alloc, "/sys/fs/cgroup/yoq/{s}/memory.max", .{id});
+        defer alloc.free(path);
+        var memory = try env.run(&.{ "/bin/cat", path });
+        defer memory.deinit();
+        try memory.expectExitCode(0);
+        const actual = try std.fmt.parseInt(u64, std.mem.trim(u8, memory.stdout, " \t\r\n"), 10);
+        try std.testing.expectEqual(expected, actual);
     }
 }
 
