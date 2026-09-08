@@ -253,3 +253,55 @@ test "stop nonexistent container fails gracefully" {
 
     try std.testing.expect(result.exit_code != 0);
 }
+
+test "detached startup accepts fast exits independently of exit code" {
+    var fixture = try initLifecycleFixture();
+    defer fixture.env.deinit();
+    defer fixture.rootfs.deinit();
+
+    for ([_]u8{ 0, 1, 255 }) |exit_code| {
+        const command = try std.fmt.allocPrint(alloc, "exit {d}", .{exit_code});
+        defer alloc.free(command);
+        var launched = try fixture.env.runYoq(&.{ "run", "-d", fixture.rootfs.rootfs_path, "/bin/sh", "-c", command });
+        defer launched.deinit();
+        try std.testing.expectEqual(@as(u8, 0), launched.exit_code);
+        const id = trimOutput(launched.stdout);
+        try std.testing.expect(id.len > 0);
+        defer {
+            if (fixture.env.runYoq(&.{ "rm", id })) |value| {
+                var result = value;
+                result.deinit();
+            } else |_| {}
+        }
+
+        var completed = false;
+        for (0..100) |_| {
+            var ps = try fixture.env.runYoq(&.{ "ps", "--json" });
+            defer ps.deinit();
+            const parsed = try std.json.parseFromSlice(std.json.Value, alloc, trimOutput(ps.stdout), .{});
+            defer parsed.deinit();
+            for (parsed.value.array.items) |entry| {
+                if (!std.mem.eql(u8, entry.object.get("id").?.string, id)) continue;
+                if (std.mem.eql(u8, entry.object.get("status").?.string, "stopped") and entry.object.get("pid").? == .null) {
+                    completed = true;
+                }
+            }
+            if (completed) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake);
+        }
+        try std.testing.expect(completed);
+    }
+}
+
+test "detached startup rejects a genuine filesystem preparation failure" {
+    var fixture = try initLifecycleFixture();
+    defer fixture.env.deinit();
+    defer fixture.rootfs.deinit();
+    const proc_path = try std.fmt.allocPrint(alloc, "{s}/proc", .{fixture.rootfs.rootfs_path});
+    defer alloc.free(proc_path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = proc_path, .data = "not a mount directory" });
+    var launched = try fixture.env.runYoq(&.{ "run", "-d", fixture.rootfs.rootfs_path, "/bin/sh", "-c", ":" });
+    defer launched.deinit();
+    try std.testing.expect(launched.exit_code != 0);
+    try std.testing.expectEqualStrings("", trimOutput(launched.stdout));
+}

@@ -60,10 +60,22 @@ pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, a
 
         var c = containerFromSaved(id, cfg, attach);
         c.start() catch |err| {
-            store.updateStatus(id, "stopped", null, 255) catch {};
+            store.recordStartupFailure(id) catch {};
             writeErr("failed to start container: {}\n", .{err});
             return 255;
         };
+
+        if (first_start) {
+            store.setStartupOutcome(id, .succeeded) catch |err| {
+                // Do not leave an unacknowledged detached workload running.
+                c.forceStop() catch {};
+                _ = c.wait() catch 255;
+                store.recordStartupFailure(id) catch {};
+                container.cleanupContainerDirs(id);
+                writeErr("failed to record container startup: {}\n", .{err});
+                return 255;
+            };
+        }
 
         if (first_start and attach) {
             write("{s}\n", .{id});
@@ -88,7 +100,8 @@ pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) Con
     const exe_path = readSelfExePathAlloc(io, alloc) catch return ContainerError.OutOfMemory;
     defer alloc.free(exe_path);
 
-    const child = std.process.spawn(io, .{
+    store.setStartupOutcome(id, .pending) catch return ContainerError.ConfigSaveFailed;
+    _ = std.process.spawn(io, .{
         .argv = &.{ exe_path, "__run-supervisor", id },
         .stdin = .ignore,
         .stdout = .ignore,
@@ -97,17 +110,6 @@ pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) Con
         writeErr("failed to spawn detached supervisor: {}\n", .{err});
         return ContainerError.ProcessNotFound;
     };
-
-    runtime_wait.sleepWithIoOrError(io, std.Io.Duration.fromMilliseconds(100), "container supervisor spawn settle") catch {
-        return ContainerError.ProcessNotFound;
-    };
-
-    if (process.sendSignal(child.id orelse return ContainerError.ProcessNotFound, 0)) |_| {
-        return;
-    } else |_| {
-        writeErr("supervisor process exited immediately\n", .{});
-        return ContainerError.ProcessNotFound;
-    }
 }
 
 pub fn stopProcess(pid: i32) ContainerError!void {
@@ -164,6 +166,7 @@ pub fn installSignalHandlers() void {
 pub fn runSupervisor(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const id = requireArg(args, "usage: yoq __run-supervisor <container-id>\n");
     var cfg = run_state.loadConfig(alloc, id) catch |err| {
+        store.recordStartupFailure(id) catch {};
         writeErr("failed to load container config for {s}: {}\n", .{ id, err });
         return ContainerError.ConfigSaveFailed;
     };

@@ -6,6 +6,8 @@ const schema = @import("../schema.zig");
 const Allocator = std.mem.Allocator;
 const StoreError = common.StoreError;
 
+pub const StartupOutcome = enum(u8) { pending = 0, succeeded = 1, failed = 2 };
+
 pub const ContainerRecord = struct {
     id: []const u8,
     rootfs: []const u8,
@@ -18,6 +20,7 @@ pub const ContainerRecord = struct {
     veth_host: ?[]const u8 = null,
     app_name: ?[]const u8 = null,
     created_at: i64,
+    startup_outcome: StartupOutcome = .pending,
 
     pub fn deinit(self: ContainerRecord, alloc: Allocator) void {
         alloc.free(self.id);
@@ -32,7 +35,7 @@ pub const ContainerRecord = struct {
 };
 
 const container_columns =
-    "id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at";
+    "id, rootfs, command, hostname, status, pid, exit_code, ip_address, veth_host, app_name, created_at, startup_outcome";
 
 const ContainerRow = struct {
     id: sqlite.Text,
@@ -46,6 +49,7 @@ const ContainerRow = struct {
     veth_host: ?sqlite.Text,
     app_name: ?sqlite.Text,
     created_at: i64,
+    startup_outcome: i64,
 };
 
 const IdRow = struct {
@@ -68,6 +72,7 @@ fn rowToRecord(row: ContainerRow) ContainerRecord {
         .veth_host = if (row.veth_host) |veth| veth.data else null,
         .app_name = if (row.app_name) |app| app.data else null,
         .created_at = row.created_at,
+        .startup_outcome = std.enums.fromInt(StartupOutcome, row.startup_outcome) orelse .failed,
     };
 }
 
@@ -84,7 +89,7 @@ fn saveInDb(db: *sqlite.Db, record: ContainerRecord) StoreError!void {
 
     db.exec(
         "INSERT OR REPLACE INTO containers (" ++ container_columns ++ ")" ++
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.id,
@@ -98,6 +103,7 @@ fn saveInDb(db: *sqlite.Db, record: ContainerRecord) StoreError!void {
             record.veth_host,
             record.app_name,
             record.created_at,
+            @intFromEnum(record.startup_outcome),
         },
     ) catch return StoreError.WriteFailed;
 }
@@ -181,6 +187,26 @@ fn updateStatusInDb(db: *sqlite.Db, id: []const u8, status: []const u8, pid: ?i3
         "UPDATE containers SET status = ?, pid = ?, exit_code = ? WHERE id = ?;",
         .{},
         .{ status, pid_val, exit_val, id },
+    ) catch return StoreError.WriteFailed;
+}
+
+/// A launch outcome survives process exit and automatic supervisor restarts.
+pub fn setStartupOutcome(id: []const u8, outcome: StartupOutcome) StoreError!void {
+    var lease = try common.leaseDb();
+    defer lease.deinit();
+    lease.db.exec("UPDATE containers SET startup_outcome = ? WHERE id = ?;", .{}, .{ @intFromEnum(outcome), id }) catch return StoreError.WriteFailed;
+}
+
+pub fn recordStartupFailure(id: []const u8) StoreError!void {
+    var lease = try common.leaseDb();
+    defer lease.deinit();
+    // Preserve rollback diagnostics and an earlier successful first launch.
+    lease.db.exec(
+        "UPDATE containers SET startup_outcome = CASE WHEN startup_outcome = 0 THEN 2 ELSE startup_outcome END," ++
+            " status = CASE WHEN status = 'cleanup_failed' THEN status ELSE 'stopped' END," ++
+            " pid = NULL, exit_code = CASE WHEN status = 'cleanup_failed' THEN exit_code ELSE 255 END WHERE id = ?;",
+        .{},
+        .{id},
     ) catch return StoreError.WriteFailed;
 }
 
@@ -443,4 +469,36 @@ test "find app container by hostname" {
         .{ "myapp", "cache" },
     ) catch unreachable;
     try std.testing.expect(missing == null);
+}
+
+test "container startup outcome migrates legacy rows and survives database reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory: [4096]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &directory);
+    const file = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}/startup.db", .{directory[0..len]}, 0);
+    defer std.testing.allocator.free(file);
+    {
+        var db = try sqlite.Db.init(.{ .mode = .{ .File = file }, .open_flags = .{ .write = true, .create = true } });
+        defer db.deinit();
+        try db.exec(
+            "CREATE TABLE containers (id TEXT PRIMARY KEY, rootfs TEXT, command TEXT, hostname TEXT," ++
+                " status TEXT, pid INTEGER, exit_code INTEGER, ip_address TEXT, veth_host TEXT, app_name TEXT, created_at INTEGER);",
+            .{},
+            .{},
+        );
+        try db.exec("INSERT INTO containers (id,rootfs,command,hostname,status,exit_code,created_at) VALUES ('legacy','/fixture','/bin/sh','legacy','stopped',0,1);", .{}, .{});
+        try schema.init(&db);
+        var record = try loadInDb(&db, std.testing.allocator, "legacy");
+        defer record.deinit(std.testing.allocator);
+        try std.testing.expectEqual(StartupOutcome.pending, record.startup_outcome);
+        record.startup_outcome = .succeeded;
+        try saveInDb(&db, record);
+    }
+    var reopened = try sqlite.Db.init(.{ .mode = .{ .File = file }, .open_flags = .{ .write = true } });
+    defer reopened.deinit();
+    const record = try loadInDb(&reopened, std.testing.allocator, "legacy");
+    defer record.deinit(std.testing.allocator);
+    try std.testing.expectEqual(StartupOutcome.succeeded, record.startup_outcome);
+    try std.testing.expectEqualStrings("stopped", record.status);
 }
