@@ -212,9 +212,16 @@ pub const ApplicationSpec = struct {
             try json_helpers.writeJsonEscaped(writer, svc.name);
             try writer.writeAll("\",\"image\":\"");
             try json_helpers.writeJsonEscaped(writer, svc.image);
-            try writer.writeAll("\",\"command\":\"");
-            try writeJsonJoinedCommand(writer, svc.command);
-            try writer.print("\",\"cpu_limit\":{d},\"memory_limit_mb\":{d}", .{
+            try writer.writeAll("\",\"command\":");
+            try writeJsonStringArray(writer, svc.command);
+            try writer.writeAll(",\"env\":");
+            try writeJsonStringArray(writer, svc.env);
+            if (svc.working_dir) |dir| {
+                try writer.writeAll(",\"working_dir\":\"");
+                try json_helpers.writeJsonEscaped(writer, dir);
+                try writer.writeByte('"');
+            }
+            try writer.print(",\"cpu_limit\":{d},\"memory_limit_mb\":{d}", .{
                 svc.cpu_limit,
                 svc.memory_limit_mb,
             });
@@ -370,13 +377,6 @@ pub fn fromManifest(alloc: std.mem.Allocator, app_name: []const u8, manifest: *c
         .training_jobs = training_jobs,
         .alloc = alloc,
     };
-}
-
-fn writeJsonJoinedCommand(writer: anytype, command: []const []const u8) !void {
-    for (command, 0..) |arg, i| {
-        if (i > 0) try writer.writeByte(' ');
-        try json_helpers.writeJsonEscaped(writer, arg);
-    }
 }
 
 fn writeJsonStringArray(writer: anytype, items: []const []const u8) !void {
@@ -924,7 +924,7 @@ test "toLegacyDeployJson preserves service semantics needed by deploy shim" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"volume_app\":\"cluster-app\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"api\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"image\":\"alpine:latest\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"command\":\"sleep 30\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"command\":[\"sleep\",\"30\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"gpu_limit\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"gpu_model\":\"H100\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"gpu_vram_min_mb\":81920") != null);

@@ -57,13 +57,9 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
         var iter = json_helpers.extractJsonObjects(services_json);
         while (iter.next()) |block| {
             const image = extractJsonString(block, "image") orelse continue;
-            const command = extractCommandString(alloc, block) catch return ParseError.OutOfMemory;
+            const command = extractCommandString(alloc, block) catch |err| return if (err == error.OutOfMemory) ParseError.OutOfMemory else ParseError.InvalidRequest;
 
             if (!common.validateClusterInput(image)) {
-                alloc.free(command);
-                continue;
-            }
-            if (command.len > 0 and !common.validateClusterInput(command)) {
                 alloc.free(command);
                 continue;
             }
@@ -155,50 +151,8 @@ fn parseRolloutPolicy(block: []const u8) error{InvalidRolloutConfig}!spec.Rollou
     };
 }
 
-fn extractJsonStringArray(alloc: std.mem.Allocator, json: []const u8, key: []const u8) !?[]u8 {
-    const array_json = extractJsonArray(json, key) orelse return null;
-    if (array_json.len < 2) return null;
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-
-    var pos: usize = 1;
-    var first = true;
-    while (pos < array_json.len - 1) {
-        while (pos < array_json.len - 1 and (array_json[pos] == ' ' or array_json[pos] == '\n' or array_json[pos] == '\r' or array_json[pos] == '\t' or array_json[pos] == ',')) : (pos += 1) {}
-        if (pos >= array_json.len - 1) break;
-        if (array_json[pos] != '"') return ParseError.InvalidRequest;
-        pos += 1;
-        const start = pos;
-
-        while (pos < array_json.len - 1) : (pos += 1) {
-            if (array_json[pos] == '\\') {
-                pos += 1;
-                if (pos >= array_json.len - 1) return ParseError.InvalidRequest;
-                continue;
-            }
-            if (array_json[pos] == '"') break;
-        }
-        if (pos >= array_json.len - 1) return ParseError.InvalidRequest;
-
-        if (!first) try out.append(alloc, ' ');
-        first = false;
-        try out.appendSlice(alloc, array_json[start..pos]);
-        pos += 1;
-    }
-
-    return try out.toOwnedSlice(alloc);
-}
-
 fn extractCommandString(alloc: std.mem.Allocator, block: []const u8) ![]const u8 {
-    if (extractJsonString(block, "command")) |command| {
-        return alloc.dupe(u8, command);
-    }
-    if (try extractJsonStringArray(alloc, block, "command")) |joined| {
-        defer alloc.free(joined);
-        return alloc.dupe(u8, joined);
-    }
-    return alloc.dupe(u8, "");
+    return @import("../../../cluster/assignment_spec.zig").fromWorkload(alloc, block);
 }
 
 test "parse finds services array regardless of field order" {
@@ -215,7 +169,7 @@ test "parse finds services array regardless of field order" {
     try std.testing.expectEqualStrings("busybox", parsed.requests.items[1].request.image);
 }
 
-test "parse joins structured command arrays" {
+test "parse preserves structured command arrays" {
     const alloc = std.testing.allocator;
     const json =
         \\{"app_name":"demo-app","services":[{"name":"web","image":"nginx","command":["nginx","-g","daemon off"]}]}
@@ -226,7 +180,9 @@ test "parse joins structured command arrays" {
 
     try std.testing.expectEqualStrings("demo-app", parsed.app_name.?);
     try std.testing.expectEqual(@as(usize, 1), parsed.requests.items.len);
-    try std.testing.expectEqualStrings("nginx -g daemon off", parsed.requests.items[0].request.command);
+    var execution = try @import("../../../cluster/assignment_spec.zig").decode(alloc, parsed.requests.items[0].request.command);
+    defer execution.deinit();
+    try std.testing.expectEqualStrings("daemon off", execution.value.argv[2]);
 }
 
 test "parse accepts training-only app apply payloads" {

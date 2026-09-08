@@ -192,6 +192,7 @@ comptime {
     _ = @import("cluster/agent_types.zig");
     _ = @import("cluster/heartbeat_batcher.zig");
     _ = @import("cluster/agent_store.zig");
+    _ = @import("cluster/assignment_spec.zig");
     _ = @import("cluster/registry.zig");
     _ = @import("cluster/http_client.zig");
     _ = @import("cluster/agent.zig");

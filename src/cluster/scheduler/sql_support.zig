@@ -26,7 +26,7 @@ pub fn assignmentSqlGang(
 ) ![]const u8 {
     var img_esc_buf: [512]u8 = undefined;
     const img_esc = try sql_escape.escapeSqlString(&img_esc_buf, request.image);
-    var cmd_esc_buf: [512]u8 = undefined;
+    var cmd_esc_buf: [@import("../assignment_spec.zig").max_encoded_bytes * 2]u8 = undefined;
     const cmd_esc = try sql_escape.escapeSqlString(&cmd_esc_buf, request.command);
     var app_esc_buf: [256]u8 = undefined;
     var kind_esc_buf: [64]u8 = undefined;
