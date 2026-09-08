@@ -148,6 +148,9 @@ test "placement capacity treats negative and overflowing usage as exhausted" {
     try db.exec("INSERT INTO assignments VALUES ('large', 'worker', 'pending', 9223372036854775807, -1), ('extra', 'worker', 'pending', 1, 1);", .{}, .{});
     try db.exec("INSERT INTO assignment_claims VALUES ('large', 9223372036854775807), ('extra', 1);", .{}, .{});
     var agent = test_agent;
+    agent.cpu_used = 1;
+    agent.memory_used_mb = 1;
+    agent.gpu_used = 1;
     try includeClaims(std.testing.allocator, &db, &agent, &.{});
     try std.testing.expectEqual(std.math.maxInt(i64), agent.cpu_used);
     try std.testing.expectEqual(std.math.maxInt(i64), agent.memory_used_mb);
