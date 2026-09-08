@@ -8,6 +8,15 @@ const socket_ops = @import("socket_ops.zig");
 const MessageBuilder = builder_mod.MessageBuilder;
 
 pub fn addAddress(fd: posix.fd_t, if_index: u32, ip: *const [4]u8, prefix_len: u8) common.NetlinkError!void {
+    return addAddressWithFlags(fd, if_index, ip, prefix_len, 0);
+}
+
+/// Keep the address mask without creating a direct route to every peer.
+pub fn addRoutedAddress(fd: posix.fd_t, if_index: u32, ip: *const [4]u8, prefix_len: u8) common.NetlinkError!void {
+    return addAddressWithFlags(fd, if_index, ip, prefix_len, 0x200); // IFA_F_NOPREFIXROUTE
+}
+
+fn addAddressWithFlags(fd: posix.fd_t, if_index: u32, ip: *const [4]u8, prefix_len: u8, flags: u32) common.NetlinkError!void {
     var buf_storage: [common.buf_size]u8 align(4) = undefined;
     var mb = MessageBuilder.init(&buf_storage);
 
@@ -25,11 +34,20 @@ pub fn addAddress(fd: posix.fd_t, if_index: u32, ip: *const [4]u8, prefix_len: u
 
     try mb.putAttr(hdr, common.IFA.LOCAL, ip);
     try mb.putAttr(hdr, common.IFA.ADDRESS, ip);
+    if (flags != 0) try mb.putAttrU32(hdr, common.IFA.FLAGS, flags);
 
     try socket_ops.sendAndCheck(fd, mb.message());
 }
 
 pub fn addRoute(fd: posix.fd_t, dest: ?*const [4]u8, dest_len: u8, gw: *const [4]u8) common.NetlinkError!void {
+    return addRouteWithInterface(fd, dest, dest_len, gw, null);
+}
+
+pub fn addLinkRoute(fd: posix.fd_t, if_index: u32, dest: *const [4]u8, dest_len: u8) common.NetlinkError!void {
+    return addRouteWithInterface(fd, dest, dest_len, null, if_index);
+}
+
+fn addRouteWithInterface(fd: posix.fd_t, dest: ?*const [4]u8, dest_len: u8, gw: ?*const [4]u8, if_index: ?u32) common.NetlinkError!void {
     var buf_storage: [common.buf_size]u8 align(4) = undefined;
     var mb = MessageBuilder.init(&buf_storage);
 
@@ -44,11 +62,12 @@ pub fn addRoute(fd: posix.fd_t, dest: ?*const [4]u8, dest_len: u8, gw: *const [4
     rt.dst_len = dest_len;
     rt.table = common.RT_TABLE.MAIN;
     rt.protocol = common.RTPROT.BOOT;
-    rt.scope = common.RT_SCOPE.UNIVERSE;
+    rt.scope = if (gw != null) common.RT_SCOPE.UNIVERSE else common.RT_SCOPE.LINK;
     rt.type = common.RTN.UNICAST;
 
     if (dest) |d| try mb.putAttr(hdr, common.RTA.DST, d);
-    try mb.putAttr(hdr, common.RTA.GATEWAY, gw);
+    if (gw) |gateway| try mb.putAttr(hdr, common.RTA.GATEWAY, gateway);
+    if (if_index) |index| try mb.putAttrU32(hdr, common.RTA.OIF, index);
 
     try socket_ops.sendAndCheck(fd, mb.message());
 }

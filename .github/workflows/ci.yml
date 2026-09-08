@@ -58,6 +58,17 @@ jobs:
       - name: verify veth creation in destination namespaces
         run: bash scripts/veth-namespace-smoke.sh
 
+  service-gateway:
+    name: service-gateway
+    needs: changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-zig
+      - name: verify service vip traffic through container gateways
+        run: bash scripts/service-gateway-smoke.sh
+
   fmt-check:
     name: fmt-check
     runs-on: ubuntu-latest

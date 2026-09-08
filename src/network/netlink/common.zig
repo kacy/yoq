@@ -122,6 +122,7 @@ pub const VETH = struct {
 };
 
 pub const IFA = struct {
+    pub const FLAGS: u16 = 8;
     pub const ADDRESS: u16 = 1;
     pub const LOCAL: u16 = 2;
 };

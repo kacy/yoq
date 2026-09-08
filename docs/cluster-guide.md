@@ -113,6 +113,8 @@ this does several things:
 
 each agent gets an IP from the `10.40.0.0/16` overlay and a `/24` subnet for its containers (`10.42.{node_id}.0/24`). WireGuard encrypts all cross-node traffic automatically.
 
+Containers keep their assigned subnet mask but route peer traffic through the bridge gateway. This keeps service VIP requests and replies on the load balancer path, including containers on the same node. Existing containers need to be recreated to receive this routing setup.
+
 after joining, verify the agent appears:
 
 ```
