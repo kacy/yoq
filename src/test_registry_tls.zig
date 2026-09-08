@@ -39,11 +39,12 @@ fn uploadFixture(init: std.process.Init, args: []const []const u8) !void {
         const data = try std.Io.Dir.cwd().readFileAlloc(init.io, path, init.gpa, .limited(1024 * 1024));
         defer init.gpa.free(data);
         try registry.uploadBlob(init.gpa, &client, host, repository, digest, data, token);
-    } else if (std.mem.eql(u8, mode, "upload-file")) {
+    } else if (std.mem.eql(u8, mode, "upload-file") or std.mem.eql(u8, mode, "upload-file-short")) {
         const file = try std.Io.Dir.cwd().openFile(init.io, path, .{});
         defer file.close(init.io);
         const stat = try file.stat(init.io);
         var blob = blob_store.BlobHandle{ .file = file, .size = stat.size };
+        if (std.mem.eql(u8, mode, "upload-file-short")) blob.size += 1;
         try upload.uploadBlobFile(&client, host, repository, digest, &blob, token);
     } else return error.InvalidUploadMode;
 }

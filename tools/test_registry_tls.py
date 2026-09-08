@@ -60,6 +60,8 @@ def inside(binary, root, outer_namespace):
     redirects = {"/v2/fixture/blobs/" + key: path for path, key in redirected_blobs.items()}
     requests = []
     uploads = []
+    short_upload_sizes = []
+    short_upload_finished = threading.Event()
     upload_cases = ("relative", "absolute", "other-port", "bad-init", "bad-complete")
 
     class Registry(http.server.BaseHTTPRequestHandler):
@@ -78,7 +80,7 @@ def inside(binary, root, outer_namespace):
         def do_POST(self):
             self.record_upload()
             case = self.path.removeprefix("/v2/").removesuffix("/blobs/uploads/")
-            if case not in upload_cases:
+            if case not in upload_cases and case != "short-file":
                 self.send_error(404)
                 return
             location = f"/uploads/{case}?state=fixture%2Bstate&part=1"
@@ -88,6 +90,17 @@ def inside(binary, root, outer_namespace):
             self.empty_response(200 if case == "bad-init" else 202, location)
 
         def do_PUT(self):
+            if self.path.startswith("/uploads/short-file?"):
+                short_upload_sizes.append(int(self.headers["Content-Length"]))
+                self.connection.settimeout(30)
+                try:
+                    # the client closes the connection when the file ends early.
+                    while self.rfile.read1(8192):
+                        pass
+                except (ConnectionResetError, ssl.SSLEOFError):
+                    pass
+                short_upload_finished.set()
+                return
             self.record_upload()
             self.empty_response(200 if self.path.startswith("/uploads/bad-complete?") else 201)
 
@@ -180,6 +193,16 @@ def inside(binary, root, outer_namespace):
                     expected.append(("PUT", port, f"/uploads/{case}?state=fixture%2Bstate&part=1&digest={digest(data)}",
                                      auth, data, "application/octet-stream"))
                 assert uploads == expected, (mode, case, uploads)
+
+        source = root / "short-file"
+        data = bytes(range(256)) * 97
+        source.write_bytes(data)
+        result = subprocess.run([str(binary), "upload-file-short", f"localhost:{server.server_port}",
+                                 "short-file", digest(data), str(source)], capture_output=True, timeout=30)
+        assert result.returncode == 2, result.stderr.decode()
+        assert b"registry upload rejected: UploadFailed" in result.stderr, result.stderr.decode()
+        assert short_upload_finished.wait(30), "short upload connection did not close"
+        assert short_upload_sizes == [len(data) + 1], short_upload_sizes
         print("registry TLS: certificate checks, parallel pulls, byte and file uploads, and upload auth verified", flush=True)
     finally:
         for server, thread in servers:
