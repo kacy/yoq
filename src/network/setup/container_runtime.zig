@@ -67,6 +67,10 @@ pub fn setupContainer(
         log.warn("failed to enable IP forwarding: {}", .{e});
         return common.SetupError.NatFailed;
     };
+    nat.ensureContainerForwarding(bridge.default_bridge, "10.42.0.0/16") catch |e| {
+        log.warn("failed to permit container forwarding on {s}: {}", .{ bridge.default_bridge, e });
+        return common.SetupError.NatFailed;
+    };
     nat.ensureMasquerade(bridge.default_bridge, "10.42.0.0/16") catch |e| {
         log.warn("failed to set up masquerade on {s}: {}", .{ bridge.default_bridge, e });
         return common.SetupError.NatFailed;
