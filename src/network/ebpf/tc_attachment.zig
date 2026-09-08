@@ -158,7 +158,12 @@ fn listFilters(if_index: u32, direction: common.Direction) !std.ArrayList(Filter
             if (reply.len < @sizeOf(linux.nlmsghdr) or reply.len > count - offset) return error.InvalidResponse;
             const payload = storage[offset + @sizeOf(linux.nlmsghdr) .. offset + reply.len];
             offset += nl.nlmsgAlign(reply.len);
-            if (reply.type == .DONE) return filters;
+            if (reply.type == .DONE) {
+                // Multipart dumps can finish with an error in NLMSG_DONE.
+                if (payload.len != 0 and (payload.len < 4 or
+                    std.mem.bytesToValue(i32, payload[0..4]) != 0)) return error.InvalidResponse;
+                return filters;
+            }
             if (reply.type == .ERROR) return error.InvalidResponse;
             if (reply.type != .RTM_NEWTFILTER or payload.len < @sizeOf(nl.TcMsg)) continue;
             const tc = std.mem.bytesAsValue(nl.TcMsg, payload[0..@sizeOf(nl.TcMsg)]);
