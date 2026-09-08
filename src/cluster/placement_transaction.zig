@@ -8,7 +8,7 @@ const scheduler = @import("scheduler.zig");
 const mutation = @import("mutation_session.zig");
 const sql = @import("sql_command.zig");
 
-const max_gang_ranks = 4096;
+pub const max_gang_ranks = 4096;
 const max_batch_bytes = 1024 * 1024;
 
 var placement_mu: std.Io.Mutex = .init;
@@ -137,10 +137,24 @@ pub const Placement = struct {
 };
 
 pub fn place(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8) mutation.Error!?Placement {
+    return placeWithMetadata(alloc, session, request, release_id, null);
+}
+
+/// Replace one workload only when its complete new placement fits. Assignment
+/// deletion, new claims and caller metadata are applied or rejected together.
+pub fn replaceWorkload(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, metadata_sql: []const u8) mutation.Error!?Placement {
+    const app_name = request.app_name orelse return error.Conflict;
+    const workload_kind = request.workload_kind orelse return error.Conflict;
+    const workload_name = request.workload_name orelse return error.Conflict;
+    if (app_name.len == 0 or workload_kind.len == 0 or workload_name.len == 0) return error.Conflict;
+    return placeWithMetadata(alloc, session, request, null, metadata_sql);
+}
+
+fn placeWithMetadata(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8, metadata_sql: ?[]const u8) mutation.Error!?Placement {
     // Bound gang work before allocating a ranks array or building SQL.
     if (request.cpu_limit <= 0 or request.memory_limit_mb <= 0 or request.gpu_limit < 0 or request.gang_world_size > max_gang_ranks) return error.Conflict;
     for (0..3) |_| {
-        return placeOnce(alloc, session, request, release_id) catch |err| {
+        return placeOnce(alloc, session, request, release_id, metadata_sql) catch |err| {
             if (err == error.Conflict) continue;
             return err;
         };
@@ -148,16 +162,23 @@ pub fn place(alloc: std.mem.Allocator, session: mutation.Session, request: sched
     return error.Conflict;
 }
 
-fn placeOnce(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8) mutation.Error!?Placement {
+fn placeOnce(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8, metadata_sql: ?[]const u8) mutation.Error!?Placement {
     const lease = try Lease.begin(session);
     defer lease.deinit();
     if (release_id) |id| {
         if (try resumePlacement(alloc, lease, request, id)) |existing| return existing;
     }
-    const agents = lease.agents(alloc, &.{}) catch return error.InternalError;
+    const prior = if (metadata_sql != null) try workloadIds(alloc, session, request) else Placement{ .assignment_ids = &.{} };
+    defer prior.deinit(alloc);
+    const agents = lease.agents(alloc, prior.assignment_ids) catch return error.InternalError;
     defer agents.deinit(alloc);
     var batch = std.Io.Writer.Allocating.init(alloc);
     defer batch.deinit();
+    if (metadata_sql) |metadata| {
+        sql.write(&batch.writer, "DELETE FROM assignments WHERE app_name = ? AND workload_kind = ? AND workload_name = ?;", .{ request.app_name, request.workload_kind, request.workload_name }) catch return error.InternalError;
+        batch.writer.writeAll(cleanup_sql) catch return error.InternalError;
+        batch.writer.writeAll(metadata) catch return error.InternalError;
+    }
     var ids: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (ids.items) |id| alloc.free(id);
@@ -200,6 +221,28 @@ fn placeOnce(alloc: std.mem.Allocator, session: mutation.Session, request: sched
     }
     try lease.commit(batch.written());
     return .{ .assignment_ids = owned };
+}
+
+fn workloadIds(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest) mutation.Error!Placement {
+    session.node.mu.lockUncancelable(std.Options.debug_io);
+    defer session.node.mu.unlock(std.Options.debug_io);
+    try session.checkLocked();
+    const records = registry.listAssignmentsForWorkload(alloc, session.node.stateMachineDb(), request.app_name.?, request.workload_kind.?, request.workload_name.?) catch return error.InternalError;
+    defer {
+        for (records) |record| record.deinit(alloc);
+        alloc.free(records);
+    }
+    const ids = alloc.alloc([]const u8, records.len) catch return error.InternalError;
+    var initialized: usize = 0;
+    errdefer {
+        for (ids[0..initialized]) |id| alloc.free(id);
+        alloc.free(ids);
+    }
+    for (records, ids) |record, *id| {
+        id.* = alloc.dupe(u8, record.id) catch return error.InternalError;
+        initialized += 1;
+    }
+    return .{ .assignment_ids = ids };
 }
 
 fn newId(alloc: std.mem.Allocator) mutation.Error![]const u8 {

@@ -190,7 +190,7 @@ pub fn findTrainingJobInDb(db: *sqlite.Db, alloc: Allocator, app_name: []const u
     const row = (db.oneAlloc(
         TrainingJobRow,
         alloc,
-        "SELECT " ++ training_job_columns ++ " FROM training_jobs WHERE app_name = ? AND name = ? ORDER BY created_at DESC LIMIT 1;",
+        "SELECT " ++ training_job_columns ++ " FROM training_jobs WHERE app_name = ? AND name = ? ORDER BY created_at DESC, rowid DESC LIMIT 1;",
         .{},
         .{ app_name, name },
     ) catch return StoreError.ReadFailed) orelse return null;
@@ -229,7 +229,7 @@ pub fn listTrainingJobsByAppInDb(
 ) StoreError!std.ArrayList(TrainingJobRecord) {
     var records: std.ArrayList(TrainingJobRecord) = .empty;
     var stmt = db.prepare(
-        "SELECT " ++ training_job_columns ++ " FROM training_jobs WHERE app_name = ? ORDER BY updated_at DESC, created_at DESC;",
+        "SELECT " ++ training_job_columns ++ " FROM training_jobs WHERE app_name = ? ORDER BY updated_at DESC, created_at DESC, rowid DESC;",
     ) catch return StoreError.ReadFailed;
     defer stmt.deinit();
     var iter = stmt.iterator(TrainingJobRow, .{app_name}) catch return StoreError.ReadFailed;
@@ -429,10 +429,13 @@ test "summarizeTrainingJobsByAppInDb keeps only the latest row per job name" {
         .checkpoint_interval = null,
         .checkpoint_keep = null,
         .restart_count = 1,
-        .created_at = 200,
-        .updated_at = 200,
+        .created_at = 100,
+        .updated_at = 100,
     });
 
+    const latest = (try findTrainingJobInDb(&db, alloc, "demo-app", "finetune")).?;
+    defer latest.deinit(alloc);
+    try std.testing.expectEqualStrings("job-new", latest.id);
     const summary = try summarizeTrainingJobsByAppInDb(&db, alloc, "demo-app");
     try std.testing.expectEqual(@as(usize, 1), summary.active);
     try std.testing.expectEqual(@as(usize, 0), summary.paused);
