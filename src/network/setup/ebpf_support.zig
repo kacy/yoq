@@ -16,7 +16,7 @@ pub fn loadDnsInterceptorOnBridge() void {
     const if_index = nl.getIfIndex(sock, bridge.default_bridge) catch return;
     if (if_index == 0) return;
 
-    ebpf.loadPolicyEnforcer(if_index) catch |e| {
+    policy.installOnBridge(if_index, std.heap.page_allocator) catch |e| {
         log.info("ebpf policy enforcer not loaded: {}", .{e});
     };
 
@@ -32,8 +32,4 @@ pub fn loadDnsInterceptorOnBridge() void {
     ebpf.loadPortMapper(if_index) catch |e| {
         log.info("ebpf port mapper not loaded (using iptables): {}", .{e});
     };
-
-    if (ebpf.getPolicyEnforcer() != null) {
-        policy.syncPolicies(std.heap.page_allocator);
-    }
 }

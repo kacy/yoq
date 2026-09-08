@@ -96,12 +96,16 @@ pub const PolicyAddressRole = enum { source, target };
 pub fn lookupPolicyAddresses(alloc: Allocator, name: []const u8, role: PolicyAddressRole) StoreError!std.ArrayList([]const u8) {
     var lease = try common.leaseDb();
     defer lease.deinit();
+    return lookupPolicyAddressesInDb(lease.db, alloc, name, role);
+}
+
+pub fn lookupPolicyAddressesInDb(db: *sqlite.Db, alloc: Allocator, name: []const u8, role: PolicyAddressRole) StoreError!std.ArrayList([]const u8) {
     var ips: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (ips.items) |address| alloc.free(address);
         ips.deinit(alloc);
     }
-    var stmt = lease.db.prepare(
+    var stmt = db.prepare(
         "SELECT ip_address FROM service_endpoints WHERE service_name = ?" ++
             " UNION SELECT ip_address FROM service_names WHERE name = ?" ++
             " UNION SELECT vip_address FROM services WHERE service_name = ? AND ? = 1;",

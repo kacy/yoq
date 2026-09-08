@@ -92,6 +92,7 @@ pub const listServiceNames = service_names.list;
 pub const addNetworkPolicy = service_policies.add;
 pub const removeNetworkPolicy = service_policies.remove;
 pub const listNetworkPolicies = service_policies.list;
+pub const NetworkPolicyReadSnapshot = service_policies.ReadSnapshot;
 pub const getServicePolicies = service_policies.listForSource;
 
 pub const saveDeployment = @import("store/deployments.zig").saveDeployment;

@@ -8,12 +8,16 @@ const map_support = @import("map_support.zig");
 const program_support = @import("program_support.zig");
 const resource_support = @import("resource_support.zig");
 
+const rules = @import("../policy_rules.zig");
+
 const policy_prog = @import("../bpf/policy.zig");
 
-pub const PolicyKey = extern struct {
-    src_ip: u32,
-    dst_ip: u32,
-};
+pub const PolicyKey = rules.Key;
+
+comptime {
+    std.debug.assert(rules.max_rules == policy_prog.maps[0].max_entries);
+    std.debug.assert(rules.max_isolated == policy_prog.maps[1].max_entries);
+}
 
 pub const PolicyEnforcer = struct {
     prog_fd: posix.fd_t,
@@ -86,6 +90,12 @@ pub const PolicyEnforcer = struct {
 };
 
 pub fn load(bridge_if_index: u32) common.EbpfError!PolicyEnforcer {
+    return loadWithRules(bridge_if_index, .{ .rules = &.{}, .isolated = &.{} });
+}
+
+/// Populate private maps completely before replacing the live filter.
+pub fn loadWithRules(bridge_if_index: u32, snapshot: rules.Snapshot) common.EbpfError!PolicyEnforcer {
+    if (snapshot.rules.len > rules.max_rules or snapshot.isolated.len > rules.max_isolated) return error.MapFull;
     const policy_fd = try map_support.createMap(
         @enumFromInt(policy_prog.maps[0].map_type),
         policy_prog.maps[0].key_size,
@@ -106,6 +116,15 @@ pub fn load(bridge_if_index: u32) common.EbpfError!PolicyEnforcer {
     errdefer {
         linux_platform.posix.close(isolation_fd);
         resource_support.releaseBpfFd();
+    }
+
+    for (snapshot.rules) |rule| {
+        const action: u8 = @intFromEnum(rule.action);
+        try map_support.mapUpdate(policy_fd, std.mem.asBytes(&rule.key), std.mem.asBytes(&action));
+    }
+    for (snapshot.isolated) |source| {
+        const flag: u8 = 1;
+        try map_support.mapUpdate(isolation_fd, std.mem.asBytes(&source), std.mem.asBytes(&flag));
     }
 
     var map_fds = [_]posix.fd_t{ policy_fd, isolation_fd };

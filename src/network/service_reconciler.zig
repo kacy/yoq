@@ -559,6 +559,8 @@ fn auditLoop() void {
 
 fn runAuditPassLocked() void {
     refreshComponentStateLocked();
+    // Policy-only database edits must reach the process that owns the filters.
+    policy.syncPolicies(std.heap.page_allocator);
     quarantineStaleEndpointsLocked();
     audit_passes_total += 1;
     last_audit_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
