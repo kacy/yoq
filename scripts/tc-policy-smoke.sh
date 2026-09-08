@@ -162,3 +162,16 @@ assert not any(f.get("kind")=="bpf" for f in filters), filters
 '
 echo 'tc ownership collision fixture passed'
 COLLISION
+
+# A different process holding the namespace lock cannot hang startup indefinitely.
+sudo unshare --net -- python3 - "$fixture_dir/fixture" <<'CONTENTION'
+import fcntl, os, subprocess, sys, time
+subprocess.run(["ip","link","add","yoq0","type","bridge"],check=True)
+with open("/proc/thread-self/ns/net", "rb") as lock:
+    fcntl.flock(lock,fcntl.LOCK_EX)
+    start=time.monotonic()
+    result=subprocess.run([sys.argv[1],"chain","default"],stdin=subprocess.DEVNULL,timeout=3)
+    assert result.returncode != 0
+    assert time.monotonic()-start < 3
+print("tc namespace contention fixture passed")
+CONTENTION

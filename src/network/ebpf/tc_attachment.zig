@@ -92,7 +92,13 @@ pub fn attach(if_index: u32, direction: common.Direction, program_fd: std.posix.
             ((direction == .ingress and component == .policy) or
                 (direction == .egress and component == .load_balancer)))
         {
-            deleteFilter(if_index, direction, filter) catch return error.AttachFailed;
+            deleteFilter(if_index, direction, filter) catch |err| {
+                // The kernel retains this stable filter and its maps even if
+                // the caller closes its FDs. A later load can rediscover it.
+                // Rollback here could remove enforcement after partial cleanup.
+                @import("../../lib/log.zig").warn("ebpf: legacy TC cleanup failed; replacement {s} remains installed: {}", .{ component.name(), err });
+                return error.LegacyCleanupFailed;
+            };
         }
     }
     return .{ .if_index = if_index, .direction = direction, .component = component, .program_id = program_id };
@@ -101,13 +107,17 @@ pub fn attach(if_index: u32, direction: common.Direction, program_fd: std.posix.
 fn acquireLock() !std.posix.fd_t {
     const fd = try platform.posix.open("/proc/thread-self/ns/net", .{ .CLOEXEC = true }, 0);
     errdefer platform.posix.close(fd);
-    while (true) {
-        switch (linux.errno(linux.flock(fd, 2))) { // LOCK_EX
+    // Another process must not stall startup or periodic policy refresh forever.
+    const pause: linux.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+    for (0..100) |_| {
+        switch (linux.errno(linux.flock(fd, 2 | 4))) { // LOCK_EX | LOCK_NB
             .SUCCESS => return fd,
-            .INTR => continue,
+            .AGAIN, .INTR => {},
             else => return error.LockFailed,
         }
+        _ = linux.nanosleep(&pause, null);
     }
+    return error.Timeout;
 }
 
 fn programId(fd: std.posix.fd_t) !u32 {
