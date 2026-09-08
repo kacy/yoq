@@ -33,8 +33,10 @@ pub fn handleScale(
     ctx: RouteContext,
 ) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
-    const gpus = json_helpers.extractJsonInt(request.body, "gpus") orelse return common.badRequest("missing gpus");
-    if (gpus <= 0) return common.badRequest("invalid gpus");
+    const numbers = @import("../../../lib/json_numbers.zig");
+    const parsed = numbers.parse(alloc, request.body) catch return common.badRequest("invalid gpus");
+    defer parsed.deinit();
+    const gpus = (numbers.optional(u32, parsed.value, "gpus", 1, std.math.maxInt(u32)) catch return common.badRequest("invalid gpus")) orelse return common.badRequest("missing gpus");
 
     const rec = store.findTrainingJobInDb(node.stateMachineDb(), alloc, app_name, job_name) catch return common.internalError();
     if (rec == null) return common.notFound();

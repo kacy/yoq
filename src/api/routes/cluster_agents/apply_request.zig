@@ -7,7 +7,8 @@ const spec = @import("../../../manifest/spec.zig");
 const common = @import("../common.zig");
 
 const extractJsonString = json_helpers.extractJsonString;
-const extractJsonInt = json_helpers.extractJsonInt;
+const numbers = @import("../../../lib/json_numbers.zig");
+const placement_numbers = @import("../../../cluster/placement_numbers.zig");
 const extractJsonArray = json_helpers.extractJsonArray;
 
 pub const ApplyRequest = struct {
@@ -43,6 +44,10 @@ pub const ParseError = error{
 };
 
 pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool) ParseError!ApplyRequest {
+    const document = numbers.parse(alloc, body) catch return ParseError.InvalidRequest;
+    defer document.deinit();
+    placement_numbers.validateWorkloads(document.value) catch return ParseError.InvalidRequest;
+
     var parsed: ApplyRequest = .{
         .app_name = extractJsonString(body, "app_name") orelse extractJsonString(body, "volume_app"),
         .summary = app_snapshot.summarize(body),
@@ -64,7 +69,16 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
                 continue;
             }
 
-            const rollout = parseRolloutPolicy(block) catch {
+            const numeric = numbers.parse(alloc, block) catch {
+                alloc.free(command);
+                return ParseError.InvalidRequest;
+            };
+            defer numeric.deinit();
+            const resources = placement_numbers.Resources.parse(numeric.value, 256) catch {
+                alloc.free(command);
+                return ParseError.InvalidRequest;
+            };
+            const rollout = parseRolloutPolicy(numeric.value, block) catch {
                 alloc.free(command);
                 return ParseError.InvalidRolloutConfig;
             };
@@ -77,14 +91,15 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
                     .app_name = parsed.app_name,
                     .workload_kind = if (parsed.app_name != null) "service" else null,
                     .workload_name = if (parsed.app_name != null) (extractJsonString(block, "name") orelse "") else null,
-                    .cpu_limit = extractJsonInt(block, "cpu_limit") orelse 1000,
-                    .memory_limit_mb = extractJsonInt(block, "memory_limit_mb") orelse 256,
-                    .gpu_limit = extractJsonInt(block, "gpu_limit") orelse 0,
+                    .cpu_limit = resources.cpu,
+                    .memory_limit_mb = resources.memory_mb,
+                    .gpu_limit = resources.gpus,
                     .gpu_model = extractJsonString(block, "gpu_model"),
-                    .gpu_vram_min_mb = if (extractJsonInt(block, "gpu_vram_min_mb")) |v| @as(u64, @intCast(@max(0, v))) else null,
+                    .gpu_vram_min_mb = resources.vram_mb,
                     .required_labels = extractJsonString(block, "required_labels") orelse "",
-                    .gang_world_size = if (extractJsonInt(block, "gang_world_size")) |v| @intCast(@max(0, v)) else 0,
-                    .gpus_per_rank = if (extractJsonInt(block, "gpus_per_rank")) |v| @intCast(@max(1, v)) else 1,
+                    .gang_world_size = resources.world_size,
+                    .gpus_per_rank = resources.gpus_per_rank,
+                    .gang_master_port = resources.master_port,
                 },
                 .rollout = rollout,
             }) catch {
@@ -103,8 +118,10 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
     return parsed;
 }
 
-fn parseRolloutPolicy(block: []const u8) error{InvalidRolloutConfig}!spec.RolloutPolicy {
-    const rollout_json = json_helpers.extractJsonObject(block, "rollout") orelse return .{};
+fn parseRolloutPolicy(object: std.json.Value, block: []const u8) error{InvalidRolloutConfig}!spec.RolloutPolicy {
+    const rollout = object.object.get("rollout") orelse return .{};
+    if (rollout != .object) return error.InvalidRolloutConfig;
+    const rollout_json = json_helpers.extractJsonObject(block, "rollout") orelse "{}";
     const strategy = if (extractJsonString(rollout_json, "strategy")) |value|
         if (std.mem.eql(u8, value, "rolling"))
             spec.RolloutStrategy.rolling
@@ -117,15 +134,9 @@ fn parseRolloutPolicy(block: []const u8) error{InvalidRolloutConfig}!spec.Rollou
     else
         spec.RolloutStrategy.rolling;
 
-    const parallelism = if (extractJsonInt(rollout_json, "parallelism")) |v| blk: {
-        if (v < 1) return error.InvalidRolloutConfig;
-        break :blk @as(u32, @intCast(v));
-    } else 1;
+    const parallelism = numbers.field(u32, rollout, "parallelism", 1, std.math.maxInt(u32), 1) catch return error.InvalidRolloutConfig;
 
-    const delay_between_batches = if (extractJsonInt(rollout_json, "delay_between_batches")) |v| blk: {
-        if (v < 0) return error.InvalidRolloutConfig;
-        break :blk @as(u32, @intCast(v));
-    } else 0;
+    const delay_between_batches = numbers.field(u32, rollout, "delay_between_batches", 0, std.math.maxInt(u32), 0) catch return error.InvalidRolloutConfig;
 
     const failure_action = if (extractJsonString(rollout_json, "failure_action")) |action|
         if (std.mem.eql(u8, action, "pause"))
@@ -137,10 +148,7 @@ fn parseRolloutPolicy(block: []const u8) error{InvalidRolloutConfig}!spec.Rollou
     else
         spec.RolloutFailureAction.rollback;
 
-    const health_check_timeout = if (extractJsonInt(rollout_json, "health_check_timeout")) |v| blk: {
-        if (v < 0) return error.InvalidRolloutConfig;
-        break :blk @as(u32, @intCast(v));
-    } else 0;
+    const health_check_timeout = numbers.field(u32, rollout, "health_check_timeout", 0, std.math.maxInt(u32), 0) catch return error.InvalidRolloutConfig;
 
     return .{
         .strategy = strategy,

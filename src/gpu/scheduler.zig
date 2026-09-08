@@ -55,6 +55,15 @@ pub const GangPlacement = struct {
     }
 };
 
+fn availableGpu(agent: AgentRecord, used: i64) ?i64 {
+    if (!std.mem.eql(u8, agent.status, "active")) return null;
+    if (agent.role) |role| {
+        if (std.mem.eql(u8, role, "server")) return null;
+    }
+    if (agent.gpu_count < 0 or agent.gpu_count > std.math.maxInt(u32) or used < 0 or used > agent.gpu_count) return null;
+    return agent.gpu_count - used;
+}
+
 /// schedule a gang of ranks across agents.
 /// returns placements for all ranks, or null if the gang can't be fully placed.
 /// gang scheduling is all-or-nothing: either every rank gets placed, or none do.
@@ -63,7 +72,16 @@ pub fn scheduleGang(
     gang: GangSpec,
     agents: []const AgentRecord,
 ) !?[]GangPlacement {
-    if (gang.world_size == 0) return null;
+    if (gang.world_size == 0 or gang.gpus_per_rank == 0) return null;
+
+    // Check capacity before allocating one record per requested rank. A valid
+    // u32 request can still be far larger than the entire cluster.
+    var available_ranks: u64 = 0;
+    for (agents) |agent| {
+        const free = availableGpu(agent, agent.gpu_used) orelse continue;
+        if (free > 0) available_ranks +|= @as(u64, @intCast(free)) / gang.gpus_per_rank;
+    }
+    if (gang.world_size > available_ranks) return null;
 
     var placements = try alloc.alloc(GangPlacement, gang.world_size);
     errdefer alloc.free(placements);
@@ -87,15 +105,7 @@ pub fn scheduleGang(
         var best_same_zone: bool = false;
 
         for (agents, 0..) |a, agent_idx| {
-            if (!std.mem.eql(u8, a.status, "active")) continue;
-
-            // skip server-only agents
-            if (a.role) |role| {
-                if (std.mem.eql(u8, role, "server")) continue;
-            }
-
-            if (a.gpu_count < 0 or a.gpu_count > std.math.maxInt(u32) or gpu_alloc[agent_idx] < 0) continue;
-            const free_gpu = a.gpu_count -| gpu_alloc[agent_idx];
+            const free_gpu = availableGpu(a, gpu_alloc[agent_idx]) orelse continue;
             if (free_gpu < gang.gpus_per_rank) continue;
 
             const same_zone = if (preferred_zone) |pz|
@@ -387,4 +397,15 @@ test "scheduleGang falls back to other zones when needed" {
     defer alloc.free(placements);
 
     try std.testing.expectEqual(@as(usize, 6), placements.len);
+}
+
+test "placement numbers reject impossible gang size before allocation" {
+    // A zero-capacity allocator proves oversized requests never reach allocation.
+    var empty: [0]u8 = .{};
+    var alloc = std.heap.FixedBufferAllocator.init(&empty);
+    const result = try scheduleGang(alloc.allocator(), .{ .world_size = std.math.maxInt(u32) }, &.{});
+    try std.testing.expect(result == null);
+    var server = makeGpuAgent("server", "127.0.0.1", std.math.maxInt(u32), 0);
+    server.role = "server";
+    try std.testing.expect((try scheduleGang(alloc.allocator(), .{ .world_size = std.math.maxInt(u32) }, &.{server})) == null);
 }

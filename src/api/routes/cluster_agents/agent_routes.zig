@@ -3,6 +3,7 @@ const http = @import("../../http.zig");
 const agent_registry = @import("../../../cluster/registry.zig");
 const cluster_config = @import("../../../cluster/config.zig");
 const request_support = @import("../../../cluster/agent/request_support.zig");
+const numbers = @import("../../../lib/json_numbers.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const audit = @import("../../../state/audit.zig");
 const common = @import("../common.zig");
@@ -12,7 +13,6 @@ const credentials = @import("../../../cluster/agent_credentials.zig");
 const Response = common.Response;
 const RouteContext = common.RouteContext;
 const extractJsonString = json_helpers.extractJsonString;
-const extractJsonInt = json_helpers.extractJsonInt;
 
 fn nowRealSeconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
@@ -34,19 +34,13 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
 
     const token = extractJsonString(request.body, "token") orelse return common.badRequest("missing token field");
     const address = extractJsonString(request.body, "address") orelse return common.badRequest("missing address field");
-    const agent_api_port = extractJsonInt(request.body, "agent_api_port");
-    const cpu_cores = extractJsonInt(request.body, "cpu_cores") orelse return common.badRequest("missing cpu_cores field");
-    const memory_mb = extractJsonInt(request.body, "memory_mb") orelse return common.badRequest("missing memory_mb field");
-    if (cpu_cores <= 0 or cpu_cores > 10000) return common.badRequest("invalid cpu_cores");
-    if (memory_mb <= 0 or memory_mb > 10_000_000) return common.badRequest("invalid memory_mb");
-    if (agent_api_port) |port| {
-        if (port <= 0 or port > 65535) return common.badRequest("invalid agent_api_port");
-    }
-    if (cpu_cores > std.math.maxInt(u32)) return common.badRequest("cpu_cores too large");
-    if (memory_mb > std.math.maxInt(u64)) return common.badRequest("memory_mb too large");
-
+    const parsed = numbers.parse(alloc, request.body) catch return common.badRequest("invalid resource snapshot");
+    defer parsed.deinit();
+    const agent_api_port = numbers.optional(u16, parsed.value, "agent_api_port", 1, 65535) catch return common.badRequest("invalid agent_api_port");
+    const cpu_cores = (numbers.optional(u32, parsed.value, "cpu_cores", 1, 10000) catch return common.badRequest("invalid cpu_cores")) orelse return common.badRequest("missing cpu_cores field");
+    const memory_mb = (numbers.optional(u64, parsed.value, "memory_mb", 1, 10_000_000) catch return common.badRequest("invalid memory_mb")) orelse return common.badRequest("missing memory_mb field");
     const wg_public_key = extractJsonString(request.body, "wg_public_key");
-    const wg_listen_port = extractJsonInt(request.body, "wg_listen_port");
+    const wg_listen_port = numbers.optional(u16, parsed.value, "wg_listen_port", 1, 65535) catch return common.badRequest("invalid wg_listen_port");
 
     if (!common.validateClusterInput(address)) return common.badRequest("invalid address");
     if (!agent_registry.validateToken(token, expected_token)) {
@@ -67,10 +61,7 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
     if (wg_public_key) |pub_key| {
         if (!common.validateClusterInput(pub_key)) return common.badRequest("invalid wg_public_key");
 
-        const port: u16 = if (wg_listen_port) |p| blk: {
-            if (p <= 0 or p > 65535) return common.badRequest("invalid wg_listen_port");
-            break :blk @intCast(p);
-        } else 51820;
+        const port = wg_listen_port orelse 51820;
         const endpoint_host = if (request_support.parseHostPort(address)) |hp|
             std.fmt.bufPrint(&endpoint_buf, "{d}.{d}.{d}.{d}:{d}", .{ hp.addr[0], hp.addr[1], hp.addr[2], hp.addr[3], port }) catch null
         else
@@ -90,31 +81,24 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
     }
 
     var sql_buf: [2048]u8 = undefined;
-    const gpu_count_val = extractJsonInt(request.body, "gpu_count");
+    const gpu_count_val = numbers.optional(u32, parsed.value, "gpu_count", 0, std.math.maxInt(u32)) catch return common.badRequest("invalid gpu_count");
     const gpu_model_str = json_helpers.extractJsonString(request.body, "gpu_model");
-    const gpu_vram_val = extractJsonInt(request.body, "gpu_vram_mb");
-
-    if (gpu_count_val) |g| {
-        if (g > std.math.maxInt(u32)) return common.badRequest("gpu_count too large");
-    }
-    if (gpu_vram_val) |v| {
-        if (v > std.math.maxInt(u64)) return common.badRequest("gpu_vram_mb too large");
-    }
+    const gpu_vram_val = numbers.optional(u64, parsed.value, "gpu_vram_mb", 0, std.math.maxInt(i64)) catch return common.badRequest("invalid gpu_vram_mb");
 
     const sql = agent_registry.registerSqlFull(
         &sql_buf,
         &id_buf,
         address,
         .{
-            .cpu_cores = @intCast(cpu_cores),
-            .memory_mb = @intCast(memory_mb),
-            .gpu_count = if (gpu_count_val) |g| @intCast(@max(0, g)) else 0,
+            .cpu_cores = cpu_cores,
+            .memory_mb = memory_mb,
+            .gpu_count = gpu_count_val orelse 0,
             .gpu_model = gpu_model_str,
-            .gpu_vram_mb = if (gpu_vram_val) |v| @intCast(@max(0, v)) else 0,
+            .gpu_vram_mb = gpu_vram_val orelse 0,
         },
         nowRealSeconds(),
         .{
-            .agent_api_port = if (agent_api_port) |port| @intCast(port) else null,
+            .agent_api_port = agent_api_port,
             .role = role_str,
             .region = region_str,
             .labels = labels_str,
@@ -215,13 +199,15 @@ pub fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id:
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     if (request.body.len == 0) return common.badRequest("missing request body");
 
-    const cpu_used = extractJsonInt(request.body, "cpu_used") orelse 0;
-    const memory_used_mb = extractJsonInt(request.body, "memory_used_mb") orelse 0;
-    const containers = extractJsonInt(request.body, "containers") orelse 0;
-    const cpu_cores = extractJsonInt(request.body, "cpu_cores") orelse 0;
-    const memory_mb = extractJsonInt(request.body, "memory_mb") orelse 0;
-    const gpu_count = extractJsonInt(request.body, "gpu_count") orelse 0;
-    const gpu_used = extractJsonInt(request.body, "gpu_used") orelse 0;
+    const parsed = numbers.parse(alloc, request.body) catch return common.badRequest("invalid resource snapshot");
+    defer parsed.deinit();
+    const cpu_used = numbers.field(u32, parsed.value, "cpu_used", 0, std.math.maxInt(u32), 0) catch return common.badRequest("invalid cpu_used");
+    const memory_used_mb = numbers.field(u64, parsed.value, "memory_used_mb", 0, std.math.maxInt(i64), 0) catch return common.badRequest("invalid memory_used_mb");
+    const containers = numbers.field(u32, parsed.value, "containers", 0, std.math.maxInt(u32), 0) catch return common.badRequest("invalid containers");
+    const cpu_cores = numbers.field(u32, parsed.value, "cpu_cores", 0, 10000, 0) catch return common.badRequest("invalid cpu_cores");
+    const memory_mb = numbers.field(u64, parsed.value, "memory_mb", 0, 10_000_000, 0) catch return common.badRequest("invalid memory_mb");
+    const gpu_count = numbers.field(u32, parsed.value, "gpu_count", 0, std.math.maxInt(u32), 0) catch return common.badRequest("invalid gpu_count");
+    const gpu_used = numbers.field(u32, parsed.value, "gpu_used", 0, std.math.maxInt(u32), 0) catch return common.badRequest("invalid gpu_used");
     const gpu_health_str = extractJsonString(request.body, "gpu_health");
 
     const agent_types = @import("../../../cluster/agent_types.zig");
@@ -229,13 +215,13 @@ pub fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id:
     node.recordHeartbeat(
         id,
         .{
-            .cpu_cores = @intCast(@max(0, cpu_cores)),
-            .memory_mb = @intCast(@max(0, memory_mb)),
-            .cpu_used = @intCast(@max(0, cpu_used)),
-            .memory_used_mb = @intCast(@max(0, memory_used_mb)),
-            .containers = @intCast(@max(0, containers)),
-            .gpu_count = @intCast(@max(0, gpu_count)),
-            .gpu_used = @intCast(@max(0, gpu_used)),
+            .cpu_cores = cpu_cores,
+            .memory_mb = memory_mb,
+            .cpu_used = cpu_used,
+            .memory_used_mb = memory_used_mb,
+            .containers = containers,
+            .gpu_count = gpu_count,
+            .gpu_used = gpu_used,
             .gpu_health = if (gpu_health_str) |s| agent_types.AgentResources.GpuHealthBuf.fromSlice(s) else .{},
         },
         nowRealSeconds(),
@@ -463,7 +449,7 @@ test "registration returns credentials only after their row is applied" {
     const id = extractJsonString(response.body, "id") orelse return error.MissingIdentity;
     const secret = extractJsonString(response.body, "credential") orelse return error.MissingCredential;
     try std.testing.expect(try credentials.authenticates(&node.state_machine.db, secret, id));
-    try std.testing.expectEqual(@as(?i64, 2), extractJsonInt(response.body, "node_id"));
+    try std.testing.expectEqual(@as(?i64, 2), json_helpers.extractJsonInt(response.body, "node_id"));
     const gossip = json_helpers.extractJsonObject(response.body, "gossip_server") orelse return error.MissingGossipServer;
     try std.testing.expectEqual(@as(?i64, 1), json_helpers.extractJsonInt(gossip, "id"));
     try std.testing.expectEqual(@as(?i64, 19877), json_helpers.extractJsonInt(gossip, "port"));

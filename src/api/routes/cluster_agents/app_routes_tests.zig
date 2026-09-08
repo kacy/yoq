@@ -1290,3 +1290,94 @@ test "multi-service apply reserves capacity across sequential batches" {
     try std.testing.expectEqual(@as(i64, 1), reserved.count);
     try std.testing.expectEqual(@as(i64, 600), reserved.cpu);
 }
+
+test "placement numbers reject invalid requests without poisoning the next apply" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+
+    const bad_fields = [_][]const u8{
+        "\"rollout\":{\"parallelism\":4294967296}",
+        "\"rollout\":{\"parallelism\":-1}",
+        "\"rollout\":{\"parallelism\":0}",
+        "\"rollout\":{\"parallelism\":1.5}",
+        "\"rollout\":{\"parallelism\":1e2}",
+        "\"rollout\":{\"parallelism\":null}",
+        "\"rollout\":{\"parallelism\":\"2\"}",
+        "\"rollout\":{\"parallelism\":184467440737095516160}",
+        "\"rollout\": {\"parallelism\" : 4294967296}",
+        "\"rollout\":{\"delay_between_batches\":4294967296}",
+        "\"rollout\":{\"health_check_timeout\":4294967296}",
+        "\"cpu_limit\":-1",
+        "\"cpu_limit\":0",
+        "\"cpu_limit\":18446744073709552",
+        "\"memory_limit_mb\":17592186044416",
+        "\"memory_limit_mb\":3",
+        "\"cpu_limit\":true",
+        "\"cpu_limit\":null",
+        "\"cpu_limit\":1.5",
+        "\"gang_world_size\":4294967296",
+        "\"gpus_per_rank\":0",
+        "\"gpu_limit\":-1",
+        "\"gpu_vram_min_mb\":-1",
+        "\"gang_master_port\":65536",
+        "\"health_check\":{\"kind\":\"tcp\",\"port\":65536}",
+        "\"health_check\":{\"kind\":\"tcp\",\"port\":80,\"retries\":4294967296}",
+    };
+    for (bad_fields) |fields| {
+        const body = try std.fmt.allocPrint(alloc, "{{\"app_name\":\"numeric-demo\",\"services\":[{{\"name\":\"web\",\"image\":\"alpine\",{s}}}]}}", .{fields});
+        defer alloc.free(body);
+        const response = harness.appApply(body);
+        defer freeResponse(alloc, response);
+        try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
+    }
+    for ([_][]const u8{
+        "\"training_jobs\":[{\"name\":\"train\",\"image\":\"alpine\",\"gpus\":4294967296}]",
+        "\"workers\":[{\"name\":\"work\",\"image\":\"alpine\",\"gpu\":{\"count\":-1}}]",
+        "\"crons\":[{\"name\":\"cron\",\"every\":-1}]",
+    }) |fields| {
+        const body = try std.fmt.allocPrint(alloc, "{{\"app_name\":\"numeric-demo\",{s}}}", .{fields});
+        defer alloc.free(body);
+        const response = harness.appApply(body);
+        defer freeResponse(alloc, response);
+        try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
+    }
+    const count = (try harness.node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM deployments;", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 0), count.count);
+
+    const healthy = harness.appApply(
+        \\{"app_name":"numeric-demo","services":[{"name":"web","image":"alpine","cpu_limit" : 1000,"rollout":{"parallelism":4294967295}}]}
+    );
+    defer freeResponse(alloc, healthy);
+    try expectResponseOk(healthy);
+    harness.applyCommitted();
+    const assignment = (try harness.node.stateMachineDb().one(struct { cpu_limit: i64, memory_limit_mb: i64 }, "SELECT cpu_limit, memory_limit_mb FROM assignments;", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 1000), assignment.cpu_limit);
+    try std.testing.expectEqual(@as(i64, 256), assignment.memory_limit_mb);
+}
+
+test "placement numbers reject invalid heartbeat then accept valid resource snapshot" {
+    const support = @import("route_test_support.zig");
+    const handleAgentHeartbeat = @import("agent_routes.zig").handleAgentHeartbeat;
+    const alloc = std.testing.allocator;
+    var harness = try support.Harness.init(alloc);
+    defer harness.deinit();
+    for ([_][]const u8{
+        "\"cpu_cores\":4294967296",
+        "\"containers\":4294967296",
+        "\"gpu_count\":4294967296",
+        "\"cpu_used\":-1",
+        "\"memory_used_mb\":18446744073709551615",
+        "\"gpu_used\":1.5",
+        "\"memory_mb\":null",
+    }) |fields| {
+        const body = try std.fmt.allocPrint(alloc, "{{{s}}}", .{fields});
+        defer alloc.free(body);
+        const response = handleAgentHeartbeat(alloc, support.makeRequest(.POST, "/agents/abc123def456/heartbeat", body), "abc123def456", harness.ctx());
+        defer support.freeResponse(alloc, response);
+        try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
+    }
+    const response = handleAgentHeartbeat(alloc, support.makeRequest(.POST, "/agents/abc123def456/heartbeat", "{\"cpu_cores\":8,\"memory_mb\":16384,\"cpu_used\":1000}"), "abc123def456", harness.ctx());
+    defer support.freeResponse(alloc, response);
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+}

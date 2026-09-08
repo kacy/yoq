@@ -15,7 +15,8 @@ const assignment_spec = @import("../assignment_spec.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const extractJsonString = json_helpers.extractJsonString;
-const extractJsonInt = json_helpers.extractJsonInt;
+const numbers = @import("../../lib/json_numbers.zig");
+const placement_numbers = @import("../placement_numbers.zig");
 
 fn nowRealSeconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
@@ -70,16 +71,15 @@ pub fn reconcile(self: anytype) void {
         const parsed_command = std.json.parseFromSlice(CommandField, self.alloc, obj, .{ .ignore_unknown_fields = true }) catch continue;
         defer parsed_command.deinit();
         const command = parsed_command.value.command;
-        const cpu_limit = extractJsonInt(obj, "cpu_limit") orelse 1000;
-        const memory_limit_mb = extractJsonInt(obj, "memory_limit_mb") orelse 256;
+        const numeric = numbers.parse(self.alloc, obj) catch continue;
+        defer numeric.deinit();
+        const cpu_limit = numbers.field(i64, numeric.value, "cpu_limit", 1, placement_numbers.max_cpu, 1000) catch continue;
+        const memory_limit_mb = numbers.field(i64, numeric.value, "memory_limit_mb", 4, placement_numbers.max_memory_mb, 256) catch continue;
         const app_name = extractJsonString(obj, "app_name");
         const workload_kind = extractJsonString(obj, "workload_kind");
         const workload_name = extractJsonString(obj, "workload_name");
         const health_check_json = json_helpers.extractJsonObject(obj, "health_check");
-        const gang_rank = extractJsonInt(obj, "gang_rank");
-        const gang_world_size = extractJsonInt(obj, "gang_world_size");
-        const gang_master_addr = extractJsonString(obj, "gang_master_addr");
-        const gang_master_port = extractJsonInt(obj, "gang_master_port");
+        const gang_info = parseGang(numeric.value, extractJsonString(obj, "gang_master_addr")) catch continue;
 
         if (std.mem.eql(u8, status, "stopped") or std.mem.eql(u8, status, "failed")) {
             agent_store.removeAssignment(assignment_id) catch {};
@@ -97,12 +97,6 @@ pub fn reconcile(self: anytype) void {
         }) catch {};
 
         if (std.mem.eql(u8, status, "pending")) {
-            const gang_info: ?GangInfo = if (gang_rank != null and gang_world_size != null and gang_master_addr != null) .{
-                .rank = @intCast(@max(0, gang_rank.?)),
-                .world_size = @intCast(@max(0, gang_world_size.?)),
-                .master_addr = gang_master_addr.?,
-                .master_port = if (gang_master_port) |port| @intCast(@max(0, port)) else 29500,
-            } else null;
             startPendingAssignment(self, assignment_id, image, command, gang_info, .{
                 .cpu_limit = cpu_limit,
                 .memory_limit_mb = memory_limit_mb,
@@ -113,6 +107,23 @@ pub fn reconcile(self: anytype) void {
             });
         }
     }
+}
+
+fn parseGang(object: std.json.Value, address: ?[]const u8) !?GangInfo {
+    // The server emits null gang fields for ordinary assignments. A partially
+    // populated gang is invalid, rather than silently becoming an ordinary task.
+    var has_gang = address != null;
+    for ([_][]const u8{ "gang_rank", "gang_world_size", "gang_master_port" }) |key| {
+        if (object.object.get(key)) |value| {
+            if (value != .null) has_gang = true;
+        }
+    }
+    if (!has_gang) return null;
+    const rank = (try numbers.optional(u32, object, "gang_rank", 0, std.math.maxInt(u32))) orelse return error.InvalidRequest;
+    const world_size = (try numbers.optional(u32, object, "gang_world_size", 1, std.math.maxInt(u32))) orelse return error.InvalidRequest;
+    const port = try numbers.field(u16, object, "gang_master_port", 1, std.math.maxInt(u16), 29500);
+    if (rank >= world_size) return error.InvalidRequest;
+    return .{ .rank = rank, .world_size = world_size, .master_addr = address orelse return error.InvalidRequest, .master_port = port };
 }
 
 fn cancelRemovedAssignments(self: anytype, body: []const u8) !void {
@@ -597,7 +608,7 @@ fn waitForServiceReadiness(stopping: anytype, alloc: std.mem.Allocator, containe
     manifest_health.registerService(service_name, id_buf, container_ip, health_check) catch return .invalid;
     manifest_health.startChecker();
 
-    const deadline_ns = nowAwakeNanoseconds() + (@as(i128, estimateHealthStartupWindowSeconds(health_check)) * std.time.ns_per_s);
+    const deadline_ns = nowAwakeNanoseconds() + (@as(i128, @intCast(estimateHealthStartupWindowSeconds(health_check))) * std.time.ns_per_s);
     defer {
         const final_status = manifest_health.getStatus(service_name) orelse .starting;
         if (final_status != .healthy) manifest_health.unregisterService(service_name);
@@ -613,30 +624,34 @@ fn waitForServiceReadiness(stopping: anytype, alloc: std.mem.Allocator, containe
     return .timeout;
 }
 
-fn estimateHealthStartupWindowSeconds(health_check: manifest_spec.HealthCheck) u32 {
-    const attempts = @max(@as(u32, 1), health_check.retries);
-    return health_check.start_period + (attempts * (health_check.interval + health_check.timeout)) + 2;
+fn estimateHealthStartupWindowSeconds(health_check: manifest_spec.HealthCheck) u128 {
+    const attempts: u128 = @max(@as(u32, 1), health_check.retries);
+    return health_check.start_period + (attempts * (@as(u128, health_check.interval) + health_check.timeout)) + 2;
 }
 
 fn parseHealthCheckJson(alloc: std.mem.Allocator, json: []const u8) ?manifest_spec.HealthCheck {
     const kind = extractJsonString(json, "kind") orelse return null;
-    const interval = intFieldAsU32(json, "interval", 10);
-    const timeout = intFieldAsU32(json, "timeout", 5);
-    const retries = intFieldAsU32(json, "retries", 3);
-    const start_period = intFieldAsU32(json, "start_period", 0);
+    const numeric = numbers.parse(alloc, json) catch return null;
+    defer numeric.deinit();
+    placement_numbers.validateHealth(numeric.value) catch return null;
+    const interval = numbers.field(u32, numeric.value, "interval", 0, std.math.maxInt(u32), 10) catch return null;
+    const timeout = numbers.field(u32, numeric.value, "timeout", 0, std.math.maxInt(u32), 5) catch return null;
+    const retries = numbers.field(u32, numeric.value, "retries", 0, std.math.maxInt(u32), 3) catch return null;
+    const start_period = numbers.field(u32, numeric.value, "start_period", 0, std.math.maxInt(u32), 0) catch return null;
+    const port = numbers.field(u16, numeric.value, "port", 1, std.math.maxInt(u16), 0) catch return null;
 
     const check_type: manifest_spec.CheckType = if (std.mem.eql(u8, kind, "http")) .{
         .http = .{
             .path = alloc.dupe(u8, extractJsonString(json, "path") orelse return null) catch return null,
-            .port = intFieldAsU16(json, "port", 0),
+            .port = port,
         },
     } else if (std.mem.eql(u8, kind, "tcp")) .{
         .tcp = .{
-            .port = intFieldAsU16(json, "port", 0),
+            .port = port,
         },
     } else if (std.mem.eql(u8, kind, "grpc")) .{
         .grpc = .{
-            .port = intFieldAsU16(json, "port", 0),
+            .port = port,
             .service = if (extractJsonString(json, "service")) |service|
                 alloc.dupe(u8, service) catch return null
             else
@@ -691,14 +706,6 @@ fn parseJsonStringArray(alloc: std.mem.Allocator, json: []const u8, key: []const
     }
 
     return items.toOwnedSlice(alloc) catch null;
-}
-
-fn intFieldAsU32(json: []const u8, key: []const u8, default_value: u32) u32 {
-    return if (extractJsonInt(json, key)) |value| @intCast(@max(@as(i64, 0), value)) else default_value;
-}
-
-fn intFieldAsU16(json: []const u8, key: []const u8, default_value: u16) u16 {
-    return if (extractJsonInt(json, key)) |value| @intCast(@max(@as(i64, 0), value)) else default_value;
 }
 
 fn buildAssignmentHostname(buf: []u8, meta: AssignmentMeta, gang_info: ?GangInfo) []const u8 {
@@ -927,4 +934,27 @@ test "assignment cancellation retires completed owner when the same id becomes p
     try fixture.local_containers.put(try alloc.dupe(u8, "assignment"), owner);
     try cancelRemovedAssignments(&fixture, "[{\"id\":\"assignment\",\"status\":\"pending\"}]");
     try std.testing.expectEqual(@as(u32, 0), fixture.local_containers.count());
+}
+
+test "placement numbers reject malformed gang and health metadata" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{
+        "{\"gang_rank\":4294967296,\"gang_world_size\":2}",
+        "{\"gang_rank\":2,\"gang_world_size\":2}",
+        "{\"gang_rank\":0,\"gang_world_size\":-1}",
+        "{\"gang_rank\":0,\"gang_world_size\":2,\"gang_master_port\":65536}",
+        "{\"gang_rank\":0,\"gang_world_size\":2.5}",
+    }) |json| {
+        const parsed = try numbers.parse(alloc, json);
+        defer parsed.deinit();
+        try std.testing.expectError(error.InvalidRequest, parseGang(parsed.value, "10.0.0.1"));
+    }
+    const ordinary = try numbers.parse(alloc, "{\"gang_rank\":null,\"gang_world_size\":null,\"gang_master_port\":null}");
+    defer ordinary.deinit();
+    try std.testing.expectEqual(@as(?GangInfo, null), try parseGang(ordinary.value, null));
+    try std.testing.expect(parseHealthCheckJson(alloc, "{\"kind\":\"tcp\",\"port\":65536}") == null);
+    try std.testing.expect(parseHealthCheckJson(alloc, "{\"kind\":\"tcp\",\"port\":80,\"retries\":null}") == null);
+    const health = parseHealthCheckJson(alloc, "{\"kind\":\"tcp\",\"port\":65535,\"interval\":4294967295,\"timeout\":4294967295,\"retries\":4294967295,\"start_period\":4294967295}").?;
+    defer health.deinit(alloc);
+    try std.testing.expect(estimateHealthStartupWindowSeconds(health) > std.math.maxInt(u64));
 }
