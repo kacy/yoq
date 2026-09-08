@@ -14,6 +14,8 @@ pub fn isAllowedStatement(sql: []const u8) bool {
 
 fn isAllowedSingleStatement(sql: []const u8) bool {
     const allowed_prefixes = [_][]const u8{
+        "INSERT OR REPLACE INTO assignment_claims ",
+        "DELETE FROM assignment_claims ",
         "INSERT INTO deployments ",
         "UPDATE deployments SET ",
         "INSERT INTO cron_schedules ",

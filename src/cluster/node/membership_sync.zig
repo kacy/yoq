@@ -1,6 +1,7 @@
 const std = @import("std");
 const agent_registry = @import("../registry.zig");
-const scheduler = @import("../scheduler.zig");
+const placement = @import("../placement_transaction.zig");
+const mutation_session = @import("../mutation_session.zig");
 const gossip_mod = @import("../gossip.zig");
 const gossip_sender_validation = @import("../gossip_sender_validation.zig");
 const ip_mod = @import("../../network/ip.zig");
@@ -53,32 +54,12 @@ pub fn reconcileOrphanedAssignments(
     orphans: []const agent_registry.Assignment,
     agents: []const agent_registry.AgentRecord,
 ) void {
+    _ = agents;
     if (orphans.len == 0) return;
-
-    var requests = self.alloc.alloc(scheduler.PlacementRequest, orphans.len) catch return;
-    defer self.alloc.free(requests);
-
-    for (orphans, 0..) |orphan, i| {
-        requests[i] = .{
-            .image = orphan.image,
-            .command = orphan.command,
-            .cpu_limit = orphan.cpu_limit,
-            .memory_limit_mb = orphan.memory_limit_mb,
-        };
-    }
-
-    const placements = scheduler.schedule(self.alloc, requests, agents) catch return;
-    defer self.alloc.free(placements);
-
-    for (placements, 0..) |placement, i| {
-        if (placement) |picked| {
-            var sql_buf: [256]u8 = undefined;
-            const sql = agent_registry.reassignSql(&sql_buf, orphans[i].id, picked.agent_id) catch continue;
-            _ = proposeUnderLock(self, sql) catch |e| {
-                logger.warn("failed to propose reassignment for {s}: {}", .{ orphans[i].id, e });
-            };
-        }
-    }
+    const session = mutation_session.Session.begin(self) catch return;
+    placement.reconcileOrphans(self.alloc, session) catch |err| {
+        logger.warn("failed to reconcile assignment capacity: {}", .{err});
+    };
 }
 
 pub fn cleanupDeadAgents(self: anytype, agents: []const agent_registry.AgentRecord) void {

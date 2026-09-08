@@ -44,6 +44,7 @@ pub const freeGossipSeeds = identity.freeGossipSeeds;
 pub const validateToken = identity.validateToken;
 pub const generateAgentId = identity.generateAgentId;
 
+pub const hasAgents = queries.hasAgents;
 pub const listWireguardPeers = queries.listWireguardPeers;
 pub const listWireguardServerPeers = queries.listWireguardServerPeers;
 pub const listAgents = queries.listAgents;

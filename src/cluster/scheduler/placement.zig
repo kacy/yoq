@@ -16,6 +16,7 @@ pub fn schedule(
 ) ![]?PlacementResult {
     var results = try alloc.alloc(?PlacementResult, requests.len);
     @memset(results, null);
+    errdefer alloc.free(results);
 
     var used_cpu = try alloc.alloc(i64, agents.len);
     defer alloc.free(used_cpu);
@@ -31,6 +32,7 @@ pub fn schedule(
     }
 
     for (requests, 0..) |req, req_idx| {
+        if (req.cpu_limit < 0 or req.memory_limit_mb < 0 or req.gpu_limit < 0) continue;
         var best_idx: ?usize = null;
         var best_score: i64 = -1;
 
@@ -40,13 +42,14 @@ pub fn schedule(
                 if (std.mem.eql(u8, role, "server")) continue;
             }
 
-            const free_cpu = agent.cpu_cores * 1000 - used_cpu[agent_idx];
-            const free_mem = agent.memory_mb - used_mem[agent_idx];
+            if (!validCapacity(agent) or used_cpu[agent_idx] < 0 or used_mem[agent_idx] < 0 or used_gpu[agent_idx] < 0) continue;
+            const free_cpu = agent.cpu_cores * 1000 -| used_cpu[agent_idx];
+            const free_mem = agent.memory_mb -| used_mem[agent_idx];
             if (free_cpu < req.cpu_limit) continue;
             if (free_mem < req.memory_limit_mb) continue;
 
             if (req.gpu_limit > 0) {
-                const free_gpu = agent.gpu_count - used_gpu[agent_idx];
+                const free_gpu = agent.gpu_count -| used_gpu[agent_idx];
                 if (free_gpu < req.gpu_limit) continue;
                 if (req.gpu_model != null or req.gpu_vram_min_mb != null) {
                     if (!gpu_scheduler.matchesGpuRequirements(agent, req.gpu_model, req.gpu_vram_min_mb)) continue;
@@ -60,8 +63,8 @@ pub fn schedule(
                 if (!constraints.matchesVolumeConstraints(agent, req.volume_constraints)) continue;
             }
 
-            const gpu_score: i64 = if (req.gpu_limit > 0) (agent.gpu_count - used_gpu[agent_idx]) * 1000 else 0;
-            const score = free_cpu + free_mem + gpu_score;
+            const gpu_score: i64 = if (req.gpu_limit > 0) (agent.gpu_count -| used_gpu[agent_idx]) *| 1000 else 0;
+            const score = free_cpu +| free_mem +| gpu_score;
             if (score > best_score) {
                 best_score = score;
                 best_idx = agent_idx;
@@ -80,4 +83,9 @@ pub fn schedule(
     }
 
     return results;
+}
+
+pub fn validCapacity(agent: AgentRecord) bool {
+    return agent.cpu_cores >= 0 and agent.cpu_cores <= @divTrunc(std.math.maxInt(i64), 1000) and
+        agent.memory_mb >= 0 and agent.gpu_count >= 0 and agent.gpu_count <= std.math.maxInt(u32);
 }

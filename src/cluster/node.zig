@@ -376,6 +376,9 @@ pub const Node = struct {
             return err;
         };
         const term = self.raft.persistent_state.current_term;
+        // Background reconcilers can call this from the tick thread itself.
+        // Dispatch replication before waiting instead of relying on a later tick.
+        action_loop.processActions(self);
         self.mu.unlock(std.Options.debug_io);
         return self.waitForApplied(index, term, timeout_ms);
     }
@@ -482,19 +485,6 @@ pub const Node = struct {
     /// staleness from the unlocked read is safe.
     fn checkAgentHealth(self: *Node, agents: []const agent_registry.AgentRecord) void {
         membership_sync.checkAgentHealth(self, agents);
-    }
-
-    /// reschedule orphaned assignments onto active agents.
-    /// orphans are assignments with agent_id = '' that were detached
-    /// when their agent went offline. called with self.mu held.
-    ///
-    /// DB queries happen before this call (outside the lock).
-    fn reconcileOrphanedAssignments(
-        self: *Node,
-        orphans: []const agent_registry.Assignment,
-        agents: []const agent_registry.AgentRecord,
-    ) void {
-        membership_sync.reconcileOrphanedAssignments(self, orphans, agents);
     }
 
     /// remove agents that have been offline for more than 1 hour.

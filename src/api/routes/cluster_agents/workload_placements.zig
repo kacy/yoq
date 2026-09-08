@@ -21,24 +21,16 @@ pub fn run(
             .rollout = .{},
         };
     }
-    const agents = agent_registry.listAgents(alloc, node.stateMachineDb()) catch return deploy_routes.ClusterApplyError.InternalError;
-    defer {
-        for (agents) |a| a.deinit(alloc);
-        alloc.free(agents);
-    }
-    if (agents.len == 0) return error.InternalError;
+    if (!(agent_registry.hasAgents(node.stateMachineDb()) catch return error.InternalError)) return error.InternalError;
 
     var backend = deploy_routes.ClusterApplyBackend{
         .alloc = alloc,
         .session = try mutation_session.Session.begin(node),
         .requests = owned_requests,
-        .agents = agents,
     };
     return backend.apply();
 }
 
 pub fn freeOutcomePayloads(alloc: std.mem.Allocator, outcome: apply_release.ApplyOutcome) void {
-    if (outcome.failure_details_json) |json| alloc.free(json);
-    if (outcome.rollout_targets_json) |json| alloc.free(json);
-    if (outcome.rollout_checkpoint_json) |json| alloc.free(json);
+    outcome.deinit(alloc);
 }
