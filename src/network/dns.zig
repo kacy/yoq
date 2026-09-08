@@ -1,7 +1,7 @@
 // dns — userspace DNS resolver for container service discovery
 //
 // provides name resolution for containers on the yoq bridge network.
-// runs a UDP listener on the bridge gateway (10.42.0.1:53) that answers
+// runs a UDP listener confined to the container bridge (port 53) that answers
 // A record queries for registered service names. unknown names are
 // forwarded to an upstream DNS server read from /etc/resolv.conf
 // (falls back to 8.8.8.8 if unavailable).

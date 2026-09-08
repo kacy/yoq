@@ -4,6 +4,7 @@ const posix = std.posix;
 const log = @import("../../lib/log.zig");
 const packet_support = @import("packet_support.zig");
 const registry_support = @import("registry_support.zig");
+const bridge = @import("../bridge.zig");
 
 const listen_port: u16 = 53;
 const upstream_port: u16 = 53;
@@ -43,17 +44,25 @@ pub fn startResolver() void {
         return;
     };
 
+    // Cluster workers have node-specific gateway addresses. Listen on every
+    // address of the container bridge, while rejecting other ingress devices.
+    // Failure must close the socket, never expose an unrestricted DNS listener.
+    linux_platform.posix.setsockopt(sock, posix.SOL.SOCKET, posix.SO.BINDTODEVICE, bridge.default_bridge ++ "\x00") catch |e| {
+        log.warn("dns: failed to bind socket to container bridge: {}", .{e});
+        linux_platform.posix.close(sock);
+        return;
+    };
     const addr = posix.sockaddr.in{
         .port = std.mem.nativeToBig(u16, listen_port),
-        .addr = std.mem.nativeToBig(u32, (@as(u32, 10) << 24) | (@as(u32, 42) << 16) | (@as(u32, 0) << 8) | 1),
+        .addr = 0,
     };
 
     linux_platform.posix.bind(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch |e| {
         if (e == error.AddressInUse) {
             external_resolver_available.store(true, .release);
-            log.info("dns resolver already available on 10.42.0.1:53", .{});
+            log.info("dns resolver already available on {s}:53", .{bridge.default_bridge});
         } else {
-            log.warn("dns: failed to bind to 10.42.0.1:53: {}", .{e});
+            log.warn("dns: failed to bind to {s}:53: {}", .{ bridge.default_bridge, e });
         }
         linux_platform.posix.close(sock);
         return;
@@ -71,7 +80,7 @@ pub fn startResolver() void {
         return;
     };
 
-    log.info("dns resolver started on 10.42.0.1:53", .{});
+    log.info("dns resolver started on {s}:53", .{bridge.default_bridge});
 }
 
 pub fn isRunning() bool {
@@ -96,7 +105,7 @@ pub fn stopResolver() void {
     // shut down the socket to unblock any recvfrom() in the resolver thread
     // before closing it, so the thread sees ENOTCONN instead of EBADF
     if (resolver_socket) |sock| {
-        posix.shutdown(sock, .both) catch {};
+        _ = std.os.linux.shutdown(sock, std.os.linux.SHUT.RDWR);
     }
 
     const thread = resolver_thread;
