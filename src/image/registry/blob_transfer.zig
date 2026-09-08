@@ -104,12 +104,7 @@ fn fetchBlobFromUrl(
         return error.BlobNotFound;
     };
 
-    const blob_conn = http_helpers.connectWithTimeout(client, uri) catch {
-        log.warn("blob fetch: connect failed for {s}", .{url_summary});
-        return error.NetworkError;
-    };
-    var req = client.request(.GET, uri, .{
-        .connection = blob_conn,
+    var req = http_helpers.requestWithTimeout(client, .GET, uri, .{
         .redirect_behavior = .unhandled,
         .keep_alive = false,
         .headers = .{
@@ -206,12 +201,7 @@ fn downloadBlobUrlToStore(
         return error.BlobNotFound;
     };
 
-    const blob_conn = http_helpers.connectWithTimeout(client, uri) catch {
-        log.warn("layer fetch: connect failed for {s}", .{url_summary});
-        return error.NetworkError;
-    };
-    var req = client.request(.GET, uri, .{
-        .connection = blob_conn,
+    var req = http_helpers.requestWithTimeout(client, .GET, uri, .{
         .redirect_behavior = .unhandled,
         .keep_alive = false,
         .headers = .{

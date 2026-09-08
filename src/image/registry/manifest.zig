@@ -150,9 +150,7 @@ fn fetchSingle(alloc: std.mem.Allocator, client: *std.http.Client, host: []const
     const uri = std.Uri.parse(url) catch return error.ManifestNotFound;
     var headers: [1]std.http.Header = .{accept_header};
 
-    const manifest_conn = http_helpers.connectWithTimeout(client, uri) catch return error.NetworkError;
-    var req = client.request(.GET, uri, .{
-        .connection = manifest_conn,
+    var req = http_helpers.requestWithTimeout(client, .GET, uri, .{
         .redirect_behavior = @enumFromInt(3),
         .keep_alive = false,
         .headers = .{
