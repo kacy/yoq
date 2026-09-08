@@ -75,9 +75,9 @@ pub fn requireForContainer(service_name: []const u8, address: [4]u8, alloc: std.
 /// Initial startup also populates maps before replacing another process's filter.
 pub fn installOnBridge(if_index: u32, alloc: std.mem.Allocator) !void {
     if (comptime builtin.os.tag != .linux) return error.NotSupported;
-    const snapshot = try buildPolicySnapshot(alloc, null);
-    defer snapshot.deinit(alloc);
-    try ebpf.installPolicyRules(if_index, snapshot.snapshot);
+    const prepared = try buildPolicySnapshot(alloc, null);
+    defer prepared.deinit(alloc);
+    try ebpf.installPolicyRules(if_index, prepared.snapshot);
 }
 
 /// Prepare a complete policy generation and replace the active filters.
@@ -98,12 +98,12 @@ const GlobalPolicySink = struct {
 };
 
 fn syncPoliciesWithEnforcer(alloc: std.mem.Allocator, enforcer: anytype) void {
-    const snapshot = buildPolicySnapshot(alloc, null) catch |err| {
+    const prepared = buildPolicySnapshot(alloc, null) catch |err| {
         log.warn("policy: retaining active rules because desired policy could not be prepared: {}", .{err});
         return;
     };
-    defer snapshot.deinit(alloc);
-    enforcer.replace(snapshot.snapshot) catch |err| {
+    defer prepared.deinit(alloc);
+    enforcer.replace(prepared.snapshot) catch |err| {
         log.warn("policy: policy replacement failed: {}", .{err});
     };
 }
