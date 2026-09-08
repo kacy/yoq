@@ -195,6 +195,7 @@ pub fn setStartupOutcome(id: []const u8, outcome: StartupOutcome) StoreError!voi
     var lease = try common.leaseDb();
     defer lease.deinit();
     lease.db.exec("UPDATE containers SET startup_outcome = ? WHERE id = ?;", .{}, .{ @intFromEnum(outcome), id }) catch return StoreError.WriteFailed;
+    if (lease.db.rowsAffected() != 1) return StoreError.NotFound;
 }
 
 pub fn recordStartupFailure(id: []const u8) StoreError!void {

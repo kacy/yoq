@@ -276,4 +276,8 @@ test "detached startup outcome survives immediate process exit and rejects real 
     try std.testing.expectEqual(@as(?u8, null), failed.exit_code);
     try std.testing.expectEqual(store.StartupOutcome.failed, failed.startup_outcome);
     try std.testing.expectError(ContainerError.ProcessNotFound, waitForContainerStart(std.testing.allocator, id));
+
+    try store.remove(id);
+    try std.testing.expectError(error.NotFound, store.setStartupOutcome(id, .succeeded));
+    try std.testing.expectError(error.NotFound, store.setStartupOutcome(id, .pending));
 }
