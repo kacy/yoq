@@ -140,40 +140,40 @@ int lb_ingress(struct __sk_buff *skb)
     // -- parse ethernet header (14 bytes) --
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     if (eth->h_proto != htons(ETH_P_IP))
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // -- parse IP header (20 bytes, fixed) --
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // SECURITY: Validate IP total length
     __u16 ip_tot_len = ntohs(ip->tot_len);
     if (ip_tot_len < 40 || ip_tot_len > 9000) // min: IP+TCP/UDP headers, max: jumbo frame
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Validate TTL is reasonable
-    if (ip->ttl < 1 || ip->ttl > 128)
-        return TC_ACT_OK;
+    if (ip->ttl < 1)
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Reject obviously spoofed source IPs
-    __u32 src_ip = ip->saddr;
+    __u32 src_ip = ntohl(ip->saddr);
     if (src_ip == 0 || src_ip == 0xFFFFFFFF ||
         (src_ip & 0xF0000000) == 0xE0000000 ||
         (src_ip & 0xFF000000) == 0x7F000000)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // require IHL=5 (no options) for fixed-offset transport header access
     __u8 ihl = ip->ihl_version & 0x0F;
     if (ihl != 5)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     __u8 proto = ip->protocol;
     if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // -- extract ports at fixed offset (eth 14 + ip 20 = 34) --
     __u16 src_port = 0, dst_port = 0;
@@ -181,16 +181,16 @@ int lb_ingress(struct __sk_buff *skb)
     if (proto == IPPROTO_TCP) {
         struct tcphdr *tcp = (void *)((char *)ip + 20);
         if ((void *)(tcp + 1) > data_end)
-            return TC_ACT_OK;
+            return TC_ACT_UNSPEC;
         src_port = tcp->source;
         dst_port = tcp->dest;
     } else {
         struct udphdr *udp = (void *)((char *)ip + 20);
         if ((void *)(udp + 1) > data_end)
-            return TC_ACT_OK;
+            return TC_ACT_UNSPEC;
         // skip DNS queries (port 53) — handled by dns_intercept
         if (udp->dest == htons(53))
-            return TC_ACT_OK;
+            return TC_ACT_UNSPEC;
         src_port = udp->source;
         dst_port = udp->dest;
     }
@@ -198,7 +198,7 @@ int lb_ingress(struct __sk_buff *skb)
     // -- check if dst IP is a service VIP --
     struct service_backends *svc = bpf_map_lookup_elem(&backends_map, &ip->daddr);
     if (!svc)
-        return TC_ACT_OK; // not a service IP
+        return TC_ACT_UNSPEC; // not a service IP
 
     if (svc->count == 0)
         return TC_ACT_SHOT;
@@ -232,7 +232,7 @@ int lb_ingress(struct __sk_buff *skb)
 
     // -- DNAT: rewrite dst IP to backend --
     if (backend_ip == ip->daddr)
-        return TC_ACT_OK; // already pointing at the right backend
+        return TC_ACT_UNSPEC; // already pointing at the right backend
 
     // save values needed after helper calls invalidate packet pointers
     __u32 old_daddr = ip->daddr;
@@ -265,7 +265,7 @@ int lb_ingress(struct __sk_buff *skb)
     __u32 vip = old_daddr;
     bpf_map_update_elem(&rev_conntrack_map, &rev_key, &vip, 0);
 
-    return TC_ACT_OK;
+    return TC_ACT_UNSPEC;
 }
 
 SEC("tc_egress")
@@ -277,40 +277,40 @@ int lb_egress(struct __sk_buff *skb)
     // -- parse ethernet --
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     if (eth->h_proto != htons(ETH_P_IP))
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // -- parse IP --
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // SECURITY: Validate IP total length
     __u16 ip_tot_len = ntohs(ip->tot_len);
     if (ip_tot_len < 40 || ip_tot_len > 9000) // Support jumbo frames
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Validate TTL is reasonable
-    if (ip->ttl < 1 || ip->ttl > 128)
-        return TC_ACT_OK;
+    if (ip->ttl < 1)
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Reject obviously spoofed source IPs
-    __u32 src_ip = ip->saddr;
+    __u32 src_ip = ntohl(ip->saddr);
     if (src_ip == 0 || src_ip == 0xFFFFFFFF ||
         (src_ip & 0xF0000000) == 0xE0000000 ||
         (src_ip & 0xFF000000) == 0x7F000000)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // require IHL=5 for fixed offsets
     __u8 ihl = ip->ihl_version & 0x0F;
     if (ihl != 5)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     __u8 proto = ip->protocol;
     if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // -- extract ports at fixed offset --
     __u16 src_port = 0, dst_port = 0;
@@ -318,13 +318,13 @@ int lb_egress(struct __sk_buff *skb)
     if (proto == IPPROTO_TCP) {
         struct tcphdr *tcp = (void *)((char *)ip + 20);
         if ((void *)(tcp + 1) > data_end)
-            return TC_ACT_OK;
+            return TC_ACT_UNSPEC;
         src_port = tcp->source;
         dst_port = tcp->dest;
     } else {
         struct udphdr *udp = (void *)((char *)ip + 20);
         if ((void *)(udp + 1) > data_end)
-            return TC_ACT_OK;
+            return TC_ACT_UNSPEC;
         src_port = udp->source;
         dst_port = udp->dest;
     }
@@ -341,12 +341,12 @@ int lb_egress(struct __sk_buff *skb)
 
     __u32 *vip = bpf_map_lookup_elem(&rev_conntrack_map, &rev_key);
     if (!vip)
-        return TC_ACT_OK; // not a tracked connection
+        return TC_ACT_UNSPEC; // not a tracked connection
 
     // SNAT: rewrite source IP from backend back to VIP
     __u32 vip_val = *vip;
     if (vip_val == ip->saddr)
-        return TC_ACT_OK; // already correct
+        return TC_ACT_UNSPEC; // already correct
 
     // save old source and do direct packet write (pointers still valid)
     __u32 old_saddr = ip->saddr;
@@ -364,7 +364,7 @@ int lb_egress(struct __sk_buff *skb)
         bpf_skb_store_bytes(skb, UDP_CSUM_OFF, &zero, 2, 0);
     }
 
-    return TC_ACT_OK;
+    return TC_ACT_UNSPEC;
 }
 
 char _license[] SEC("license") = "GPL";

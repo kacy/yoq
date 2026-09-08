@@ -12,6 +12,16 @@ pub fn attachTC(
     prog_fd: posix.fd_t,
     priority: u32,
 ) common.EbpfError!void {
+    return attachTCWithOptions(if_index, direction, prog_fd, priority, .{});
+}
+
+pub const FilterOptions = struct {
+    handle: u32 = 0,
+    name: []const u8 = "yoq",
+    replace: bool = false,
+};
+
+pub fn attachTCWithOptions(if_index: u32, direction: common.Direction, prog_fd: posix.fd_t, priority: u32, options: FilterOptions) common.EbpfError!void {
     const fd = nl.openSocket() catch return common.EbpfError.AttachFailed;
     defer linux_platform.posix.close(fd);
 
@@ -20,7 +30,7 @@ pub fn attachTC(
         return common.EbpfError.AttachFailed;
     };
 
-    addBpfFilter(fd, if_index, direction, prog_fd, priority) catch |e| {
+    addBpfFilter(fd, if_index, direction, prog_fd, priority, options) catch |e| {
         log.warn("ebpf: failed to add BPF filter on ifindex {d}: {}", .{ if_index, e });
         return common.EbpfError.AttachFailed;
     };
@@ -146,6 +156,7 @@ fn addBpfFilter(
     direction: common.Direction,
     prog_fd: posix.fd_t,
     priority: u32,
+    filter_options: FilterOptions,
 ) nl.NetlinkError!void {
     var buf: [nl.buf_size]u8 align(4) = undefined;
     var mb = nl.MessageBuilder.init(&buf);
@@ -160,7 +171,7 @@ fn addBpfFilter(
 
     const hdr = try mb.putHeader(
         .RTM_NEWTFILTER,
-        nl.NLM_F.REQUEST | nl.NLM_F.ACK | nl.NLM_F.CREATE | nl.NLM_F.EXCL,
+        nl.NLM_F.REQUEST | nl.NLM_F.ACK | nl.NLM_F.CREATE | @as(u16, if (filter_options.replace) 0x100 else nl.NLM_F.EXCL),
         nl.TcMsg,
     );
     const tc = mb.getPayload(hdr, nl.TcMsg);
@@ -168,7 +179,7 @@ fn addBpfFilter(
     tc._pad1 = 0;
     tc._pad2 = 0;
     tc.ifindex = @intCast(if_index);
-    tc.handle = 0;
+    tc.handle = filter_options.handle;
     tc.parent = parent;
     tc.info = info;
 
@@ -176,7 +187,7 @@ fn addBpfFilter(
 
     const options = try mb.startNested(hdr, nl.TCA.OPTIONS);
     try mb.putAttrU32(hdr, nl.TCA_BPF.FD, @intCast(prog_fd));
-    try mb.putAttrStr(hdr, nl.TCA_BPF.NAME, "yoq");
+    try mb.putAttrStr(hdr, nl.TCA_BPF.NAME, filter_options.name);
     try mb.putAttrU32(hdr, nl.TCA_BPF.FLAGS, nl.TCA_BPF.FLAG_ACT_DIRECT);
     mb.endNested(options);
 

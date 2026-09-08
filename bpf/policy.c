@@ -1,6 +1,6 @@
 // policy.c — network policy enforcement (allow/deny between services)
 //
-// attached to the bridge ingress at priority 0 (before DNS interceptor,
+// attached to the bridge ingress at priority 10 (before DNS interceptor,
 // load balancer, and metrics). enforces per-IP pair allow/deny rules
 // set by `yoq policy`. drops denied packets before any other processing.
 //
@@ -64,42 +64,28 @@ int policy_enforce(struct __sk_buff *skb)
     
     // SECURITY: Enforce minimum packet size for parsing
     if (data + 34 > data_end) // eth(14) + ip(20)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // parse ethernet header
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // only enforce on IPv4
     if (eth->h_proto != htons(ETH_P_IP))
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // parse IP header
     struct iphdr *iph = (void *)(eth + 1);
     if ((void *)(iph + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
-    // SECURITY: Validate IP total length is reasonable
-    __u16 ip_tot_len = ntohs(iph->tot_len);
-    if (ip_tot_len < 20 || ip_tot_len > 65535)
-        return TC_ACT_OK;
-    
-    // SECURITY: Validate TTL is reasonable (prevent routing loops)
-    if (iph->ttl < 1 || iph->ttl > 128)
-        return TC_ACT_OK;
-    
-    // SECURITY: Reject obviously spoofed source IPs
-    __u32 src_ip = iph->saddr;
-    if (src_ip == 0 || src_ip == 0xFFFFFFFF ||
-        (src_ip & 0xF0000000) == 0xE0000000 ||
-        (src_ip & 0xFF000000) == 0x7F000000)
-        return TC_ACT_OK;
-    
-    // SECURITY: Validate IHL is correct
+    // Policies apply to every valid IPv4 TTL and source address. Source
+    // filtering belongs to the routing layer, never a policy lookup bypass.
     __u8 ihl = iph->ihl_version & 0x0F;
-    if (ihl < 5 || ihl > 15) // Min 20 bytes, max 60 bytes
-        return TC_ACT_OK;
+    if ((iph->ihl_version >> 4) != 4 || ihl < 5 ||
+        data + 14 + ihl * 4 > data_end || ntohs(iph->tot_len) < ihl * 4)
+        return TC_ACT_SHOT;
 
     // SECURITY: Fully initialize the key to prevent info leaks
     struct policy_key key = {
@@ -120,7 +106,7 @@ int policy_enforce(struct __sk_buff *skb)
             return TC_ACT_SHOT;
     }
 
-    return TC_ACT_OK;
+    return TC_ACT_UNSPEC;
 }
 
 char _license[] SEC("license") = "GPL";

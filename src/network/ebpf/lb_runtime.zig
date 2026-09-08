@@ -2,7 +2,7 @@ const std = @import("std");
 const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const log = @import("../../lib/log.zig");
-const attach_support = @import("attach_support.zig");
+const tc_attachment = @import("tc_attachment.zig");
 const common = @import("common.zig");
 const map_support = @import("map_support.zig");
 const program_support = @import("program_support.zig");
@@ -24,6 +24,8 @@ pub const LoadBalancer = struct {
     conntrack_fd: posix.fd_t,
     rev_conntrack_fd: posix.fd_t,
     if_index: u32,
+    ingress_attachment: tc_attachment.Attachment,
+    egress_attachment: tc_attachment.Attachment,
 
     pub fn addBackend(self: *const LoadBalancer, vip: [4]u8, backend_ip: [4]u8) void {
         const vip_net = ipToNetworkOrder(vip);
@@ -109,8 +111,11 @@ pub const LoadBalancer = struct {
     }
 
     pub fn deinit(self: *LoadBalancer) void {
-        attach_support.detachTC(self.if_index) catch |e| {
+        self.ingress_attachment.detach() catch |e| {
             log.debug("ebpf: failed to detach load balancer: {}", .{e});
+        };
+        self.egress_attachment.detach() catch |e| {
+            log.debug("ebpf: failed to detach LB return path: {}", .{e});
         };
         if (self.prog_fd >= 0) {
             linux_platform.posix.close(self.prog_fd);
@@ -180,20 +185,14 @@ pub fn load(bridge_if_index: u32) common.EbpfError!LoadBalancer {
         resource_support.releaseBpfFd();
     }
 
-    try attach_support.attachTC(bridge_if_index, .ingress, prog_fd, 1);
-
-    var egress_fd: posix.fd_t = -1;
-    if (@hasDecl(lb_prog, "egress_insns")) {
-        egress_fd = program_support.loadEgressProgram(lb_prog, &map_fds) catch -1;
-        if (egress_fd >= 0) {
-            attach_support.attachTC(bridge_if_index, .egress, egress_fd, 1) catch |e| {
-                log.warn("ebpf: failed to attach LB egress: {}", .{e});
-                linux_platform.posix.close(egress_fd);
-                resource_support.releaseBpfFd();
-                egress_fd = -1;
-            };
-        }
+    const ingress_attachment = try tc_attachment.attach(bridge_if_index, .ingress, prog_fd, .load_balancer);
+    errdefer ingress_attachment.detach() catch {};
+    const egress_fd = try program_support.loadEgressProgram(lb_prog, &map_fds);
+    errdefer {
+        linux_platform.posix.close(egress_fd);
+        resource_support.releaseBpfFd();
     }
+    const egress_attachment = try tc_attachment.attach(bridge_if_index, .egress, egress_fd, .load_balancer);
 
     return .{
         .egress_prog_fd = egress_fd,
@@ -202,5 +201,7 @@ pub fn load(bridge_if_index: u32) common.EbpfError!LoadBalancer {
         .conntrack_fd = conntrack_fd,
         .rev_conntrack_fd = rev_conntrack_fd,
         .if_index = bridge_if_index,
+        .ingress_attachment = ingress_attachment,
+        .egress_attachment = egress_attachment,
     };
 }

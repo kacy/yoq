@@ -138,79 +138,80 @@ int dns_intercept(struct __sk_buff *skb)
     // SECURITY: Check minimum packet size before any parsing
     // We need at least: eth(14) + ip(20) + udp(8) + dns(12) = 54 bytes
     if (data + DNS_QUESTION_OFFSET > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // -- parse ethernet header (offset 0, 14 bytes) --
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     if (eth->h_proto != htons(ETH_P_IP))
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // -- parse IP header (offset 14, 20 bytes) --
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     if (ip->protocol != IPPROTO_UDP)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // require IHL=5 (20 bytes, no options) for fixed offsets
     if ((ip->ihl_version & 0x0F) != 5)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Validate IP total length makes sense
     __u16 ip_tot_len = ntohs(ip->tot_len);
     if (ip_tot_len < 40 || ip_tot_len > 1500) // min: IP(20)+UDP(8)+payload, max: typical MTU
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Validate TTL is reasonable (prevent routing loops and suspicious packets)
-    // Normal DNS queries should have TTL >= 1, but very high TTL (>128) might be suspicious
-    if (ip->ttl < 1 || ip->ttl > 128)
-        return TC_ACT_OK;
+    // TTL is an unsigned byte; every nonzero value is valid.
+    if (ip->ttl < 1)
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Reject obviously spoofed or invalid source IPs
     // 0.0.0.0, broadcast, multicast, loopback as source
     __u32 src_ip = ip->saddr;
-    if (src_ip == 0 || src_ip == 0xFFFFFFFF ||          // 0.0.0.0, 255.255.255.255
-        (src_ip & 0xF0000000) == 0xE0000000 ||          // 224.0.0.0/4 multicast
-        (src_ip & 0xFF000000) == 0x7F000000)           // 127.0.0.0/8 loopback
-        return TC_ACT_OK;
+    __u32 src_host = ntohl(src_ip);
+    if (src_host == 0 || src_host == 0xFFFFFFFF ||          // 0.0.0.0, 255.255.255.255
+        (src_host & 0xF0000000) == 0xE0000000 ||          // 224.0.0.0/4 multicast
+        (src_host & 0xFF000000) == 0x7F000000)           // 127.0.0.0/8 loopback
+        return TC_ACT_UNSPEC;
 
     // -- parse UDP header (offset 34, 8 bytes) --
     struct udphdr *udp = (void *)((char *)ip + 20);
     if ((void *)(udp + 1) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     if (udp->dest != htons(DNS_PORT))
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Validate UDP length
     __u16 udp_len = ntohs(udp->len);
     if (udp_len < 8 || udp_len > 512) // min UDP header, max DNS over UDP
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // -- parse DNS header (offset 42, 12 bytes) --
     __u8 *dns = data + 42;
     if ((void *)(dns + DNS_HEADER_SIZE) > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // QR=0 (query)
     if (dns[2] & 0x80)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // QDCOUNT=1 (we only handle single queries)
     __u16 qdcount = (dns[4] << 8) | dns[5];
     if (qdcount != 1)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     // SECURITY: Check for additional sections that could indicate malformed packets
     __u16 ancount = (dns[6] << 8) | dns[7];
     __u16 nscount = (dns[8] << 8) | dns[9];
     __u16 arcount = (dns[10] << 8) | dns[11];
     if (ancount != 0 || nscount != 0 || arcount != 0)
-        return TC_ACT_OK; // Only accept pure queries, not responses
+        return TC_ACT_UNSPEC; // Only accept pure queries, not responses
 
     // -- copy question name to stack (offset 54, up to 64 bytes) --
     // SECURITY: Read only what we need (64 bytes max for key buffer)
@@ -220,7 +221,7 @@ int dns_intercept(struct __sk_buff *skb)
     // Calculate safe read length - don't exceed packet bounds
     // Use unsigned arithmetic and explicit bounds for verifier
     __u32 pkt_len = (long)data_end - (long)data;
-    if (pkt_len > 1500) return TC_ACT_OK; // Sanity check
+    if (pkt_len > 1500) return TC_ACT_UNSPEC; // Sanity check
     
     __u32 read_len = 64;
     if (DNS_QUESTION_OFFSET + 64 > pkt_len) {
@@ -232,20 +233,20 @@ int dns_intercept(struct __sk_buff *skb)
     
     // Final bounds check: must be 2-64 bytes (ensures positive, verifier-safe value)
     if (read_len < 2 || read_len > 64)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     if (bpf_skb_load_bytes(skb, DNS_QUESTION_OFFSET, key_buf, read_len) != 0)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // -- validate the DNS name is well-formed --
     __u32 wire_len = find_name_length(key_buf, read_len);
     if (wire_len == 0 || wire_len > 63) // 63 = max we can handle in our 64-byte key
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // -- map lookup --
     __u32 *ip_addr = bpf_map_lookup_elem(&service_names, key_buf);
     if (!ip_addr)
-        return TC_ACT_OK; // miss — pass to userspace
+        return TC_ACT_UNSPEC; // miss — pass to userspace
 
     // save resolved IP before any packet modifications
     __u32 resolved_ip = *ip_addr;
@@ -256,15 +257,15 @@ int dns_intercept(struct __sk_buff *skb)
     
     // SECURITY: Ensure we can read 4 bytes for QTYPE+QCLASS
     if (qtqc_offset + 4 > pkt_len)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     
     if (bpf_skb_load_bytes(skb, qtqc_offset, qtqc, 4) != 0)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     __u16 qtype = (qtqc[0] << 8) | qtqc[1];
     __u16 qclass = (qtqc[2] << 8) | qtqc[3];
     if (qtype != 1 || qclass != 1) // A / IN
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // -- save header fields before resize --
     __u8 src_mac[6], dst_mac[6];
@@ -284,11 +285,11 @@ int dns_intercept(struct __sk_buff *skb)
     
     // Validate sizes are reasonable
     if (answer_offset < DNS_QUESTION_OFFSET || new_pkt_len > 512 || new_pkt_len < answer_offset)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // -- resize packet --
     if (bpf_skb_change_tail(skb, new_pkt_len, 0) != 0)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     // re-read data pointers after resize
     data = (void *)(long)skb->data;
@@ -296,9 +297,9 @@ int dns_intercept(struct __sk_buff *skb)
 
     // SECURITY: Validate new packet size
     if (data + MIN_DNS_PACKET_SIZE > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     if (data + new_pkt_len > data_end)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     eth = data;
     ip = (void *)(eth + 1);
@@ -345,10 +346,10 @@ int dns_intercept(struct __sk_buff *skb)
 
     // SECURITY: Verify answer_offset is still valid after resize
     if (answer_offset + 16 > new_pkt_len)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     if (bpf_skb_store_bytes(skb, answer_offset, answer, 16, 0) != 0)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     return bpf_redirect(skb->ifindex, 0);
 }

@@ -45,6 +45,9 @@ jobs:
               - 'tools/bpf_gen.zig'
               - 'src/test_bpf_load_balancer.zig'
               - 'scripts/bpf-load-balancer-smoke.sh'
+              - 'scripts/tc-policy-smoke.sh'
+              - 'src/test_tc_policy_chain.zig'
+              - 'src/network/ebpf/**'
               - 'src/network/bpf/**'
 
   veth-namespace:
@@ -223,6 +226,9 @@ jobs:
 
       - name: verify load balancer with the kernel
         run: bash scripts/bpf-load-balancer-smoke.sh
+
+      - name: verify shared TC policy enforcement with the kernel
+        run: bash scripts/tc-policy-smoke.sh
 
       - name: upload bpf diff
         if: failure()
