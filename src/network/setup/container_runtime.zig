@@ -13,6 +13,7 @@ const ebpf = @import("ebpf_module.zig").ebpf;
 const ebpf_support = @import("ebpf_support.zig");
 const service_registry_bridge = @import("../service_registry_bridge.zig");
 const service_reconciler = @import("../service_reconciler.zig");
+const policy = @import("../policy.zig");
 
 pub fn setupContainer(
     container_id: []const u8,
@@ -131,6 +132,12 @@ pub fn setupContainer(
             if (config.node_id) |node_id| @as(i64, node_id) else null,
         );
     }
+
+    errdefer if (!config.skip_dns) service_registry_bridge.unregisterContainerService(container_id);
+    policy.requireForContainer(hostname, container_ip, std.heap.page_allocator) catch |err| {
+        log.err("network policy must be enforced before container startup: {}", .{err});
+        return common.SetupError.ConfigFailed;
+    };
 
     var info = common.NetworkInfo{
         .ip = container_ip,

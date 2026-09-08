@@ -47,14 +47,37 @@ const ip_mod = @import("ip.zig");
 const log = @import("../lib/log.zig");
 
 const policy_rules = @import("policy_rules.zig");
+const PreparedPolicy = struct {
+    snapshot: policy_rules.Snapshot,
+    requires_enforcement: bool,
+
+    fn deinit(self: PreparedPolicy, alloc: std.mem.Allocator) void {
+        self.snapshot.deinit(alloc);
+    }
+};
 const PolicyAction = policy_rules.Action;
+
+/// Configured policies require enforcement before releasing a new workload.
+/// Policy-free networking keeps BPF acceleration optional.
+pub fn requireForContainer(service_name: []const u8, address: [4]u8, alloc: std.mem.Allocator) !void {
+    const prepared = try buildPolicySnapshot(alloc, .{ .name = service_name, .address = address });
+    defer prepared.deinit(alloc);
+    if (!prepared.requires_enforcement) return;
+    if (comptime builtin.os.tag != .linux) return error.NotSupported;
+    const nl = @import("netlink.zig");
+    const platform = @import("linux_platform");
+    const socket = try nl.openSocket();
+    defer platform.posix.close(socket);
+    const index = try nl.getIfIndex(socket, @import("bridge.zig").default_bridge);
+    try ebpf.installPolicyRules(index, prepared.snapshot);
+}
 
 /// Initial startup also populates maps before replacing another process's filter.
 pub fn installOnBridge(if_index: u32, alloc: std.mem.Allocator) !void {
     if (comptime builtin.os.tag != .linux) return error.NotSupported;
-    const snapshot = try buildPolicySnapshot(alloc);
+    const snapshot = try buildPolicySnapshot(alloc, null);
     defer snapshot.deinit(alloc);
-    try ebpf.installPolicyRules(if_index, snapshot);
+    try ebpf.installPolicyRules(if_index, snapshot.snapshot);
 }
 
 /// Prepare a complete policy generation and replace the active filters.
@@ -75,17 +98,28 @@ const GlobalPolicySink = struct {
 };
 
 fn syncPoliciesWithEnforcer(alloc: std.mem.Allocator, enforcer: anytype) void {
-    const snapshot = buildPolicySnapshot(alloc) catch |err| {
+    const snapshot = buildPolicySnapshot(alloc, null) catch |err| {
         log.warn("policy: retaining active rules because desired policy could not be prepared: {}", .{err});
         return;
     };
     defer snapshot.deinit(alloc);
-    enforcer.replace(snapshot) catch |err| {
+    enforcer.replace(snapshot.snapshot) catch |err| {
         log.warn("policy: policy replacement failed: {}", .{err});
     };
 }
 
-fn buildPolicySnapshot(alloc: std.mem.Allocator) !policy_rules.Snapshot {
+const StartingEndpoint = struct { name: []const u8, address: [4]u8 };
+
+fn requireRegisteredAddress(name: []const u8, addresses: []const []const u8, endpoint: StartingEndpoint) !void {
+    if (!std.mem.eql(u8, name, endpoint.name)) return;
+    for (addresses) |text| {
+        const address = ip_mod.parseIp(text) orelse return error.InvalidPolicyAddress;
+        if (std.mem.eql(u8, &address, &endpoint.address)) return;
+    }
+    return error.PolicyEndpointMissing;
+}
+
+fn buildPolicySnapshot(alloc: std.mem.Allocator, starting: ?StartingEndpoint) !PreparedPolicy {
     var builder: policy_rules.Builder = .{};
     defer builder.deinit(alloc);
     var read = try store.NetworkPolicyReadSnapshot.begin();
@@ -107,6 +141,10 @@ fn buildPolicySnapshot(alloc: std.mem.Allocator) !policy_rules.Snapshot {
             for (dst_ips.items) |address| alloc.free(address);
             dst_ips.deinit(alloc);
         }
+        if (starting) |endpoint| {
+            try requireRegisteredAddress(pol.source_service, src_ips.items, endpoint);
+            try requireRegisteredAddress(pol.target_service, dst_ips.items, endpoint);
+        }
         for (src_ips.items) |source| {
             const src = ip_mod.parseIp(source) orelse return error.InvalidPolicyAddress;
             const src_net = ebpf.ipToNetworkOrder(src);
@@ -117,7 +155,7 @@ fn buildPolicySnapshot(alloc: std.mem.Allocator) !policy_rules.Snapshot {
             }
         }
     }
-    return builder.finish(alloc);
+    return .{ .snapshot = try builder.finish(alloc), .requires_enforcement = policies.items.len != 0 };
 }
 
 /// incremental: apply relevant policy rules for a newly started container.
@@ -490,13 +528,13 @@ test "policy preparation failure retains the active generation" {
     syncPoliciesWithEnforcer(std.testing.allocator, &recorder);
     const applied_count = recorder.ops.items.len;
     try seedEndpoint("web", "bad", "not-an-ip");
-    try std.testing.expectError(error.InvalidPolicyAddress, buildPolicySnapshot(std.testing.allocator));
+    try std.testing.expectError(error.InvalidPolicyAddress, buildPolicySnapshot(std.testing.allocator, null));
     syncPoliciesWithEnforcer(std.testing.allocator, &recorder);
     try std.testing.expectEqual(applied_count, recorder.ops.items.len);
     try recorder.expectOp(.{ .kind = .add_deny, .src = netIp("10.42.0.10"), .dst = netIp("10.43.0.20") });
     try store.removeServiceEndpoint("web", "bad");
     try store.addNetworkPolicy("api", "web", "invalid");
-    try std.testing.expectError(error.InvalidPolicy, buildPolicySnapshot(std.testing.allocator));
+    try std.testing.expectError(error.InvalidPolicy, buildPolicySnapshot(std.testing.allocator, null));
     syncPoliciesWithEnforcer(std.testing.allocator, &recorder);
     try std.testing.expectEqual(applied_count, recorder.ops.items.len);
 }
@@ -624,4 +662,21 @@ fn seedEndpoint(service: []const u8, id: []const u8, address: []const u8) !void 
 
 fn netIp(ip: []const u8) u32 {
     return ebpf.ipToNetworkOrder(ip_mod.parseIp(ip) orelse @panic("invalid test IP"));
+}
+
+test "policy-free startup does not require a BPF owner" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try requireForContainer("api", .{ 10, 42, 0, 9 }, std.testing.allocator);
+}
+
+test "required policy generation rejects missing startup identity" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try store.addNetworkPolicy("api", "web", "deny");
+    try std.testing.expectError(error.PolicyEndpointMissing, buildPolicySnapshot(std.testing.allocator, .{ .name = "api", .address = .{ 10, 42, 0, 9 } }));
+    try store.registerServiceName("api", "api-1", "10.42.0.9");
+    const prepared = try buildPolicySnapshot(std.testing.allocator, .{ .name = "api", .address = .{ 10, 42, 0, 9 } });
+    defer prepared.deinit(std.testing.allocator);
+    try std.testing.expect(prepared.requires_enforcement);
 }
