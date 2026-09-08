@@ -4,4 +4,4 @@
 // reports a version (the `yoq version` command, the cluster version endpoint,
 // version-skew checks) reads it from here so there is one place to bump.
 
-pub const string = "0.2.0";
+pub const string = "0.2.1";

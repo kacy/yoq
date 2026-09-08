@@ -89,6 +89,8 @@ jobs:
         run: |
           actual=$(sed -n 's/.*pub const string = "\([^"]*\)".*/\1/p' src/lib/version.zig)
           test "$actual" = "$EXPECTED_VERSION"
+          package_version=$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)
+          test "$package_version" = "$EXPECTED_VERSION"
 
   build-debug:
     name: build-debug
@@ -119,6 +121,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.validate-tag.outputs.commit }}
+      - name: check release tooling
+        run: python3 -m unittest discover -s tools -p 'test_release_security.py'
       - name: check dependencies and panic paths
         run: python3 tools/security_gate.py && bash tools/panic_audit.sh
 
@@ -280,9 +284,20 @@ jobs:
             dist/out/provenance.json
             dist/out/sbom.spdx.json
 
+      - name: verify release attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for artifact in dist/out/*.tar.gz dist/out/provenance.json dist/out/sbom.spdx.json; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --deny-self-hosted-runners
+          done
+
   publish-release:
     permissions:
       contents: write
+      attestations: read
     name: publish-release
     needs:
       - validate-tag
@@ -305,9 +320,29 @@ jobs:
         with:
           tag_name: ${{ needs.validate-tag.outputs.tag }}
           name: yoq ${{ needs.validate-tag.outputs.tag }}
-          generate_release_notes: true
+          body_path: docs/releases/${{ needs.validate-tag.outputs.version }}.md
+          make_latest: true
+          fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
             dist/*.sha256
             dist/provenance.json
             dist/sbom.spdx.json
+
+      - name: verify public installation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_TAG: ${{ needs.validate-tag.outputs.tag }}
+          EXPECTED_VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          test "$latest" = "$EXPECTED_TAG"
+          curl -fsSL https://yoq.dev/install | bash
+          "$HOME/.local/bin/yoq" version --json | python3 -c '
+          import json, os, sys
+          version = json.load(sys.stdin)["version"]
+          expected = os.environ["EXPECTED_VERSION"]
+          if version != expected:
+              raise SystemExit(f"installed version {version} does not match {expected}")
+          print(f"public installer verified yoq {version}")'

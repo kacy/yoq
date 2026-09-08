@@ -155,17 +155,38 @@ class ReleaseSecurityTests(unittest.TestCase):
                     print('0')
                 elif tool == 'curl':
                     if '-o' not in args:
-                        print(json.dumps({'tag_name': tag}))
+                        if failure == 'latest-download':
+                            sys.exit(22)
+                        releases = {
+                            'latest-malformed': '{',
+                            'latest-missing-tag': '{}',
+                            'latest-invalid-tag': json.dumps({'tag_name': '../other'}),
+                            'latest-wrong-type': json.dumps({'tag_name': 123}),
+                        }
+                        print(releases.get(failure, json.dumps({'tag_name': tag, 'name': 'yoq release'})))
                     else:
                         target = pathlib.Path(args[args.index('-o') + 1])
                         if target.name.endswith('.sha256'):
                             target.write_text(digest + '  ' + archive + '\\n')
                         elif target.name == 'provenance.json':
-                            target.write_text(json.dumps({'invocation': {'tag': 'v0.0.0' if failure == 'tag' else tag},
-                                'subject': [{'name': archive, 'sha256': '0' * 64 if failure == 'digest' else digest}]}))
+                            if failure == 'missing-metadata':
+                                sys.exit(22)
+                            metadata = {'invocation': {'tag': 'v0.0.0' if failure == 'tag' else tag},
+                                'subject': [{'name': archive, 'sha256': '0' * 64 if failure == 'digest' else digest}]}
+                            if failure == 'missing-tag':
+                                del metadata['invocation']['tag']
+                            elif failure == 'missing-subject':
+                                metadata['subject'] = []
+                            elif failure == 'duplicate-subject':
+                                metadata['subject'] *= 2
+                            target.write_text('{' if failure == 'malformed-metadata' else json.dumps(metadata))
                         else:
                             target.write_bytes(payload)
                 elif tool == 'gh':
+                    if '--help' in args:
+                        sys.exit(1 if failure == 'old-gh' else 0)
+                    if args[:2] == ['auth', 'status']:
+                        sys.exit(1 if failure == 'unauthenticated' else 0)
                     artifact = args[2]
                     if failure == 'archive' and artifact.endswith('.tar.gz'):
                         sys.exit(1)
@@ -179,22 +200,60 @@ class ReleaseSecurityTests(unittest.TestCase):
             env = dict(os.environ, PATH=str(binary) + ':' + os.environ['PATH'],
                        RELEASE_TEST_LOG=str(log), RELEASE_TEST_FAILURE=failure)
             result = subprocess.run(['sh', str(ROOT / 'scripts/install.sh')], env=env, capture_output=True, text=True)
-            return result.returncode, log.read_text()
+            return result, log.read_text()
+
+    def test_installer_rejects_missing_or_invalid_release_metadata_before_archive_download(self):
+        failures = {
+            'old-gh': 'update gh',
+            'unauthenticated': "run 'gh auth login' or set GH_TOKEN",
+            'latest-download': 'could not find the latest release',
+            'latest-malformed': 'no valid version tag',
+            'latest-missing-tag': 'no valid version tag',
+            'latest-invalid-tag': 'no valid version tag',
+            'latest-wrong-type': 'no valid version tag',
+            'missing-metadata': 'no available verification metadata',
+            'metadata': 'could not verify the publisher attestation',
+            'tag': 'does not identify the requested release and archive',
+            'missing-tag': 'does not identify the requested release and archive',
+            'missing-subject': 'does not identify the requested release and archive',
+            'duplicate-subject': 'does not identify the requested release and archive',
+            'malformed-metadata': 'does not identify the requested release and archive',
+        }
+        for failure, message in failures.items():
+            with self.subTest(failure=failure):
+                result, calls = self.run_installer(failure)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+                self.assertNotIn('.tar.gz', calls)
+                self.assertNotIn('\ntar ', calls)
+                self.assertNotIn('\nmv ', calls)
+                if failure == 'unauthenticated':
+                    self.assertNotIn('\ncurl ', calls)
 
     def test_installer_rejects_unsigned_or_mismatched_artifacts_before_extraction(self):
-        for failure in ['archive', 'metadata', 'tag', 'digest']:
+        for failure in ['archive', 'digest']:
             with self.subTest(failure=failure):
-                status, calls = self.run_installer(failure)
-                self.assertNotEqual(status, 0)
+                result, calls = self.run_installer(failure)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('nothing was installed', result.stderr)
                 self.assertNotIn('\ntar ', calls)
                 self.assertNotIn('\nmv ', calls)
 
     def test_installer_verifies_both_subjects_before_extraction(self):
-        status, calls = self.run_installer('')
-        self.assertEqual(status, 0)
-        self.assertEqual(calls.count('gh attestation verify'), 2)
-        self.assertIn('--signer-workflow kacy/yoq/.github/workflows/release.yml', calls)
+        result, calls = self.run_installer('')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        verifications = [line for line in calls.splitlines()
+                         if line.startswith('gh attestation verify ') and '--help' not in line]
+        self.assertEqual(len(verifications), 2)
+        for verification in verifications:
+            self.assertIn('--repo kacy/yoq', verification)
+            self.assertIn('--signer-workflow kacy/yoq/.github/workflows/release.yml', verification)
+            self.assertIn('--deny-self-hosted-runners', verification)
+        self.assertLess(calls.index(verifications[0]), calls.index('.tar.gz'))
         self.assertLess(calls.rindex('gh attestation verify'), calls.index('tar -xzf'))
+        self.assertLess(calls.index('tar -xzf'), calls.index('mv '))
+        self.assertIn('yoq v1.2.3 installed to /usr/local/bin/yoq', result.stdout)
 
 
 if __name__ == '__main__':
