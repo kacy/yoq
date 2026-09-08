@@ -11,12 +11,9 @@ const MAX_COMMAND_NAME_LEN = 256;
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
 
-    var threaded_io = std.Io.Threaded.init(alloc, .{});
-    defer threaded_io.deinit();
-
     const app_ctx = AppContext{
         .alloc = alloc,
-        .io = threaded_io.io(),
+        .io = init.io,
     };
 
     var args = std.process.Args.Iterator.initAllocator(init.minimal.args, alloc) catch |err| {
