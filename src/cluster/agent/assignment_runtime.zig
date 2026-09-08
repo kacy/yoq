@@ -42,6 +42,70 @@ const AssignmentMeta = struct {
     health_check_json: ?[]const u8 = null,
 };
 
+/// Strings copied for an assignment worker. The tracking map owns the
+/// assignment ID separately because it can outlive the worker.
+const AssignmentInputs = struct {
+    image: []const u8,
+    command: []const u8,
+    gang_info: ?GangInfo,
+    meta: AssignmentMeta,
+
+    fn init(
+        alloc: std.mem.Allocator,
+        image: []const u8,
+        command: []const u8,
+        gang_info: ?GangInfo,
+        meta: AssignmentMeta,
+    ) !AssignmentInputs {
+        const image_copy = try alloc.dupe(u8, image);
+        errdefer alloc.free(image_copy);
+        const command_copy = try alloc.dupe(u8, command);
+        errdefer alloc.free(command_copy);
+        const app_name = try copyOptionalString(alloc, meta.app_name);
+        errdefer if (app_name) |value| alloc.free(value);
+        const workload_kind = try copyOptionalString(alloc, meta.workload_kind);
+        errdefer if (workload_kind) |value| alloc.free(value);
+        const workload_name = try copyOptionalString(alloc, meta.workload_name);
+        errdefer if (workload_name) |value| alloc.free(value);
+        const health_check_json = try copyOptionalString(alloc, meta.health_check_json);
+        errdefer if (health_check_json) |value| alloc.free(value);
+        const gang_copy: ?GangInfo = if (gang_info) |gang| .{
+            .rank = gang.rank,
+            .world_size = gang.world_size,
+            .master_addr = try alloc.dupe(u8, gang.master_addr),
+            .master_port = gang.master_port,
+        } else null;
+
+        return .{
+            .image = image_copy,
+            .command = command_copy,
+            .gang_info = gang_copy,
+            .meta = .{
+                .cpu_limit = meta.cpu_limit,
+                .memory_limit_mb = meta.memory_limit_mb,
+                .app_name = app_name,
+                .workload_kind = workload_kind,
+                .workload_name = workload_name,
+                .health_check_json = health_check_json,
+            },
+        };
+    }
+
+    fn deinit(self: AssignmentInputs, alloc: std.mem.Allocator) void {
+        alloc.free(self.image);
+        alloc.free(self.command);
+        if (self.meta.app_name) |value| alloc.free(value);
+        if (self.meta.workload_kind) |value| alloc.free(value);
+        if (self.meta.workload_name) |value| alloc.free(value);
+        if (self.meta.health_check_json) |value| alloc.free(value);
+        if (self.gang_info) |gang| alloc.free(gang.master_addr);
+    }
+};
+
+fn copyOptionalString(alloc: std.mem.Allocator, value: ?[]const u8) !?[]const u8 {
+    return if (value) |text| try alloc.dupe(u8, text) else null;
+}
+
 const ServiceReadinessResult = enum {
     healthy,
     unhealthy,
@@ -56,8 +120,8 @@ pub fn reconcile(self: anytype) void {
     };
     defer resp.deinit(self.alloc);
 
-    // Only a complete successful snapshot can remove desired work. A server
-    // error or malformed response must never look like an empty assignment set.
+    // Cancel work only after validating a successful assignment snapshot.
+    // An error response does not mean the server removed every assignment.
     if (resp.status_code != 200) return;
     cancelRemovedAssignments(self, resp.body) catch return;
 
@@ -104,7 +168,7 @@ pub fn reconcile(self: anytype) void {
                 .workload_kind = workload_kind,
                 .workload_name = workload_name,
                 .health_check_json = health_check_json,
-            });
+            }) catch {};
         }
     }
 }
@@ -156,8 +220,8 @@ fn cancelRemovedAssignments(self: anytype, body: []const u8) !void {
             self.alloc.free(removed.key);
         }
     }
-    // Cached work can predate this process. A successful desired-state snapshot
-    // also invalidates those entries, preventing resurrection during an outage.
+    // The cache can contain work from an earlier agent process. Remove obsolete
+    // entries so a later server outage does not restart canceled assignments.
     const cached = try agent_store.listAssignments(self.alloc);
     defer {
         for (cached) |assignment| assignment.deinit(self.alloc);
@@ -178,142 +242,56 @@ fn reconcileFromCache(self: anytype) void {
     if (cached.len == 0) return;
     log.warn("server unreachable, reconciling from cache ({d} assignments)", .{cached.len});
     for (cached) |assignment| {
-        startPendingAssignment(self, assignment.id, assignment.image, assignment.command, null, .{ .cpu_limit = assignment.cpu_limit, .memory_limit_mb = assignment.memory_limit_mb });
+        startPendingAssignment(self, assignment.id, assignment.image, assignment.command, null, .{
+            .cpu_limit = assignment.cpu_limit,
+            .memory_limit_mb = assignment.memory_limit_mb,
+        }) catch {};
     }
 }
 
-fn startPendingAssignment(self: anytype, id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo, meta: AssignmentMeta) void {
+fn startPendingAssignment(
+    self: anytype,
+    id: []const u8,
+    image: []const u8,
+    command: []const u8,
+    gang_info: ?GangInfo,
+    meta: AssignmentMeta,
+) !void {
     self.container_lock.lockUncancelable(std.Options.debug_io);
     const already_tracked = self.local_containers.contains(id);
     self.container_lock.unlock(std.Options.debug_io);
     if (already_tracked) return;
 
-    const id_copy = self.alloc.dupe(u8, id) catch return;
-    const image_copy = self.alloc.dupe(u8, image) catch {
-        self.alloc.free(id_copy);
-        return;
-    };
-    const command_copy = self.alloc.dupe(u8, command) catch {
-        self.alloc.free(id_copy);
-        self.alloc.free(image_copy);
-        return;
-    };
-    const app_name_copy = if (meta.app_name) |app_name|
-        self.alloc.dupe(u8, app_name) catch {
-            self.alloc.free(id_copy);
-            self.alloc.free(image_copy);
-            self.alloc.free(command_copy);
-            return;
-        }
-    else
-        null;
-    const workload_kind_copy = if (meta.workload_kind) |workload_kind|
-        self.alloc.dupe(u8, workload_kind) catch {
-            self.alloc.free(id_copy);
-            self.alloc.free(image_copy);
-            self.alloc.free(command_copy);
-            if (app_name_copy) |app_name| self.alloc.free(app_name);
-            return;
-        }
-    else
-        null;
-    const workload_name_copy = if (meta.workload_name) |workload_name|
-        self.alloc.dupe(u8, workload_name) catch {
-            self.alloc.free(id_copy);
-            self.alloc.free(image_copy);
-            self.alloc.free(command_copy);
-            if (app_name_copy) |app_name| self.alloc.free(app_name);
-            if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
-            return;
-        }
-    else
-        null;
-    const health_check_json_copy = if (meta.health_check_json) |health_check_json|
-        self.alloc.dupe(u8, health_check_json) catch {
-            self.alloc.free(id_copy);
-            self.alloc.free(image_copy);
-            self.alloc.free(command_copy);
-            if (app_name_copy) |app_name| self.alloc.free(app_name);
-            if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
-            if (workload_name_copy) |workload_name| self.alloc.free(workload_name);
-            return;
-        }
-    else
-        null;
-    const gang_copy: ?GangInfo = if (gang_info) |gang| blk: {
-        const addr_copy = self.alloc.dupe(u8, gang.master_addr) catch {
-            self.alloc.free(id_copy);
-            self.alloc.free(image_copy);
-            self.alloc.free(command_copy);
-            if (app_name_copy) |app_name| self.alloc.free(app_name);
-            if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
-            if (workload_name_copy) |workload_name| self.alloc.free(workload_name);
-            if (health_check_json_copy) |health_check_json| self.alloc.free(health_check_json);
-            return;
-        };
-        break :blk .{
-            .rank = gang.rank,
-            .world_size = gang.world_size,
-            .master_addr = addr_copy,
-            .master_port = gang.master_port,
-        };
-    } else null;
-
-    const owner = self.alloc.create(@import("../agent.zig").LocalAssignment) catch {
-        self.alloc.free(id_copy);
-        self.alloc.free(image_copy);
-        self.alloc.free(command_copy);
-        if (app_name_copy) |name| self.alloc.free(name);
-        if (workload_kind_copy) |kind| self.alloc.free(kind);
-        if (workload_name_copy) |name| self.alloc.free(name);
-        if (health_check_json_copy) |check| self.alloc.free(check);
-        if (gang_copy) |gang| self.alloc.free(gang.master_addr);
-        return;
-    };
+    const id_copy = try self.alloc.dupe(u8, id);
+    errdefer self.alloc.free(id_copy);
+    const inputs = try AssignmentInputs.init(self.alloc, image, command, gang_info, meta);
+    errdefer inputs.deinit(self.alloc);
+    const owner = try self.alloc.create(@import("../agent.zig").LocalAssignment);
+    errdefer self.alloc.destroy(owner);
     owner.* = .{};
-    self.container_lock.lockUncancelable(std.Options.debug_io);
-    self.local_containers.put(id_copy, owner) catch {
-        self.alloc.destroy(owner);
-        self.container_lock.unlock(std.Options.debug_io);
-        self.alloc.free(id_copy);
-        self.alloc.free(image_copy);
-        self.alloc.free(command_copy);
-        if (app_name_copy) |app_name| self.alloc.free(app_name);
-        if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
-        if (workload_name_copy) |workload_name| self.alloc.free(workload_name);
-        if (health_check_json_copy) |health_check_json| self.alloc.free(health_check_json);
-        if (gang_copy) |gang| self.alloc.free(gang.master_addr);
-        return;
-    };
-    self.container_lock.unlock(std.Options.debug_io);
 
-    if (gang_copy) |gang| {
-        log.info("starting gang assignment {s} (image: {s}, rank {d}/{d})", .{ id_copy, image_copy, gang.rank, gang.world_size });
-    } else {
-        log.info("starting assignment {s} (image: {s})", .{ id_copy, image_copy });
+    {
+        self.container_lock.lockUncancelable(std.Options.debug_io);
+        defer self.container_lock.unlock(std.Options.debug_io);
+        try self.local_containers.put(id_copy, owner);
+    }
+    errdefer {
+        self.container_lock.lockUncancelable(std.Options.debug_io);
+        defer self.container_lock.unlock(std.Options.debug_io);
+        _ = self.local_containers.remove(id_copy);
     }
 
-    self.assignment_workers.spawn(runAssignment, .{ self, owner, id_copy, image_copy, command_copy, gang_copy, AssignmentMeta{
-        .cpu_limit = meta.cpu_limit,
-        .memory_limit_mb = meta.memory_limit_mb,
-        .app_name = app_name_copy,
-        .workload_kind = workload_kind_copy,
-        .workload_name = workload_name_copy,
-        .health_check_json = health_check_json_copy,
-    } }) catch {
+    if (inputs.gang_info) |gang| {
+        log.info("starting gang assignment {s} (image: {s}, rank {d}/{d})", .{ id_copy, inputs.image, gang.rank, gang.world_size });
+    } else {
+        log.info("starting assignment {s} (image: {s})", .{ id_copy, inputs.image });
+    }
+
+    // Successful spawning transfers the inputs to the worker. The map owns
+    // the ID and progress record, which the worker borrows.
+    self.assignment_workers.spawn(runAssignment, .{ self, owner, id_copy, inputs }) catch |err| {
         log.warn("failed to spawn thread for assignment {s}", .{id_copy});
-        self.container_lock.lockUncancelable(std.Options.debug_io);
-        _ = self.local_containers.remove(id_copy);
-        self.alloc.destroy(owner);
-        self.container_lock.unlock(std.Options.debug_io);
-        self.alloc.free(id_copy);
-        self.alloc.free(image_copy);
-        self.alloc.free(command_copy);
-        if (app_name_copy) |app_name| self.alloc.free(app_name);
-        if (workload_kind_copy) |workload_kind| self.alloc.free(workload_kind);
-        if (workload_name_copy) |workload_name| self.alloc.free(workload_name);
-        if (health_check_json_copy) |health_check_json| self.alloc.free(health_check_json);
-        if (gang_copy) |gang| self.alloc.free(gang.master_addr);
+        return err;
     };
 }
 
@@ -332,20 +310,23 @@ const StopToken = struct {
     }
 };
 
-fn runAssignment(group_stopping: *const std.atomic.Value(bool), self: anytype, owner: *@import("../agent.zig").LocalAssignment, assignment_id: []const u8, image: []const u8, command: []const u8, gang_info: ?GangInfo, meta: AssignmentMeta) void {
-    // Published only after the thread releases all borrowed assignment fields.
+fn runAssignment(
+    group_stopping: *const std.atomic.Value(bool),
+    self: anytype,
+    owner: *@import("../agent.zig").LocalAssignment,
+    assignment_id: []const u8,
+    inputs: AssignmentInputs,
+) void {
+    // Defers run in reverse order. Release the inputs and finish the last cache
+    // access before allowing the tracking map to free the ID and progress record.
     defer owner.done.store(true, .release);
     defer agent_store.removeAssignment(assignment_id) catch {};
+    defer inputs.deinit(self.alloc);
     const stopping = StopToken{ .group = group_stopping, .assignment = &owner.canceled };
-    defer {
-        self.alloc.free(image);
-        self.alloc.free(command);
-        if (meta.app_name) |app_name| self.alloc.free(app_name);
-        if (meta.workload_kind) |workload_kind| self.alloc.free(workload_kind);
-        if (meta.workload_name) |workload_name| self.alloc.free(workload_name);
-        if (meta.health_check_json) |health_check_json| self.alloc.free(health_check_json);
-        if (gang_info) |gang| self.alloc.free(gang.master_addr);
-    }
+    const image = inputs.image;
+    const command = inputs.command;
+    const gang_info = inputs.gang_info;
+    const meta = inputs.meta;
 
     if (stopping.load(.acquire)) {
         setContainerState(self, assignment_id, .stopped);
@@ -556,9 +537,8 @@ fn runAssignment(group_stopping: *const std.atomic.Value(bool), self: anytype, o
     cleanup(container_id);
 }
 
-/// Keep the container and its cleanup on the assignment thread. Shutdown first
-/// asks the workload to exit, then kills it after a short grace period, so join
-/// cannot leave a running workload borrowing the agent's state indefinitely.
+/// Stop and reap the process on its assignment thread before releasing resources.
+/// Give a canceled workload five seconds to exit, then force termination.
 fn waitForAssignmentExit(c: anytype, stopping: anytype, stop_requested: bool) u8 {
     return waitForAssignmentExitWith(c, stopping, stop_requested, nowAwakeNanoseconds, runtime_wait.sleep);
 }
@@ -748,6 +728,87 @@ fn cleanup(container_id: []const u8) void {
     logs.deleteLogFile(container_id);
     container.cleanupContainerDirs(container_id);
     store.remove(container_id) catch {};
+}
+
+test "assignment startup releases owned inputs when worker admission fails" {
+    const agent_mod = @import("../agent.zig");
+    const RejectingWorkers = struct {
+        fn spawn(_: *@This(), comptime _: anytype, _: anytype) !void {
+            return error.Stopping;
+        }
+    };
+    const Fixture = struct {
+        alloc: std.mem.Allocator,
+        container_lock: std.Io.Mutex = .init,
+        local_containers: std.StringHashMap(*agent_mod.LocalAssignment),
+        assignment_workers: RejectingWorkers = .{},
+
+        fn rejectAssignment(alloc: std.mem.Allocator, with_metadata: bool) !void {
+            var fixture = @This(){
+                .alloc = alloc,
+                .local_containers = std.StringHashMap(*agent_mod.LocalAssignment).init(alloc),
+            };
+            defer fixture.local_containers.deinit();
+            const gang: ?GangInfo = if (with_metadata) .{
+                .rank = 1,
+                .world_size = 2,
+                .master_addr = "10.42.0.1",
+                .master_port = 29500,
+            } else null;
+            const meta: AssignmentMeta = if (with_metadata) .{
+                .app_name = "app",
+                .workload_kind = "training",
+                .workload_name = "worker",
+                .health_check_json = "{\"kind\":\"tcp\",\"port\":8080}",
+            } else .{};
+            startPendingAssignment(&fixture, "assignment", "image", "/bin/sh", gang, meta) catch |err| {
+                try std.testing.expectEqual(@as(u32, 0), fixture.local_containers.count());
+                if (err == error.Stopping) return;
+                return err;
+            };
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    // Exercise every allocation failure, including map insertion, before the
+    // worker group rejects admission. No entry or copied input may remain.
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Fixture.rejectAssignment, .{true});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Fixture.rejectAssignment, .{false});
+}
+
+test "assignment inputs own copies of request strings" {
+    const alloc = std.testing.allocator;
+    var request_text = "request".*;
+    const inputs = try AssignmentInputs.init(alloc, &request_text, &request_text, .{
+        .rank = 1,
+        .world_size = 2,
+        .master_addr = &request_text,
+        .master_port = 29500,
+    }, .{
+        .cpu_limit = 1500,
+        .memory_limit_mb = 1024,
+        .app_name = &request_text,
+        .workload_kind = &request_text,
+        .workload_name = &request_text,
+        .health_check_json = &request_text,
+    });
+    defer inputs.deinit(alloc);
+    @memset(&request_text, 0);
+
+    for ([_][]const u8{
+        inputs.image,
+        inputs.command,
+        inputs.gang_info.?.master_addr,
+        inputs.meta.app_name.?,
+        inputs.meta.workload_kind.?,
+        inputs.meta.workload_name.?,
+        inputs.meta.health_check_json.?,
+    }) |text| try std.testing.expectEqualStrings("request", text);
+    try std.testing.expectEqual(@as(i64, 1500), inputs.meta.cpu_limit);
+    try std.testing.expectEqual(@as(i64, 1024), inputs.meta.memory_limit_mb);
+    try std.testing.expectEqual(@as(u32, 1), inputs.gang_info.?.rank);
+    try std.testing.expectEqual(@as(u32, 2), inputs.gang_info.?.world_size);
+    try std.testing.expectEqual(@as(u16, 29500), inputs.gang_info.?.master_port);
 }
 
 test "parseHealthCheckJson parses http service checks" {

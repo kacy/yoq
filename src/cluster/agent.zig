@@ -1,18 +1,8 @@
-// agent — cluster agent runtime
+// Worker runtime for cluster assignments.
 //
-// an agent is a worker node that connects to the cluster server,
-// reports its capacity, and runs assigned containers. the agent
-// uses a pull-based model: it polls the server every few seconds
-// for heartbeat updates and work assignments.
-//
-// flow:
-//   1. register with server (POST /agents/register)
-//   2. enter loop: heartbeat + reconcile assignments every 5s
-//   3. for each pending assignment: pull image, start container, report status
-//   4. on shutdown, stop local containers and exit
-//
-// the agent reuses the existing container runtime for actually
-// running containers — same code path as the local orchestrator.
+// The agent registers with a server, reports capacity, and polls for assignments.
+// Each assignment runs on an owned background thread using the shared container
+// runtime. Shutdown cancels and joins those threads before releasing agent state.
 
 const std = @import("std");
 const enrollment_identity = @import("agent/enrollment_identity.zig");
@@ -48,7 +38,7 @@ pub const AgentError = error{
     InvalidResponse,
 };
 
-/// tracks the local state of a container spawned from an assignment.
+/// Local process state for a cluster assignment.
 pub const ContainerState = enum {
     starting,
     running,
@@ -56,6 +46,9 @@ pub const ContainerState = enum {
     failed,
 };
 
+/// Progress shared with an assignment worker. The tracking map owns this record;
+/// the worker sets done after releasing its inputs and completing its last
+/// cache access.
 pub const LocalAssignment = struct {
     state: ContainerState = .starting,
     canceled: std.atomic.Value(bool) = .init(false),
@@ -82,8 +75,8 @@ pub const Agent = struct {
     log_server_thread: ?std.Thread = null,
     assignment_workers: @import("../lib/task_workers.zig").Group(128) = .{},
 
-    /// tracks assignment_id → local container state.
-    /// protected by mutex since container threads update it.
+    /// Owns assignment IDs and progress records. Container threads borrow these
+    /// entries; container_lock protects the map and each record's state field.
     local_containers: std.StringHashMap(*LocalAssignment),
     container_lock: std.Io.Mutex,
 

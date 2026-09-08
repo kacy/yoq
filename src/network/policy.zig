@@ -1,23 +1,14 @@
-// policy — network policy sync between SQLite and BPF maps
+// Translate service policies stored in SQLite into BPF rules.
 //
-// bridges the gap between service-level policy rules (stored in SQLite
-// as service name pairs) and the IP-level BPF maps that enforce them.
+// Traffic is allowed by default. An allow rule isolates its source endpoints,
+// which can then reach only explicitly allowed destinations. A deny rule
+// blocks traffic from its source to its destination.
 //
-// default behavior: all traffic between containers is ALLOWED.
-// network policies are opt-in — calling isolate() on a source IP
-// switches it to allow-only mode, where only explicitly permitted
-// destinations are reachable. containers without any policy rules
-// can communicate freely with all other containers.
+// Sources resolve to container endpoints. Destinations resolve to endpoints
+// and service VIPs so policies cover direct and load-balanced traffic.
 //
-// Source services resolve to their container endpoints. Targets resolve to both
-// endpoints and service VIPs, covering direct and load-balanced traffic.
-// BPF maps are updated when:
-//   - policies are added/removed (full sync from SQLite)
-//   - containers start (incremental — apply rules for new IP)
-//   - containers stop (remove entries for old IP)
-//
-// full sync prepares a bounded generation before replacing active policy maps.
-// incremental operations add/remove entries for a single IP.
+// Full synchronization prepares a complete snapshot before replacing the
+// active filter. Incremental updates add or remove rules for one endpoint.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -57,8 +48,8 @@ const PreparedPolicy = struct {
 };
 const PolicyAction = policy_rules.Action;
 
-/// Configured policies require enforcement before releasing a new workload.
-/// Policy-free networking keeps BPF acceleration optional.
+/// Require policy enforcement before the container starts.
+/// Return without loading BPF when no policies are configured.
 pub fn requireForContainer(service_name: []const u8, address: [4]u8, alloc: std.mem.Allocator) !void {
     const prepared = try buildPolicySnapshot(alloc, .{ .name = service_name, .address = address });
     defer prepared.deinit(alloc);
@@ -72,7 +63,7 @@ pub fn requireForContainer(service_name: []const u8, address: [4]u8, alloc: std.
     try ebpf.requirePolicyRules(index, prepared.snapshot);
 }
 
-/// Initial startup also populates maps before replacing another process's filter.
+/// Populate policy maps before attaching the bridge filter during startup.
 pub fn installOnBridge(if_index: u32, alloc: std.mem.Allocator) !void {
     if (comptime builtin.os.tag != .linux) return error.NotSupported;
     const prepared = try buildPolicySnapshot(alloc, null);
@@ -80,11 +71,9 @@ pub fn installOnBridge(if_index: u32, alloc: std.mem.Allocator) !void {
     try ebpf.installPolicyRules(if_index, prepared.snapshot);
 }
 
-/// Prepare a complete policy generation and replace the active filters.
-///
-/// reads all network policy rules, resolves service names to IPs,
-/// and leaves the active generation intact if preparation fails.
-/// called after policy changes and during startup.
+/// Resolve policies and service addresses from one database snapshot,
+/// then replace the active policy filter. Preparation failures leave
+/// the active rules unchanged.
 pub fn syncPolicies(alloc: std.mem.Allocator) void {
     if (ebpf.getPolicyEnforcer() == null) return;
     var sink: GlobalPolicySink = .{};
@@ -132,15 +121,9 @@ fn buildPolicySnapshot(alloc: std.mem.Allocator, starting: ?StartingEndpoint) !P
     for (policies.items) |pol| {
         const action = parsePolicyAction(pol.action) orelse return error.InvalidPolicy;
         var src_ips = try read.addresses(alloc, pol.source_service, .source);
-        defer {
-            for (src_ips.items) |address| alloc.free(address);
-            src_ips.deinit(alloc);
-        }
+        defer freePolicyAddresses(alloc, &src_ips);
         var dst_ips = try read.addresses(alloc, pol.target_service, .target);
-        defer {
-            for (dst_ips.items) |address| alloc.free(address);
-            dst_ips.deinit(alloc);
-        }
+        defer freePolicyAddresses(alloc, &dst_ips);
         if (starting) |endpoint| {
             try requireRegisteredAddress(pol.source_service, src_ips.items, endpoint);
             try requireRegisteredAddress(pol.target_service, dst_ips.items, endpoint);
@@ -158,10 +141,7 @@ fn buildPolicySnapshot(alloc: std.mem.Allocator, starting: ?StartingEndpoint) !P
     return .{ .snapshot = try builder.finish(alloc), .requires_enforcement = policies.items.len != 0 };
 }
 
-/// incremental: apply relevant policy rules for a newly started container.
-///
-/// looks up all policies where the container's service name appears as
-/// either source or target, then adds BPF map entries for the new IP.
+/// Add rules for a new container's IP wherever its service is a source or target.
 pub fn applyForContainer(service_name: []const u8, container_ip: [4]u8, alloc: std.mem.Allocator) void {
     if (comptime builtin.os.tag != .linux) return;
     var update = ebpf.leasePolicyUpdate() orelse return;
@@ -192,7 +172,7 @@ fn applyForContainerWithEnforcer(service_name: []const u8, container_ip: [4]u8, 
         if (!is_source and !is_target) continue;
 
         if (is_source) {
-            // this container is the source — resolve target IPs
+            // Resolve both target endpoints and VIPs for the new source.
             if (action == .allow) {
                 enforcer.isolate(new_ip_net);
             }
@@ -201,10 +181,7 @@ fn applyForContainerWithEnforcer(service_name: []const u8, container_ip: [4]u8, 
                 log.warn("policy: failed to resolve target service '{s}' for container apply", .{pol.target_service});
                 continue;
             };
-            defer {
-                for (dst_ips.items) |dst_ip| alloc.free(dst_ip);
-                dst_ips.deinit(alloc);
-            }
+            defer freePolicyAddresses(alloc, &dst_ips);
 
             for (dst_ips.items) |dst_str| {
                 const dst_addr = ip_mod.parseIp(dst_str) orelse {
@@ -221,15 +198,12 @@ fn applyForContainerWithEnforcer(service_name: []const u8, container_ip: [4]u8, 
         }
 
         if (is_target) {
-            // this container is the target — resolve source IPs
+            // Resolve source endpoints for the new target.
             var src_ips = store.lookupServicePolicyAddresses(alloc, pol.source_service, .source) catch {
                 log.warn("policy: failed to resolve source service '{s}' for container apply", .{pol.source_service});
                 continue;
             };
-            defer {
-                for (src_ips.items) |src_ip| alloc.free(src_ip);
-                src_ips.deinit(alloc);
-            }
+            defer freePolicyAddresses(alloc, &src_ips);
 
             for (src_ips.items) |src_str| {
                 const src_addr = ip_mod.parseIp(src_str) orelse {
@@ -248,10 +222,7 @@ fn applyForContainerWithEnforcer(service_name: []const u8, container_ip: [4]u8, 
     }
 }
 
-/// remove all policy map entries containing this IP.
-///
-/// called when a container stops. iterates all policies and removes
-/// any (src, dst) entries that reference this IP.
+/// Remove a stopped container's isolation entry and policy pairs.
 pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
     if (comptime builtin.os.tag != .linux) return;
     var update = ebpf.leasePolicyUpdate() orelse return;
@@ -262,10 +233,8 @@ pub fn removeForContainer(container_ip: [4]u8, alloc: std.mem.Allocator) void {
 fn removeForContainerWithEnforcer(container_ip: [4]u8, alloc: std.mem.Allocator, enforcer: anytype) void {
     const old_ip_net = ebpf.ipToNetworkOrder(container_ip);
 
-    // remove from isolation map
     enforcer.unisolate(old_ip_net);
 
-    // remove all policy_map entries that reference this IP
     var policies = store.listNetworkPolicies(alloc) catch {
         log.warn("policy: failed to list policies for container removal", .{});
         return;
@@ -281,25 +250,18 @@ fn removeForContainerWithEnforcer(container_ip: [4]u8, alloc: std.mem.Allocator,
             continue;
         };
 
-        // The endpoint may already be removed from the registry. Remove its
-        // pairs against all remaining policy addresses without requiring that
-        // old address to still appear in a service lookup.
+        // The stopped endpoint may already be absent from the registry.
+        // Pair its IP with the remaining addresses to remove its rules.
         var src_ips = store.lookupServicePolicyAddresses(alloc, pol.source_service, .source) catch {
             log.warn("policy: failed to resolve source service '{s}' during removal", .{pol.source_service});
             continue;
         };
-        defer {
-            for (src_ips.items) |address| alloc.free(address);
-            src_ips.deinit(alloc);
-        }
+        defer freePolicyAddresses(alloc, &src_ips);
         var dst_ips = store.lookupServicePolicyAddresses(alloc, pol.target_service, .target) catch {
             log.warn("policy: failed to resolve target service '{s}' during removal", .{pol.target_service});
             continue;
         };
-        defer {
-            for (dst_ips.items) |address| alloc.free(address);
-            dst_ips.deinit(alloc);
-        }
+        defer freePolicyAddresses(alloc, &dst_ips);
         for (src_ips.items) |address| {
             const parsed = ip_mod.parseIp(address) orelse continue;
             const src = ebpf.ipToNetworkOrder(parsed);
@@ -319,6 +281,11 @@ fn removeForContainerWithEnforcer(container_ip: [4]u8, alloc: std.mem.Allocator,
     }
 }
 
+fn freePolicyAddresses(alloc: std.mem.Allocator, addresses: *std.ArrayList([]const u8)) void {
+    for (addresses.items) |address| alloc.free(address);
+    addresses.deinit(alloc);
+}
+
 fn parsePolicyAction(action: []const u8) ?PolicyAction {
     if (std.mem.eql(u8, action, "allow")) return .allow;
     if (std.mem.eql(u8, action, "deny")) return .deny;
@@ -328,18 +295,14 @@ fn parsePolicyAction(action: []const u8) ?PolicyAction {
 // -- tests --
 
 test "syncPolicies — no-op without enforcer" {
-    // when no policy enforcer is loaded, syncPolicies returns immediately.
-    // this exercises the `orelse return` guard at the top.
     syncPolicies(std.testing.allocator);
 }
 
 test "applyForContainer — no-op without enforcer" {
-    // when no policy enforcer is loaded, applyForContainer returns immediately.
     applyForContainer("myservice", .{ 10, 42, 0, 5 }, std.testing.allocator);
 }
 
 test "removeForContainer — no-op without enforcer" {
-    // when no policy enforcer is loaded, removeForContainer returns immediately.
     removeForContainer(.{ 10, 42, 0, 5 }, std.testing.allocator);
 }
 
