@@ -121,6 +121,18 @@ jobs:
       timeout-minutes: 10
       failure-artifact-name: namespace-stack-log
 
+  standard-devices:
+    name: standard-devices
+    needs:
+      - changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      job-name: standard-devices
+      command: bash tools/standard_devices_smoke.sh
+      timeout-minutes: 10
+      failure-artifact-name: standard-devices-log
+
   operator-smoke:
     name: operator-smoke
     needs:

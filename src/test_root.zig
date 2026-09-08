@@ -16,6 +16,7 @@ comptime {
     _ = @import("runtime/cgroups.zig");
     _ = @import("runtime/namespaces.zig");
     _ = @import("runtime/filesystem.zig");
+    _ = @import("runtime/filesystem/devices.zig");
     _ = @import("runtime/filesystem/mount_ops.zig");
     _ = @import("runtime/security.zig");
     _ = @import("runtime/process.zig");
