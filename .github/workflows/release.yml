@@ -164,6 +164,12 @@ jobs:
             ./zig-out/bin/yoq validate -f "$manifest"
           done
 
+  interoperability:
+    needs: validate-tag
+    uses: ./.github/workflows/_interoperability.yml
+    with:
+      ref: ${{ needs.validate-tag.outputs.commit }}
+
   release-build:
     name: release-build-${{ matrix.arch }}
     needs:
@@ -174,6 +180,7 @@ jobs:
       - dependency-security
       - docker-build
       - examples-validate
+      - interoperability
     strategy:
       fail-fast: false
       matrix:
