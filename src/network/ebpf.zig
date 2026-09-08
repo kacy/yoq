@@ -410,7 +410,7 @@ fn replacePolicyRulesLocked(bridge_if_index: u32, snapshot: policy_rules.Snapsho
     if (policy_enforcer) |current| {
         if (current.if_index == bridge_if_index) {
             if (policy_snapshot) |previous| {
-                if (previous.eql(snapshot) and try current.attachment.isCurrent()) return;
+                if (!current.legacy_cleanup_pending and previous.eql(snapshot) and try current.attachment.isCurrent()) return;
             }
         }
     }

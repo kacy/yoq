@@ -25,6 +25,7 @@ pub const PolicyEnforcer = struct {
     isolation_fd: posix.fd_t,
     if_index: u32,
     attachment: tc_attachment.Attachment,
+    legacy_cleanup_pending: bool,
 
     pub fn addDeny(self: *const PolicyEnforcer, src_ip: u32, dst_ip: u32) void {
         var key = PolicyKey{ .src_ip = src_ip, .dst_ip = dst_ip };
@@ -134,14 +135,15 @@ pub fn loadWithRules(bridge_if_index: u32, snapshot: rules.Snapshot) common.Ebpf
         resource_support.releaseBpfFd();
     }
 
-    const attachment = try tc_attachment.attach(bridge_if_index, .ingress, prog_fd, .policy);
+    const attached = try tc_attachment.attachWithStatus(bridge_if_index, .ingress, prog_fd, .policy);
 
     return .{
         .prog_fd = prog_fd,
         .policy_fd = policy_fd,
         .isolation_fd = isolation_fd,
         .if_index = bridge_if_index,
-        .attachment = attachment,
+        .attachment = attached.attachment,
+        .legacy_cleanup_pending = attached.legacy_cleanup_pending,
     };
 }
 
