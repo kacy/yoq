@@ -22,6 +22,8 @@ pub const secrets_create_table_sql = tables.secrets_create_table_sql;
 /// initialize the database schema. safe to call multiple times
 /// (uses CREATE TABLE IF NOT EXISTS).
 pub fn init(db: *sqlite.Db) SchemaError!void {
+    // Fresh connections must wait for concurrent writers before any schema work.
+    indexes.applyPragmas(db);
     try tables.initCoreTables(db);
     try tables.initClusterTables(db);
     try tables.initSecurityTables(db);
@@ -29,7 +31,6 @@ pub fn init(db: *sqlite.Db) SchemaError!void {
     try tables.initTrainingTables(db);
     try migrations.apply(db);
     try indexes.init(db);
-    indexes.applyPragmas(db);
 }
 
 /// build the default database path: ~/.local/share/yoq/yoq.db
@@ -469,4 +470,54 @@ test "init creates performance indexes" {
     } else {
         return error.TestUnexpectedResult;
     }
+}
+
+test "schema startup waits for an existing database writer" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_buf: [paths.max_path]u8 = undefined;
+    const directory_len = try tmp.dir.realPathFile(std.testing.io, ".", &directory_buf);
+    var file_buf: [paths.max_path]u8 = undefined;
+    const file = try std.fmt.bufPrintZ(&file_buf, "{s}/startup.db", .{directory_buf[0..directory_len]});
+    var writer = try sqlite.Db.init(.{ .mode = .{ .File = file }, .open_flags = .{ .write = true, .create = true } });
+    defer writer.deinit();
+    indexes.applyPragmas(&writer);
+    try writer.exec("CREATE TABLE fixture_lock (id INTEGER);", .{}, .{});
+    try writer.exec("BEGIN IMMEDIATE;", .{}, .{});
+
+    const Startup = struct {
+        file: [:0]const u8,
+        entered: std.atomic.Value(bool) = .init(false),
+        finished: std.atomic.Value(bool) = .init(false),
+        succeeded: bool = false,
+
+        fn run(self: *@This()) void {
+            defer self.finished.store(true, .release);
+            var db = sqlite.Db.init(.{ .mode = .{ .File = self.file }, .open_flags = .{ .write = true } }) catch return;
+            defer db.deinit();
+            self.entered.store(true, .release);
+            init(&db) catch return;
+            db.exec("INSERT INTO containers (id, rootfs, command, created_at) VALUES ('after-lock', '/fixture', '/bin/sh', 1);", .{}, .{}) catch return;
+            self.succeeded = true;
+        }
+    };
+    var startup: Startup = .{ .file = file };
+    const thread = try std.Thread.spawn(.{}, Startup.run, .{&startup});
+    defer {
+        // Also release the writer if an assertion fails before COMMIT.
+        if (sqlite.c.sqlite3_get_autocommit(writer.db) == 0) writer.exec("ROLLBACK;", .{}, .{}) catch {};
+        thread.join();
+    }
+    while (!startup.entered.load(.acquire) and !startup.finished.load(.acquire)) {
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(100), .awake);
+    try std.testing.expect(!startup.finished.load(.acquire));
+    try writer.exec("COMMIT;", .{}, .{});
+    while (!startup.finished.load(.acquire)) {
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(startup.succeeded);
+    const count = (try writer.one(i64, "SELECT count(*) FROM containers WHERE id = 'after-lock';", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 1), count);
 }
