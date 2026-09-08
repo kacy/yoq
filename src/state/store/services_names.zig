@@ -88,6 +88,35 @@ pub fn lookupAddresses(alloc: Allocator, name: []const u8) StoreError!std.ArrayL
     return lookupNamesInDb(lease.db, alloc, name);
 }
 
+pub const PolicyAddressRole = enum { source, target };
+
+/// Packet sources are endpoint addresses. Targets also include the service VIP,
+/// because policy runs before destination translation. Health/admin state does
+/// not remove an endpoint's network identity while it remains registered.
+pub fn lookupPolicyAddresses(alloc: Allocator, name: []const u8, role: PolicyAddressRole) StoreError!std.ArrayList([]const u8) {
+    var lease = try common.leaseDb();
+    defer lease.deinit();
+    var ips: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (ips.items) |address| alloc.free(address);
+        ips.deinit(alloc);
+    }
+    var stmt = lease.db.prepare(
+        "SELECT ip_address FROM service_endpoints WHERE service_name = ?" ++
+            " UNION SELECT ip_address FROM service_names WHERE name = ?" ++
+            " UNION SELECT vip_address FROM services WHERE service_name = ? AND ? = 1;",
+    ) catch return StoreError.ReadFailed;
+    defer stmt.deinit();
+    var iter = stmt.iterator(struct { ip_address: sqlite.Text }, .{ name, name, name, @as(i64, if (role == .target) 1 else 0) }) catch return StoreError.ReadFailed;
+    while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
+        ips.append(alloc, row.ip_address.data) catch {
+            alloc.free(row.ip_address.data);
+            return StoreError.ReadFailed;
+        };
+    }
+    return ips;
+}
+
 pub fn list(alloc: Allocator) StoreError!std.ArrayList(ServiceNameRecord) {
     var lease = try common.leaseDb();
     defer lease.deinit();
