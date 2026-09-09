@@ -86,19 +86,16 @@ pub const CertStore = struct {
             key_tag: sqlite.Blob,
         };
 
+        // row decoding can fail after allocating only some columns.
+        var row_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer row_arena.deinit();
         const row = (self.db.oneAlloc(
             CertRow,
-            self.allocator,
+            row_arena.allocator(),
             "SELECT cert_pem, encrypted_key, key_nonce, key_tag FROM certificates WHERE domain = ?;",
             .{},
             .{domain},
         ) catch return common.CertError.ReadFailed) orelse return common.CertError.NotFound;
-        defer {
-            self.allocator.free(row.cert_pem.data);
-            self.allocator.free(row.encrypted_key.data);
-            self.allocator.free(row.key_nonce.data);
-            self.allocator.free(row.key_tag.data);
-        }
 
         if (row.key_nonce.data.len != common.nonce_length) return common.CertError.DecryptionFailed;
         if (row.key_tag.data.len != common.tag_length) return common.CertError.DecryptionFailed;
@@ -115,11 +112,7 @@ pub const CertStore = struct {
             self.allocator.free(key_pem);
         }
 
-        const cert_pem = self.allocator.dupe(u8, row.cert_pem.data) catch {
-            key_support.secureZero(key_pem);
-            self.allocator.free(key_pem);
-            return common.CertError.AllocFailed;
-        };
+        const cert_pem = self.allocator.dupe(u8, row.cert_pem.data) catch return common.CertError.AllocFailed;
 
         return .{ .cert_pem = cert_pem, .key_pem = key_pem };
     }
