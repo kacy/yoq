@@ -33,8 +33,9 @@ def run(*args):
     return subprocess.run(args, check=True, capture_output=True)
 
 
-def inside(binary, outer):
+def inside(binary, outer, outer_mount):
     assert os.readlink("/proc/self/ns/net") != outer
+    assert os.readlink("/proc/self/ns/mnt") != outer_mount
     run("ip", "link", "set", "lo", "up")
     # Missing bridge must fail closed, before any wildcard listener exists.
     missing = subprocess.run([str(binary)], capture_output=True, timeout=3)
@@ -48,7 +49,7 @@ def inside(binary, outer):
     run("ip", "addr", "add", "10.42.2.1/24", "dev", "yoq0")
     run("ip", "addr", "add", "10.42.0.1/24", "dev", "yoq0")
     run("ip", "link", "set", "yoq0", "up")
-    client = subprocess.Popen(["unshare", "--net", "sleep", "90"])
+    client = subprocess.Popen(["unshare", "--net", "sleep", "120"])
     server = None
     followers = []
     follower_logs = []
@@ -95,23 +96,22 @@ def inside(binary, outer):
             stub.sendto(b"host-dns-ok", peer)
             assert probe.recv(512) == b"host-dns-ok"
         query("127.0.0.1", False)
-        def start_follower():
+        def start_follower(*args):
             log = tempfile.TemporaryFile()
             follower_logs.append(log)
-            process = subprocess.Popen([str(binary)], stdout=subprocess.PIPE, stderr=log)
+            process = subprocess.Popen([str(binary), *args], stdout=subprocess.PIPE, stderr=log)
             followers.append(process)
             readable, _, _ = select.select([process.stdout], [], [], 3)
             assert readable, os.pread(log.fileno(), 65536, 0)
             assert process.stdout.readline() == b"dns fixture ready owned=false\n"
-            process.stdout.close()
             return process
 
         def check_gateways():
             for address in ("10.42.0.1", "10.42.2.1"):
                 run(*prefix, sys.executable, str(Path(__file__).resolve()), "--query", address, "--expect")
 
-        def wait_for_takeover(survivor):
-            deadline = time.monotonic() + 3
+        def wait_for_takeover(survivor, timeout=3):
+            deadline = time.monotonic() + timeout
             while True:
                 assert survivor.poll() is None, "surviving resolver exited"
                 try:
@@ -137,7 +137,17 @@ def inside(binary, outer):
         successor.terminate()
         successor.wait(timeout=3)
         wait_for_takeover(replacement)
+        # recovery must also happen through the production 30-second audit loop.
+        automatic = start_follower("--audit-loop")
+        replacement.terminate()
+        replacement.wait(timeout=3)
+        wait_for_takeover(automatic, timeout=40)
+        readable, _, _ = select.select([automatic.stdout], [], [], 3)
+        assert readable, "the automatic audit did not complete"
+        assert automatic.stdout.readline() == b"dns audit complete owned=true\n"
+        check_gateways()
         query("127.0.0.1", False)
+        print("DNS kernel: the automatic audit restores both gateways after the owner exits", flush=True)
         print("DNS kernel: both gateways recover after repeated owner exits; follower exit leaves DNS available", flush=True)
         print("DNS kernel: local and node gateways coexist with host DNS; unrelated ingress and loopback rejected", flush=True)
     finally:
@@ -158,19 +168,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--inside")
+    parser.add_argument("--outer-mount")
     parser.add_argument("--query")
     parser.add_argument("--expect", action="store_true")
     args = parser.parse_args()
     if args.query:
         query(args.query, args.expect)
     elif args.inside:
-        inside(args.binary.resolve(), args.inside)
+        inside(args.binary.resolve(), args.inside, args.outer_mount)
     else:
         assert os.geteuid() == 0
         with tempfile.TemporaryDirectory(prefix="yoq-dns-bridge-") as home:
-            subprocess.run(["unshare", "--net", sys.executable, str(Path(__file__).resolve()),
-                            "--binary", str(args.binary.resolve()), "--inside", os.readlink("/proc/self/ns/net")],
-                           env=dict(os.environ, HOME=home), check=True)
+            subprocess.run(["unshare", "--net", "--mount", "--propagation", "private", sys.executable, str(Path(__file__).resolve()),
+                            "--binary", str(args.binary.resolve()), "--inside", os.readlink("/proc/self/ns/net"),
+                            "--outer-mount", os.readlink("/proc/self/ns/mnt")],
+                           env=dict(os.environ, HOME=home), check=True, timeout=120)
 
 
 if __name__ == "__main__":
