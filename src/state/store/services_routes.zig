@@ -228,7 +228,9 @@ fn listMethodsForDb(
     defer stmt.deinit();
     var iter = stmt.iterator(route_types.ServiceHttpRouteMethodRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        methods.append(alloc, route_types.rowToServiceHttpRouteMethodRecord(row)) catch return StoreError.ReadFailed;
+        const method = route_types.rowToServiceHttpRouteMethodRecord(row);
+        errdefer method.deinit(alloc);
+        methods.append(alloc, method) catch return StoreError.ReadFailed;
     }
     return methods.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
 }
@@ -252,7 +254,9 @@ fn listHeadersForDb(
     defer stmt.deinit();
     var iter = stmt.iterator(route_types.ServiceHttpRouteHeaderRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        headers.append(alloc, route_types.rowToServiceHttpRouteHeaderRecord(row)) catch return StoreError.ReadFailed;
+        const header = route_types.rowToServiceHttpRouteHeaderRecord(row);
+        errdefer header.deinit(alloc);
+        headers.append(alloc, header) catch return StoreError.ReadFailed;
     }
     return headers.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
 }
@@ -276,7 +280,9 @@ fn listBackendsForDb(
     defer stmt.deinit();
     var iter = stmt.iterator(route_types.ServiceHttpRouteBackendRow, .{ service_name, route_name }) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        backends.append(alloc, route_types.rowToServiceHttpRouteBackendRecord(row)) catch return StoreError.ReadFailed;
+        const backend = route_types.rowToServiceHttpRouteBackendRecord(row);
+        errdefer backend.deinit(alloc);
+        backends.append(alloc, backend) catch return StoreError.ReadFailed;
     }
     return backends.toOwnedSlice(alloc) catch return StoreError.ReadFailed;
 }
