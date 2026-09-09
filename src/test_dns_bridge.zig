@@ -15,5 +15,12 @@ pub fn main(init: std.process.Init) !void {
     dns.stopResolver();
     if (dns.resolverRunning()) return error.ResolverStopFailed;
     try startGateways();
-    try std.Io.sleep(init.io, std.Io.Duration.fromSeconds(30), .awake);
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.File.stdout().writer(init.io, &output_buffer);
+    try output.interface.print("dns fixture ready owned={}\n", .{dns.resolverOwnedByCurrentProcess()});
+    try output.interface.flush();
+    for (0..900) |_| {
+        _ = dns.refreshResolvers();
+        try std.Io.sleep(init.io, std.Io.Duration.fromMilliseconds(100), .awake);
+    }
 }
