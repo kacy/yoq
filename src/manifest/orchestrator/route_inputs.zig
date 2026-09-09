@@ -60,6 +60,7 @@ fn convertRoute(alloc: std.mem.Allocator, route: spec.HttpProxyRoute, target_por
         .retries = route.retries,
         .connect_timeout_ms = route.connect_timeout_ms,
         .request_timeout_ms = route.request_timeout_ms,
+        .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
         .target_port = if (target_port) |port| port else null,
         .preserve_host = route.preserve_host,
         .retry_on_5xx = route.retry_on_5xx,
@@ -82,6 +83,7 @@ fn checkRouteInputs(alloc: std.mem.Allocator) !void {
             .retries = 2,
             .connect_timeout_ms = 1234,
             .request_timeout_ms = 5678,
+            .http2_idle_timeout_ms = 45000,
             .preserve_host = false,
             .retry_on_5xx = false,
             .circuit_breaker_threshold = 7,
@@ -104,6 +106,7 @@ fn checkRouteInputs(alloc: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(i64, 2), first.retries);
     try std.testing.expectEqual(@as(i64, 1234), first.connect_timeout_ms);
     try std.testing.expectEqual(@as(i64, 5678), first.request_timeout_ms);
+    try std.testing.expectEqual(@as(i64, 45000), first.http2_idle_timeout_ms);
     try std.testing.expectEqual(@as(i64, 7), first.circuit_breaker_threshold);
     try std.testing.expectEqual(@as(i64, 9000), first.circuit_breaker_timeout_ms);
     try std.testing.expect(!first.preserve_host and !first.retry_on_5xx);
@@ -123,4 +126,26 @@ test "route inputs support empty routes and services without ports" {
     const inputs = try RouteInputs.init(alloc, &.{.{ .name = "default", .host = "example.test" }}, null);
     defer inputs.deinit(alloc);
     try std.testing.expectEqual(@as(?i64, null), inputs.items[0].target_port);
+}
+
+test "route inputs persist configured http2 idle timeouts" {
+    const common = @import("../../state/store/common.zig");
+    try common.initTestDb();
+    defer common.deinitTestDb();
+    const alloc = std.testing.allocator;
+    for ([_]u32{ 45000, 1, std.math.maxInt(u32), 30000 }) |timeout| {
+        const inputs = try RouteInputs.init(alloc, &.{.{
+            .name = "default",
+            .host = "api.example.test",
+            .http2_idle_timeout_ms = timeout,
+        }}, 8080);
+        defer inputs.deinit(alloc);
+        const synced = try store.syncServiceConfig(alloc, "api", "consistent_hash", "off", inputs.items);
+        defer synced.deinit(alloc);
+        const stored = try store.getService(alloc, "api");
+        defer stored.deinit(alloc);
+        try std.testing.expectEqual(@as(usize, 1), stored.http_routes.len);
+        try std.testing.expectEqual(@as(i64, timeout), stored.http_routes[0].http2_idle_timeout_ms);
+        try std.testing.expectEqual(@as(?i64, timeout), stored.http_proxy_http2_idle_timeout_ms);
+    }
 }
