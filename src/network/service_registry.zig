@@ -803,6 +803,7 @@ fn assignCompatProxyFields(alloc: Allocator, service: *ServiceState, definition:
         service.http_proxy_circuit_breaker_threshold = primary.circuit_breaker_threshold;
         service.http_proxy_circuit_breaker_timeout_ms = primary.circuit_breaker_timeout_ms;
         try replaceOptionalOwned(alloc, &service.http_proxy_mirror_service, primary.mirror_service);
+        service.peer_mode = definition.peer_mode;
         return;
     }
 
@@ -1191,6 +1192,52 @@ test "service snapshots include optional http proxy policy" {
     try std.testing.expectEqual(@as(?u32, 5000), snapshot.http_proxy_request_timeout_ms);
     try std.testing.expectEqual(@as(?u32, 30000), snapshot.http_proxy_http2_idle_timeout_ms);
     try std.testing.expectEqual(@as(?bool, false), snapshot.http_proxy_preserve_host);
+}
+
+test "service peer mode survives creation and updates with every route form" {
+    const definitions = [_]ServiceDefinition{
+        .{
+            .service_name = "api",
+            .vip_address = "10.43.0.2",
+            .lb_policy = "consistent_hash",
+            .http_routes = &.{.{ .route_name = "api", .host = "api.internal" }},
+        },
+        .{
+            .service_name = "api",
+            .vip_address = "10.43.0.2",
+            .lb_policy = "consistent_hash",
+            .http_proxy_host = "api.internal",
+        },
+        .{
+            .service_name = "api",
+            .vip_address = "10.43.0.2",
+            .lb_policy = "consistent_hash",
+        },
+    };
+    const modes = [_]spec.TlsConfig.PeerMode{ .require, .warn, .off };
+
+    for (definitions) |base_definition| {
+        for (modes) |initial_mode| {
+            var registry = Registry.init(std.testing.allocator);
+            defer registry.deinit();
+            var definition = base_definition;
+            definition.peer_mode = initial_mode;
+            try registry.upsertService(definition);
+            {
+                const snapshot = try registry.snapshotService(std.testing.allocator, "api");
+                defer snapshot.deinit(std.testing.allocator);
+                try std.testing.expectEqual(initial_mode, snapshot.peer_mode);
+            }
+
+            for (modes) |updated_mode| {
+                definition.peer_mode = updated_mode;
+                try registry.upsertService(definition);
+                const snapshot = try registry.snapshotService(std.testing.allocator, "api");
+                defer snapshot.deinit(std.testing.allocator);
+                try std.testing.expectEqual(updated_mode, snapshot.peer_mode);
+            }
+        }
+    }
 }
 
 test "node loss and recovery toggle endpoint eligibility" {

@@ -1463,7 +1463,7 @@ test "resolveRoute prefers method-specific route" {
     try std.testing.expectEqualStrings("POST", route.method_matches[0].method);
 }
 
-test "resolveUpstream returns the first eligible endpoint" {
+test "resolveUpstream returns the first eligible endpoint with the required peer mode" {
     const store = @import("../../state/store.zig");
 
     try store.initTestDb();
@@ -1484,6 +1484,7 @@ test "resolveUpstream returns the first eligible endpoint" {
         .lb_policy = "consistent_hash",
         .http_proxy_host = "api.internal",
         .http_proxy_path_prefix = "/v1",
+        .peer_mode = "require",
         .created_at = 1000,
         .updated_at = 1000,
     });
@@ -1520,6 +1521,7 @@ test "resolveUpstream returns the first eligible endpoint" {
     try std.testing.expectEqualStrings("api-2", upstream.endpoint_id);
     try std.testing.expectEqualStrings("10.42.0.10", upstream.address);
     try std.testing.expectEqual(@as(u16, 8081), upstream.port);
+    try std.testing.expectEqual(.require, upstream.peer_mode);
 }
 
 test "snapshot exposes L7 proxy observability counters" {
