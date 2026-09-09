@@ -252,7 +252,7 @@ fn readHttp1ResponseFrom(alloc: std.mem.Allocator, wire: anytype, max_bytes: usi
     };
     const headers = response[final_start..headers_end];
     const wants_close = http1ResponseWantsClose(headers);
-    const framing = responseBodyFraming(headers, status, head_request);
+    const framing = try responseBodyFraming(headers, status, head_request);
 
     switch (framing) {
         .upgrade => return error.UnsupportedUpgrade,
@@ -324,22 +324,83 @@ fn shrinkResponse(alloc: std.mem.Allocator, response: []u8, len: usize, reusable
     return .{ .bytes = bytes, .reusable = reusable };
 }
 
-/// pick the body framing from the response headers. mirrors RFC 9112 message
-/// body rules for the cases we care about; anything we cannot classify becomes
-/// connection-close (EOF) delimited so we never misframe.
-fn responseBodyFraming(headers: []const u8, status: u16, head_request: bool) BodyFraming {
+/// apply RFC 9112 section 6.3 before forwarding bytes or reusing the socket.
+/// reject ambiguous lengths before reading a body or returning a response.
+fn responseBodyFraming(headers: []const u8, status: u16, head_request: bool) error{InvalidResponse}!BodyFraming {
     if (status == 101) return .upgrade;
     if (status >= 100 and status < 200) return .empty;
     if (head_request or status == 204 or status == 304) return .empty;
 
-    if (http.findHeaderValue(headers, "Transfer-Encoding")) |te| {
-        if (headerListContains(te, "chunked")) return .chunked;
+    var transfer: TransferCodings = .{};
+    var content_length: ?usize = null;
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    _ = lines.next(); // status line
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidResponse;
+        const name = line[0..colon];
+        if (name.len == 0) return error.InvalidResponse;
+        for (name) |byte| if (!isHeaderTokenByte(byte)) return error.InvalidResponse;
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.ascii.eqlIgnoreCase(name, "Transfer-Encoding")) {
+            try transfer.add(value);
+        } else if (std.ascii.eqlIgnoreCase(name, "Content-Length")) {
+            if (content_length != null or value.len == 0) return error.InvalidResponse;
+            for (value) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidResponse;
+            content_length = std.fmt.parseInt(usize, value, 10) catch return error.InvalidResponse;
+        }
     }
-    if (http.findHeaderValue(headers, "Content-Length") != null) {
-        const len = http.findContentLength(headers) catch return .eof;
-        return .{ .fixed = len };
+    if (transfer.present) {
+        if (content_length != null) return error.InvalidResponse;
+        return if (transfer.last_chunked) .chunked else .eof;
     }
+    if (content_length) |len| return .{ .fixed = len };
     return .eof;
+}
+
+/// repeated fields extend the same coding list, in wire order. quoted parameter
+/// values can contain commas, so a plain comma split would choose the wrong end.
+const TransferCodings = struct {
+    present: bool = false,
+    last_chunked: bool = false,
+    seen_chunked: bool = false,
+
+    fn add(self: *TransferCodings, value: []const u8) error{InvalidResponse}!void {
+        var start: usize = 0;
+        var quoted = false;
+        var escaped = false;
+        for (value, 0..) |byte, index| {
+            if (byte < 0x20 and byte != '\t' or byte == 0x7f) return error.InvalidResponse;
+            if (escaped) {
+                escaped = false;
+            } else if (quoted and byte == '\\') {
+                escaped = true;
+            } else if (byte == '"') {
+                quoted = !quoted;
+            } else if (!quoted and byte == ',') {
+                try self.addCoding(value[start..index]);
+                start = index + 1;
+            }
+        }
+        if (quoted or escaped) return error.InvalidResponse;
+        try self.addCoding(value[start..]);
+    }
+
+    fn addCoding(self: *TransferCodings, raw: []const u8) error{InvalidResponse}!void {
+        const parameter_start = std.mem.indexOfScalar(u8, raw, ';') orelse raw.len;
+        const name = std.mem.trim(u8, raw[0..parameter_start], " \t");
+        if (name.len == 0) return error.InvalidResponse;
+        for (name) |byte| if (!isHeaderTokenByte(byte)) return error.InvalidResponse;
+        const chunked = std.ascii.eqlIgnoreCase(name, "chunked");
+        if (chunked and (self.seen_chunked or parameter_start != raw.len)) return error.InvalidResponse;
+        self.present = true;
+        self.last_chunked = chunked;
+        self.seen_chunked = self.seen_chunked or chunked;
+    }
+};
+
+fn isHeaderTokenByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", byte) != null;
 }
 
 /// true when the upstream signalled the connection should close (explicit
@@ -404,21 +465,21 @@ test "headerListContains matches tokens case-insensitively" {
 }
 
 test "responseBodyFraming reads Content-Length, chunked, and close-delimited bodies" {
-    const cl = responseBodyFraming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", 200, false);
+    const cl = try responseBodyFraming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", 200, false);
     try std.testing.expectEqual(@as(usize, 5), cl.fixed);
 
-    const chunked = responseBodyFraming("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", 200, false);
+    const chunked = try responseBodyFraming("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", 200, false);
     try std.testing.expect(chunked == .chunked);
 
-    const none = responseBodyFraming("HTTP/1.1 200 OK\r\n\r\n", 200, false);
+    const none = try responseBodyFraming("HTTP/1.1 200 OK\r\n\r\n", 200, false);
     try std.testing.expect(none == .eof);
 }
 
 test "responseBodyFraming treats HEAD, 204, 304, and 1xx specially" {
-    try std.testing.expect(responseBodyFraming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", 200, true) == .empty);
-    try std.testing.expect(responseBodyFraming("HTTP/1.1 204 No Content\r\n\r\n", 204, false) == .empty);
-    try std.testing.expect(responseBodyFraming("HTTP/1.1 304 Not Modified\r\n\r\n", 304, false) == .empty);
-    try std.testing.expect(responseBodyFraming("HTTP/1.1 100 Continue\r\n\r\n", 100, false) == .empty);
+    try std.testing.expect((try responseBodyFraming("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", 200, true)) == .empty);
+    try std.testing.expect((try responseBodyFraming("HTTP/1.1 204 No Content\r\n\r\n", 204, false)) == .empty);
+    try std.testing.expect((try responseBodyFraming("HTTP/1.1 304 Not Modified\r\n\r\n", 304, false)) == .empty);
+    try std.testing.expect((try responseBodyFraming("HTTP/1.1 100 Continue\r\n\r\n", 100, false)) == .empty);
 }
 
 test "http1ResponseWantsClose honors Connection header and HTTP/1.0" {
@@ -504,6 +565,79 @@ const FakeSession = struct {
         return n;
     }
 };
+
+test "response framing rejects ambiguous lengths before reading body fragments" {
+    const invalid_headers = [_][]const u8{
+        "Transfer-Encoding: gzip\r\nContent-Length: 0\r\n",
+        "Content-Length: 0\r\nTransfer-Encoding: chunked\r\n",
+        "Content-Length: 0\r\nContent-Length: 4\r\n",
+        "Content-Length: 4\r\ncontent-length: 4\r\n",
+        "Content-Length: 4, 4\r\n",
+        "Content-Length: +4\r\n",
+        "Content-Length: 1_0\r\n",
+        "Content-Length: invalid\r\n",
+        "Content-Length : 0\r\n",
+        "Content-Length: \r\n",
+        "Content-Length: 999999999999999999999999999999999\r\n",
+        "Transfer-Encoding: \r\n",
+        "Transfer-Encoding: chunked, chunked\r\n",
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n",
+        "Transfer-Encoding: chunked; invalid=yes\r\n",
+        "Transfer-Encoding: gzip; value=\"unfinished\r\n",
+    };
+    for (invalid_headers) |fields| {
+        const headers = try std.fmt.allocPrint(std.testing.allocator, "HTTP/1.1 200 OK\r\n{s}\r\n", .{fields});
+        defer std.testing.allocator.free(headers);
+        var reader = FakeSession{ .chunks = &.{ headers, "body" } };
+        // the body arrives separately: an early return must not pool this socket.
+        const result = readHttp1ResponseFrom(std.testing.allocator, &reader, 4096, false) catch |err| {
+            try std.testing.expect(err == error.InvalidResponse);
+            try std.testing.expectEqual(@as(usize, 1), reader.index);
+            continue;
+        };
+        defer std.testing.allocator.free(result.bytes);
+        return error.TestExpectedError;
+    }
+}
+
+test "response framing uses the final transfer coding across repeated fields" {
+    const cases = [_]struct { fields: []const u8, chunked: bool }{
+        .{ .fields = "Transfer-Encoding: gzip, chunked\r\n", .chunked = true },
+        .{ .fields = "Transfer-Encoding: gzip\r\ntransfer-encoding: ChUnKeD\r\n", .chunked = true },
+        .{ .fields = "Transfer-Encoding: custom; value=\"a,b\", chunked\r\n", .chunked = true },
+        .{ .fields = "Transfer-Encoding: chunked, gzip\r\n", .chunked = false },
+        .{ .fields = "Transfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n", .chunked = false },
+        .{ .fields = "Transfer-Encoding: gzip; value=\"a,chunked\"\r\n", .chunked = false },
+    };
+    for (cases) |case| {
+        const headers = try std.fmt.allocPrint(std.testing.allocator, "HTTP/1.1 200 OK\r\n{s}\r\n", .{case.fields});
+        defer std.testing.allocator.free(headers);
+        // opaque EOF-delimited bytes can resemble a complete chunked body.
+        const body = "0\r\n\r\n";
+        var reader = FakeSession{ .chunks = &.{ headers, body, "tail" } };
+        const result = try readHttp1ResponseFrom(std.testing.allocator, &reader, 4096, false);
+        defer std.testing.allocator.free(result.bytes);
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}{s}", .{ headers, body, if (case.chunked) "" else "tail" });
+        defer std.testing.allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, result.bytes);
+        try std.testing.expectEqual(case.chunked, result.reusable);
+        try std.testing.expectEqual(@as(usize, if (case.chunked) 2 else 3), reader.index);
+    }
+}
+
+test "response framing preserves bodyless precedence and content length whitespace" {
+    const ambiguous = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nContent-Length: 0\r\n\r\n";
+    try std.testing.expect((try responseBodyFraming(ambiguous, 200, true)) == .empty);
+    for ([_]u16{ 100, 103, 204, 304 }) |status| {
+        try std.testing.expect((try responseBodyFraming(ambiguous, status, false)) == .empty);
+    }
+    var reader = FakeSession{ .chunks = &.{ "HTTP/1.1 200 OK\r\nContent-Length:\t 2 \t\r\n\r\n", "ok", "unread" } };
+    const result = try readHttp1ResponseFrom(std.testing.allocator, &reader, 4096, false);
+    defer std.testing.allocator.free(result.bytes);
+    try std.testing.expect(std.mem.endsWith(u8, result.bytes, "\r\n\r\nok"));
+    try std.testing.expect(result.reusable);
+    try std.testing.expectEqual(@as(usize, 2), reader.index);
+}
 
 test "response framing TLS reader stops at a complete response without EOF" {
     var sess = FakeSession{ .chunks = &.{ "HTTP/1.1 103 Early Hints\r\nLink: /style.css\r\n\r\nHTTP/1.1 200 OK\r\n", "Content-Length: 2\r\n\r\nok", "unread" } };
