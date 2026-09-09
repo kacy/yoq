@@ -744,10 +744,7 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
 
 fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Error!std.ArrayList(HttpRouteState) {
     var routes: std.ArrayList(HttpRouteState) = .empty;
-    errdefer {
-        for (routes.items) |route| route.deinit(alloc);
-        routes.deinit(alloc);
-    }
+    errdefer deinitRoutes(alloc, &routes);
 
     if (definition.http_routes.len > 0) {
         for (definition.http_routes) |route| {
