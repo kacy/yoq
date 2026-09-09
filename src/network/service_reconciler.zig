@@ -619,55 +619,59 @@ fn auditServiceLocked(service_name: []const u8, runtime_services: *const std.Arr
     };
     defer if (db_service) |service| service.deinit(alloc);
 
-    const mismatch = try computeAuditMismatch(alloc, service_name, runtime_service, db_service);
-    defer if (mismatch) |value| alloc.free(value.reason);
+    const mismatch = (try computeAuditMismatch(alloc, service_name, runtime_service, db_service)) orelse {
+        clearServiceFailureLocked(service_name, authoritative);
+        return;
+    };
+    defer alloc.free(mismatch.reason);
 
-    if (mismatch) |value| {
-        audit_mismatch_services_total += 1;
-        noteAuditMismatchKind(value.kind);
-        last_mismatch_at = now;
-        log.warn("service reconciler: audit mismatch service={s} kind={s} reason={s}", .{ service_name, auditMismatchKindLabel(value.kind), value.reason });
-        try ensureDegradedServiceLocked(service_name);
-        if (!authoritative) return;
+    audit_mismatch_services_total += 1;
+    noteAuditMismatchKind(mismatch.kind);
+    last_mismatch_at = now;
+    log.warn("service reconciler: audit mismatch service={s} kind={s} reason={s}", .{ service_name, auditMismatchKindLabel(mismatch.kind), mismatch.reason });
+    try ensureDegradedServiceLocked(service_name);
+    if (!authoritative) return;
 
-        service_registry_runtime.markReconcileFailed(service_name, value.reason) catch |e| {
-            log.warn("service reconciler: failed to mark {s} as failed: {}", .{ service_name, e });
+    // keep the mismatch visible while backoff delays the next repair.
+    service_registry_runtime.markReconcileFailed(service_name, mismatch.reason) catch |err| {
+        log.warn("service reconciler: failed to mark {s} as failed: {}", .{ service_name, err });
+    };
+    if (!retryDueLocked(service_name, now)) return;
+
+    if (!try repairServiceLocked(service_name, db_service)) {
+        noteRetryFailureLocked(service_name, now) catch |err| {
+            log.warn("service reconciler: failed to track retry backoff for {s}: {}", .{ service_name, err });
         };
-
-        if (!retryDueLocked(service_name, now)) return;
-
-        service_registry_runtime.syncServiceFromStore(service_name);
-        try reconcileServiceLocked(service_name);
-        proxy_control_plane.refreshIfEnabled();
-
-        const refreshed_runtime = service_registry_runtime.snapshotService(alloc, service_name) catch |err| switch (err) {
-            error.ServiceNotFound => null,
-            else => return err,
-        };
-        defer if (refreshed_runtime) |service| service.deinit(alloc);
-
-        const repaired_mismatch = try computeAuditMismatch(alloc, service_name, refreshed_runtime, db_service);
-        defer if (repaired_mismatch) |value_inner| alloc.free(value_inner.reason);
-
-        if (repaired_mismatch == null) {
-            audit_repairs_total += 1;
-            removeDegradedServiceLocked(service_name);
-            clearRetryStateLocked(service_name);
-            service_registry_runtime.markReconcileSucceeded(service_name) catch |e| {
-                log.warn("service reconciler: failed to mark {s} as succeeded: {}", .{ service_name, e });
-            };
-        } else {
-            noteRetryFailureLocked(service_name, now) catch |err| {
-                log.warn("service reconciler: failed to track retry backoff for {s}: {}", .{ service_name, err });
-            };
-        }
         return;
     }
 
+    audit_repairs_total += 1;
+    clearServiceFailureLocked(service_name, true);
+}
+
+fn repairServiceLocked(service_name: []const u8, db_service: ?store.ServiceRecord) !bool {
+    const alloc = std.heap.page_allocator;
+    service_registry_runtime.syncServiceFromStore(service_name);
+    try reconcileServiceLocked(service_name);
+    proxy_control_plane.refreshIfEnabled();
+
+    const refreshed_runtime = service_registry_runtime.snapshotService(alloc, service_name) catch |err| switch (err) {
+        error.ServiceNotFound => null,
+        else => return err,
+    };
+    defer if (refreshed_runtime) |service| service.deinit(alloc);
+
+    // verify the repair against the durable snapshot from this audit.
+    const mismatch = try computeAuditMismatch(alloc, service_name, refreshed_runtime, db_service);
+    defer if (mismatch) |value| alloc.free(value.reason);
+    return mismatch == null;
+}
+
+fn clearServiceFailureLocked(service_name: []const u8, authoritative: bool) void {
     removeDegradedServiceLocked(service_name);
     clearRetryStateLocked(service_name);
-    if (authoritative) service_registry_runtime.markReconcileSucceeded(service_name) catch |e| {
-        log.warn("service reconciler: failed to mark {s} as succeeded: {}", .{ service_name, e });
+    if (authoritative) service_registry_runtime.markReconcileSucceeded(service_name) catch |err| {
+        log.warn("service reconciler: failed to mark {s} as succeeded: {}", .{ service_name, err });
     };
 }
 
@@ -1583,7 +1587,7 @@ test "audit ignores legacy service_names drift in canonical vip mode" {
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
 }
 
-test "audit pass repairs live dns registry drift" {
+test "audit pass waits for backoff before repairing live dns registry drift" {
     try store.initTestDb();
     defer store.deinitTestDb();
     dns_registry_support.resetRegistryForTest();
@@ -1621,15 +1625,50 @@ test "audit pass repairs live dns registry drift" {
     dns_registry_support.resetRegistryForTest();
     try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
 
+    {
+        mutex.lockUncancelable(std.Options.debug_io);
+        defer mutex.unlock(std.Options.debug_io);
+        try noteRetryFailureLocked("api", 0);
+        retry_states.items[0].next_retry_at = std.math.maxInt(i64);
+    }
+
+    runAuditPassIfEnabled();
+    try std.testing.expectEqual(@as(?[4]u8, null), dns.lookupService("api"));
+    {
+        var audit = try snapshotAuditState(std.testing.allocator);
+        defer audit.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u64, 1), audit.mismatch_services_total);
+        try std.testing.expectEqual(@as(u64, 0), audit.repairs_total);
+        try std.testing.expectEqual(@as(usize, 1), audit.degraded_services.items.len);
+        try std.testing.expectEqualStrings("api", audit.degraded_services.items[0]);
+        const service = try service_registry_runtime.snapshotService(std.testing.allocator, "api");
+        defer service.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("failed", service.last_reconcile_status);
+    }
+
+    {
+        mutex.lockUncancelable(std.Options.debug_io);
+        defer mutex.unlock(std.Options.debug_io);
+        retry_states.items[0].next_retry_at = 0;
+    }
     runAuditPassIfEnabled();
 
     try std.testing.expectEqual(@as(?[4]u8, .{ 10, 43, 0, 2 }), dns.lookupService("api"));
     var audit = try snapshotAuditState(std.testing.allocator);
     defer audit.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(u64, 1), audit.passes_total);
-    try std.testing.expectEqual(@as(u64, 1), audit.mismatch_services_total);
+    try std.testing.expectEqual(@as(u64, 2), audit.passes_total);
+    try std.testing.expectEqual(@as(u64, 2), audit.mismatch_services_total);
     try std.testing.expectEqual(@as(u64, 1), audit.repairs_total);
     try std.testing.expectEqual(@as(usize, 0), audit.degraded_services.items.len);
+    const repaired_service = try service_registry_runtime.snapshotService(std.testing.allocator, "api");
+    defer repaired_service.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("idle", repaired_service.last_reconcile_status);
+    try std.testing.expect(repaired_service.last_reconcile_error == null);
+    {
+        mutex.lockUncancelable(std.Options.debug_io);
+        defer mutex.unlock(std.Options.debug_io);
+        try std.testing.expect(findRetryStateIndex("api") == null);
+    }
 }
 
 test "node loss and recovery reconcile authoritative DNS immediately" {
