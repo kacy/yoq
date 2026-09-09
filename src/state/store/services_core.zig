@@ -83,8 +83,7 @@ fn ensureInDb(db: *sqlite.Db, alloc: Allocator, service_name: []const u8, lb_pol
         .{},
         .{service_name},
     ) catch return StoreError.ReadFailed) |row| {
-        const routes = try service_routes.listForDb(alloc, db, service_name);
-        const record = rowToServiceRecord(row, routes);
+        const record = try recordWithRoutes(alloc, db, row);
         db.exec("COMMIT;", .{}, .{}) catch {
             record.deinit(alloc);
             return StoreError.WriteFailed;
@@ -387,6 +386,12 @@ fn checkServiceRead(alloc: Allocator) !void {
     try checkServiceContents(record);
 }
 
+fn checkServiceEnsure(alloc: Allocator) !void {
+    const record = ensure(alloc, "api", "consistent_hash") catch return error.OutOfMemory;
+    defer record.deinit(alloc);
+    try checkServiceContents(record);
+}
+
 fn checkServiceList(alloc: Allocator) !void {
     var records = list(alloc) catch return error.OutOfMemory;
     defer {
@@ -430,6 +435,8 @@ test "service reads and lists clean up every allocation failure" {
     defer worker.deinit(alloc);
     try std.testing.checkAllAllocationFailures(alloc, checkServiceRead, .{});
     try std.testing.checkAllAllocationFailures(alloc, checkServiceList, .{});
+    try std.testing.checkAllAllocationFailures(alloc, checkServiceEnsure, .{});
     try checkServiceRead(alloc);
     try checkServiceList(alloc);
+    try checkServiceEnsure(alloc);
 }
