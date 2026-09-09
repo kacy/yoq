@@ -379,3 +379,29 @@ test "isLeapYear" {
     try std.testing.expect(!isLeapYear(1900));
     try std.testing.expect(!isLeapYear(2023));
 }
+
+fn checkCertificateRetrieval(alloc: std.mem.Allocator, db: *sqlite.Db) !void {
+    var cs = try CertStore.initWithKey(db, alloc, [_]u8{0xAB} ** key_length);
+    const result = cs.get("example.com") catch |err| switch (err) {
+        // the fixture is valid; these errors wrap allocation failures in get.
+        error.ReadFailed, error.DecryptionFailed, error.AllocFailed => return error.OutOfMemory,
+        else => return err,
+    };
+    defer alloc.free(result.cert_pem);
+    defer {
+        secureZero(result.key_pem);
+        alloc.free(result.key_pem);
+    }
+    try std.testing.expectEqualStrings(@embedFile("testdata/cert.pem"), result.cert_pem);
+    try std.testing.expectEqualStrings("private key fixture", result.key_pem);
+}
+
+test "certificate retrieval cleans up every allocation failure" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    var cs = try CertStore.initWithKey(&db, std.testing.allocator, [_]u8{0xAB} ** key_length);
+    try cs.install("example.com", @embedFile("testdata/cert.pem"), "private key fixture", "manual");
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkCertificateRetrieval, .{&db});
+    // failed reads must leave the stored certificate usable.
+    try checkCertificateRetrieval(std.testing.allocator, &db);
+}
