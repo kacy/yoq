@@ -688,39 +688,31 @@ pub fn resolveUpstreamWithPolicy(alloc: std.mem.Allocator, service_name: []const
         endpoints.deinit(alloc);
     }
 
-    var candidates: std.ArrayList(upstream_mod.Upstream) = .empty;
-    defer {
-        for (candidates.items) |candidate| candidate.deinit(alloc);
-        candidates.deinit(alloc);
-    }
-
     mutex.lockUncancelable(std.Options.debug_io);
     defer mutex.unlock(std.Options.debug_io);
 
     const now_ms = nowRealMilliseconds();
-    const target_port = service.http_proxy_target_port;
-    const peer_mode = service.peer_mode;
     for (endpoints.items) |endpoint| {
-        const port: u16 = target_port orelse if (endpoint.port < 0) 0 else @intCast(endpoint.port);
-        try candidates.append(alloc, .{
-            .service = try alloc.dupe(u8, service_name),
-            .endpoint_id = try alloc.dupe(u8, endpoint.endpoint_id),
-            .address = try alloc.dupe(u8, endpoint.ip_address),
-            .port = port,
-            .eligible = endpoint.eligible and endpointAllowsRequestLocked(endpoint.endpoint_id, now_ms, cb_policy),
-            .peer_mode = peer_mode,
-        });
-    }
+        if (!endpoint.eligible or !endpointAllowsRequestLocked(endpoint.endpoint_id, now_ms, cb_policy)) continue;
 
-    const selected = upstream_mod.selectFirstEligible(candidates.items) orelse return error.NoHealthyUpstream;
-    return .{
-        .service = try alloc.dupe(u8, selected.service),
-        .endpoint_id = try alloc.dupe(u8, selected.endpoint_id),
-        .address = try alloc.dupe(u8, selected.address),
-        .port = selected.port,
-        .eligible = selected.eligible,
-        .peer_mode = selected.peer_mode,
-    };
+        const service_name_copy = try alloc.dupe(u8, service_name);
+        errdefer alloc.free(service_name_copy);
+        const endpoint_id_copy = try alloc.dupe(u8, endpoint.endpoint_id);
+        errdefer alloc.free(endpoint_id_copy);
+        const address_copy = try alloc.dupe(u8, endpoint.ip_address);
+        errdefer alloc.free(address_copy);
+
+        // reserve a recovery probe only after the chosen upstream owns its data.
+        reserveEndpointProbeLocked(endpoint.endpoint_id);
+        return .{
+            .service = service_name_copy,
+            .endpoint_id = endpoint_id_copy,
+            .address = address_copy,
+            .port = service.http_proxy_target_port orelse if (endpoint.port < 0) 0 else @intCast(endpoint.port),
+            .peer_mode = service.peer_mode,
+        };
+    }
+    return error.NoHealthyUpstream;
 }
 
 pub fn selectBackendService(route: router.Route, request_key: u64, attempt: u8) []const u8 {
@@ -732,25 +724,28 @@ pub fn selectSnapshotBackendService(route: RouteSnapshot, request_key: u64, atte
 }
 
 fn endpointAllowsRequestLocked(endpoint_id: []const u8, now_ms: i64, cb_policy: proxy_policy.CircuitBreakerPolicy) bool {
-    const circuit = endpoint_circuits.getPtr(endpoint_id) orelse return true;
+    const circuit = endpoint_circuits.get(endpoint_id) orelse return true;
+    return switch (circuit.state) {
+        .closed => true,
+        .open => if (circuit.opened_at_ms) |opened_at_ms|
+            proxy_policy.shouldAllowHalfOpen(cb_policy, opened_at_ms, now_ms)
+        else
+            false,
+        .half_open => !circuit.half_open_in_flight,
+    };
+}
 
+fn reserveEndpointProbeLocked(endpoint_id: []const u8) void {
+    const circuit = endpoint_circuits.getPtr(endpoint_id) orelse return;
     switch (circuit.state) {
-        .closed => return true,
+        .closed => return,
         .open => {
-            const opened_at_ms = circuit.opened_at_ms orelse return false;
-            if (!proxy_policy.shouldAllowHalfOpen(cb_policy, opened_at_ms, now_ms)) return false;
-
             circuit.state = .half_open;
-            circuit.half_open_in_flight = true;
             circuit_transitions_open_to_half_open += 1;
-            return true;
         },
-        .half_open => {
-            if (circuit.half_open_in_flight) return false;
-            circuit.half_open_in_flight = true;
-            return true;
-        },
+        .half_open => {},
     }
+    circuit.half_open_in_flight = true;
 }
 
 fn selectBackendServiceFromTargets(
@@ -1844,4 +1839,117 @@ test "route snapshots retain runtime failure details after recovery" {
         try std.testing.expectEqual(RouteFailureKind.receive, routes_snapshot.items[0].last_failure_kind.?);
         try std.testing.expect(routes_snapshot.items[0].last_failure_at != null);
     }
+}
+
+const selection_test_endpoints = [_][]const u8{ "api-1", "api-2", "api-3" };
+
+fn seedSelectionTestService() !void {
+    const store = @import("../../state/store.zig");
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_target_port = 8443,
+        .peer_mode = "require",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    for (selection_test_endpoints, 0..) |endpoint_id, index| {
+        try store.upsertServiceEndpoint(.{
+            .service_name = "api",
+            .endpoint_id = endpoint_id,
+            .container_id = endpoint_id,
+            .node_id = null,
+            .ip_address = "10.42.0.9",
+            .port = @intCast(8080 + index),
+            .weight = 1,
+            .admin_state = "active",
+            .generation = 1,
+            .registered_at = 1000,
+            .last_seen_at = 1000,
+        });
+    }
+    service_registry_runtime.syncServiceFromStore("api");
+}
+
+fn openSelectionTestCircuits() void {
+    for (selection_test_endpoints) |endpoint_id| {
+        recordEndpointSuccess(endpoint_id);
+        recordEndpointFailure(endpoint_id, .{ .failure_threshold = 1 });
+    }
+    mutex.lockUncancelable(std.Options.debug_io);
+    defer mutex.unlock(std.Options.debug_io);
+    for (selection_test_endpoints) |endpoint_id| {
+        endpoint_circuits.getPtr(endpoint_id).?.opened_at_ms = 0;
+    }
+}
+
+test "upstream selection reserves only the chosen recovery probe" {
+    const store = @import("../../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{ .service_registry_v2 = true, .l7_proxy_http = true });
+    defer service_rollout.resetForTest();
+    resetForTest();
+    defer resetForTest();
+    try seedSelectionTestService();
+    openSelectionTestCircuits();
+
+    for (selection_test_endpoints, 0..) |endpoint_id, selected_index| {
+        const selected = try resolveUpstream(std.testing.allocator, "api");
+        defer selected.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings(endpoint_id, selected.endpoint_id);
+        try std.testing.expectEqual(@as(u16, 8443), selected.port);
+        try std.testing.expectEqual(.require, selected.peer_mode);
+        mutex.lockUncancelable(std.Options.debug_io);
+        defer mutex.unlock(std.Options.debug_io);
+        for (selection_test_endpoints, 0..) |candidate_id, index| {
+            const circuit = endpoint_circuits.get(candidate_id).?;
+            try std.testing.expectEqual(index <= selected_index, circuit.half_open_in_flight);
+            try std.testing.expectEqual(if (index <= selected_index) proxy_policy.CircuitState.half_open else .open, circuit.state);
+        }
+        try std.testing.expectEqual(@as(u64, @intCast(selected_index + 1)), circuit_transitions_open_to_half_open);
+    }
+    try std.testing.expectError(error.NoHealthyUpstream, resolveUpstream(std.testing.allocator, "api"));
+    recordEndpointSuccess("api-2");
+    const recovered = try resolveUpstream(std.testing.allocator, "api");
+    defer recovered.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("api-2", recovered.endpoint_id);
+}
+
+fn checkUpstreamSelectionAllocationFailures(alloc: std.mem.Allocator) !void {
+    openSelectionTestCircuits();
+    const selected = resolveUpstream(alloc, "api") catch |err| {
+        mutex.lockUncancelable(std.Options.debug_io);
+        defer mutex.unlock(std.Options.debug_io);
+        for (selection_test_endpoints) |endpoint_id| {
+            const circuit = endpoint_circuits.get(endpoint_id).?;
+            try std.testing.expectEqual(proxy_policy.CircuitState.open, circuit.state);
+            try std.testing.expect(!circuit.half_open_in_flight);
+        }
+        return err;
+    };
+    defer selected.deinit(alloc);
+    try std.testing.expectEqualStrings("api", selected.service);
+    try std.testing.expectEqualStrings("api-1", selected.endpoint_id);
+    try std.testing.expectEqualStrings("10.42.0.9", selected.address);
+    try std.testing.expectEqual(@as(u16, 8443), selected.port);
+    try std.testing.expectEqual(.require, selected.peer_mode);
+}
+
+test "upstream selection cleans up allocation failures without reserving a probe" {
+    const store = @import("../../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    service_rollout.setForTest(.{ .service_registry_v2 = true, .l7_proxy_http = true });
+    defer service_rollout.resetForTest();
+    resetForTest();
+    defer resetForTest();
+    try seedSelectionTestService();
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkUpstreamSelectionAllocationFailures, .{});
 }
