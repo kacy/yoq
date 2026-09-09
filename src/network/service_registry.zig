@@ -381,13 +381,19 @@ pub const Registry = struct {
             return;
         }
 
-        try self.services.append(self.alloc, .{
-            .service_name = try self.alloc.dupe(u8, definition.service_name),
-            .vip_address = try self.alloc.dupe(u8, definition.vip_address),
-            .lb_policy = try self.alloc.dupe(u8, definition.lb_policy),
-            .http_routes = try cloneRoutesFromDefinition(self.alloc, definition),
-        });
-        try assignCompatProxyFields(self.alloc, &self.services.items[self.services.items.len - 1], definition);
+        var service = ServiceState{
+            .service_name = &.{},
+            .vip_address = &.{},
+            .lb_policy = &.{},
+        };
+        errdefer service.deinit(self.alloc);
+
+        service.service_name = try self.alloc.dupe(u8, definition.service_name);
+        service.vip_address = try self.alloc.dupe(u8, definition.vip_address);
+        service.lb_policy = try self.alloc.dupe(u8, definition.lb_policy);
+        service.http_routes = try cloneRoutesFromDefinition(self.alloc, definition);
+        try assignCompatProxyFields(self.alloc, &service, definition);
+        try self.services.append(self.alloc, service);
     }
 
     pub fn removeService(self: *Registry, service_name: []const u8) bool {
@@ -406,6 +412,7 @@ pub const Registry = struct {
 
         for (definitions) |definition| {
             var endpoint = try cloneEndpoint(self.alloc, definition);
+            errdefer endpoint.deinit(self.alloc);
             if (findEndpoint(service.endpoints.items, definition.endpoint_id)) |existing| {
                 endpoint.readiness_required = existing.readiness_required;
                 endpoint.node_lost = existing.node_lost;
@@ -552,7 +559,9 @@ pub const Registry = struct {
         errdefer deinitServiceSnapshots(alloc, &services);
 
         for (self.services.items) |service| {
-            try services.append(alloc, try cloneServiceSnapshot(alloc, &service));
+            const snapshot = try cloneServiceSnapshot(alloc, &service);
+            errdefer snapshot.deinit(alloc);
+            try services.append(alloc, snapshot);
         }
         return services;
     }
@@ -570,7 +579,9 @@ pub const Registry = struct {
         errdefer deinitEndpointSnapshots(alloc, &endpoints);
 
         for (service.endpoints.items) |endpoint| {
-            try endpoints.append(alloc, try cloneEndpointSnapshot(alloc, &endpoint));
+            const snapshot = try cloneEndpointSnapshot(alloc, &endpoint);
+            errdefer snapshot.deinit(alloc);
+            try endpoints.append(alloc, snapshot);
         }
         return endpoints;
     }
@@ -609,14 +620,23 @@ fn findEndpointIndex(endpoints: []const EndpointState, endpoint_id: []const u8) 
 }
 
 fn cloneEndpoint(alloc: Allocator, definition: EndpointDefinition) Error!EndpointState {
+    const owned_endpoint_id = try alloc.dupe(u8, definition.endpoint_id);
+    errdefer alloc.free(owned_endpoint_id);
+    const owned_container_id = try alloc.dupe(u8, definition.container_id);
+    errdefer alloc.free(owned_container_id);
+    const owned_ip_address = try alloc.dupe(u8, definition.ip_address);
+    errdefer alloc.free(owned_ip_address);
+    const owned_admin_state = try alloc.dupe(u8, definition.admin_state);
+    errdefer alloc.free(owned_admin_state);
+
     return .{
-        .endpoint_id = try alloc.dupe(u8, definition.endpoint_id),
-        .container_id = try alloc.dupe(u8, definition.container_id),
+        .endpoint_id = owned_endpoint_id,
+        .container_id = owned_container_id,
         .node_id = definition.node_id,
-        .ip_address = try alloc.dupe(u8, definition.ip_address),
+        .ip_address = owned_ip_address,
         .port = definition.port,
         .weight = definition.weight,
-        .admin_state = try alloc.dupe(u8, definition.admin_state),
+        .admin_state = owned_admin_state,
         .generation = definition.generation,
         .registered_at = definition.registered_at,
         .last_seen_at = definition.last_seen_at,
@@ -624,18 +644,29 @@ fn cloneEndpoint(alloc: Allocator, definition: EndpointDefinition) Error!Endpoin
 }
 
 fn cloneEndpointSnapshot(alloc: Allocator, endpoint: *const EndpointState) Error!EndpointSnapshot {
+    const owned_endpoint_id = try alloc.dupe(u8, endpoint.endpoint_id);
+    errdefer alloc.free(owned_endpoint_id);
+    const owned_container_id = try alloc.dupe(u8, endpoint.container_id);
+    errdefer alloc.free(owned_container_id);
+    const owned_ip_address = try alloc.dupe(u8, endpoint.ip_address);
+    errdefer alloc.free(owned_ip_address);
+    const owned_admin_state = try alloc.dupe(u8, endpoint.admin_state);
+    errdefer alloc.free(owned_admin_state);
+    const owned_observed_health = try alloc.dupe(u8, endpoint.observed_health.label());
+    errdefer alloc.free(owned_observed_health);
+
     return .{
-        .endpoint_id = try alloc.dupe(u8, endpoint.endpoint_id),
-        .container_id = try alloc.dupe(u8, endpoint.container_id),
+        .endpoint_id = owned_endpoint_id,
+        .container_id = owned_container_id,
         .node_id = endpoint.node_id,
-        .ip_address = try alloc.dupe(u8, endpoint.ip_address),
+        .ip_address = owned_ip_address,
         .port = endpoint.port,
         .weight = endpoint.weight,
-        .admin_state = try alloc.dupe(u8, endpoint.admin_state),
+        .admin_state = owned_admin_state,
         .generation = endpoint.generation,
         .registered_at = endpoint.registered_at,
         .last_seen_at = endpoint.last_seen_at,
-        .observed_health = try alloc.dupe(u8, endpoint.observed_health.label()),
+        .observed_health = owned_observed_health,
         .eligible = isEndpointEligible(endpoint),
         .readiness_required = endpoint.readiness_required,
         .last_transition_at = endpoint.last_transition_at,
@@ -661,14 +692,33 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
         alloc.free(routes);
     }
 
+    const owned_service_name = try alloc.dupe(u8, service.service_name);
+    errdefer alloc.free(owned_service_name);
+    const owned_vip_address = try alloc.dupe(u8, service.vip_address);
+    errdefer alloc.free(owned_vip_address);
+    const owned_lb_policy = try alloc.dupe(u8, service.lb_policy);
+    errdefer alloc.free(owned_lb_policy);
+    const owned_http_proxy_host = if (service.http_proxy_host) |host| try alloc.dupe(u8, host) else null;
+    errdefer if (owned_http_proxy_host) |value| alloc.free(value);
+    const owned_http_proxy_path_prefix = if (service.http_proxy_path_prefix) |path_prefix| try alloc.dupe(u8, path_prefix) else null;
+    errdefer if (owned_http_proxy_path_prefix) |value| alloc.free(value);
+    const owned_http_proxy_rewrite_prefix = if (service.http_proxy_rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null;
+    errdefer if (owned_http_proxy_rewrite_prefix) |value| alloc.free(value);
+    const owned_http_proxy_mirror_service = if (service.http_proxy_mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null;
+    errdefer if (owned_http_proxy_mirror_service) |value| alloc.free(value);
+    const owned_last_reconcile_status = try alloc.dupe(u8, service.last_reconcile_status.label());
+    errdefer alloc.free(owned_last_reconcile_status);
+    const owned_last_reconcile_error = if (service.last_reconcile_error) |message| try alloc.dupe(u8, message) else null;
+    errdefer if (owned_last_reconcile_error) |value| alloc.free(value);
+
     return .{
-        .service_name = try alloc.dupe(u8, service.service_name),
-        .vip_address = try alloc.dupe(u8, service.vip_address),
-        .lb_policy = try alloc.dupe(u8, service.lb_policy),
+        .service_name = owned_service_name,
+        .vip_address = owned_vip_address,
+        .lb_policy = owned_lb_policy,
         .http_routes = routes,
-        .http_proxy_host = if (service.http_proxy_host) |host| try alloc.dupe(u8, host) else null,
-        .http_proxy_path_prefix = if (service.http_proxy_path_prefix) |path_prefix| try alloc.dupe(u8, path_prefix) else null,
-        .http_proxy_rewrite_prefix = if (service.http_proxy_rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+        .http_proxy_host = owned_http_proxy_host,
+        .http_proxy_path_prefix = owned_http_proxy_path_prefix,
+        .http_proxy_rewrite_prefix = owned_http_proxy_rewrite_prefix,
         .http_proxy_retries = service.http_proxy_retries,
         .http_proxy_connect_timeout_ms = service.http_proxy_connect_timeout_ms,
         .http_proxy_request_timeout_ms = service.http_proxy_request_timeout_ms,
@@ -678,14 +728,14 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
         .http_proxy_retry_on_5xx = service.http_proxy_retry_on_5xx,
         .http_proxy_circuit_breaker_threshold = service.http_proxy_circuit_breaker_threshold,
         .http_proxy_circuit_breaker_timeout_ms = service.http_proxy_circuit_breaker_timeout_ms,
-        .http_proxy_mirror_service = if (service.http_proxy_mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
+        .http_proxy_mirror_service = owned_http_proxy_mirror_service,
         .peer_mode = service.peer_mode,
         .total_endpoints = total_endpoints,
         .eligible_endpoints = eligible_endpoints,
         .healthy_endpoints = healthy_endpoints,
         .draining_endpoints = draining_endpoints,
-        .last_reconcile_status = try alloc.dupe(u8, service.last_reconcile_status.label()),
-        .last_reconcile_error = if (service.last_reconcile_error) |message| try alloc.dupe(u8, message) else null,
+        .last_reconcile_status = owned_last_reconcile_status,
+        .last_reconcile_error = owned_last_reconcile_error,
         .last_reconcile_requested_at = service.last_reconcile_requested_at,
         .overflow = service.overflow,
         .degraded = service.overflow or service.last_reconcile_status == .failed or eligible_endpoints == 0,
@@ -701,15 +751,41 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
 
     if (definition.http_routes.len > 0) {
         for (definition.http_routes) |route| {
+            const owned_route_name = try alloc.dupe(u8, route.route_name);
+            errdefer alloc.free(owned_route_name);
+            const owned_host = try alloc.dupe(u8, route.host);
+            errdefer alloc.free(owned_host);
+            const owned_path_prefix = try alloc.dupe(u8, route.path_prefix);
+            errdefer alloc.free(owned_path_prefix);
+            const owned_rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null;
+            errdefer if (owned_rewrite_prefix) |value| alloc.free(value);
+            const owned_match_methods = try cloneMethodMatches(alloc, route.match_methods);
+            errdefer {
+                for (owned_match_methods) |item| item.deinit(alloc);
+                alloc.free(owned_match_methods);
+            }
+            const owned_match_headers = try cloneHeaderMatches(alloc, route.match_headers);
+            errdefer {
+                for (owned_match_headers) |item| item.deinit(alloc);
+                alloc.free(owned_match_headers);
+            }
+            const owned_backend_services = try cloneRouteBackends(alloc, route.backend_services);
+            errdefer {
+                for (owned_backend_services) |item| item.deinit(alloc);
+                alloc.free(owned_backend_services);
+            }
+            const owned_mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null;
+            errdefer if (owned_mirror_service) |value| alloc.free(value);
+
             try routes.append(alloc, .{
-                .route_name = try alloc.dupe(u8, route.route_name),
-                .host = try alloc.dupe(u8, route.host),
-                .path_prefix = try alloc.dupe(u8, route.path_prefix),
-                .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
-                .match_methods = try cloneMethodMatches(alloc, route.match_methods),
-                .match_headers = try cloneHeaderMatches(alloc, route.match_headers),
-                .backend_services = try cloneRouteBackends(alloc, route.backend_services),
-                .mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
+                .route_name = owned_route_name,
+                .host = owned_host,
+                .path_prefix = owned_path_prefix,
+                .rewrite_prefix = owned_rewrite_prefix,
+                .match_methods = owned_match_methods,
+                .match_headers = owned_match_headers,
+                .backend_services = owned_backend_services,
+                .mirror_service = owned_mirror_service,
                 .retries = route.retries,
                 .connect_timeout_ms = route.connect_timeout_ms,
                 .request_timeout_ms = route.request_timeout_ms,
@@ -725,15 +801,31 @@ fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Er
     }
 
     if (definition.http_proxy_host) |host| {
+        const owned_route_name = try alloc.dupe(u8, "default");
+        errdefer alloc.free(owned_route_name);
+        const owned_host = try alloc.dupe(u8, host);
+        errdefer alloc.free(owned_host);
+        const owned_path_prefix = try alloc.dupe(u8, definition.http_proxy_path_prefix orelse "/");
+        errdefer alloc.free(owned_path_prefix);
+        const owned_rewrite_prefix = if (definition.http_proxy_rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null;
+        errdefer if (owned_rewrite_prefix) |value| alloc.free(value);
+        const owned_backend_services = try defaultRouteBackends(alloc, definition.service_name);
+        errdefer {
+            for (owned_backend_services) |item| item.deinit(alloc);
+            alloc.free(owned_backend_services);
+        }
+        const owned_mirror_service = if (definition.http_proxy_mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null;
+        errdefer if (owned_mirror_service) |value| alloc.free(value);
+
         try routes.append(alloc, .{
-            .route_name = try alloc.dupe(u8, "default"),
-            .host = try alloc.dupe(u8, host),
-            .path_prefix = try alloc.dupe(u8, definition.http_proxy_path_prefix orelse "/"),
-            .rewrite_prefix = if (definition.http_proxy_rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
+            .route_name = owned_route_name,
+            .host = owned_host,
+            .path_prefix = owned_path_prefix,
+            .rewrite_prefix = owned_rewrite_prefix,
             .match_methods = &.{},
             .match_headers = &.{},
-            .backend_services = try defaultRouteBackends(alloc, definition.service_name),
-            .mirror_service = if (definition.http_proxy_mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
+            .backend_services = owned_backend_services,
+            .mirror_service = owned_mirror_service,
             .retries = definition.http_proxy_retries orelse 0,
             .connect_timeout_ms = definition.http_proxy_connect_timeout_ms orelse 1000,
             .request_timeout_ms = definition.http_proxy_request_timeout_ms orelse 5000,
@@ -763,15 +855,41 @@ fn cloneRouteSnapshots(alloc: Allocator, routes: []const HttpRouteState) Error![
     }
 
     for (routes) |route| {
+        const owned_route_name = try alloc.dupe(u8, route.route_name);
+        errdefer alloc.free(owned_route_name);
+        const owned_host = try alloc.dupe(u8, route.host);
+        errdefer alloc.free(owned_host);
+        const owned_path_prefix = try alloc.dupe(u8, route.path_prefix);
+        errdefer alloc.free(owned_path_prefix);
+        const owned_rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null;
+        errdefer if (owned_rewrite_prefix) |value| alloc.free(value);
+        const owned_match_methods = try cloneMethodMatches(alloc, route.match_methods);
+        errdefer {
+            for (owned_match_methods) |item| item.deinit(alloc);
+            alloc.free(owned_match_methods);
+        }
+        const owned_match_headers = try cloneHeaderMatches(alloc, route.match_headers);
+        errdefer {
+            for (owned_match_headers) |item| item.deinit(alloc);
+            alloc.free(owned_match_headers);
+        }
+        const owned_backend_services = try cloneRouteBackends(alloc, route.backend_services);
+        errdefer {
+            for (owned_backend_services) |item| item.deinit(alloc);
+            alloc.free(owned_backend_services);
+        }
+        const owned_mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null;
+        errdefer if (owned_mirror_service) |value| alloc.free(value);
+
         try snapshots.append(alloc, .{
-            .route_name = try alloc.dupe(u8, route.route_name),
-            .host = try alloc.dupe(u8, route.host),
-            .path_prefix = try alloc.dupe(u8, route.path_prefix),
-            .rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null,
-            .match_methods = try cloneMethodMatches(alloc, route.match_methods),
-            .match_headers = try cloneHeaderMatches(alloc, route.match_headers),
-            .backend_services = try cloneRouteBackends(alloc, route.backend_services),
-            .mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null,
+            .route_name = owned_route_name,
+            .host = owned_host,
+            .path_prefix = owned_path_prefix,
+            .rewrite_prefix = owned_rewrite_prefix,
+            .match_methods = owned_match_methods,
+            .match_headers = owned_match_headers,
+            .backend_services = owned_backend_services,
+            .mirror_service = owned_mirror_service,
             .retries = route.retries,
             .connect_timeout_ms = route.connect_timeout_ms,
             .request_timeout_ms = route.request_timeout_ms,
@@ -837,8 +955,11 @@ fn cloneMethodMatches(alloc: Allocator, matches: []const HttpMethodMatch) Error!
     }
 
     for (matches) |method_match| {
+        const owned_method = try alloc.dupe(u8, method_match.method);
+        errdefer alloc.free(owned_method);
+
         try cloned.append(alloc, .{
-            .method = try alloc.dupe(u8, method_match.method),
+            .method = owned_method,
         });
     }
     return cloned.toOwnedSlice(alloc);
@@ -852,9 +973,14 @@ fn cloneHeaderMatches(alloc: Allocator, matches: []const HttpHeaderMatch) Error!
     }
 
     for (matches) |header_match| {
+        const owned_name = try alloc.dupe(u8, header_match.name);
+        errdefer alloc.free(owned_name);
+        const owned_value = try alloc.dupe(u8, header_match.value);
+        errdefer alloc.free(owned_value);
+
         try cloned.append(alloc, .{
-            .name = try alloc.dupe(u8, header_match.name),
-            .value = try alloc.dupe(u8, header_match.value),
+            .name = owned_name,
+            .value = owned_value,
         });
     }
     return cloned.toOwnedSlice(alloc);
@@ -868,8 +994,11 @@ fn cloneRouteBackends(alloc: Allocator, backends: []const HttpRouteBackend) Erro
     }
 
     for (backends) |backend| {
+        const owned_service_name = try alloc.dupe(u8, backend.service_name);
+        errdefer alloc.free(owned_service_name);
+
         try cloned.append(alloc, .{
-            .service_name = try alloc.dupe(u8, backend.service_name),
+            .service_name = owned_service_name,
             .weight = backend.weight,
         });
     }
@@ -938,6 +1067,303 @@ fn deinitEndpointSnapshots(alloc: Allocator, endpoints: *std.ArrayList(EndpointS
 fn deinitServiceSnapshots(alloc: Allocator, services: *std.ArrayList(ServiceSnapshot)) void {
     for (services.items) |service| service.deinit(alloc);
     services.deinit(alloc);
+}
+
+const allocation_test_service = ServiceDefinition{
+    .service_name = "api",
+    .vip_address = "10.43.0.2",
+    .lb_policy = "consistent_hash",
+    .http_routes = &.{
+        .{
+            .route_name = "public",
+            .host = "api.example.com",
+            .path_prefix = "/v1",
+            .rewrite_prefix = "/internal",
+            .match_methods = &.{ .{ .method = "GET" }, .{ .method = "POST" } },
+            .match_headers = &.{ .{ .name = "x-tenant", .value = "blue" }, .{ .name = "x-version", .value = "2" } },
+            .backend_services = &.{ .{ .service_name = "api", .weight = 80 }, .{ .service_name = "canary", .weight = 20 } },
+            .mirror_service = "shadow",
+            .retries = 2,
+            .connect_timeout_ms = 1500,
+            .request_timeout_ms = 6500,
+            .http2_idle_timeout_ms = 45000,
+            .target_port = 8080,
+            .preserve_host = false,
+            .retry_on_5xx = false,
+            .circuit_breaker_threshold = 5,
+            .circuit_breaker_timeout_ms = 60000,
+        },
+        .{ .route_name = "health", .host = "health.example.com" },
+    },
+};
+
+const allocation_test_endpoints = [_]EndpointDefinition{
+    .{
+        .endpoint_id = "ctr-1:8080",
+        .container_id = "ctr-1",
+        .node_id = 7,
+        .ip_address = "10.42.0.9",
+        .port = 8080,
+        .weight = 80,
+        .admin_state = "active",
+        .generation = 2,
+        .registered_at = 1000,
+        .last_seen_at = 1100,
+    },
+    .{
+        .endpoint_id = "ctr-2:8080",
+        .container_id = "ctr-2",
+        .node_id = null,
+        .ip_address = "10.42.0.10",
+        .port = 8080,
+        .weight = 20,
+        .admin_state = "draining",
+        .generation = 1,
+        .registered_at = 900,
+        .last_seen_at = 1050,
+    },
+};
+
+fn expectAllocationTestRoutes(routes: []const HttpRouteSnapshot) !void {
+    try std.testing.expectEqual(@as(usize, 2), routes.len);
+    for (allocation_test_service.http_routes, routes) |expected, actual| {
+        try std.testing.expectEqualStrings(expected.route_name, actual.route_name);
+        try std.testing.expectEqualStrings(expected.host, actual.host);
+        try std.testing.expectEqualStrings(expected.path_prefix, actual.path_prefix);
+        try std.testing.expectEqualDeep(expected.rewrite_prefix, actual.rewrite_prefix);
+        try std.testing.expectEqualDeep(expected.match_methods, actual.match_methods);
+        try std.testing.expectEqualDeep(expected.match_headers, actual.match_headers);
+        try std.testing.expectEqualDeep(expected.backend_services, actual.backend_services);
+        try std.testing.expectEqualDeep(expected.mirror_service, actual.mirror_service);
+        try std.testing.expectEqual(expected.retries, actual.retries);
+        try std.testing.expectEqual(expected.connect_timeout_ms, actual.connect_timeout_ms);
+        try std.testing.expectEqual(expected.request_timeout_ms, actual.request_timeout_ms);
+        try std.testing.expectEqual(expected.http2_idle_timeout_ms, actual.http2_idle_timeout_ms);
+        try std.testing.expectEqual(expected.target_port, actual.target_port);
+        try std.testing.expectEqual(expected.preserve_host, actual.preserve_host);
+        try std.testing.expectEqual(expected.retry_on_5xx, actual.retry_on_5xx);
+        try std.testing.expectEqual(expected.circuit_breaker_threshold, actual.circuit_breaker_threshold);
+        try std.testing.expectEqual(expected.circuit_breaker_timeout_ms, actual.circuit_breaker_timeout_ms);
+    }
+}
+
+fn checkServiceInsertionAllocationFailures(alloc: Allocator) !void {
+    var registry = Registry.init(alloc);
+    defer registry.deinit();
+    registry.upsertService(allocation_test_service) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), registry.services.items.len);
+        return err;
+    };
+
+    const snapshot = try registry.snapshotService(std.testing.allocator, "api");
+    defer snapshot.deinit(std.testing.allocator);
+    try expectAllocationTestRoutes(snapshot.http_routes);
+    try std.testing.expectEqualStrings("api.example.com", snapshot.http_proxy_host.?);
+    try std.testing.expectEqualStrings("/internal", snapshot.http_proxy_rewrite_prefix.?);
+    try std.testing.expectEqualStrings("shadow", snapshot.http_proxy_mirror_service.?);
+    try std.testing.expectEqual(@as(?u32, 45000), snapshot.http_proxy_http2_idle_timeout_ms);
+}
+
+test "service insertion cleans up every allocation failure before publishing" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkServiceInsertionAllocationFailures, .{});
+}
+
+fn checkLegacyRouteAllocationFailures(alloc: Allocator, use_defaults: bool) !void {
+    var registry = Registry.init(alloc);
+    defer registry.deinit();
+    const definition = ServiceDefinition{
+        .service_name = "legacy",
+        .vip_address = "10.43.0.3",
+        .lb_policy = "round_robin",
+        .http_proxy_host = "legacy.example.com",
+        .http_proxy_path_prefix = if (use_defaults) null else "/old",
+        .http_proxy_rewrite_prefix = if (use_defaults) null else "/new",
+        .http_proxy_mirror_service = if (use_defaults) null else "shadow",
+        .http_proxy_retries = if (use_defaults) null else 2,
+        .http_proxy_target_port = if (use_defaults) null else 8080,
+    };
+    registry.upsertService(definition) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), registry.services.items.len);
+        return err;
+    };
+    const snapshot = try registry.snapshotService(std.testing.allocator, "legacy");
+    defer snapshot.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.http_routes.len);
+    const route = snapshot.http_routes[0];
+    try std.testing.expectEqualStrings("default", route.route_name);
+    try std.testing.expectEqualStrings("legacy.example.com", route.host);
+    try std.testing.expectEqualStrings(if (use_defaults) "/" else "/old", route.path_prefix);
+    try std.testing.expectEqualDeep(definition.http_proxy_rewrite_prefix, route.rewrite_prefix);
+    try std.testing.expectEqualDeep(definition.http_proxy_mirror_service, route.mirror_service);
+    try std.testing.expectEqual(@as(usize, 0), route.match_methods.len);
+    try std.testing.expectEqual(@as(usize, 0), route.match_headers.len);
+    try std.testing.expectEqual(@as(usize, 1), route.backend_services.len);
+    try std.testing.expectEqualStrings("legacy", route.backend_services[0].service_name);
+    try std.testing.expectEqual(@as(u8, 100), route.backend_services[0].weight);
+    try std.testing.expectEqual(definition.http_proxy_retries orelse 0, route.retries);
+    try std.testing.expectEqual(definition.http_proxy_target_port, route.target_port);
+    try std.testing.expectEqual(@as(u32, 1000), route.connect_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 5000), route.request_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 30000), route.http2_idle_timeout_ms);
+    try std.testing.expect(route.preserve_host);
+    try std.testing.expect(route.retry_on_5xx);
+    try std.testing.expectEqual(@as(u8, 3), route.circuit_breaker_threshold);
+    try std.testing.expectEqual(@as(u32, 30000), route.circuit_breaker_timeout_ms);
+}
+
+test "legacy route insertion cleans up every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkLegacyRouteAllocationFailures, .{true});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkLegacyRouteAllocationFailures, .{false});
+}
+
+fn checkEndpointReplacementAllocationFailures(alloc: Allocator) !void {
+    var registry = Registry.init(alloc);
+    defer registry.deinit();
+    try registry.upsertService(.{ .service_name = "api", .vip_address = "10.43.0.2", .lb_policy = "round_robin" });
+    try registry.replaceServiceEndpoints("api", allocation_test_endpoints[0..1]);
+    _ = try registry.noteProbeResult("api", "ctr-1:8080", true);
+
+    registry.replaceServiceEndpoints("api", &allocation_test_endpoints) catch |err| {
+        const endpoints = registry.services.items[0].endpoints.items;
+        try std.testing.expectEqual(@as(usize, 1), endpoints.len);
+        try std.testing.expectEqualStrings("ctr-1:8080", endpoints[0].endpoint_id);
+        try std.testing.expectEqual(ObservedHealth.healthy, endpoints[0].observed_health);
+        return err;
+    };
+    const endpoints = registry.services.items[0].endpoints.items;
+    try std.testing.expectEqual(@as(usize, 2), endpoints.len);
+    try std.testing.expectEqual(ObservedHealth.healthy, endpoints[0].observed_health);
+    try std.testing.expectEqualStrings("ctr-2:8080", endpoints[1].endpoint_id);
+    try std.testing.expectEqualStrings("draining", endpoints[1].admin_state);
+}
+
+test "endpoint replacement cleans up every allocation failure and preserves old endpoints" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkEndpointReplacementAllocationFailures, .{});
+}
+
+fn checkServiceSnapshotAllocationFailures(alloc: Allocator, registry: *const Registry, list: bool) !void {
+    if (list) {
+        var snapshots = try registry.snapshotServices(alloc);
+        defer deinitServiceSnapshots(alloc, &snapshots);
+        try std.testing.expectEqual(@as(usize, 2), snapshots.items.len);
+        try expectAllocationTestRoutes(snapshots.items[0].http_routes);
+        try std.testing.expectEqualStrings("worker", snapshots.items[1].service_name);
+        try std.testing.expectEqual(@as(usize, 0), snapshots.items[1].http_routes.len);
+        try std.testing.expect(snapshots.items[1].http_proxy_host == null);
+        try std.testing.expect(snapshots.items[1].last_reconcile_error == null);
+    } else {
+        const snapshot = try registry.snapshotService(alloc, "api");
+        defer snapshot.deinit(alloc);
+        try expectAllocationTestRoutes(snapshot.http_routes);
+        try std.testing.expectEqualStrings("api", snapshot.service_name);
+        try std.testing.expectEqualStrings("10.43.0.2", snapshot.vip_address);
+        try std.testing.expectEqualStrings("consistent_hash", snapshot.lb_policy);
+        try std.testing.expectEqualStrings("api.example.com", snapshot.http_proxy_host.?);
+        try std.testing.expectEqualStrings("/v1", snapshot.http_proxy_path_prefix.?);
+        try std.testing.expectEqualStrings("/internal", snapshot.http_proxy_rewrite_prefix.?);
+        try std.testing.expectEqualStrings("shadow", snapshot.http_proxy_mirror_service.?);
+        try std.testing.expectEqualStrings("failed", snapshot.last_reconcile_status);
+        try std.testing.expectEqualStrings("map update failed", snapshot.last_reconcile_error.?);
+        try std.testing.expectEqual(@as(usize, 2), snapshot.total_endpoints);
+        try std.testing.expectEqual(@as(usize, 1), snapshot.eligible_endpoints);
+        try std.testing.expectEqual(@as(usize, 1), snapshot.healthy_endpoints);
+        try std.testing.expectEqual(@as(usize, 1), snapshot.draining_endpoints);
+        try std.testing.expect(snapshot.degraded);
+    }
+}
+
+test "service snapshots clean up every allocation failure" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.upsertService(allocation_test_service);
+    try registry.upsertService(.{ .service_name = "worker", .vip_address = "10.43.0.3", .lb_policy = "round_robin" });
+    try registry.replaceServiceEndpoints("api", &allocation_test_endpoints);
+    _ = try registry.noteProbeResult("api", "ctr-1:8080", true);
+    try registry.markReconcileFailed("api", "map update failed");
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkServiceSnapshotAllocationFailures, .{ &registry, false });
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkServiceSnapshotAllocationFailures, .{ &registry, true });
+}
+
+fn checkEndpointSnapshotAllocationFailures(alloc: Allocator, registry: *const Registry) !void {
+    var snapshots = try registry.snapshotServiceEndpoints(alloc, "api");
+    defer deinitEndpointSnapshots(alloc, &snapshots);
+    try std.testing.expectEqual(@as(usize, 2), snapshots.items.len);
+    for (allocation_test_endpoints, snapshots.items) |expected, actual| {
+        try std.testing.expectEqualStrings(expected.endpoint_id, actual.endpoint_id);
+        try std.testing.expectEqualStrings(expected.container_id, actual.container_id);
+        try std.testing.expectEqual(expected.node_id, actual.node_id);
+        try std.testing.expectEqualStrings(expected.ip_address, actual.ip_address);
+        try std.testing.expectEqual(expected.port, actual.port);
+        try std.testing.expectEqual(expected.weight, actual.weight);
+        try std.testing.expectEqualStrings(expected.admin_state, actual.admin_state);
+        try std.testing.expectEqual(expected.generation, actual.generation);
+        try std.testing.expectEqual(expected.registered_at, actual.registered_at);
+        try std.testing.expectEqual(expected.last_seen_at, actual.last_seen_at);
+    }
+    try std.testing.expectEqualStrings("healthy", snapshots.items[0].observed_health);
+    try std.testing.expect(snapshots.items[0].eligible);
+    try std.testing.expect(snapshots.items[0].last_transition_at != null);
+    try std.testing.expectEqualStrings("unknown", snapshots.items[1].observed_health);
+    try std.testing.expect(!snapshots.items[1].eligible);
+    try std.testing.expect(snapshots.items[1].last_transition_at == null);
+}
+
+test "endpoint snapshots clean up every allocation failure" {
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.upsertService(.{ .service_name = "api", .vip_address = "10.43.0.2", .lb_policy = "round_robin" });
+    try registry.replaceServiceEndpoints("api", &allocation_test_endpoints);
+    _ = try registry.noteProbeResult("api", "ctr-1:8080", true);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkEndpointSnapshotAllocationFailures, .{&registry});
+}
+
+fn checkCollectionGrowthAllocationFailures(alloc: Allocator, registry: *const Registry, definition: ServiceDefinition) !void {
+    var routes = try cloneRoutesFromDefinition(alloc, definition);
+    defer deinitRoutes(alloc, &routes);
+    try std.testing.expectEqual(@as(usize, 20), routes.items.len);
+    try std.testing.expectEqualStrings("item-19", routes.items[19].route_name);
+
+    var services = try registry.snapshotServices(alloc);
+    defer deinitServiceSnapshots(alloc, &services);
+    try std.testing.expectEqual(@as(usize, 20), services.items.len);
+    try std.testing.expectEqualStrings("item-19", services.items[19].service_name);
+    try std.testing.expectEqual(@as(usize, 20), services.items[0].http_routes.len);
+    try std.testing.expectEqualStrings("item-19", services.items[0].http_routes[19].route_name);
+
+    var endpoints = try registry.snapshotServiceEndpoints(alloc, "api");
+    defer deinitEndpointSnapshots(alloc, &endpoints);
+    try std.testing.expectEqual(@as(usize, 20), endpoints.items.len);
+    try std.testing.expectEqualStrings("item-19", endpoints.items[19].endpoint_id);
+}
+
+test "registry collection growth cleans up every allocation failure" {
+    var names: [20][16]u8 = undefined;
+    var routes: [20]HttpRouteDefinition = undefined;
+    var endpoints: [20]EndpointDefinition = undefined;
+    for (&names, &routes, &endpoints, 0..) |*name_buf, *route, *endpoint, index| {
+        const name = try std.fmt.bufPrint(name_buf, "item-{d}", .{index});
+        route.* = .{ .route_name = name, .host = "api.example.com" };
+        endpoint.* = allocation_test_endpoints[0];
+        endpoint.endpoint_id = name;
+    }
+    const definition = ServiceDefinition{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "round_robin",
+        .http_routes = &routes,
+    };
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.upsertService(definition);
+    for (routes[1..]) |route| {
+        try registry.upsertService(.{
+            .service_name = route.route_name,
+            .vip_address = "10.43.0.3",
+            .lb_policy = "round_robin",
+        });
+    }
+    try registry.replaceServiceEndpoints("api", &endpoints);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkCollectionGrowthAllocationFailures, .{ &registry, definition });
 }
 
 test "replaceServiceEndpoints preserves observed health for matching endpoint ids" {
