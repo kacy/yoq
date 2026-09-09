@@ -543,8 +543,7 @@ pub const Registry = struct {
     pub fn markReconcileFailed(self: *Registry, service_name: []const u8, message: []const u8) Error!void {
         const service = try self.getServiceMut(service_name);
         service.last_reconcile_status = .failed;
-        if (service.last_reconcile_error) |current| self.alloc.free(current);
-        service.last_reconcile_error = try self.alloc.dupe(u8, message);
+        try replaceOptionalOwned(self.alloc, &service.last_reconcile_error, message);
     }
 
     pub fn snapshotServices(self: *const Registry, alloc: Allocator) Error!std.ArrayList(ServiceSnapshot) {
@@ -1251,4 +1250,35 @@ test "markReconcileFailed and markReconcileSucceeded update service detail" {
     defer recovered.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("idle", recovered.last_reconcile_status);
     try std.testing.expect(recovered.last_reconcile_error == null);
+}
+
+test "failed reconcile message replacement preserves the previous message" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var registry = Registry.init(failing.allocator());
+    defer registry.deinit();
+    try registry.upsertService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+    });
+    try registry.markReconcileFailed("api", "map update failed");
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, registry.markReconcileFailed("api", "retry failed"));
+    const service = try registry.getServiceMut("api");
+    try std.testing.expectEqualStrings("map update failed", service.last_reconcile_error.?);
+    try std.testing.expectEqual(ReconcileStatus.failed, service.last_reconcile_status);
+
+    // reporting the same message needs no allocation, even when it is borrowed.
+    try registry.markReconcileFailed("api", service.last_reconcile_error.?);
+    failing.fail_index = std.math.maxInt(usize);
+    try registry.markReconcileFailed("api", service.last_reconcile_error.?[4..]);
+    try std.testing.expectEqualStrings("update failed", service.last_reconcile_error.?);
+
+    try registry.markReconcileSucceeded("api");
+    try std.testing.expect(service.last_reconcile_error == null);
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, registry.markReconcileFailed("api", "retry failed"));
+    try std.testing.expect(service.last_reconcile_error == null);
+    try std.testing.expectEqual(ReconcileStatus.failed, service.last_reconcile_status);
 }
