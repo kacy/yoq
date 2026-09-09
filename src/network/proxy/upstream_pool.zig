@@ -20,8 +20,8 @@ const socket_helpers = @import("socket_helpers.zig");
 
 const socket_t = linux_platform.posix.socket_t;
 
-/// most idle connections kept per endpoint. a small fixed array keeps the
-/// checkout/release path allocation-free once an endpoint is known.
+/// most idle connections kept per endpoint. each endpoint has a fixed array,
+/// and its map entry is removed when the last idle connection leaves.
 pub const max_idle_per_endpoint = 8;
 /// global ceiling on idle connections across all endpoints, guarding against
 /// file-descriptor exhaustion when many endpoints are in play.
@@ -82,6 +82,7 @@ pub fn checkout(endpoint_id: []const u8, address: []const u8, port: u16) ?socket
     defer mutex.unlock(std.Options.debug_io);
 
     const entry = pool.getPtr(key) orelse return null;
+    defer if (entry.len == 0) removeEmptyEndpoint(key);
     const now = nowMilliseconds();
 
     // pop from the end (most-recently-released, warmest) toward the front.
@@ -177,6 +178,10 @@ pub fn sweepIdle(now_ms: i64) void {
     mutex.lockUncancelable(std.Options.debug_io);
     defer mutex.unlock(std.Options.debug_io);
 
+    // each endpoint has at least one idle connection, so the global idle cap
+    // also bounds this list. remove entries after iteration to keep it valid.
+    var empty_keys: [max_total_idle][]const u8 = undefined;
+    var empty_count: usize = 0;
     var it = pool.iterator();
     while (it.next()) |kv| {
         const entry = kv.value_ptr;
@@ -193,7 +198,18 @@ pub fn sweepIdle(now_ms: i64) void {
                 i += 1;
             }
         }
+        if (entry.len == 0) {
+            empty_keys[empty_count] = kv.key_ptr.*;
+            empty_count += 1;
+        }
     }
+    for (empty_keys[0..empty_count]) |key| removeEmptyEndpoint(key);
+}
+
+// the caller holds the mutex and has removed every connection from the entry.
+fn removeEmptyEndpoint(key: []const u8) void {
+    const removed = pool.fetchRemove(key) orelse return;
+    std.heap.page_allocator.free(removed.key);
 }
 
 pub fn snapshot() PoolSnapshot {
@@ -304,6 +320,7 @@ test "sweepIdle evicts connections past the idle timeout" {
     const snap = snapshot();
     try std.testing.expectEqual(@as(u64, 0), snap.idle);
     try std.testing.expectEqual(@as(u64, 1), snap.evicted_idle_total);
+    try std.testing.expectEqual(@as(u32, 0), pool.count());
 }
 
 test "checkout discards a connection whose peer has closed" {
@@ -321,4 +338,132 @@ test "checkout discards a connection whose peer has closed" {
     const snap = snapshot();
     try std.testing.expectEqual(@as(u64, 1), snap.evicted_broken_total);
     try std.testing.expectEqual(@as(u64, 0), snap.idle);
+    try std.testing.expectEqual(@as(u32, 0), pool.count());
+}
+
+test "endpoint churn releases empty buckets and allows repeated reuse" {
+    resetForTest();
+    defer resetForTest();
+
+    const iterations = max_total_idle * 2;
+    for (0..iterations) |i| {
+        var id_buf: [32]u8 = undefined;
+        const id = try std.fmt.bufPrint(&id_buf, "api-{d}", .{i});
+        const pair = try testPair();
+        defer linux_platform.posix.close(pair[1]);
+
+        noteDialed();
+        release(id, "10.0.0.2", 8080, pair[0]);
+        try std.testing.expectEqual(@as(u32, 1), pool.count());
+
+        // reuse the same connection after removing and recreating its bucket.
+        for (0..2) |_| {
+            const reused = checkout(id, "10.0.0.2", 8080) orelse return error.TestExpectedReuse;
+            defer release(id, "10.0.0.2", 8080, reused);
+            try std.testing.expectEqual(pair[0], reused);
+            try std.testing.expectEqual(@as(u32, 0), pool.count());
+        }
+        const reused = checkout(id, "10.0.0.2", 8080) orelse return error.TestExpectedReuse;
+        discard(reused);
+    }
+
+    const snap = snapshot();
+    try std.testing.expectEqual(@as(u32, 0), pool.count());
+    try std.testing.expectEqual(@as(u64, 0), snap.idle);
+    try std.testing.expectEqual(@as(u64, 0), snap.active);
+    try std.testing.expectEqual(@as(u64, iterations), snap.created_total);
+    try std.testing.expectEqual(@as(u64, iterations * 3), snap.reuse_total);
+    try std.testing.expectEqual(@as(u64, 0), snap.evicted_overflow_total);
+}
+
+test "checkout removes an endpoint after all its connections expire" {
+    resetForTest();
+    defer resetForTest();
+
+    for (0..max_idle_per_endpoint) |_| {
+        const pair = try testPair();
+        defer linux_platform.posix.close(pair[1]);
+        noteDialed();
+        release("api-1", "10.0.0.2", 8080, pair[0]);
+    }
+    var it = pool.valueIterator();
+    const entry = it.next().?;
+    for (entry.conns[0..entry.len]) |*conn| conn.idle_since_ms = nowMilliseconds() - idle_timeout_ms - 1;
+
+    try std.testing.expect(checkout("api-1", "10.0.0.2", 8080) == null);
+    try std.testing.expectEqual(@as(u32, 0), pool.count());
+    const snap = snapshot();
+    try std.testing.expectEqual(@as(u64, 0), snap.idle);
+    try std.testing.expectEqual(@as(u64, 0), snap.active);
+    try std.testing.expectEqual(@as(u64, max_idle_per_endpoint), snap.evicted_idle_total);
+    try std.testing.expectEqual(@as(u64, 0), snap.evicted_broken_total);
+}
+
+test "sweep removes expired endpoints and preserves live connections" {
+    resetForTest();
+    defer resetForTest();
+
+    const now = nowMilliseconds();
+    var peers: [max_total_idle]socket_t = undefined;
+    var peer_count: usize = 0;
+    defer for (peers[0..peer_count]) |peer| linux_platform.posix.close(peer);
+    for (0..max_total_idle) |i| {
+        var id_buf: [32]u8 = undefined;
+        const id = try std.fmt.bufPrint(&id_buf, "api-{d}", .{i});
+        const pair = try testPair();
+        noteDialed();
+        release(id, "10.0.0.2", 8080, pair[0]);
+        peers[peer_count] = pair[1];
+        peer_count += 1;
+    }
+    // leave one connection unexpired while every other endpoint is removed.
+    var it = pool.iterator();
+    while (it.next()) |kv| {
+        kv.value_ptr.conns[0].idle_since_ms = if (std.mem.startsWith(u8, kv.key_ptr.*, "api-0\x1f")) now else now - idle_timeout_ms;
+    }
+    sweepIdle(now);
+    try std.testing.expectEqual(@as(u32, 1), pool.count());
+    try std.testing.expectEqual(@as(u64, 1), snapshot().idle);
+    try std.testing.expectEqual(@as(u64, max_total_idle - 1), snapshot().evicted_idle_total);
+
+    // the final sweep exercises the same removal path when no entries remain.
+    sweepIdle(now + idle_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 0), pool.count());
+    try std.testing.expectEqual(@as(u64, 0), snapshot().idle);
+    try std.testing.expectEqual(@as(u64, max_total_idle), snapshot().evicted_idle_total);
+}
+
+test "checkout keeps the bucket until its remaining healthy connections leave" {
+    resetForTest();
+    defer resetForTest();
+
+    const first = try testPair();
+    defer linux_platform.posix.close(first[1]);
+    noteDialed();
+    release("api-1", "10.0.0.2", 8080, first[0]);
+
+    const second = try testPair();
+    defer linux_platform.posix.close(second[1]);
+    noteDialed();
+    release("api-1", "10.0.0.2", 8080, second[0]);
+
+    const broken = try testPair();
+    noteDialed();
+    release("api-1", "10.0.0.2", 8080, broken[0]);
+    linux_platform.posix.close(broken[1]);
+
+    const reused_second = checkout("api-1", "10.0.0.2", 8080) orelse return error.TestExpectedReuse;
+    defer discard(reused_second);
+    try std.testing.expectEqual(second[0], reused_second);
+    try std.testing.expectEqual(@as(u32, 1), pool.count());
+    try std.testing.expectEqual(@as(u64, 1), snapshot().idle);
+    try std.testing.expectEqual(@as(u64, 1), snapshot().evicted_broken_total);
+
+    const reused_first = checkout("api-1", "10.0.0.2", 8080) orelse return error.TestExpectedReuse;
+    defer discard(reused_first);
+    try std.testing.expectEqual(first[0], reused_first);
+    try std.testing.expectEqual(@as(u32, 0), pool.count());
+    try std.testing.expectEqual(@as(u64, 0), snapshot().idle);
+    try std.testing.expectEqual(@as(u64, 2), snapshot().active);
+    try std.testing.expectEqual(@as(u64, 2), snapshot().reuse_total);
 }
