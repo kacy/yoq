@@ -116,6 +116,10 @@ pub const HttpRouteDefinition = struct {
 pub const HttpMethodMatch = struct {
     method: []const u8,
 
+    fn clone(self: HttpMethodMatch, alloc: Allocator) Error!HttpMethodMatch {
+        return .{ .method = try alloc.dupe(u8, self.method) };
+    }
+
     pub fn deinit(self: HttpMethodMatch, alloc: Allocator) void {
         alloc.free(self.method);
     }
@@ -124,6 +128,12 @@ pub const HttpMethodMatch = struct {
 pub const HttpHeaderMatch = struct {
     name: []const u8,
     value: []const u8,
+
+    fn clone(self: HttpHeaderMatch, alloc: Allocator) Error!HttpHeaderMatch {
+        const name = try alloc.dupe(u8, self.name);
+        errdefer alloc.free(name);
+        return .{ .name = name, .value = try alloc.dupe(u8, self.value) };
+    }
 
     pub fn deinit(self: HttpHeaderMatch, alloc: Allocator) void {
         alloc.free(self.name);
@@ -134,6 +144,10 @@ pub const HttpHeaderMatch = struct {
 pub const HttpRouteBackend = struct {
     service_name: []const u8,
     weight: u8,
+
+    fn clone(self: HttpRouteBackend, alloc: Allocator) Error!HttpRouteBackend {
+        return .{ .service_name = try alloc.dupe(u8, self.service_name), .weight = self.weight };
+    }
 
     pub fn deinit(self: HttpRouteBackend, alloc: Allocator) void {
         alloc.free(self.service_name);
@@ -321,39 +335,7 @@ const ServiceState = struct {
     }
 };
 
-const HttpRouteState = struct {
-    route_name: []const u8,
-    host: []const u8,
-    path_prefix: []const u8,
-    rewrite_prefix: ?[]const u8,
-    match_methods: []const HttpMethodMatch,
-    match_headers: []const HttpHeaderMatch,
-    backend_services: []const HttpRouteBackend,
-    mirror_service: ?[]const u8,
-    retries: u8,
-    connect_timeout_ms: u32,
-    request_timeout_ms: u32,
-    http2_idle_timeout_ms: u32,
-    target_port: ?u16,
-    preserve_host: bool,
-    retry_on_5xx: bool = true,
-    circuit_breaker_threshold: u8 = 3,
-    circuit_breaker_timeout_ms: u32 = 30_000,
-
-    fn deinit(self: HttpRouteState, alloc: Allocator) void {
-        alloc.free(self.route_name);
-        alloc.free(self.host);
-        alloc.free(self.path_prefix);
-        if (self.rewrite_prefix) |rewrite_prefix| alloc.free(rewrite_prefix);
-        for (self.match_methods) |method_match| method_match.deinit(alloc);
-        if (self.match_methods.len > 0) alloc.free(self.match_methods);
-        for (self.match_headers) |header_match| header_match.deinit(alloc);
-        if (self.match_headers.len > 0) alloc.free(self.match_headers);
-        for (self.backend_services) |backend| backend.deinit(alloc);
-        if (self.backend_services.len > 0) alloc.free(self.backend_services);
-        if (self.mirror_service) |mirror_service| alloc.free(mirror_service);
-    }
-};
+const HttpRouteState = HttpRouteSnapshot;
 
 pub const Registry = struct {
     alloc: Allocator,
@@ -619,57 +601,53 @@ fn findEndpointIndex(endpoints: []const EndpointState, endpoint_id: []const u8) 
 }
 
 fn cloneEndpoint(alloc: Allocator, definition: EndpointDefinition) Error!EndpointState {
-    const owned_endpoint_id = try alloc.dupe(u8, definition.endpoint_id);
-    errdefer alloc.free(owned_endpoint_id);
-    const owned_container_id = try alloc.dupe(u8, definition.container_id);
-    errdefer alloc.free(owned_container_id);
-    const owned_ip_address = try alloc.dupe(u8, definition.ip_address);
-    errdefer alloc.free(owned_ip_address);
-    const owned_admin_state = try alloc.dupe(u8, definition.admin_state);
-    errdefer alloc.free(owned_admin_state);
-
-    return .{
-        .endpoint_id = owned_endpoint_id,
-        .container_id = owned_container_id,
+    // empty owned fields let deinit clean up a partial clone.
+    var cloned: EndpointState = .{
+        .endpoint_id = &.{},
+        .container_id = &.{},
         .node_id = definition.node_id,
-        .ip_address = owned_ip_address,
+        .ip_address = &.{},
         .port = definition.port,
         .weight = definition.weight,
-        .admin_state = owned_admin_state,
+        .admin_state = &.{},
         .generation = definition.generation,
         .registered_at = definition.registered_at,
         .last_seen_at = definition.last_seen_at,
     };
+    errdefer cloned.deinit(alloc);
+
+    cloned.endpoint_id = try alloc.dupe(u8, definition.endpoint_id);
+    cloned.container_id = try alloc.dupe(u8, definition.container_id);
+    cloned.ip_address = try alloc.dupe(u8, definition.ip_address);
+    cloned.admin_state = try alloc.dupe(u8, definition.admin_state);
+    return cloned;
 }
 
 fn cloneEndpointSnapshot(alloc: Allocator, endpoint: *const EndpointState) Error!EndpointSnapshot {
-    const owned_endpoint_id = try alloc.dupe(u8, endpoint.endpoint_id);
-    errdefer alloc.free(owned_endpoint_id);
-    const owned_container_id = try alloc.dupe(u8, endpoint.container_id);
-    errdefer alloc.free(owned_container_id);
-    const owned_ip_address = try alloc.dupe(u8, endpoint.ip_address);
-    errdefer alloc.free(owned_ip_address);
-    const owned_admin_state = try alloc.dupe(u8, endpoint.admin_state);
-    errdefer alloc.free(owned_admin_state);
-    const owned_observed_health = try alloc.dupe(u8, endpoint.observed_health.label());
-    errdefer alloc.free(owned_observed_health);
-
-    return .{
-        .endpoint_id = owned_endpoint_id,
-        .container_id = owned_container_id,
+    var cloned: EndpointSnapshot = .{
+        .endpoint_id = &.{},
+        .container_id = &.{},
         .node_id = endpoint.node_id,
-        .ip_address = owned_ip_address,
+        .ip_address = &.{},
         .port = endpoint.port,
         .weight = endpoint.weight,
-        .admin_state = owned_admin_state,
+        .admin_state = &.{},
         .generation = endpoint.generation,
         .registered_at = endpoint.registered_at,
         .last_seen_at = endpoint.last_seen_at,
-        .observed_health = owned_observed_health,
+        .observed_health = &.{},
         .eligible = isEndpointEligible(endpoint),
         .readiness_required = endpoint.readiness_required,
         .last_transition_at = endpoint.last_transition_at,
     };
+    errdefer cloned.deinit(alloc);
+
+    cloned.endpoint_id = try alloc.dupe(u8, endpoint.endpoint_id);
+    cloned.container_id = try alloc.dupe(u8, endpoint.container_id);
+    cloned.ip_address = try alloc.dupe(u8, endpoint.ip_address);
+    cloned.admin_state = try alloc.dupe(u8, endpoint.admin_state);
+    cloned.observed_health = try alloc.dupe(u8, endpoint.observed_health.label());
+    return cloned;
 }
 
 fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!ServiceSnapshot {
@@ -685,39 +663,14 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
         if (isEndpointEligible(&endpoint)) eligible_endpoints += 1;
     }
 
-    const routes = try cloneRouteSnapshots(alloc, service.http_routes.items);
-    errdefer {
-        for (routes) |route| route.deinit(alloc);
-        alloc.free(routes);
-    }
-
-    const owned_service_name = try alloc.dupe(u8, service.service_name);
-    errdefer alloc.free(owned_service_name);
-    const owned_vip_address = try alloc.dupe(u8, service.vip_address);
-    errdefer alloc.free(owned_vip_address);
-    const owned_lb_policy = try alloc.dupe(u8, service.lb_policy);
-    errdefer alloc.free(owned_lb_policy);
-    const owned_http_proxy_host = if (service.http_proxy_host) |host| try alloc.dupe(u8, host) else null;
-    errdefer if (owned_http_proxy_host) |value| alloc.free(value);
-    const owned_http_proxy_path_prefix = if (service.http_proxy_path_prefix) |path_prefix| try alloc.dupe(u8, path_prefix) else null;
-    errdefer if (owned_http_proxy_path_prefix) |value| alloc.free(value);
-    const owned_http_proxy_rewrite_prefix = if (service.http_proxy_rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null;
-    errdefer if (owned_http_proxy_rewrite_prefix) |value| alloc.free(value);
-    const owned_http_proxy_mirror_service = if (service.http_proxy_mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null;
-    errdefer if (owned_http_proxy_mirror_service) |value| alloc.free(value);
-    const owned_last_reconcile_status = try alloc.dupe(u8, service.last_reconcile_status.label());
-    errdefer alloc.free(owned_last_reconcile_status);
-    const owned_last_reconcile_error = if (service.last_reconcile_error) |message| try alloc.dupe(u8, message) else null;
-    errdefer if (owned_last_reconcile_error) |value| alloc.free(value);
-
-    return .{
-        .service_name = owned_service_name,
-        .vip_address = owned_vip_address,
-        .lb_policy = owned_lb_policy,
-        .http_routes = routes,
-        .http_proxy_host = owned_http_proxy_host,
-        .http_proxy_path_prefix = owned_http_proxy_path_prefix,
-        .http_proxy_rewrite_prefix = owned_http_proxy_rewrite_prefix,
+    var cloned: ServiceSnapshot = .{
+        .service_name = &.{},
+        .vip_address = &.{},
+        .lb_policy = &.{},
+        .http_routes = &.{},
+        .http_proxy_host = null,
+        .http_proxy_path_prefix = null,
+        .http_proxy_rewrite_prefix = null,
         .http_proxy_retries = service.http_proxy_retries,
         .http_proxy_connect_timeout_ms = service.http_proxy_connect_timeout_ms,
         .http_proxy_request_timeout_ms = service.http_proxy_request_timeout_ms,
@@ -727,114 +680,98 @@ fn cloneServiceSnapshot(alloc: Allocator, service: *const ServiceState) Error!Se
         .http_proxy_retry_on_5xx = service.http_proxy_retry_on_5xx,
         .http_proxy_circuit_breaker_threshold = service.http_proxy_circuit_breaker_threshold,
         .http_proxy_circuit_breaker_timeout_ms = service.http_proxy_circuit_breaker_timeout_ms,
-        .http_proxy_mirror_service = owned_http_proxy_mirror_service,
+        .http_proxy_mirror_service = null,
         .peer_mode = service.peer_mode,
         .total_endpoints = total_endpoints,
         .eligible_endpoints = eligible_endpoints,
         .healthy_endpoints = healthy_endpoints,
         .draining_endpoints = draining_endpoints,
-        .last_reconcile_status = owned_last_reconcile_status,
-        .last_reconcile_error = owned_last_reconcile_error,
+        .last_reconcile_status = &.{},
+        .last_reconcile_error = null,
         .last_reconcile_requested_at = service.last_reconcile_requested_at,
         .overflow = service.overflow,
         .degraded = service.overflow or service.last_reconcile_status == .failed or eligible_endpoints == 0,
     };
+    errdefer cloned.deinit(alloc);
+
+    cloned.http_routes = try cloneRouteSnapshots(alloc, service.http_routes.items);
+    cloned.service_name = try alloc.dupe(u8, service.service_name);
+    cloned.vip_address = try alloc.dupe(u8, service.vip_address);
+    cloned.lb_policy = try alloc.dupe(u8, service.lb_policy);
+    cloned.http_proxy_host = if (service.http_proxy_host) |host| try alloc.dupe(u8, host) else null;
+    cloned.http_proxy_path_prefix = if (service.http_proxy_path_prefix) |path_prefix| try alloc.dupe(u8, path_prefix) else null;
+    cloned.http_proxy_rewrite_prefix = if (service.http_proxy_rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null;
+    cloned.http_proxy_mirror_service = if (service.http_proxy_mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null;
+    cloned.last_reconcile_status = try alloc.dupe(u8, service.last_reconcile_status.label());
+    cloned.last_reconcile_error = if (service.last_reconcile_error) |message| try alloc.dupe(u8, message) else null;
+    return cloned;
 }
 
 fn cloneRoutesFromDefinition(alloc: Allocator, definition: ServiceDefinition) Error!std.ArrayList(HttpRouteState) {
+    if (definition.http_routes.len > 0) return cloneRoutes(alloc, definition.http_routes);
+    const host = definition.http_proxy_host orelse return .empty;
+    const legacy_route = HttpRouteDefinition{
+        .route_name = "default",
+        .host = host,
+        .path_prefix = definition.http_proxy_path_prefix orelse "/",
+        .rewrite_prefix = definition.http_proxy_rewrite_prefix,
+        .backend_services = &.{.{ .service_name = definition.service_name, .weight = 100 }},
+        .mirror_service = definition.http_proxy_mirror_service,
+        .retries = definition.http_proxy_retries orelse 0,
+        .connect_timeout_ms = definition.http_proxy_connect_timeout_ms orelse 1000,
+        .request_timeout_ms = definition.http_proxy_request_timeout_ms orelse 5000,
+        .http2_idle_timeout_ms = definition.http_proxy_http2_idle_timeout_ms orelse 30000,
+        .target_port = definition.http_proxy_target_port,
+        .preserve_host = definition.http_proxy_preserve_host orelse true,
+        .retry_on_5xx = definition.http_proxy_retry_on_5xx orelse true,
+        .circuit_breaker_threshold = definition.http_proxy_circuit_breaker_threshold orelse 3,
+        .circuit_breaker_timeout_ms = definition.http_proxy_circuit_breaker_timeout_ms orelse 30000,
+    };
+    return cloneRoutes(alloc, &[_]HttpRouteDefinition{legacy_route});
+}
+
+fn cloneRoutes(alloc: Allocator, source: anytype) Error!std.ArrayList(HttpRouteState) {
     var routes: std.ArrayList(HttpRouteState) = .empty;
     errdefer deinitRoutes(alloc, &routes);
-
-    if (definition.http_routes.len > 0) {
-        for (definition.http_routes) |route| {
-            const owned_route_name = try alloc.dupe(u8, route.route_name);
-            errdefer alloc.free(owned_route_name);
-            const owned_host = try alloc.dupe(u8, route.host);
-            errdefer alloc.free(owned_host);
-            const owned_path_prefix = try alloc.dupe(u8, route.path_prefix);
-            errdefer alloc.free(owned_path_prefix);
-            const owned_rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null;
-            errdefer if (owned_rewrite_prefix) |value| alloc.free(value);
-            const owned_match_methods = try cloneMethodMatches(alloc, route.match_methods);
-            errdefer {
-                for (owned_match_methods) |item| item.deinit(alloc);
-                alloc.free(owned_match_methods);
-            }
-            const owned_match_headers = try cloneHeaderMatches(alloc, route.match_headers);
-            errdefer {
-                for (owned_match_headers) |item| item.deinit(alloc);
-                alloc.free(owned_match_headers);
-            }
-            const owned_backend_services = try cloneRouteBackends(alloc, route.backend_services);
-            errdefer {
-                for (owned_backend_services) |item| item.deinit(alloc);
-                alloc.free(owned_backend_services);
-            }
-            const owned_mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null;
-            errdefer if (owned_mirror_service) |value| alloc.free(value);
-
-            try routes.append(alloc, .{
-                .route_name = owned_route_name,
-                .host = owned_host,
-                .path_prefix = owned_path_prefix,
-                .rewrite_prefix = owned_rewrite_prefix,
-                .match_methods = owned_match_methods,
-                .match_headers = owned_match_headers,
-                .backend_services = owned_backend_services,
-                .mirror_service = owned_mirror_service,
-                .retries = route.retries,
-                .connect_timeout_ms = route.connect_timeout_ms,
-                .request_timeout_ms = route.request_timeout_ms,
-                .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
-                .target_port = route.target_port,
-                .preserve_host = route.preserve_host,
-                .retry_on_5xx = route.retry_on_5xx,
-                .circuit_breaker_threshold = route.circuit_breaker_threshold,
-                .circuit_breaker_timeout_ms = route.circuit_breaker_timeout_ms,
-            });
-        }
-        return routes;
+    for (source) |route| {
+        const cloned = try cloneRoute(alloc, route);
+        errdefer cloned.deinit(alloc);
+        try routes.append(alloc, cloned);
     }
-
-    if (definition.http_proxy_host) |host| {
-        const owned_route_name = try alloc.dupe(u8, "default");
-        errdefer alloc.free(owned_route_name);
-        const owned_host = try alloc.dupe(u8, host);
-        errdefer alloc.free(owned_host);
-        const owned_path_prefix = try alloc.dupe(u8, definition.http_proxy_path_prefix orelse "/");
-        errdefer alloc.free(owned_path_prefix);
-        const owned_rewrite_prefix = if (definition.http_proxy_rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null;
-        errdefer if (owned_rewrite_prefix) |value| alloc.free(value);
-        const owned_backend_services = try defaultRouteBackends(alloc, definition.service_name);
-        errdefer {
-            for (owned_backend_services) |item| item.deinit(alloc);
-            alloc.free(owned_backend_services);
-        }
-        const owned_mirror_service = if (definition.http_proxy_mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null;
-        errdefer if (owned_mirror_service) |value| alloc.free(value);
-
-        try routes.append(alloc, .{
-            .route_name = owned_route_name,
-            .host = owned_host,
-            .path_prefix = owned_path_prefix,
-            .rewrite_prefix = owned_rewrite_prefix,
-            .match_methods = &.{},
-            .match_headers = &.{},
-            .backend_services = owned_backend_services,
-            .mirror_service = owned_mirror_service,
-            .retries = definition.http_proxy_retries orelse 0,
-            .connect_timeout_ms = definition.http_proxy_connect_timeout_ms orelse 1000,
-            .request_timeout_ms = definition.http_proxy_request_timeout_ms orelse 5000,
-            .http2_idle_timeout_ms = definition.http_proxy_http2_idle_timeout_ms orelse 30000,
-            .target_port = definition.http_proxy_target_port,
-            .preserve_host = definition.http_proxy_preserve_host orelse true,
-            .retry_on_5xx = definition.http_proxy_retry_on_5xx orelse true,
-            .circuit_breaker_threshold = definition.http_proxy_circuit_breaker_threshold orelse 3,
-            .circuit_breaker_timeout_ms = definition.http_proxy_circuit_breaker_timeout_ms orelse 30_000,
-        });
-    }
-
     return routes;
+}
+
+fn cloneRoute(alloc: Allocator, route: anytype) Error!HttpRouteSnapshot {
+    var cloned: HttpRouteSnapshot = .{
+        .route_name = &.{},
+        .host = &.{},
+        .path_prefix = &.{},
+        .rewrite_prefix = null,
+        .match_methods = &.{},
+        .match_headers = &.{},
+        .backend_services = &.{},
+        .mirror_service = null,
+        .retries = route.retries,
+        .connect_timeout_ms = route.connect_timeout_ms,
+        .request_timeout_ms = route.request_timeout_ms,
+        .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
+        .target_port = route.target_port,
+        .preserve_host = route.preserve_host,
+        .retry_on_5xx = route.retry_on_5xx,
+        .circuit_breaker_threshold = route.circuit_breaker_threshold,
+        .circuit_breaker_timeout_ms = route.circuit_breaker_timeout_ms,
+    };
+    errdefer cloned.deinit(alloc);
+
+    cloned.route_name = try alloc.dupe(u8, route.route_name);
+    cloned.host = try alloc.dupe(u8, route.host);
+    cloned.path_prefix = try alloc.dupe(u8, route.path_prefix);
+    cloned.rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null;
+    cloned.match_methods = try cloneSlice(HttpMethodMatch, alloc, route.match_methods);
+    cloned.match_headers = try cloneSlice(HttpHeaderMatch, alloc, route.match_headers);
+    cloned.backend_services = try cloneSlice(HttpRouteBackend, alloc, route.backend_services);
+    cloned.mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null;
+    return cloned;
 }
 
 fn replaceRoutesFromDefinition(alloc: Allocator, current: *std.ArrayList(HttpRouteState), definition: ServiceDefinition) Error!void {
@@ -844,60 +781,8 @@ fn replaceRoutesFromDefinition(alloc: Allocator, current: *std.ArrayList(HttpRou
 }
 
 fn cloneRouteSnapshots(alloc: Allocator, routes: []const HttpRouteState) Error![]const HttpRouteSnapshot {
-    var snapshots: std.ArrayList(HttpRouteSnapshot) = .empty;
-    errdefer {
-        for (snapshots.items) |route| route.deinit(alloc);
-        snapshots.deinit(alloc);
-    }
-
-    for (routes) |route| {
-        const owned_route_name = try alloc.dupe(u8, route.route_name);
-        errdefer alloc.free(owned_route_name);
-        const owned_host = try alloc.dupe(u8, route.host);
-        errdefer alloc.free(owned_host);
-        const owned_path_prefix = try alloc.dupe(u8, route.path_prefix);
-        errdefer alloc.free(owned_path_prefix);
-        const owned_rewrite_prefix = if (route.rewrite_prefix) |rewrite_prefix| try alloc.dupe(u8, rewrite_prefix) else null;
-        errdefer if (owned_rewrite_prefix) |value| alloc.free(value);
-        const owned_match_methods = try cloneMethodMatches(alloc, route.match_methods);
-        errdefer {
-            for (owned_match_methods) |item| item.deinit(alloc);
-            alloc.free(owned_match_methods);
-        }
-        const owned_match_headers = try cloneHeaderMatches(alloc, route.match_headers);
-        errdefer {
-            for (owned_match_headers) |item| item.deinit(alloc);
-            alloc.free(owned_match_headers);
-        }
-        const owned_backend_services = try cloneRouteBackends(alloc, route.backend_services);
-        errdefer {
-            for (owned_backend_services) |item| item.deinit(alloc);
-            alloc.free(owned_backend_services);
-        }
-        const owned_mirror_service = if (route.mirror_service) |mirror_service| try alloc.dupe(u8, mirror_service) else null;
-        errdefer if (owned_mirror_service) |value| alloc.free(value);
-
-        try snapshots.append(alloc, .{
-            .route_name = owned_route_name,
-            .host = owned_host,
-            .path_prefix = owned_path_prefix,
-            .rewrite_prefix = owned_rewrite_prefix,
-            .match_methods = owned_match_methods,
-            .match_headers = owned_match_headers,
-            .backend_services = owned_backend_services,
-            .mirror_service = owned_mirror_service,
-            .retries = route.retries,
-            .connect_timeout_ms = route.connect_timeout_ms,
-            .request_timeout_ms = route.request_timeout_ms,
-            .http2_idle_timeout_ms = route.http2_idle_timeout_ms,
-            .target_port = route.target_port,
-            .preserve_host = route.preserve_host,
-            .retry_on_5xx = route.retry_on_5xx,
-            .circuit_breaker_threshold = route.circuit_breaker_threshold,
-            .circuit_breaker_timeout_ms = route.circuit_breaker_timeout_ms,
-        });
-    }
-
+    var snapshots = try cloneRoutes(alloc, routes);
+    errdefer deinitRoutes(alloc, &snapshots);
     return snapshots.toOwnedSlice(alloc);
 }
 
@@ -944,72 +829,18 @@ fn isEndpointEligible(endpoint: *const EndpointState) bool {
     return endpoint.observed_health != .unhealthy;
 }
 
-fn cloneMethodMatches(alloc: Allocator, matches: []const HttpMethodMatch) Error![]const HttpMethodMatch {
-    var cloned: std.ArrayList(HttpMethodMatch) = .empty;
+fn cloneSlice(comptime T: type, alloc: Allocator, source: []const T) Error![]const T {
+    const cloned = try alloc.alloc(T, source.len);
+    var initialized: usize = 0;
     errdefer {
-        for (cloned.items) |method_match| method_match.deinit(alloc);
-        cloned.deinit(alloc);
+        for (cloned[0..initialized]) |item| item.deinit(alloc);
+        alloc.free(cloned);
     }
-
-    for (matches) |method_match| {
-        const owned_method = try alloc.dupe(u8, method_match.method);
-        errdefer alloc.free(owned_method);
-
-        try cloned.append(alloc, .{
-            .method = owned_method,
-        });
+    for (source, cloned) |item, *copy| {
+        copy.* = try item.clone(alloc);
+        initialized += 1;
     }
-    return cloned.toOwnedSlice(alloc);
-}
-
-fn cloneHeaderMatches(alloc: Allocator, matches: []const HttpHeaderMatch) Error![]const HttpHeaderMatch {
-    var cloned: std.ArrayList(HttpHeaderMatch) = .empty;
-    errdefer {
-        for (cloned.items) |header_match| header_match.deinit(alloc);
-        cloned.deinit(alloc);
-    }
-
-    for (matches) |header_match| {
-        const owned_name = try alloc.dupe(u8, header_match.name);
-        errdefer alloc.free(owned_name);
-        const owned_value = try alloc.dupe(u8, header_match.value);
-        errdefer alloc.free(owned_value);
-
-        try cloned.append(alloc, .{
-            .name = owned_name,
-            .value = owned_value,
-        });
-    }
-    return cloned.toOwnedSlice(alloc);
-}
-
-fn cloneRouteBackends(alloc: Allocator, backends: []const HttpRouteBackend) Error![]const HttpRouteBackend {
-    var cloned: std.ArrayList(HttpRouteBackend) = .empty;
-    errdefer {
-        for (cloned.items) |backend| backend.deinit(alloc);
-        cloned.deinit(alloc);
-    }
-
-    for (backends) |backend| {
-        const owned_service_name = try alloc.dupe(u8, backend.service_name);
-        errdefer alloc.free(owned_service_name);
-
-        try cloned.append(alloc, .{
-            .service_name = owned_service_name,
-            .weight = backend.weight,
-        });
-    }
-    return cloned.toOwnedSlice(alloc);
-}
-
-fn defaultRouteBackends(alloc: Allocator, service_name: []const u8) Error![]const HttpRouteBackend {
-    const backends = try alloc.alloc(HttpRouteBackend, 1);
-    errdefer alloc.free(backends);
-    backends[0] = .{
-        .service_name = try alloc.dupe(u8, service_name),
-        .weight = 100,
-    };
-    return backends;
+    return cloned;
 }
 
 fn replaceOwned(alloc: Allocator, current: *[]const u8, next: []const u8) Error!void {
