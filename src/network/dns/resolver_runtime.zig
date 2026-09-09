@@ -23,12 +23,12 @@ const Listener = struct {
     address: [4]u8,
     socket: ?linux_platform.posix.socket_t = null,
     thread: ?std.Thread = null,
+    external: bool = false,
 };
 // A process serves local workloads and its own cluster subnet. Keep both
 // gateways available without a wildcard socket occupying host DNS addresses.
 var listeners: [2]?Listener = .{ null, null };
 var resolver_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
-var external_resolver_available: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var resolver_mutex: std.Io.Mutex = .init;
 var rate_limits: [256]RateLimitEntry = [_]RateLimitEntry{.{
     .ip = 0,
@@ -45,10 +45,18 @@ pub fn startResolverAt(address: [4]u8) void {
     resolver_mutex.lockUncancelable(std.Options.debug_io);
     defer resolver_mutex.unlock(std.Options.debug_io);
 
+    startResolverAtLocked(address);
+}
+
+fn startResolverAtLocked(address: [4]u8) void {
     var available: ?*?Listener = null;
     for (&listeners) |*entry| {
         if (entry.*) |listener| {
-            if (std.mem.eql(u8, &listener.address, &address)) return;
+            if (std.mem.eql(u8, &listener.address, &address)) {
+                if (listener.socket != null) return;
+                available = entry;
+                break;
+            }
         } else {
             available = entry;
         }
@@ -58,6 +66,8 @@ pub fn startResolverAt(address: [4]u8) void {
         return;
     };
 
+    // retain the requested gateway so an audit can retry a failed bind.
+    slot.* = .{ .address = address };
     initUpstreamDns();
 
     const sock = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC, 0) catch |e| {
@@ -80,8 +90,7 @@ pub fn startResolverAt(address: [4]u8) void {
 
     linux_platform.posix.bind(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch |e| {
         if (e == error.AddressInUse) {
-            slot.* = .{ .address = address };
-            external_resolver_available.store(true, .release);
+            slot.* = .{ .address = address, .external = true };
             log.info("dns resolver already available on {s}:53", .{bridge.default_bridge});
         } else {
             log.warn("dns: failed to bind to {s}:53: {}", .{ bridge.default_bridge, e });
@@ -103,19 +112,40 @@ pub fn startResolverAt(address: [4]u8) void {
     });
 }
 
+/// retry gateways served by another process; return true after acquiring a socket.
+pub fn refreshResolvers() bool {
+    resolver_mutex.lockUncancelable(std.Options.debug_io);
+    defer resolver_mutex.unlock(std.Options.debug_io);
+    var acquired = false;
+    for (&listeners) |*entry| {
+        const listener = entry.* orelse continue;
+        if (listener.socket != null) continue;
+        startResolverAtLocked(listener.address);
+        if (entry.*.?.socket != null) acquired = true;
+    }
+    return acquired;
+}
+
 pub fn isRunningAt(address: [4]u8) bool {
     resolver_mutex.lockUncancelable(std.Options.debug_io);
     defer resolver_mutex.unlock(std.Options.debug_io);
     for (listeners) |entry| {
         if (entry) |listener| {
-            if (std.mem.eql(u8, &listener.address, &address)) return true;
+            if (std.mem.eql(u8, &listener.address, &address)) return listener.socket != null or listener.external;
         }
     }
     return false;
 }
 
 pub fn isRunning() bool {
-    return resolver_running.load(.acquire) or external_resolver_available.load(.acquire);
+    resolver_mutex.lockUncancelable(std.Options.debug_io);
+    defer resolver_mutex.unlock(std.Options.debug_io);
+    for (listeners) |entry| {
+        if (entry) |listener| {
+            if (listener.socket != null or listener.external) return true;
+        }
+    }
+    return false;
 }
 
 pub fn isOwnedByCurrentProcess() bool {
@@ -141,7 +171,6 @@ pub fn stopResolver() void {
         }
         entry.* = null;
     }
-    external_resolver_available.store(false, .release);
 }
 
 fn initUpstreamDns() void {

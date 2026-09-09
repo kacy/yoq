@@ -119,10 +119,8 @@ pub fn setupContainer(
         ebpf_support.loadDnsInterceptorOnBridge();
     }
     service_reconciler.refreshComponentStateIfEnabled();
-    if (dns.resolverOwnedByCurrentProcess()) {
-        // Detached local supervisors also own filters and need policy refresh.
-        service_reconciler.startAuditLoopIfEnabled();
-    }
+    // every supervisor must retry DNS ownership if the current listener exits.
+    service_reconciler.startAuditLoopIfEnabled();
 
     if (!config.skip_dns) {
         service_registry_bridge.registerContainerService(
