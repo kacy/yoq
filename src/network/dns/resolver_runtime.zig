@@ -66,6 +66,7 @@ fn startResolverAtLocked(address: [4]u8) void {
         return;
     };
 
+    const was_external = if (slot.*) |listener| listener.external else false;
     // retain the requested gateway so an audit can retry a failed bind.
     slot.* = .{ .address = address };
     initUpstreamDns();
@@ -91,7 +92,7 @@ fn startResolverAtLocked(address: [4]u8) void {
     linux_platform.posix.bind(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch |e| {
         if (e == error.AddressInUse) {
             slot.* = .{ .address = address, .external = true };
-            log.info("dns resolver already available on {s}:53", .{bridge.default_bridge});
+            if (!was_external) log.info("dns resolver already available on {s}:53", .{bridge.default_bridge});
         } else {
             log.warn("dns: failed to bind to {s}:53: {}", .{ bridge.default_bridge, e });
         }
@@ -112,7 +113,7 @@ fn startResolverAtLocked(address: [4]u8) void {
     });
 }
 
-/// retry gateways served by another process; return true after acquiring a socket.
+/// retry requested gateways without a local socket; return true after acquiring one.
 pub fn refreshResolvers() bool {
     resolver_mutex.lockUncancelable(std.Options.debug_io);
     defer resolver_mutex.unlock(std.Options.debug_io);

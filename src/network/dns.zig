@@ -144,7 +144,7 @@ pub fn startResolver() void {
     resolver_runtime.startResolver();
 }
 
-/// retry requested gateways whose listener belongs to another process.
+/// retry requested gateways without a local socket.
 /// returns true when this process acquires a listener.
 pub fn refreshResolvers() bool {
     return resolver_runtime.refreshResolvers();
