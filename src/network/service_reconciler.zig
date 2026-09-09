@@ -558,6 +558,7 @@ fn auditLoop() void {
 }
 
 fn runAuditPassLocked() void {
+    if (dns.refreshResolvers()) ebpf_support.loadDnsInterceptorOnBridge();
     refreshComponentStateLocked();
     // Policy-only database edits must reach the process that owns the filters.
     policy.syncPolicies(std.heap.page_allocator);

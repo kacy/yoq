@@ -144,6 +144,12 @@ pub fn startResolver() void {
     resolver_runtime.startResolver();
 }
 
+/// retry requested gateways without a local socket.
+/// returns true when this process acquires a listener.
+pub fn refreshResolvers() bool {
+    return resolver_runtime.refreshResolvers();
+}
+
 pub fn resolverRunning() bool {
     return resolver_runtime.isRunning();
 }

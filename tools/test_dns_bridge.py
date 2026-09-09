@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import socket
+import select
 import struct
 import subprocess
 import sys
@@ -47,8 +48,10 @@ def inside(binary, outer):
     run("ip", "addr", "add", "10.42.2.1/24", "dev", "yoq0")
     run("ip", "addr", "add", "10.42.0.1/24", "dev", "yoq0")
     run("ip", "link", "set", "yoq0", "up")
-    client = subprocess.Popen(["unshare", "--net", "sleep", "30"])
+    client = subprocess.Popen(["unshare", "--net", "sleep", "90"])
     server = None
+    followers = []
+    follower_logs = []
     try:
         deadline = time.monotonic() + 2
         while os.readlink(f"/proc/{client.pid}/ns/net") == os.readlink("/proc/self/ns/net"):
@@ -92,10 +95,54 @@ def inside(binary, outer):
             stub.sendto(b"host-dns-ok", peer)
             assert probe.recv(512) == b"host-dns-ok"
         query("127.0.0.1", False)
+        def start_follower():
+            log = tempfile.TemporaryFile()
+            follower_logs.append(log)
+            process = subprocess.Popen([str(binary)], stdout=subprocess.PIPE, stderr=log)
+            followers.append(process)
+            readable, _, _ = select.select([process.stdout], [], [], 3)
+            assert readable, os.pread(log.fileno(), 65536, 0)
+            assert process.stdout.readline() == b"dns fixture ready owned=false\n"
+            process.stdout.close()
+            return process
+
+        def check_gateways():
+            for address in ("10.42.0.1", "10.42.2.1"):
+                run(*prefix, sys.executable, str(Path(__file__).resolve()), "--query", address, "--expect")
+
+        def wait_for_takeover(survivor):
+            deadline = time.monotonic() + 3
+            while True:
+                assert survivor.poll() is None, "surviving resolver exited"
+                try:
+                    check_gateways()
+                    return
+                except subprocess.CalledProcessError:
+                    assert time.monotonic() < deadline, "surviving resolver did not acquire both gateways"
+                    time.sleep(0.05)
+
+        # stopping a follower must leave the current listener untouched.
+        follower = start_follower()
+        follower.terminate()
+        follower.wait(timeout=3)
+        check_gateways()
+
+        # the survivor retries both gateways after the owner exits.
+        successor = start_follower()
+        server.terminate()
+        server.wait(timeout=3)
+        server = None
+        wait_for_takeover(successor)
+        replacement = start_follower()
+        successor.terminate()
+        successor.wait(timeout=3)
+        wait_for_takeover(replacement)
+        query("127.0.0.1", False)
+        print("DNS kernel: both gateways recover after repeated owner exits; follower exit leaves DNS available", flush=True)
         print("DNS kernel: local and node gateways coexist with host DNS; unrelated ingress and loopback rejected", flush=True)
     finally:
         stub.close()
-        for process in (server, client):
+        for process in (server, *followers, client):
             if process is not None:
                 process.terminate()
                 try:
@@ -103,6 +150,8 @@ def inside(binary, outer):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+        for log in follower_logs:
+            log.close()
 
 
 def main():
