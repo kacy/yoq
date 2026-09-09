@@ -83,8 +83,7 @@ fn ensureInDb(db: *sqlite.Db, alloc: Allocator, service_name: []const u8, lb_pol
         .{},
         .{service_name},
     ) catch return StoreError.ReadFailed) |row| {
-        const routes = try service_routes.listForDb(alloc, db, service_name);
-        const record = rowToServiceRecord(row, routes);
+        const record = try recordWithRoutes(alloc, db, row);
         db.exec("COMMIT;", .{}, .{}) catch {
             record.deinit(alloc);
             return StoreError.WriteFailed;
@@ -184,8 +183,14 @@ fn getInDb(db: *sqlite.Db, alloc: Allocator, service_name: []const u8) StoreErro
         .{},
         .{service_name},
     ) catch return StoreError.ReadFailed) orelse return StoreError.NotFound;
-    const routes = try service_routes.listForDb(alloc, db, service_name);
-    return rowToServiceRecord(row, routes);
+    return recordWithRoutes(alloc, db, row);
+}
+
+fn recordWithRoutes(alloc: Allocator, db: *sqlite.Db, row: ServiceRow) StoreError!ServiceRecord {
+    var record = rowToServiceRecord(row, &.{});
+    errdefer record.deinit(alloc);
+    record.http_routes = try service_routes.listForDb(alloc, db, record.service_name);
+    return record;
 }
 
 pub fn list(alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
@@ -197,14 +202,19 @@ pub fn list(alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
 
 fn listInDb(db: *sqlite.Db, alloc: Allocator) StoreError!std.ArrayList(ServiceRecord) {
     var services: std.ArrayList(ServiceRecord) = .empty;
+    errdefer {
+        for (services.items) |service| service.deinit(alloc);
+        services.deinit(alloc);
+    }
     var stmt = db.prepare(
         "SELECT " ++ service_columns ++ " FROM services ORDER BY service_name;",
     ) catch return StoreError.ReadFailed;
     defer stmt.deinit();
     var iter = stmt.iterator(ServiceRow, .{}) catch return StoreError.ReadFailed;
     while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-        const routes = try service_routes.listForDb(alloc, db, row.service_name.data);
-        services.append(alloc, rowToServiceRecord(row, routes)) catch return StoreError.ReadFailed;
+        const record = try recordWithRoutes(alloc, db, row);
+        errdefer record.deinit(alloc);
+        services.append(alloc, record) catch return StoreError.ReadFailed;
     }
     return services;
 }
@@ -368,4 +378,65 @@ test "syncConfig persists peer_mode round-trip" {
     const downgraded = try syncConfig(alloc, "billing", "consistent_hash", "warn", &.{});
     defer downgraded.deinit(alloc);
     try std.testing.expectEqualStrings("warn", downgraded.peer_mode.?);
+}
+
+fn checkServiceRead(alloc: Allocator) !void {
+    const record = get(alloc, "api") catch return error.OutOfMemory;
+    defer record.deinit(alloc);
+    try checkServiceContents(record);
+}
+
+fn checkServiceEnsure(alloc: Allocator) !void {
+    const record = ensure(alloc, "api", "consistent_hash") catch return error.OutOfMemory;
+    defer record.deinit(alloc);
+    try checkServiceContents(record);
+}
+
+fn checkServiceList(alloc: Allocator) !void {
+    var records = list(alloc) catch return error.OutOfMemory;
+    defer {
+        for (records.items) |record| record.deinit(alloc);
+        records.deinit(alloc);
+    }
+    try std.testing.expectEqual(@as(usize, 2), records.items.len);
+    try checkServiceContents(records.items[0]);
+    try std.testing.expectEqualStrings("worker", records.items[1].service_name);
+    try std.testing.expectEqual(@as(usize, 0), records.items[1].http_routes.len);
+}
+
+fn checkServiceContents(record: ServiceRecord) !void {
+    try std.testing.expectEqualStrings("api", record.service_name);
+    try std.testing.expectEqualStrings("/new", record.http_proxy_rewrite_prefix.?);
+    try std.testing.expectEqualStrings("shadow", record.http_proxy_mirror_service.?);
+    try std.testing.expectEqualStrings("require", record.peer_mode.?);
+    try std.testing.expectEqual(@as(usize, 1), record.http_routes.len);
+    const route = record.http_routes[0];
+    try std.testing.expectEqualStrings("POST", route.match_methods[1].method);
+    try std.testing.expectEqualStrings("prod", route.match_headers[0].header_value);
+    try std.testing.expectEqualStrings("canary", route.backend_services[1].backend_service);
+}
+
+test "service reads and lists clean up every allocation failure" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+    const alloc = std.testing.allocator;
+    const api = try syncConfig(alloc, "api", "consistent_hash", "require", &.{.{
+        .route_name = "default",
+        .host = "api.example",
+        .path_prefix = "/old",
+        .rewrite_prefix = "/new",
+        .mirror_service = "shadow",
+        .match_methods = &.{ .{ .method = "GET" }, .{ .method = "POST" } },
+        .match_headers = &.{.{ .header_name = "x-env", .header_value = "prod" }},
+        .backend_services = &.{ .{ .backend_service = "stable", .weight = 90 }, .{ .backend_service = "canary", .weight = 10 } },
+    }});
+    defer api.deinit(alloc);
+    const worker = try ensure(alloc, "worker", "consistent_hash");
+    defer worker.deinit(alloc);
+    try std.testing.checkAllAllocationFailures(alloc, checkServiceRead, .{});
+    try std.testing.checkAllAllocationFailures(alloc, checkServiceList, .{});
+    try std.testing.checkAllAllocationFailures(alloc, checkServiceEnsure, .{});
+    try checkServiceRead(alloc);
+    try checkServiceList(alloc);
+    try checkServiceEnsure(alloc);
 }

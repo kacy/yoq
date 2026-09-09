@@ -143,6 +143,10 @@ pub const CertStore = struct {
         };
 
         var results: std.ArrayList(common.CertInfo) = .empty;
+        errdefer {
+            for (results.items) |record| record.deinit(self.allocator);
+            results.deinit(self.allocator);
+        }
 
         var stmt = self.db.prepare(
             "SELECT domain, not_after, source, created_at FROM certificates ORDER BY domain ASC;",
@@ -151,12 +155,14 @@ pub const CertStore = struct {
 
         var iter = stmt.iterator(InfoRow, .{}) catch return common.CertError.ReadFailed;
         while (iter.nextAlloc(self.allocator, .{}) catch return common.CertError.ReadFailed) |row| {
-            results.append(self.allocator, .{
+            const record: common.CertInfo = .{
                 .domain = row.domain.data,
                 .not_after = row.not_after,
                 .source = row.source.data,
                 .created_at = row.created_at,
-            }) catch return common.CertError.AllocFailed;
+            };
+            errdefer record.deinit(self.allocator);
+            results.append(self.allocator, record) catch return common.CertError.AllocFailed;
         }
 
         return results;
@@ -224,6 +230,10 @@ pub const CertStore = struct {
 
         const threshold = nowRealSeconds() + (days * 86400);
         var results: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (results.items) |domain| self.allocator.free(domain);
+            results.deinit(self.allocator);
+        }
 
         var stmt = self.db.prepare(
             "SELECT domain FROM certificates WHERE not_after <= ? ORDER BY not_after ASC;",
@@ -232,6 +242,7 @@ pub const CertStore = struct {
 
         var iter = stmt.iterator(DomainRow, .{threshold}) catch return common.CertError.ReadFailed;
         while (iter.nextAlloc(self.allocator, .{}) catch return common.CertError.ReadFailed) |row| {
+            errdefer self.allocator.free(row.domain.data);
             results.append(self.allocator, row.domain.data) catch return common.CertError.AllocFailed;
         }
 
@@ -245,6 +256,10 @@ pub const CertStore = struct {
 
         const threshold = nowRealSeconds() + (days * 86400);
         var results: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (results.items) |domain| self.allocator.free(domain);
+            results.deinit(self.allocator);
+        }
 
         var stmt = self.db.prepare(
             "SELECT c.domain FROM certificates c " ++
@@ -255,6 +270,7 @@ pub const CertStore = struct {
 
         var iter = stmt.iterator(DomainRow, .{threshold}) catch return common.CertError.ReadFailed;
         while (iter.nextAlloc(self.allocator, .{}) catch return common.CertError.ReadFailed) |row| {
+            errdefer self.allocator.free(row.domain.data);
             results.append(self.allocator, row.domain.data) catch return common.CertError.AllocFailed;
         }
 

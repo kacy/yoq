@@ -405,3 +405,44 @@ test "certificate retrieval cleans up every allocation failure" {
     // failed reads must leave the stored certificate usable.
     try checkCertificateRetrieval(std.testing.allocator, &db);
 }
+
+const CertificateListKind = enum { all, expiring, managed };
+
+fn checkCertificateList(alloc: std.mem.Allocator, db: *sqlite.Db, kind: CertificateListKind) !void {
+    var cs = try CertStore.initWithKey(db, alloc, [_]u8{0xAB} ** key_length);
+    if (kind == .all) {
+        var records = cs.list() catch return error.OutOfMemory;
+        defer {
+            for (records.items) |record| record.deinit(alloc);
+            records.deinit(alloc);
+        }
+        try std.testing.expectEqual(@as(usize, 2), records.items.len);
+        try std.testing.expectEqualStrings("a.example", records.items[0].domain);
+        try std.testing.expectEqualStrings("manual", records.items[0].source);
+        try std.testing.expectEqualStrings("b.example", records.items[1].domain);
+    } else {
+        var domains = (if (kind == .managed) cs.listExpiringManagedSoon(1) else cs.listExpiringSoon(1)) catch return error.OutOfMemory;
+        defer {
+            for (domains.items) |domain| alloc.free(domain);
+            domains.deinit(alloc);
+        }
+        try std.testing.expectEqual(@as(usize, if (kind == .managed) 1 else 2), domains.items.len);
+        try std.testing.expectEqualStrings("b.example", domains.items[0]);
+        if (kind == .expiring) try std.testing.expectEqualStrings("a.example", domains.items[1]);
+    }
+}
+
+test "certificate lists clean up every allocation failure" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    var cs = try CertStore.initWithKey(&db, std.testing.allocator, [_]u8{0xAB} ** key_length);
+    for ([_][]const u8{ "a.example", "b.example" }) |domain| {
+        try cs.install(domain, @embedFile("testdata/cert.pem"), "key", "manual");
+    }
+    try db.exec("UPDATE certificates SET not_after = CASE domain WHEN 'b.example' THEN 1 ELSE 2 END;", .{}, .{});
+    try db.exec("INSERT INTO certificate_acme_config VALUES ('b.example', '{}', 0, 0);", .{}, .{});
+    for ([_]CertificateListKind{ .all, .expiring, .managed }) |kind| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, checkCertificateList, .{ &db, kind });
+        try checkCertificateList(std.testing.allocator, &db, kind);
+    }
+}
