@@ -12,6 +12,7 @@ const enrollment = @import("../../../cluster/enrollment_identity.zig");
 const mutation = @import("../../../cluster/mutation_session.zig");
 const deploy_routes = @import("deploy_routes.zig");
 const credentials = @import("../../../cluster/agent_credentials.zig");
+const Node = @import("../../../cluster/node.zig").Node;
 
 const Response = common.Response;
 const RouteContext = common.RouteContext;
@@ -126,8 +127,8 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
             }) catch |refresh_error| return deploy_routes.mutationFailure(alloc, node, refresh_error);
         } else return deploy_routes.mutationFailure(alloc, node, err);
     };
-    // Keep credential validation, assigned identity and peer bootstrap in the
-    // same applied-state snapshot while constructing the response.
+    // validate the credential and read the assigned identity and bootstrap peers
+    // from one applied-state snapshot.
     node.mu.lockUncancelable(std.Options.debug_io);
     defer node.mu.unlock(std.Options.debug_io);
     const registered = (enrollment.readRegisteredLocked(alloc, session, &id_buf, &credential, if (registration_key != null) wg_public_key else null) catch |err| return switch (err) {
@@ -136,59 +137,76 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
         else => common.internalError(),
     }) orelse return common.conflict("registration identity unavailable");
     defer registered.deinit(alloc);
-    const assigned_node_id: ?u16 = if (registered.node_id) |nid| std.math.cast(u16, nid) else null;
-    const overlay_ip_str = registered.overlay_ip;
+    var json = std.Io.Writer.Allocating.init(alloc);
+    defer json.deinit();
+    writeRegistrationJson(alloc, &json.writer, node, .{
+        .id = &id_buf,
+        .credential = &credential,
+        .registration_key_accepted = registration_key != null,
+        .node_id = if (registered.node_id) |nid| std.math.cast(u16, nid) else null,
+        .overlay_ip = registered.overlay_ip,
+        .role = role_str,
+    }) catch return common.internalError();
+    const body = json.toOwnedSlice() catch return common.internalError();
+    return .{ .status = .ok, .body = body, .allocated = true };
+}
 
-    var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
-    defer json_buf_writer.deinit();
+const RegistrationResponse = struct {
+    id: []const u8,
+    credential: []const u8,
+    registration_key_accepted: bool,
+    node_id: ?u16,
+    overlay_ip: ?[]const u8,
+    role: ?[]const u8,
+};
 
-    const writer = &json_buf_writer.writer;
+// the caller holds the node lock through all bootstrap queries and serialization.
+fn writeRegistrationJson(alloc: std.mem.Allocator, writer: *std.Io.Writer, node: *Node, response: RegistrationResponse) !void {
+    try writer.writeAll("{\"id\":\"");
+    try writer.writeAll(response.id);
+    try writer.print("\",\"credential\":\"{s}\"", .{response.credential});
+    if (response.registration_key_accepted) try writer.writeAll(",\"registration_key_accepted\":true");
 
-    writer.writeAll("{\"id\":\"") catch return common.internalError();
-    writer.writeAll(&id_buf) catch return common.internalError();
-    writer.print("\",\"credential\":\"{s}\"", .{credential}) catch return common.internalError();
-    if (registration_key != null) writer.writeAll(",\"registration_key_accepted\":true") catch return common.internalError();
-
-    if (assigned_node_id) |nid| {
-        writer.print(",\"node_id\":{d}", .{nid}) catch return common.internalError();
+    if (response.node_id) |nid| {
+        try writer.print(",\"node_id\":{d}", .{nid});
     }
-    if (overlay_ip_str) |oip| {
-        writer.writeAll(",\"overlay_ip\":\"") catch return common.internalError();
-        writer.writeAll(oip) catch return common.internalError();
-        writer.writeByte('"') catch return common.internalError();
+    if (response.overlay_ip) |oip| {
+        try writer.writeAll(",\"overlay_ip\":\"");
+        try writer.writeAll(oip);
+        try writer.writeByte('"');
     }
 
-    if (assigned_node_id != null) {
+    if (response.node_id) |node_id| {
         const db = node.stateMachineDb();
-        const parsed_role = if (role_str) |rs| cluster_config.NodeRole.fromString(rs) else null;
-        const is_agent_role = if (parsed_role) |r| r == .agent else false;
+        const parsed_role = if (response.role) |role| cluster_config.NodeRole.fromString(role) else null;
+        const is_agent_role = parsed_role == .agent;
         const peers = (if (is_agent_role)
             agent_registry.listWireguardServerPeers(alloc, db)
         else
             agent_registry.listWireguardPeers(alloc, db)) catch {
-            writer.writeByte('}') catch return common.internalError();
-            const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
-            return .{ .status = .ok, .body = body, .allocated = true };
+            // return the assigned identity if peer lookup fails.
+            try writer.writeByte('}');
+            return;
         };
         defer {
             for (peers) |p| p.deinit(alloc);
             alloc.free(peers);
         }
 
-        writer.writeAll(",\"peers\":[") catch return common.internalError();
+        try writer.writeAll(",\"peers\":[");
         var first = true;
         for (peers) |peer| {
-            if (peer.node_id == @as(i64, assigned_node_id.?)) continue;
-            if (!first) writer.writeByte(',') catch return common.internalError();
+            if (peer.node_id == @as(i64, node_id)) continue;
+            if (!first) try writer.writeByte(',');
             first = false;
-            writers.writeWireguardPeerJson(writer, peer) catch return common.internalError();
+            try writers.writeWireguardPeerJson(writer, peer);
         }
-        writer.writeByte(']') catch return common.internalError();
+        try writer.writeByte(']');
     }
 
-    // The first worker has no other worker seed. Advertise this authenticated
-    // server's identity and actual port; the agent pins its IP to the API peer.
-    writer.print(",\"gossip_server\":{{\"id\":{d},\"port\":{d}}}", .{ node.config.id, node.gossip_port }) catch return common.internalError();
+    // the first worker needs a server to contact before other worker seeds exist.
+    // the agent uses this port and pins the server IP to the authenticated API peer.
+    try writer.print(",\"gossip_server\":{{\"id\":{d},\"port\":{d}}}", .{ node.config.id, node.gossip_port });
 
     blk: {
         const db = node.stateMachineDb();
@@ -196,21 +214,18 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
         defer agent_registry.freeGossipSeeds(alloc, seeds);
 
         if (seeds.len > 0) {
-            writer.writeAll(",\"gossip_seeds\":[") catch return common.internalError();
+            try writer.writeAll(",\"gossip_seeds\":[");
             for (seeds, 0..) |seed, i| {
-                if (i > 0) writer.writeByte(',') catch return common.internalError();
-                writer.writeByte('"') catch return common.internalError();
-                json_helpers.writeJsonEscaped(writer, seed) catch return common.internalError();
-                writer.writeByte('"') catch return common.internalError();
+                if (i > 0) try writer.writeByte(',');
+                try writer.writeByte('"');
+                try json_helpers.writeJsonEscaped(writer, seed);
+                try writer.writeByte('"');
             }
-            writer.writeByte(']') catch return common.internalError();
+            try writer.writeByte(']');
         }
     }
 
-    writer.writeByte('}') catch return common.internalError();
-
-    const body = json_buf_writer.toOwnedSlice() catch return common.internalError();
-    return .{ .status = .ok, .body = body, .allocated = true };
+    try writer.writeByte('}');
 }
 
 pub fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id: []const u8, ctx: RouteContext) Response {
@@ -594,4 +609,92 @@ test "enrollment rejects malformed retry keys instead of creating a legacy ident
     for ([_][]const u8{ "{\"registration_key\":7}", "{\"registration_key\":\"short\"}", "{\"registration_key\":null}" }) |body|
         try std.testing.expectError(error.InvalidKey, enrollment.parseKey(alloc, body));
     try std.testing.expect((try enrollment.parseKey(alloc, "{}")) == null);
+}
+
+test "registration bootstrap filters worker peers and excludes the assigned identity" {
+    const alloc = std.testing.allocator;
+    var node = try Node.initForTests(alloc, .{ .id = 1, .port = 0, .gossip_port = 19877, .peers = &.{}, .data_dir = "/unused" });
+    defer node.deinit();
+    node.fixPointers();
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
+    const db = node.stateMachineDb();
+    for ([_][]const u8{ "server", "agent", "both" }, 2..) |role, id| {
+        const node_id: u16 = @intCast(id);
+        var sql_buf: [2048]u8 = undefined;
+        const agent_sql = try agent_registry.registerSqlFull(&sql_buf, role, "10.0.0.2", .{ .cpu_cores = 2, .memory_mb = 512 }, 0, .{
+            .role = role,
+            .node_id = node_id,
+            .wg_public_key = role,
+            .overlay_ip = "10.42.0.2",
+        });
+        try db.execDynamic(agent_sql, .{}, .{});
+        const peer_sql = try agent_registry.wireguardPeerSql(&sql_buf, node_id, role, role, "10.0.0.2:51820", "10.42.0.2", "10.42.2.0/24");
+        try db.execDynamic(peer_sql, .{}, .{});
+    }
+
+    for ([_]?[]const u8{ "agent", "server", "both", null, "unknown" }) |role| {
+        var json = std.Io.Writer.Allocating.init(alloc);
+        defer json.deinit();
+        try writeRegistrationJson(alloc, &json.writer, &node, .{
+            .id = "both",
+            .credential = retry_test_key,
+            .registration_key_accepted = true,
+            .node_id = 4,
+            .overlay_ip = "10.42.0.2",
+            .role = role,
+        });
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json.written(), .{});
+        defer parsed.deinit();
+        const object = parsed.value.object;
+        try std.testing.expect(object.get("registration_key_accepted").?.bool);
+        try std.testing.expectEqualStrings(retry_test_key, object.get("credential").?.string);
+        const peers = object.get("peers").?.array.items;
+        const worker_only = if (role) |value| std.mem.eql(u8, value, "agent") else false;
+        try std.testing.expectEqual(@as(usize, if (worker_only) 1 else 2), peers.len);
+        try std.testing.expectEqual(@as(i64, 2), peers[0].object.get("node_id").?.integer);
+        if (!worker_only) try std.testing.expectEqual(@as(i64, 3), peers[1].object.get("node_id").?.integer);
+        const gossip = object.get("gossip_server").?.object;
+        try std.testing.expectEqual(@as(i64, 1), gossip.get("id").?.integer);
+        try std.testing.expectEqual(@as(i64, 19877), gossip.get("port").?.integer);
+        try std.testing.expectEqual(@as(usize, 2), object.get("gossip_seeds").?.array.items.len);
+    }
+}
+
+test "registration bootstrap preserves responses without peer data" {
+    const alloc = std.testing.allocator;
+    var node = try Node.initForTests(alloc, .{ .id = 1, .port = 0, .gossip_port = 19877, .peers = &.{}, .data_dir = "/unused" });
+    defer node.deinit();
+    node.fixPointers();
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
+    try node.stateMachineDb().exec("DROP TABLE wireguard_peers;", .{}, .{});
+    var response: RegistrationResponse = .{
+        .id = "assigned-id",
+        .credential = retry_test_key,
+        .registration_key_accepted = false,
+        .node_id = 2,
+        .overlay_ip = "10.42.0.2",
+        .role = null,
+    };
+    var json = std.Io.Writer.Allocating.init(alloc);
+    defer json.deinit();
+    try writeRegistrationJson(alloc, &json.writer, &node, response);
+    try std.testing.expectEqualStrings(
+        "{\"id\":\"assigned-id\",\"credential\":\"" ++ retry_test_key ++ "\",\"node_id\":2,\"overlay_ip\":\"10.42.0.2\"}",
+        json.written(),
+    );
+
+    response.node_id = null;
+    response.overlay_ip = null;
+    var legacy_json = std.Io.Writer.Allocating.init(alloc);
+    defer legacy_json.deinit();
+    try writeRegistrationJson(alloc, &legacy_json.writer, &node, response);
+    try std.testing.expectEqualStrings(
+        "{\"id\":\"assigned-id\",\"credential\":\"" ++ retry_test_key ++ "\",\"gossip_server\":{\"id\":1,\"port\":19877}}",
+        legacy_json.written(),
+    );
+    var short_buffer: [8]u8 = undefined;
+    var short_writer = std.Io.Writer.fixed(&short_buffer);
+    try std.testing.expectError(error.WriteFailed, writeRegistrationJson(alloc, &short_writer, &node, response));
 }
