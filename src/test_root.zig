@@ -31,6 +31,7 @@ comptime {
     _ = @import("runtime/cli/container/state_support.zig");
     _ = @import("runtime/run_state.zig");
     _ = @import("state/store.zig");
+    _ = @import("state/sqlite_rows_test.zig");
     _ = @import("state/store/common.zig");
     _ = @import("state/store/crons.zig");
     _ = @import("state/store/deployments.zig");

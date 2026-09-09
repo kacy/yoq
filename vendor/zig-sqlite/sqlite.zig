@@ -1418,6 +1418,12 @@ pub fn Iterator(comptime Type: type) type {
             }
 
             var value: Type = undefined;
+            var initialized: usize = 0;
+            errdefer if (@hasField(@TypeOf(options), "allocator")) {
+                inline for (@typeInfo(Type).@"struct".fields, 0..) |field, i| {
+                    if (i < initialized) freeField(options.allocator, @field(value, field.name));
+                }
+            };
 
             inline for (@typeInfo(Type).@"struct".fields, 0..) |field, _i| {
                 const i = @as(usize, _i);
@@ -1425,9 +1431,54 @@ pub fn Iterator(comptime Type: type) type {
                 const ret = try self.readField(field.type, options, i);
 
                 @field(value, field.name) = ret;
+                initialized += 1;
             }
 
             return value;
+        }
+
+        // release only allocations made by the built-in column readers. custom
+        // converters retain their existing arena ownership contract.
+        fn freeField(allocator: mem.Allocator, value: anytype) void {
+            switch (@TypeOf(value)) {
+                Text, Blob => allocator.free(value.data),
+                else => switch (@typeInfo(@TypeOf(value))) {
+                    .optional => if (value) |child| freeField(allocator, child),
+                    .pointer => |ptr| switch (ptr.size) {
+                        .one => {
+                            freeField(allocator, value.*);
+                            allocator.destroy(value);
+                        },
+                        .slice => allocator.free(value),
+                        else => unreachable,
+                    },
+                    else => {},
+                },
+            }
+        }
+
+        fn freeRow(allocator: mem.Allocator, row: Type) void {
+            if (Type != Text and Type != Blob and @typeInfo(Type) == .@"struct") {
+                inline for (@typeInfo(Type).@"struct".fields) |field| {
+                    freeField(allocator, @field(row, field.name));
+                }
+            } else {
+                freeField(allocator, row);
+            }
+        }
+
+        fn collect(self: *Self, allocator: mem.Allocator, options: QueryOptions) ![]Type {
+            var rows: std.ArrayList(Type) = .empty;
+            errdefer {
+                for (rows.items) |row| freeRow(allocator, row);
+                rows.deinit(allocator);
+            }
+
+            while (try self.nextAlloc(allocator, options)) |row| {
+                errdefer freeRow(allocator, row);
+                try rows.append(allocator, row);
+            }
+            return rows.toOwnedSlice(allocator);
         }
 
         fn readField(self: *Self, comptime FieldType: type, options: anytype, i: usize) !FieldType {
@@ -1971,12 +2022,7 @@ pub const DynamicStatement = struct {
     pub fn all(self: *Self, comptime Type: type, allocator: mem.Allocator, options: QueryOptions, values: anytype) ![]Type {
         var iter = try self.iteratorAlloc(Type, allocator, values);
 
-        var rows: std.ArrayList(Type) = .{};
-        while (try iter.nextAlloc(allocator, options)) |row| {
-            try rows.append(allocator, row);
-        }
-
-        return rows.toOwnedSlice(allocator);
+        return iter.collect(allocator, options);
     }
 };
 
@@ -2261,12 +2307,7 @@ pub fn Statement(comptime opts: StatementOptions, comptime query: anytype) type 
         pub fn all(self: *Self, comptime Type: type, allocator: mem.Allocator, options: QueryOptions, values: anytype) ![]Type {
             var iter = try self.iteratorAlloc(Type, allocator, values);
 
-            var rows: std.ArrayList(Type) = .{};
-            while (try iter.nextAlloc(allocator, options)) |row| {
-                try rows.append(allocator, row);
-            }
-
-            return rows.toOwnedSlice(allocator);
+            return iter.collect(allocator, options);
         }
     };
 }
