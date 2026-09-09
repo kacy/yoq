@@ -601,6 +601,7 @@ fn findEndpointIndex(endpoints: []const EndpointState, endpoint_id: []const u8) 
 }
 
 fn cloneEndpoint(alloc: Allocator, definition: EndpointDefinition) Error!EndpointState {
+    // empty owned fields let deinit clean up a partial clone.
     var cloned: EndpointState = .{
         .endpoint_id = &.{},
         .container_id = &.{},
