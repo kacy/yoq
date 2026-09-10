@@ -1,65 +1,48 @@
 pub fn applyStateUpdate(self: anytype, update: anytype) !void {
     if (update.id == self.self_id) {
-        if (update.state == .suspect or update.state == .dead) {
-            if (update.incarnation >= self.incarnation) {
-                self.incarnation = update.incarnation +| 1;
-                try self.addPendingUpdate(.{
-                    .id = self.self_id,
-                    .addr = self.self_addr,
-                    .state = .alive,
-                    .incarnation = self.incarnation,
-                });
-            }
-        }
+        if (update.state == .alive or update.incarnation < self.incarnation) return;
+        self.incarnation = update.incarnation +| 1;
+        try self.addPendingUpdate(.{
+            .id = self.self_id,
+            .addr = self.self_addr,
+            .state = .alive,
+            .incarnation = self.incarnation,
+        });
         return;
     }
 
     const member = self.members.getPtr(update.id) orelse {
-        if (update.state != .dead) {
-            try self.members.put(update.id, .{
-                .id = update.id,
-                .addr = update.addr,
-                .state = update.state,
-                .incarnation = update.incarnation,
-                .state_changed_at = self.tick_count,
-            });
-            self.rebuildProbeOrder() catch {};
-            if (update.state == .alive) {
-                try self.actions.append(self.alloc, .{ .member_alive = .{ .id = update.id } });
-            } else {
-                try self.actions.append(self.alloc, .{ .member_suspect = .{ .id = update.id } });
-            }
-        }
+        if (update.state == .dead) return;
+        try self.members.put(update.id, .{
+            .id = update.id,
+            .addr = update.addr,
+            .state = update.state,
+            .incarnation = update.incarnation,
+            .state_changed_at = self.tick_count,
+        });
+        self.rebuildProbeOrder() catch {};
+        try emitStateChange(self, update.id, update.state);
         return;
     };
 
-    if (update.incarnation > member.incarnation) {
-        const old_state = member.state;
+    if (update.incarnation < member.incarnation) return;
+    if (update.incarnation == member.incarnation) {
+        if (@intFromEnum(update.state) <= @intFromEnum(member.state)) return;
+    } else {
         member.incarnation = update.incarnation;
-        member.state = update.state;
-        // A self-refutation may advertise an overlay or wildcard address.
-        // It can update liveness, but cannot replace an authoritative endpoint
-        // used to validate the source of authenticated transport packets.
+        // refutations may advertise overlay or wildcard addresses. keep registered
+        // endpoints for authenticated packet source checks.
         if (!member.endpoint_pinned) member.addr = update.addr;
-        member.state_changed_at = self.tick_count;
-        try emitStateChange(self, update.id, old_state, update.state);
-    } else if (update.incarnation == member.incarnation) {
-        const update_priority = @intFromEnum(update.state);
-        const current_priority = @intFromEnum(member.state);
-        if (update_priority > current_priority) {
-            const old_state = member.state;
-            member.state = update.state;
-            member.state_changed_at = self.tick_count;
-            try emitStateChange(self, update.id, old_state, update.state);
-        }
     }
+    member.state = update.state;
+    member.state_changed_at = self.tick_count;
+    try emitStateChange(self, update.id, update.state);
 }
 
-pub fn emitStateChange(self: anytype, id: u64, old: anytype, new: anytype) !void {
-    _ = old;
-    switch (new) {
-        .alive => try self.actions.append(self.alloc, .{ .member_alive = .{ .id = id } }),
-        .suspect => try self.actions.append(self.alloc, .{ .member_suspect = .{ .id = id } }),
-        .dead => try self.actions.append(self.alloc, .{ .member_dead = .{ .id = id } }),
-    }
+fn emitStateChange(self: anytype, id: u64, state: anytype) !void {
+    try self.actions.append(self.alloc, switch (state) {
+        .alive => .{ .member_alive = .{ .id = id } },
+        .suspect => .{ .member_suspect = .{ .id = id } },
+        .dead => .{ .member_dead = .{ .id = id } },
+    });
 }
