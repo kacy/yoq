@@ -15,8 +15,10 @@ const rollout_spec = @import("../../../manifest/spec.zig");
 const store = @import("../../../state/store.zig");
 const runtime_wait = @import("../../../lib/runtime_wait.zig");
 
-const FailureDetailBuilder = rollout_targets_mod.FailureDetailBuilder;
-const RolloutTargetBuilder = rollout_targets_mod.RolloutTargetBuilder;
+const rollout_progress = @import("../../../manifest/rollout_progress.zig");
+const FailureDetails = rollout_progress.FailureDetails;
+const RolloutTargets = rollout_progress.Targets;
+const workloadForRequest = rollout_targets_mod.workloadForRequest;
 const ScheduledTarget = rollout_targets_mod.ScheduledTarget;
 
 const ResumeSeed = struct {
@@ -64,11 +66,13 @@ pub const ClusterApplyBackend = struct {
         const strategy = effectiveClusterRollout(self.requests);
         const resume_seed = try loadResumeSeed(self.alloc, self.session.node.stateMachineDb(), self.progress);
         defer resume_seed.deinit(self.alloc);
-        var failure_details = FailureDetailBuilder.init(self.alloc);
+        var failure_details = FailureDetails.init(self.alloc);
         defer failure_details.deinit();
-        var rollout_targets = RolloutTargetBuilder.init(self.alloc);
+        var rollout_targets = RolloutTargets.init(self.alloc);
         defer rollout_targets.deinit();
-        rollout_targets.appendRequests(self.requests) catch return ClusterApplyError.InternalError;
+        for (self.requests) |req| {
+            rollout_targets.append(workloadForRequest(req.request)) catch return ClusterApplyError.InternalError;
+        }
         rollout_targets.restoreFromJson(resume_seed.rollout_targets_json);
         var rollback_state_storage: RollbackState = undefined;
         var rollback_state: ?*RollbackState = null;
@@ -146,8 +150,8 @@ pub const ClusterApplyBackend = struct {
         batch_end: usize,
         strategy: rollout_spec.RolloutPolicy,
         rollback_state: ?*RollbackState,
-        failure_details: *FailureDetailBuilder,
-        rollout_targets: *RolloutTargetBuilder,
+        failure_details: *FailureDetails,
+        rollout_targets: *RolloutTargets,
         counters: *ApplyCounters,
     ) ClusterApplyError!void {
         const batch_failed_before = counters.failed_targets;
@@ -192,7 +196,7 @@ pub const ClusterApplyBackend = struct {
         for (scheduled_targets.items) |target| {
             try rollback.activateTarget(self.session, target);
             if (rollback_state) |state| try state.recordActivatedTarget(target);
-            rollout_targets.setTargetState(target, "ready", null);
+            rollout_targets.set(workloadForRequest(target.request), "ready", null);
             counters.placed += target.placement_count;
             counters.completed_targets += 1;
             try self.reportProgress("cutover", batch_start, batch_end, counters.*, failure_details, rollout_targets);
@@ -204,12 +208,12 @@ pub const ClusterApplyBackend = struct {
         req: apply_request.ServiceRequest,
         batch_start: usize,
         batch_end: usize,
-        failure_details: *FailureDetailBuilder,
-        rollout_targets: *RolloutTargetBuilder,
+        failure_details: *FailureDetails,
+        rollout_targets: *RolloutTargets,
         counters: *ApplyCounters,
         scheduled_targets: *std.ArrayListUnmanaged(ScheduledTarget),
     ) ClusterApplyError!void {
-        if (isTerminalRolloutTargetState(rollout_targets.stateForRequest(req.request))) return;
+        if (rollout_progress.isTerminalState(rollout_targets.stateFor(workloadForRequest(req.request)))) return;
         scheduled_targets.ensureUnusedCapacity(self.alloc, 1) catch return error.InternalError;
         const placement = try placement_transaction.place(self.alloc, self.session, req.request, if (self.progress) |progress| progress.release_id else null);
         if (placement) |reserved| {
@@ -218,13 +222,13 @@ pub const ClusterApplyBackend = struct {
                 .assignment_ids = reserved.assignment_ids,
                 .placement_count = reserved.assignment_ids.len,
             });
-            rollout_targets.setRequestState(req.request, "starting", null);
+            rollout_targets.set(workloadForRequest(req.request), "starting", null);
             return;
         }
         counters.failed += @max(@as(usize, 1), req.request.gang_world_size);
         counters.failed_targets += 1;
-        failure_details.appendRequest(req, "placement_failed") catch return error.InternalError;
-        rollout_targets.setRequestState(req.request, "failed", "placement_failed");
+        failure_details.append(workloadForRequest(req.request), "placement_failed") catch return error.InternalError;
+        rollout_targets.set(workloadForRequest(req.request), "failed", "placement_failed");
         try self.reportProgress("schedule", batch_start, batch_end, counters.*, failure_details, rollout_targets);
     }
 
@@ -234,8 +238,8 @@ pub const ClusterApplyBackend = struct {
         batch_start: usize,
         batch_end: usize,
         counters: ApplyCounters,
-        failure_details: *FailureDetailBuilder,
-        rollout_targets: *RolloutTargetBuilder,
+        failure_details: *FailureDetails,
+        rollout_targets: *RolloutTargets,
     ) ClusterApplyError!void {
         if (self.progress) |progress| {
             const failure_details_json = failure_details.toOwnedJson() catch return ClusterApplyError.InternalError;
@@ -280,8 +284,8 @@ pub const ClusterApplyBackend = struct {
         targets: []ScheduledTarget,
         failure_action: rollout_spec.RolloutFailureAction,
         rollback_state: ?*RollbackState,
-        failure_details: *FailureDetailBuilder,
-        rollout_targets: *RolloutTargetBuilder,
+        failure_details: *FailureDetails,
+        rollout_targets: *RolloutTargets,
         timeout_secs: u32,
         counters: *ApplyCounters,
         batch_start: usize,
@@ -293,7 +297,7 @@ pub const ClusterApplyBackend = struct {
 
         if (try self.awaitControl()) {
             for (targets) |target| {
-                rollout_targets.setTargetState(target, "failed", "canceled_by_operator");
+                rollout_targets.set(workloadForRequest(target.request), "failed", "canceled_by_operator");
                 try rollback.discardTarget(self.session, target);
             }
             counters.failed_targets += targets.len;
@@ -311,10 +315,10 @@ pub const ClusterApplyBackend = struct {
         if (failure_action == .rollback and batch_has_failure) {
             for (targets, states) |target, state| {
                 if (state != .ready) {
-                    failure_details.appendTarget(target, readiness.failureReason(state)) catch return ClusterApplyError.InternalError;
-                    rollout_targets.setTargetState(target, "failed", readiness.failureReason(state));
+                    failure_details.append(workloadForRequest(target.request), readiness.failureReason(state)) catch return ClusterApplyError.InternalError;
+                    rollout_targets.set(workloadForRequest(target.request), "failed", readiness.failureReason(state));
                 } else {
-                    rollout_targets.setTargetState(target, "rolled_back", "rollback_reverted");
+                    rollout_targets.set(workloadForRequest(target.request), "rolled_back", "rollback_reverted");
                 }
                 try rollback.discardTarget(self.session, target);
             }
@@ -334,7 +338,7 @@ pub const ClusterApplyBackend = struct {
                 .ready => {
                     try rollback.activateTarget(self.session, target);
                     if (rollback_state) |state_tracker| try state_tracker.recordActivatedTarget(target);
-                    rollout_targets.setTargetState(target, "ready", null);
+                    rollout_targets.set(workloadForRequest(target.request), "ready", null);
                     counters.placed += target.placement_count;
                     counters.completed_targets += 1;
                     try self.reportProgress("cutover", batch_start, batch_end, counters.*, failure_details, rollout_targets);
@@ -353,8 +357,8 @@ pub const ClusterApplyBackend = struct {
                 .failed,
                 => {
                     const reason = readiness.failureReason(state);
-                    failure_details.appendTarget(target, reason) catch return ClusterApplyError.InternalError;
-                    rollout_targets.setTargetState(target, "failed", reason);
+                    failure_details.append(workloadForRequest(target.request), reason) catch return ClusterApplyError.InternalError;
+                    rollout_targets.set(workloadForRequest(target.request), "failed", reason);
                     switch (failure_action) {
                         .rollback, .pause => try rollback.discardTarget(self.session, target),
                     }
@@ -380,10 +384,6 @@ fn loadResumeSeed(
         .failed_targets = dep.failed_targets,
         .rollout_targets_json = if (dep.rollout_targets_json) |json| alloc.dupe(u8, json) catch return error.InternalError else null,
     };
-}
-
-fn isTerminalRolloutTargetState(state: []const u8) bool {
-    return rollout_targets_mod.isTerminalState(state);
 }
 
 pub fn effectiveClusterRollout(requests: []const apply_request.ServiceRequest) rollout_spec.RolloutPolicy {
@@ -915,14 +915,11 @@ test "finalizeBatchTargets honors paused rollout resume before cutover" {
         .requests = &.{},
         .progress = makeTestProgressRecorder("dep-resume"),
     };
-    var failure_details = FailureDetailBuilder.init(alloc);
+    var failure_details = FailureDetails.init(alloc);
     defer failure_details.deinit();
-    var rollout_targets = RolloutTargetBuilder.init(alloc);
+    var rollout_targets = RolloutTargets.init(alloc);
     defer rollout_targets.deinit();
-    try rollout_targets.appendRequests(&.{.{
-        .request = targets[0].request,
-        .rollout = .{},
-    }});
+    try rollout_targets.append(workloadForRequest(targets[0].request));
 
     var counters = ApplyCounters{
         .placed = 0,
@@ -1025,14 +1022,11 @@ test "finalizeBatchTargets discards scheduled targets when paused rollout is can
         .requests = &.{},
         .progress = makeTestProgressRecorder("dep-cancel-finalize"),
     };
-    var failure_details = FailureDetailBuilder.init(alloc);
+    var failure_details = FailureDetails.init(alloc);
     defer failure_details.deinit();
-    var rollout_targets = RolloutTargetBuilder.init(alloc);
+    var rollout_targets = RolloutTargets.init(alloc);
     defer rollout_targets.deinit();
-    try rollout_targets.appendRequests(&.{.{
-        .request = targets[0].request,
-        .rollout = .{},
-    }});
+    try rollout_targets.append(workloadForRequest(targets[0].request));
 
     var counters = ApplyCounters{
         .placed = 0,
