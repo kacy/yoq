@@ -15,7 +15,9 @@ const proxy_control_plane = @import("../network/proxy/control_plane.zig");
 const service_rollout = @import("../network/service_rollout.zig");
 const service_reconciler = @import("../network/service_reconciler.zig");
 const listener_runtime = @import("../network/proxy/listener_runtime.zig");
-const json_helpers = @import("../lib/json_helpers.zig");
+const rollout_progress = @import("rollout_progress.zig");
+const FailureDetails = rollout_progress.FailureDetails;
+const RolloutTargets = rollout_progress.Targets;
 const runtime_wait = @import("../lib/runtime_wait.zig");
 
 const writeErr = cli.writeErr;
@@ -41,167 +43,6 @@ const ReplacementHealthResult = enum {
     timeout,
     failed,
     canceled,
-};
-
-const ReplacementFailureDetail = struct {
-    workload_kind: []const u8,
-    workload_name: []const u8,
-    reason: []const u8,
-};
-
-const ReplacementRolloutTarget = struct {
-    workload_kind: []const u8,
-    workload_name: []const u8,
-    state: []const u8,
-    reason: ?[]const u8 = null,
-};
-
-const ReplacementFailureDetailBuilder = struct {
-    alloc: std.mem.Allocator,
-    items: std.ArrayListUnmanaged(ReplacementFailureDetail) = .empty,
-
-    fn init(alloc: std.mem.Allocator) ReplacementFailureDetailBuilder {
-        return .{ .alloc = alloc };
-    }
-
-    fn deinit(self: *ReplacementFailureDetailBuilder) void {
-        self.items.deinit(self.alloc);
-    }
-
-    fn appendService(self: *ReplacementFailureDetailBuilder, service_name: []const u8, reason: []const u8) !void {
-        try self.items.append(self.alloc, .{
-            .workload_kind = "service",
-            .workload_name = service_name,
-            .reason = reason,
-        });
-    }
-
-    fn appendIndexes(
-        self: *ReplacementFailureDetailBuilder,
-        services: []const spec.Service,
-        indexes: []const usize,
-        reason: []const u8,
-    ) !void {
-        for (indexes) |idx| {
-            try self.appendService(services[idx].name, reason);
-        }
-    }
-
-    fn toOwnedJson(self: *ReplacementFailureDetailBuilder) !?[]u8 {
-        if (self.items.items.len == 0) return null;
-
-        var json_buf_writer = std.Io.Writer.Allocating.init(self.alloc);
-        defer json_buf_writer.deinit();
-
-        const writer = &json_buf_writer.writer;
-
-        try writer.writeByte('[');
-        for (self.items.items, 0..) |detail, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writer.writeByte('{');
-            try json_helpers.writeJsonStringField(writer, "workload_kind", detail.workload_kind);
-            try writer.writeByte(',');
-            try json_helpers.writeJsonStringField(writer, "workload_name", detail.workload_name);
-            try writer.writeByte(',');
-            try json_helpers.writeJsonStringField(writer, "reason", detail.reason);
-            try writer.writeByte('}');
-        }
-        try writer.writeByte(']');
-        const owned = try json_buf_writer.toOwnedSlice();
-        return owned;
-    }
-};
-
-const ReplacementRolloutTargetBuilder = struct {
-    alloc: std.mem.Allocator,
-    items: std.ArrayListUnmanaged(ReplacementRolloutTarget) = .empty,
-
-    fn init(alloc: std.mem.Allocator) ReplacementRolloutTargetBuilder {
-        return .{ .alloc = alloc };
-    }
-
-    fn deinit(self: *ReplacementRolloutTargetBuilder) void {
-        self.items.deinit(self.alloc);
-    }
-
-    fn appendService(self: *ReplacementRolloutTargetBuilder, service_name: []const u8) !void {
-        try self.items.append(self.alloc, .{
-            .workload_kind = "service",
-            .workload_name = service_name,
-            .state = "pending",
-            .reason = null,
-        });
-    }
-
-    fn appendIndexes(
-        self: *ReplacementRolloutTargetBuilder,
-        services: []const spec.Service,
-        indexes: []const usize,
-    ) !void {
-        for (indexes) |idx| {
-            try self.appendService(services[idx].name);
-        }
-    }
-
-    fn setServiceState(
-        self: *ReplacementRolloutTargetBuilder,
-        service_name: []const u8,
-        state: []const u8,
-        reason: ?[]const u8,
-    ) void {
-        for (self.items.items) |*item| {
-            if (std.mem.eql(u8, item.workload_name, service_name)) {
-                item.state = state;
-                item.reason = reason;
-                return;
-            }
-        }
-    }
-
-    fn stateForService(self: *const ReplacementRolloutTargetBuilder, service_name: []const u8) []const u8 {
-        for (self.items.items) |item| {
-            if (std.mem.eql(u8, item.workload_name, service_name)) return item.state;
-        }
-        return "pending";
-    }
-
-    fn restoreFromJson(self: *ReplacementRolloutTargetBuilder, rollout_targets_json: ?[]const u8) void {
-        const json = rollout_targets_json orelse return;
-        var iter = json_helpers.extractJsonObjects(json);
-        while (iter.next()) |obj| {
-            const workload_kind = json_helpers.extractJsonString(obj, "workload_kind") orelse continue;
-            if (!std.mem.eql(u8, workload_kind, "service")) continue;
-            const workload_name = json_helpers.extractJsonString(obj, "workload_name") orelse continue;
-            const state = json_helpers.extractJsonString(obj, "state") orelse continue;
-            const reason = json_helpers.extractJsonString(obj, "reason");
-            self.setServiceState(workload_name, state, reason);
-        }
-    }
-
-    fn toOwnedJson(self: *ReplacementRolloutTargetBuilder) !?[]u8 {
-        if (self.items.items.len == 0) return null;
-
-        var json_buf_writer = std.Io.Writer.Allocating.init(self.alloc);
-        defer json_buf_writer.deinit();
-
-        const writer = &json_buf_writer.writer;
-
-        try writer.writeByte('[');
-        for (self.items.items, 0..) |target, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writer.writeByte('{');
-            try json_helpers.writeJsonStringField(writer, "workload_kind", target.workload_kind);
-            try writer.writeByte(',');
-            try json_helpers.writeJsonStringField(writer, "workload_name", target.workload_name);
-            try writer.writeByte(',');
-            try json_helpers.writeJsonStringField(writer, "state", target.state);
-            try writer.writeByte(',');
-            try json_helpers.writeNullableJsonStringField(writer, "reason", target.reason);
-            try writer.writeByte('}');
-        }
-        try writer.writeByte(']');
-        return try json_buf_writer.toOwnedSlice();
-    }
 };
 
 const ReplacementResumeState = struct {
@@ -461,12 +302,12 @@ fn runReplacementPlan(
 ) !apply_release.ApplyOutcome {
     var completed_workers: std.StringHashMapUnmanaged(void) = .empty;
     defer completed_workers.deinit(alloc);
-    var failure_details = ReplacementFailureDetailBuilder.init(alloc);
+    var failure_details = FailureDetails.init(alloc);
     defer failure_details.deinit();
-    var rollout_targets = ReplacementRolloutTargetBuilder.init(alloc);
+    var rollout_targets = RolloutTargets.init(alloc);
     defer rollout_targets.deinit();
-    try rollout_targets.appendIndexes(services, new_indexes);
-    try rollout_targets.appendIndexes(services, replacement_indexes);
+    for (new_indexes) |idx| try rollout_targets.append(.{ .name = services[idx].name });
+    for (replacement_indexes) |idx| try rollout_targets.append(.{ .name = services[idx].name });
     rollout_targets.restoreFromJson(resume_rollout_targets_json);
 
     var placed: usize = initial_completed_targets;
@@ -487,11 +328,11 @@ fn runReplacementPlan(
 
         var batch_started: usize = 0;
         for (batch) |idx| {
-            if (isTerminalRolloutState(rollout_targets.stateForService(services[idx].name))) continue;
+            if (rollout_progress.isTerminalState(rollout_targets.stateFor(.{ .name = services[idx].name }))) continue;
             runner.start(idx, &completed_workers) catch {
                 failed += 1;
-                try failure_details.appendService(services[idx].name, "start_failed");
-                rollout_targets.setServiceState(services[idx].name, "failed", "start_failed");
+                try failure_details.append(.{ .name = services[idx].name }, "start_failed");
+                rollout_targets.set(.{ .name = services[idx].name }, "failed", "start_failed");
                 reportProgressDetailsIfSupported(runner, alloc, "start", new_start, batch_end, new_indexes.len + replacement_indexes.len, placed, failed, &failure_details, &rollout_targets);
                 if (!mutated) return error.StartFailed;
                 continue;
@@ -499,7 +340,7 @@ fn runReplacementPlan(
             started_batch[batch_started] = idx;
             batch_started += 1;
             mutated = true;
-            rollout_targets.setServiceState(services[idx].name, "starting", null);
+            rollout_targets.set(.{ .name = services[idx].name }, "starting", null);
         }
 
         if (batch_started > 0) {
@@ -512,7 +353,7 @@ fn runReplacementPlan(
                 switch (health_result) {
                     .healthy => {
                         batch_completed += 1;
-                        rollout_targets.setServiceState(services[idx].name, "ready", null);
+                        rollout_targets.set(.{ .name = services[idx].name }, "ready", null);
                     },
                     .timeout, .failed => {
                         batch_failed += 1;
@@ -522,11 +363,11 @@ fn runReplacementPlan(
                             .failed => "readiness_failed",
                             .canceled => unreachable,
                         };
-                        try failure_details.appendService(services[idx].name, reason);
-                        rollout_targets.setServiceState(services[idx].name, "failed", reason);
+                        try failure_details.append(.{ .name = services[idx].name }, reason);
+                        rollout_targets.set(.{ .name = services[idx].name }, "failed", reason);
                     },
                     .canceled => {
-                        rollout_targets.setServiceState(services[idx].name, "blocked", "canceled_by_operator");
+                        rollout_targets.set(.{ .name = services[idx].name }, "blocked", "canceled_by_operator");
                     },
                 }
             }
@@ -588,7 +429,7 @@ fn runReplacementPlan(
 
         var stopped_any = false;
         for (batch) |idx| {
-            if (isTerminalRolloutState(rollout_targets.stateForService(services[idx].name))) continue;
+            if (rollout_progress.isTerminalState(rollout_targets.stateFor(.{ .name = services[idx].name }))) continue;
             runner.stop(idx);
             stopped_any = true;
         }
@@ -596,17 +437,17 @@ fn runReplacementPlan(
 
         var batch_started: usize = 0;
         for (batch) |idx| {
-            if (isTerminalRolloutState(rollout_targets.stateForService(services[idx].name))) continue;
+            if (rollout_progress.isTerminalState(rollout_targets.stateFor(.{ .name = services[idx].name }))) continue;
             runner.start(idx, &completed_workers) catch {
                 failed += 1;
-                try failure_details.appendService(services[idx].name, "start_failed");
-                rollout_targets.setServiceState(services[idx].name, "failed", "start_failed");
+                try failure_details.append(.{ .name = services[idx].name }, "start_failed");
+                rollout_targets.set(.{ .name = services[idx].name }, "failed", "start_failed");
                 reportProgressDetailsIfSupported(runner, alloc, "replace", replacement_start, batch_end, new_indexes.len + replacement_indexes.len, placed, failed, &failure_details, &rollout_targets);
                 continue;
             };
             started_batch[batch_started] = idx;
             batch_started += 1;
-            rollout_targets.setServiceState(services[idx].name, "starting", null);
+            rollout_targets.set(.{ .name = services[idx].name }, "starting", null);
         }
 
         if (batch_started > 0) {
@@ -619,7 +460,7 @@ fn runReplacementPlan(
                 switch (health_result) {
                     .healthy => {
                         batch_completed += 1;
-                        rollout_targets.setServiceState(services[idx].name, "ready", null);
+                        rollout_targets.set(.{ .name = services[idx].name }, "ready", null);
                     },
                     .timeout, .failed => {
                         batch_failed += 1;
@@ -629,11 +470,11 @@ fn runReplacementPlan(
                             .failed => "readiness_failed",
                             .canceled => unreachable,
                         };
-                        try failure_details.appendService(services[idx].name, reason);
-                        rollout_targets.setServiceState(services[idx].name, "failed", reason);
+                        try failure_details.append(.{ .name = services[idx].name }, reason);
+                        rollout_targets.set(.{ .name = services[idx].name }, "failed", reason);
                     },
                     .canceled => {
-                        rollout_targets.setServiceState(services[idx].name, "blocked", "canceled_by_operator");
+                        rollout_targets.set(.{ .name = services[idx].name }, "blocked", "canceled_by_operator");
                     },
                 }
             }
@@ -716,19 +557,13 @@ fn runReplacementPlan(
     };
 }
 
-fn isTerminalRolloutState(state: []const u8) bool {
-    return std.mem.eql(u8, state, "ready") or
-        std.mem.eql(u8, state, "failed") or
-        std.mem.eql(u8, state, "rolled_back");
-}
-
 fn allRemainingServicesTerminal(
-    rollout_targets: *const ReplacementRolloutTargetBuilder,
+    rollout_targets: *const RolloutTargets,
     services: []const spec.Service,
     indexes: []const usize,
 ) bool {
     for (indexes) |idx| {
-        if (!isTerminalRolloutState(rollout_targets.stateForService(services[idx].name))) return false;
+        if (!rollout_progress.isTerminalState(rollout_targets.stateFor(.{ .name = services[idx].name }))) return false;
     }
     return true;
 }
@@ -770,8 +605,8 @@ fn reportProgressDetailsIfSupported(
     total_targets: usize,
     completed_targets: usize,
     failed_targets: usize,
-    failure_details: *ReplacementFailureDetailBuilder,
-    rollout_targets: *ReplacementRolloutTargetBuilder,
+    failure_details: *FailureDetails,
+    rollout_targets: *RolloutTargets,
 ) void {
     if (@hasDecl(std.meta.Child(@TypeOf(runner)), "reportProgressDetails")) {
         const failure_details_json = failure_details.toOwnedJson() catch return;

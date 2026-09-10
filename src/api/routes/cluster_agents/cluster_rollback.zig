@@ -9,7 +9,7 @@ const apply_request = @import("apply_request.zig");
 const rollout_targets_mod = @import("rollout_targets.zig");
 
 const ActivatedTarget = rollout_targets_mod.ActivatedTarget;
-const RolloutTargetBuilder = rollout_targets_mod.RolloutTargetBuilder;
+const RolloutTargets = @import("../../../manifest/rollout_progress.zig").Targets;
 const ScheduledTarget = rollout_targets_mod.ScheduledTarget;
 
 pub const ApplyError = mutation_session.Error;
@@ -158,12 +158,12 @@ pub const RollbackState = struct {
 
     pub fn markActivatedTargets(
         self: *const RollbackState,
-        rollout_targets: *RolloutTargetBuilder,
+        rollout_targets: *RolloutTargets,
         state: []const u8,
         reason: ?[]const u8,
     ) void {
         for (self.activated_targets.items) |target| {
-            rollout_targets.setActivatedState(target, state, reason);
+            rollout_targets.set(rollout_targets_mod.workloadForRequest(target.request), state, reason);
         }
     }
 
