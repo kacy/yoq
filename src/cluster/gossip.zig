@@ -731,7 +731,7 @@ test "more than 64 simultaneous suspects all transition to dead" {
     defer g.freeActions(actions);
 }
 
-test "incarnation at u64 max wraps on refutation" {
+test "incarnation at u64 max saturates on refutation" {
     const alloc = std.testing.allocator;
     var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
     defer g.deinit();
