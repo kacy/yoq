@@ -277,31 +277,11 @@ pub const Gossip = struct {
 
     // --- internal ---
 
-    fn startProbe(self: *Gossip) !void {
-        return probe_runtime.startProbe(self);
-    }
-
-    fn escalateToIndirect(self: *Gossip) !void {
-        return probe_runtime.escalateToIndirect(self);
-    }
-
-    fn suspectProbeTarget(self: *Gossip) !void {
-        return probe_runtime.suspectProbeTarget(self);
-    }
-
-    fn checkSuspectTimeouts(self: *Gossip) !void {
-        return probe_runtime.checkSuspectTimeouts(self);
-    }
-
     /// apply a state update using incarnation-based conflict resolution.
     /// higher incarnation always wins. at same incarnation: dead > suspect > alive.
     /// if we ourselves are accused, increment incarnation and refute.
     fn applyStateUpdate(self: *Gossip, update: StateUpdate) !void {
         return state_updates.applyStateUpdate(self, update);
-    }
-
-    fn emitStateChange(self: *Gossip, id: u64, old: MemberState, new: MemberState) !void {
-        return state_updates.emitStateChange(self, id, old, new);
     }
 
     pub fn getMemberAddr(self: *Gossip, id: u64) ?MemberAddr {
@@ -738,7 +718,7 @@ test "more than 64 simultaneous suspects all transition to dead" {
 
     // tick past suspect timeout — all 100 should become dead
     g.tick_count = 10; // well past the timeout of 1
-    try g.checkSuspectTimeouts();
+    try probe_runtime.checkSuspectTimeouts(&g);
 
     var dead_count: usize = 0;
     var iter = g.members.iterator();
@@ -1366,6 +1346,7 @@ test "applyStateUpdate ignores lower incarnation" {
     var drain = try g.drainActions();
     g.freeActions(drain);
 
+    g.tick_count = 10;
     // try to apply an update with incarnation 3 — should be ignored
     try g.applyStateUpdate(.{
         .id = 2,
@@ -1374,10 +1355,12 @@ test "applyStateUpdate ignores lower incarnation" {
         .incarnation = 3,
     });
     drain = try g.drainActions();
-    g.freeActions(drain);
+    defer g.freeActions(drain);
+    try std.testing.expectEqual(@as(usize, 0), drain.len);
 
     // state should still be alive at incarnation 5
     const member = g.members.get(2).?;
+    try std.testing.expectEqual(@as(u64, 0), member.state_changed_at);
     try std.testing.expectEqual(MemberState.alive, member.state);
     try std.testing.expectEqual(@as(u64, 5), member.incarnation);
 }
@@ -1399,6 +1382,7 @@ test "applyStateUpdate same incarnation uses state priority" {
     var drain = try g.drainActions();
     g.freeActions(drain);
 
+    g.tick_count = 10;
     // suspect at same incarnation — should win (suspect > alive)
     try g.applyStateUpdate(.{
         .id = 2,
@@ -1406,11 +1390,16 @@ test "applyStateUpdate same incarnation uses state priority" {
         .state = .suspect,
         .incarnation = 5,
     });
-    drain = try g.drainActions();
-    g.freeActions(drain);
+    {
+        const actions = try g.drainActions();
+        defer g.freeActions(actions);
+        try std.testing.expectEqual(@as(usize, 1), actions.len);
+        try std.testing.expect(actions[0] == .member_suspect);
+    }
 
     try std.testing.expectEqual(MemberState.suspect, g.members.get(2).?.state);
 
+    g.tick_count = 20;
     // alive at same incarnation — should NOT win (alive < suspect)
     try g.applyStateUpdate(.{
         .id = 2,
@@ -1419,7 +1408,9 @@ test "applyStateUpdate same incarnation uses state priority" {
         .incarnation = 5,
     });
     drain = try g.drainActions();
-    g.freeActions(drain);
+    defer g.freeActions(drain);
+    try std.testing.expectEqual(@as(usize, 0), drain.len);
+    try std.testing.expectEqual(@as(u64, 10), g.members.get(2).?.state_changed_at);
 
     try std.testing.expectEqual(MemberState.suspect, g.members.get(2).?.state);
 }
@@ -1770,8 +1761,13 @@ test "gossip endpoint discovery yields to authoritative membership" {
     const registered = MemberAddr{ .ip = .{ 192, 0, 2, 2 }, .port = 19800 };
     try g.applyStateUpdate(.{ .id = 2, .addr = hint, .state = .alive, .incarnation = 1 });
     try std.testing.expect(!g.members.get(2).?.endpoint_pinned);
+    const newer_hint = MemberAddr{ .ip = .{ 10, 40, 0, 3 }, .port = 9801 };
+    try g.applyStateUpdate(.{ .id = 2, .addr = newer_hint, .state = .suspect, .incarnation = 1 });
+    try std.testing.expectEqualDeep(hint, g.getMemberAddr(2).?);
+    try g.applyStateUpdate(.{ .id = 2, .addr = newer_hint, .state = .alive, .incarnation = 2 });
+    try std.testing.expectEqualDeep(newer_hint, g.getMemberAddr(2).?);
     try g.addMember(2, registered);
-    try g.applyStateUpdate(.{ .id = 2, .addr = hint, .state = .alive, .incarnation = 2 });
+    try g.applyStateUpdate(.{ .id = 2, .addr = hint, .state = .alive, .incarnation = 3 });
     try std.testing.expectEqualDeep(registered, g.getMemberAddr(2).?);
     try std.testing.expect(g.members.get(2).?.endpoint_pinned);
 }

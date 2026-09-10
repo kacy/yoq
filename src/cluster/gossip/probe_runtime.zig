@@ -87,7 +87,7 @@ pub fn handlePingReq(self: anytype, msg: anytype) !void {
     } });
 }
 
-pub fn startProbe(self: anytype) !void {
+fn startProbe(self: anytype) !void {
     if (self.probe_order.items.len == 0) {
         try self.rebuildProbeOrder();
         if (self.probe_order.items.len == 0) return;
@@ -125,7 +125,7 @@ pub fn startProbe(self: anytype) !void {
     }
 }
 
-pub fn escalateToIndirect(self: anytype) !void {
+fn escalateToIndirect(self: anytype) !void {
     const target_id = self.probe_target orelse return;
 
     self.probe_phase = .indirect;
@@ -164,7 +164,7 @@ pub fn escalateToIndirect(self: anytype) !void {
     }
 }
 
-pub fn suspectProbeTarget(self: anytype) !void {
+fn suspectProbeTarget(self: anytype) !void {
     const target_id = self.probe_target orelse return;
 
     self.probe_phase = .idle;
