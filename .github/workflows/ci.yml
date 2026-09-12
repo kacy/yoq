@@ -22,7 +22,7 @@ jobs:
       bpf: ${{ steps.filter.outputs.bpf }}
     steps:
       - name: check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: detect changed files
         id: filter
@@ -57,7 +57,7 @@ jobs:
     if: needs.changed-files.outputs.non_docs == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
       - name: verify veth creation in destination namespaces
         run: bash scripts/veth-namespace-smoke.sh
@@ -68,7 +68,7 @@ jobs:
     if: needs.changed-files.outputs.non_docs == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
       - name: verify service vip traffic through container gateways
         run: bash scripts/service-gateway-smoke.sh
@@ -79,7 +79,7 @@ jobs:
     if: needs.changed-files.outputs.non_docs == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
       - name: verify kernel dns cache questions
         run: bash scripts/dns-cache-kernel-smoke.sh
@@ -90,7 +90,7 @@ jobs:
     if: needs.changed-files.outputs.non_docs == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-zig
       - name: verify prepared policy generation replacement
         run: bash scripts/policy-generation-smoke.sh
@@ -100,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: set up zig
         uses: ./.github/actions/setup-zig
@@ -128,7 +128,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: build Docker image
         shell: bash
@@ -219,7 +219,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: set up zig
         uses: ./.github/actions/setup-zig
@@ -272,7 +272,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: set up zig
         uses: ./.github/actions/setup-zig
       - name: install fixture dependencies
@@ -290,7 +290,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: set up zig
         uses: ./.github/actions/setup-zig
@@ -312,7 +312,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: set up zig
         uses: ./.github/actions/setup-zig
       - name: verify trusted and rejected registry connections
@@ -329,7 +329,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: set up zig
         uses: ./.github/actions/setup-zig
       - name: install independent kernel reader
