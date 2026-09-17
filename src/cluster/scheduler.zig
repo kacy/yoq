@@ -72,6 +72,32 @@ test "schedule spreads across agents" {
     try std.testing.expectEqualStrings("agent2", results[0].?.agent_id);
 }
 
+test "schedule preserves agent order when tracked capacity ties" {
+    const alloc = std.testing.allocator;
+    const agents = [_]AgentRecord{
+        makeAgent("agent1", "active", 4, 8192, 0, 0),
+        makeAgent("agent2", "active", 4, 8192, 0, 0),
+    };
+    const request = PlacementRequest{
+        .image = "nginx",
+        .command = "",
+        .cpu_limit = 1000,
+        .memory_limit_mb = 256,
+    };
+    const requests = [_]PlacementRequest{request} ** 3;
+
+    const results = try schedule(alloc, &requests, &agents);
+    defer alloc.free(results);
+
+    // the second placement restores a tie, so the third returns to agent1.
+    const expected_agents = [_][]const u8{ "agent1", "agent2", "agent1" };
+    for (results, expected_agents, 0..) |result, expected_agent, request_idx| {
+        try std.testing.expect(result != null);
+        try std.testing.expectEqualStrings(expected_agent, result.?.agent_id);
+        try std.testing.expectEqual(request_idx, result.?.request_idx);
+    }
+}
+
 test "schedule capacity exceeded returns null" {
     const alloc = std.testing.allocator;
     const agents = &[_]AgentRecord{

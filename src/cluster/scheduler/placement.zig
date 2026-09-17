@@ -9,6 +9,18 @@ pub const AgentRecord = agent_types.AgentRecord;
 pub const PlacementRequest = common.PlacementRequest;
 pub const PlacementResult = common.PlacementResult;
 
+const ResourceUsage = struct {
+    cpu: i64,
+    memory_mb: i64,
+    gpu: i64,
+
+    fn reserve(self: *ResourceUsage, request: PlacementRequest) void {
+        self.cpu += request.cpu_limit;
+        self.memory_mb += request.memory_limit_mb;
+        self.gpu += request.gpu_limit;
+    }
+};
+
 pub fn schedule(
     alloc: Allocator,
     requests: []const PlacementRequest,
@@ -18,71 +30,70 @@ pub fn schedule(
     @memset(results, null);
     errdefer alloc.free(results);
 
-    var used_cpu = try alloc.alloc(i64, agents.len);
-    defer alloc.free(used_cpu);
-    var used_mem = try alloc.alloc(i64, agents.len);
-    defer alloc.free(used_mem);
-    var used_gpu = try alloc.alloc(i64, agents.len);
-    defer alloc.free(used_gpu);
-
-    for (agents, 0..) |agent, i| {
-        used_cpu[i] = agent.cpu_used;
-        used_mem[i] = agent.memory_used_mb;
-        used_gpu[i] = agent.gpu_used;
+    const usage = try alloc.alloc(ResourceUsage, agents.len);
+    defer alloc.free(usage);
+    for (agents, usage) |agent, *used| {
+        used.* = .{
+            .cpu = agent.cpu_used,
+            .memory_mb = agent.memory_used_mb,
+            .gpu = agent.gpu_used,
+        };
     }
 
-    for (requests, 0..) |req, req_idx| {
-        if (req.cpu_limit < 0 or req.memory_limit_mb < 0 or req.gpu_limit < 0) continue;
+    for (requests, 0..) |request, request_idx| {
+        if (request.cpu_limit < 0 or request.memory_limit_mb < 0 or request.gpu_limit < 0) continue;
         var best_idx: ?usize = null;
         var best_score: i64 = -1;
 
-        for (agents, 0..) |agent, agent_idx| {
-            if (!std.mem.eql(u8, agent.status, "active")) continue;
-            if (agent.role) |role| {
-                if (std.mem.eql(u8, role, "server")) continue;
-            }
-
-            if (!validCapacity(agent) or used_cpu[agent_idx] < 0 or used_mem[agent_idx] < 0 or used_gpu[agent_idx] < 0) continue;
-            const free_cpu = agent.cpu_cores * 1000 -| used_cpu[agent_idx];
-            const free_mem = agent.memory_mb -| used_mem[agent_idx];
-            if (free_cpu < req.cpu_limit) continue;
-            if (free_mem < req.memory_limit_mb) continue;
-
-            if (req.gpu_limit > 0) {
-                const free_gpu = agent.gpu_count -| used_gpu[agent_idx];
-                if (free_gpu < req.gpu_limit) continue;
-                if (req.gpu_model != null or req.gpu_vram_min_mb != null) {
-                    if (!gpu_scheduler.matchesGpuRequirements(agent, req.gpu_model, req.gpu_vram_min_mb)) continue;
-                }
-            }
-
-            if (req.required_labels.len > 0) {
-                if (!constraints.matchesLabels(agent.labels orelse "", req.required_labels)) continue;
-            }
-            if (req.volume_constraints.len > 0) {
-                if (!constraints.matchesVolumeConstraints(agent, req.volume_constraints)) continue;
-            }
-
-            const gpu_score: i64 = if (req.gpu_limit > 0) (agent.gpu_count -| used_gpu[agent_idx]) *| 1000 else 0;
-            const score = free_cpu +| free_mem +| gpu_score;
+        for (agents, usage, 0..) |agent, used, agent_idx| {
+            const score = placementScore(agent, used, request) orelse continue;
+            // keep the first agent when scores tie, so input order stays significant.
             if (score > best_score) {
                 best_score = score;
                 best_idx = agent_idx;
             }
         }
 
-        if (best_idx) |idx| {
-            results[req_idx] = .{
-                .agent_id = agents[idx].id,
-                .request_idx = req_idx,
+        if (best_idx) |agent_idx| {
+            results[request_idx] = .{
+                .agent_id = agents[agent_idx].id,
+                .request_idx = request_idx,
             };
-            used_cpu[idx] += req.cpu_limit;
-            used_mem[idx] += req.memory_limit_mb;
-            used_gpu[idx] += req.gpu_limit;
+            // later requests must account for placements made in this call.
+            usage[agent_idx].reserve(request);
         }
     }
 
     return results;
+}
+
+// null means the agent cannot run this request. higher scores favor agents
+// with more free capacity before placement.
+fn placementScore(agent: AgentRecord, used: ResourceUsage, request: PlacementRequest) ?i64 {
+    if (!std.mem.eql(u8, agent.status, "active")) return null;
+    if (std.mem.eql(u8, agent.role orelse "", "server")) return null;
+    if (!validCapacity(agent)) return null;
+    if (used.cpu < 0 or used.memory_mb < 0 or used.gpu < 0) return null;
+
+    const free_cpu = agent.cpu_cores * 1000 -| used.cpu;
+    const free_memory = agent.memory_mb -| used.memory_mb;
+    if (free_cpu < request.cpu_limit or free_memory < request.memory_limit_mb) return null;
+
+    var gpu_score: i64 = 0;
+    if (request.gpu_limit > 0) {
+        const free_gpu = agent.gpu_count -| used.gpu;
+        if (free_gpu < request.gpu_limit) return null;
+        if (request.gpu_model != null or request.gpu_vram_min_mb != null) {
+            if (!gpu_scheduler.matchesGpuRequirements(agent, request.gpu_model, request.gpu_vram_min_mb)) return null;
+        }
+        // gpu capacity only affects the score when the request needs a gpu.
+        gpu_score = free_gpu *| 1000;
+    }
+
+    if (!constraints.matchesLabels(agent.labels orelse "", request.required_labels)) return null;
+    if (!constraints.matchesVolumeConstraints(agent, request.volume_constraints)) return null;
+
+    return free_cpu +| free_memory +| gpu_score;
 }
 
 pub fn validCapacity(agent: AgentRecord) bool {
