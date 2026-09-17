@@ -138,16 +138,7 @@ pub fn tickGossipLoop(self: anytype) void {
     };
     defer gossip.freeActions(actions);
 
-    for (actions) |action| {
-        switch (action) {
-            .send_message => |msg| {
-                var encode_buf: [512]u8 = undefined;
-                const len = gossip_mod.Gossip.encode(&encode_buf, msg.message) catch continue;
-                transport.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
-            },
-            .member_dead, .member_alive, .member_suspect => {},
-        }
-    }
+    sendGossipActions(transport, actions);
 }
 
 pub fn receiveGossipLoop(self: anytype) void {
@@ -176,15 +167,21 @@ pub fn receiveGossipLoop(self: anytype) void {
             return;
         };
         defer gossip.freeActions(actions);
-        for (actions) |action| {
-            switch (action) {
-                .send_message => |send| {
-                    var encode_buf: [512]u8 = undefined;
-                    const len = gossip_mod.Gossip.encode(&encode_buf, send.message) catch continue;
-                    transport.sendGossip(send.addr.ip, send.addr.port, encode_buf[0..len]) catch {};
-                },
-                .member_dead, .member_alive, .member_suspect => {},
-            }
+        sendGossipActions(transport, actions);
+    }
+}
+
+// both tick and receive paths send messages in action order. a failed send
+// leaves later actions eligible for delivery.
+fn sendGossipActions(transport: anytype, actions: []const gossip_mod.Action) void {
+    for (actions) |action| {
+        switch (action) {
+            .send_message => |msg| {
+                var encode_buf: [512]u8 = undefined;
+                const len = gossip_mod.Gossip.encode(&encode_buf, msg.message) catch continue;
+                transport.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
+            },
+            .member_dead, .member_alive, .member_suspect => {},
         }
     }
 }
@@ -213,8 +210,8 @@ test "gossip bootstrap pins first worker to server identity and actual port" {
         for (seeds) |seed| alloc.free(seed);
         alloc.free(seeds);
     };
-    // A self seed and a conflicting server endpoint must not replace the API
-    // server's pinned address. Non-default server gossip ports are preserved.
+    // the api server keeps its pinned address and advertised port, even when
+    // the seed list includes this node or a conflicting server endpoint.
     parseGossipSeeds(&agent, "{\"gossip_server\":{\"id\":1,\"port\":19800},\"gossip_seeds\":[\"2@10.0.0.2\",\"1@10.0.0.99:9800\"]}");
     const seeds = agent.gossip_seeds.?;
     try std.testing.expectEqual(@as(usize, 1), seeds.len);
@@ -243,4 +240,52 @@ test "gossip bootstrap retains legacy ports and rejects invalid endpoints" {
     try std.testing.expectEqual(@as(u16, 9800), parseSeedAddr("3@10.0.0.3").?.port);
     for ([_][]const u8{ "0@10.0.0.1", "1@10.0.0.1:0", "1@10.0.0.1:65536", "1@10.0.0.1:no" }) |seed|
         try std.testing.expect(parseSeedAddr(seed) == null);
+}
+
+test "gossip action dispatch continues after send failures and skips membership events" {
+    const Capture = struct {
+        addresses: [2]gossip_mod.MemberAddr = undefined,
+        messages: [2]gossip_mod.GossipMessage = undefined,
+        count: usize = 0,
+        attempts: usize = 0,
+
+        pub fn sendGossip(self: *@This(), ip: [4]u8, port: u16, payload: []const u8) !void {
+            self.attempts += 1;
+            if (self.count == self.messages.len) return error.UnexpectedSend;
+            self.addresses[self.count] = .{ .ip = ip, .port = port };
+            self.messages[self.count] = try gossip_mod.Gossip.decode(std.testing.allocator, payload);
+            self.count += 1;
+            if (self.count == 1) return error.SendFailed;
+        }
+    };
+    var capture: Capture = .{};
+    const first_addr: gossip_mod.MemberAddr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 9801 };
+    const second_addr: gossip_mod.MemberAddr = .{ .ip = .{ 10, 0, 0, 3 }, .port = 9802 };
+    const actions = [_]gossip_mod.Action{
+        .{ .member_alive = .{ .id = 2 } },
+        .{ .send_message = .{
+            .target = 2,
+            .addr = first_addr,
+            .message = .{ .ping = .{ .from = 1, .sequence = 17 } },
+        } },
+        .{ .member_suspect = .{ .id = 4 } },
+        .{ .member_dead = .{ .id = 5 } },
+        .{ .send_message = .{
+            .target = 3,
+            .addr = second_addr,
+            .message = .{ .ping_req = .{ .from = 1, .target = 4, .sequence = 18 } },
+        } },
+    };
+
+    sendGossipActions(&capture, &actions);
+
+    try std.testing.expectEqual(@as(usize, 2), capture.count);
+    try std.testing.expectEqual(@as(usize, 2), capture.attempts);
+    try std.testing.expectEqualDeep(first_addr, capture.addresses[0]);
+    try std.testing.expectEqualDeep(second_addr, capture.addresses[1]);
+    try std.testing.expectEqual(@as(u64, 1), capture.messages[0].ping.from);
+    try std.testing.expectEqual(@as(u64, 17), capture.messages[0].ping.sequence);
+    try std.testing.expectEqual(@as(u64, 1), capture.messages[1].ping_req.from);
+    try std.testing.expectEqual(@as(u64, 4), capture.messages[1].ping_req.target);
+    try std.testing.expectEqual(@as(u64, 18), capture.messages[1].ping_req.sequence);
 }
