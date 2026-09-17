@@ -21,39 +21,32 @@ pub fn handleBatchFailure(
 ) common.UpdateError {
     log.warn("update: batch failed for {s}: {s}", .{ context.service_name, reason });
 
-    switch (strategy.failure_action) {
-        .rollback => {
+    const status: common.DeploymentStatus = switch (strategy.failure_action) {
+        .rollback => blk: {
             log.info("update: rolling back — stopping {d} new containers", .{new_container_ids.items.len});
 
             for (new_container_ids.items) |new_id| {
                 _ = context.callbacks.stopContainer(&new_id);
             }
 
-            progress.status = .rolled_back;
-            progress.message = reason;
-
-            if (deployment_id) |id| {
-                deployment_store.updateDeploymentStatus(id, .rolled_back, reason) catch |e| {
-                    log.warn("failed to update deployment status to rolled_back: {}", .{e});
-                };
-            }
-
-            return common.UpdateError.BatchFailed;
+            break :blk .rolled_back;
         },
-        .pause => {
-            const status = pausedFailureStatus(progress);
-            progress.status = status;
-            progress.message = reason;
+        .pause => pausedFailureStatus(progress),
+    };
 
-            if (deployment_id) |id| {
-                deployment_store.updateDeploymentStatus(id, status, reason) catch |e| {
-                    log.warn("failed to update deployment status to {s}: {}", .{ status.toString(), e });
-                };
-            }
+    progress.status = status;
+    progress.message = reason;
 
-            return common.UpdateError.UpdatePaused;
-        },
+    if (deployment_id) |id| {
+        deployment_store.updateDeploymentStatus(id, status, reason) catch |err| {
+            log.warn("failed to update deployment status to {s}: {}", .{ status.toString(), err });
+        };
     }
+
+    return switch (strategy.failure_action) {
+        .rollback => common.UpdateError.BatchFailed,
+        .pause => common.UpdateError.UpdatePaused,
+    };
 }
 
 pub fn waitForHealth(
@@ -73,16 +66,7 @@ fn waitForHealthWithSleep(
     const deadline = nowAwakeSeconds() + timeout;
 
     while (nowAwakeSeconds() < deadline) {
-        var all_healthy = true;
-
-        for (container_ids.items) |id| {
-            if (!callbacks.isHealthy(&id)) {
-                all_healthy = false;
-                break;
-            }
-        }
-
-        if (all_healthy) return true;
+        if (allHealthy(container_ids.items, callbacks)) return true;
         sleepFn() catch |err| {
             log.warn("update: health wait interrupted: {}", .{err});
             return false;
@@ -90,6 +74,13 @@ fn waitForHealthWithSleep(
     }
 
     return false;
+}
+
+fn allHealthy(container_ids: []const [12]u8, callbacks: common.UpdateCallbacks) bool {
+    for (container_ids) |id| {
+        if (!callbacks.isHealthy(&id)) return false;
+    }
+    return true;
 }
 
 fn sleepHealthPoll() !void {
