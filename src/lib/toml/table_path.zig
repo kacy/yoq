@@ -35,30 +35,33 @@ pub fn resolveTablePath(root: *Table, alloc: std.mem.Allocator, line: []const u8
             return ParseError.InvalidTableHeader;
         }
 
-        if (current.entries.get(part)) |existing| {
-            switch (existing) {
-                .table => |table| current = table,
-                else => {
-                    log.err("toml: line {d}: '{s}' is not a table", .{ line_num, part });
-                    return ParseError.DuplicateKey;
-                },
-            }
-        } else {
-            const subtable = alloc.create(Table) catch return ParseError.OutOfMemory;
-            subtable.* = Table{ .entries = .{} };
-            errdefer {
-                subtable.deinit(alloc);
-                alloc.destroy(subtable);
-            }
-
-            const key = alloc.dupe(u8, part) catch return ParseError.OutOfMemory;
-            current.entries.put(alloc, key, Value{ .table = subtable }) catch {
-                alloc.free(key);
-                return ParseError.OutOfMemory;
-            };
-            current = subtable;
-        }
+        current = try resolveSegment(current, alloc, part, line_num);
     }
 
     return current;
+}
+
+fn resolveSegment(parent: *Table, alloc: std.mem.Allocator, name: []const u8, line_num: usize) ParseError!*Table {
+    if (parent.entries.get(name)) |existing| {
+        return switch (existing) {
+            .table => |table| table,
+            else => {
+                log.err("toml: line {d}: '{s}' is not a table", .{ line_num, name });
+                return ParseError.DuplicateKey;
+            },
+        };
+    }
+
+    const subtable = alloc.create(Table) catch return ParseError.OutOfMemory;
+    subtable.* = Table{ .entries = .{} };
+    errdefer {
+        subtable.deinit(alloc);
+        alloc.destroy(subtable);
+    }
+
+    const key = alloc.dupe(u8, name) catch return ParseError.OutOfMemory;
+    errdefer alloc.free(key);
+    parent.entries.put(alloc, key, Value{ .table = subtable }) catch return ParseError.OutOfMemory;
+    // the parent owns the key and subtable once insertion succeeds.
+    return subtable;
 }
