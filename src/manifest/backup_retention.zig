@@ -58,12 +58,12 @@ pub fn prune(alloc: std.mem.Allocator, dir: std.Io.Dir, newest: []const u8, now:
     var iter = dir.iterate();
     while (try iter.next(std.Options.debug_io)) |entry| {
         if (entry.kind != .file) continue;
-        const ts = timestamp(entry.name) orelse continue;
+        const backup_time = artifactTimestamp(entry.name) orelse continue;
         const stat = try dir.statFile(std.Options.debug_io, entry.name, .{ .follow_symlinks = false });
         if (stat.kind != .file) continue;
         const name = try alloc.dupe(u8, entry.name);
         errdefer alloc.free(name);
-        try artifacts.append(alloc, .{ .name = name, .timestamp = ts, .size = stat.size });
+        try artifacts.append(alloc, .{ .name = name, .timestamp = backup_time, .size = stat.size });
     }
     std.mem.sort(Artifact, artifacts.items, {}, struct {
         fn newer(_: void, a: Artifact, b: Artifact) bool {
@@ -90,20 +90,31 @@ fn newestBackupSize(artifacts: []const Artifact, newest: []const u8) !u64 {
     return error.MissingNewestBackup;
 }
 
-fn timestamp(name: []const u8) ?i64 {
+fn artifactTimestamp(name: []const u8) ?i64 {
     const prefix = "yoq-backup-";
     if (!std.mem.startsWith(u8, name, prefix)) return null;
-    const suffix = if (std.mem.endsWith(u8, name, ".yoqbackup")) @as(usize, 10) else if (std.mem.endsWith(u8, name, ".db")) @as(usize, 3) else return null;
-    if (name.len <= prefix.len + suffix) return null;
-    const body = name[prefix.len .. name.len - suffix];
-    const dash = std.mem.indexOfScalar(u8, body, '-');
-    const seconds = if (dash) |i| body[0..i] else body;
+    const extension = if (std.mem.endsWith(u8, name, ".yoqbackup"))
+        ".yoqbackup"
+    else if (std.mem.endsWith(u8, name, ".db"))
+        ".db"
+    else
+        return null;
+    if (name.len <= prefix.len + extension.len) return null;
+
+    // older backups use only a timestamp; current names also include a nonce.
+    const body = name[prefix.len .. name.len - extension.len];
+    const nonce_separator = std.mem.indexOfScalar(u8, body, '-');
+    const seconds = if (nonce_separator) |index| body[0..index] else body;
     if (seconds.len == 0) return null;
-    for (seconds) |c| if (!std.ascii.isDigit(c)) return null;
-    if (dash) |i| {
-        const nonce = body[i + 1 ..];
+    for (seconds) |digit| {
+        if (!std.ascii.isDigit(digit)) return null;
+    }
+    if (nonce_separator) |index| {
+        const nonce = body[index + 1 ..];
         if (nonce.len != 32) return null;
-        for (nonce) |c| if (!std.ascii.isHex(c)) return null;
+        for (nonce) |digit| {
+            if (!std.ascii.isHex(digit)) return null;
+        }
     }
     return std.fmt.parseInt(i64, seconds, 10) catch null;
 }
@@ -148,4 +159,22 @@ test "backup retention leaves files intact when the newest backup is missing" {
         .{ .keep_count = 1 },
     ));
     try tmp.dir.access(std.testing.io, "yoq-backup-10.db", .{});
+}
+
+test "backup retention recognizes only completed scheduler filenames" {
+    try std.testing.expectEqual(@as(?i64, 10), artifactTimestamp("yoq-backup-10.db"));
+    try std.testing.expectEqual(@as(?i64, 0), artifactTimestamp("yoq-backup-0.yoqbackup"));
+    try std.testing.expectEqual(@as(?i64, 20), artifactTimestamp("yoq-backup-20-0123456789abcdef0123456789ABCDEF.yoqbackup"));
+    const ignored = [_][]const u8{
+        "manual.db",
+        "yoq-backup-.db",
+        "yoq-backup--1.db",
+        "yoq-backup-+1.db",
+        "yoq-backup-10.db.partial",
+        "yoq-backup-10-.db",
+        "yoq-backup-10-0123456789abcdef0123456789abcde.db",
+        "yoq-backup-10-0123456789abcdef0123456789abcdeg.db",
+        "yoq-backup-9223372036854775808.db",
+    };
+    for (ignored) |name| try std.testing.expect(artifactTimestamp(name) == null);
 }
