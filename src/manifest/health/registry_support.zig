@@ -48,30 +48,6 @@ pub fn registerService(
 
     const len = @min(service_name.len, 64);
     const endpoint_len = @min(endpoint_id.len, 96);
-    if (findServiceIndex(service_name)) |index| {
-        var entry = &health_states.items[index];
-        entry.status = .starting;
-        entry.consecutive_failures = 0;
-        entry.consecutive_successes = 0;
-        entry.last_check = null;
-        entry.last_error = null;
-        entry.started_at = now;
-        entry.container_id = container_id;
-        entry.container_ip = container_ip;
-        entry.config.deinit(std.heap.page_allocator);
-        entry.config = owned_config;
-        entry.name_len = @intCast(len);
-        @memcpy(entry.name_buf[0..len], service_name[0..len]);
-        entry.endpoint_id_len = @intCast(endpoint_len);
-        @memcpy(entry.endpoint_id_buf[0..endpoint_len], endpoint_id[0..endpoint_len]);
-        entry.generation = generation;
-        entry.registration_epoch += 1;
-        entry.next_check_at = now;
-        entry.in_flight = false;
-        entry.flap_count = 0;
-        return;
-    }
-
     var entry = types.ServiceHealth{
         .status = .starting,
         .consecutive_failures = 0,
@@ -92,6 +68,16 @@ pub fn registerService(
     };
     @memcpy(entry.name_buf[0..len], service_name[0..len]);
     @memcpy(entry.endpoint_id_buf[0..endpoint_len], endpoint_id[0..endpoint_len]);
+
+    if (findServiceIndex(service_name)) |index| {
+        const previous = &health_states.items[index];
+        // advance the epoch so checks still in flight cannot update this registration.
+        entry.registration_epoch = previous.registration_epoch + 1;
+        previous.config.deinit(std.heap.page_allocator);
+        previous.* = entry;
+        return;
+    }
+
     health_states.append(std.heap.page_allocator, entry) catch return types.HealthError.OutOfMemory;
 }
 
@@ -123,7 +109,7 @@ pub fn getServiceHealth(alloc: std.mem.Allocator, service_name: []const u8) !?ty
 }
 
 pub fn snapshotChecker() types.CheckerSnapshot {
-    // Match the scheduler's health-state then work-queue lock order.
+    // lock health state before the work queue, as the scheduler does.
     health_mutex.lockUncancelable(std.Options.debug_io);
     defer health_mutex.unlock(std.Options.debug_io);
     work_mutex.lockUncancelable(std.Options.debug_io);
