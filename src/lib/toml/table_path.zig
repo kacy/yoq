@@ -35,30 +35,68 @@ pub fn resolveTablePath(root: *Table, alloc: std.mem.Allocator, line: []const u8
             return ParseError.InvalidTableHeader;
         }
 
-        if (current.entries.get(part)) |existing| {
-            switch (existing) {
-                .table => |table| current = table,
-                else => {
-                    log.err("toml: line {d}: '{s}' is not a table", .{ line_num, part });
-                    return ParseError.DuplicateKey;
-                },
-            }
-        } else {
-            const subtable = alloc.create(Table) catch return ParseError.OutOfMemory;
-            subtable.* = Table{ .entries = .{} };
-            errdefer {
-                subtable.deinit(alloc);
-                alloc.destroy(subtable);
-            }
-
-            const key = alloc.dupe(u8, part) catch return ParseError.OutOfMemory;
-            current.entries.put(alloc, key, Value{ .table = subtable }) catch {
-                alloc.free(key);
-                return ParseError.OutOfMemory;
-            };
-            current = subtable;
-        }
+        current = try resolveSegment(current, alloc, part, line_num);
     }
 
     return current;
+}
+
+fn resolveSegment(parent: *Table, alloc: std.mem.Allocator, name: []const u8, line_num: usize) ParseError!*Table {
+    if (parent.entries.get(name)) |existing| {
+        return switch (existing) {
+            .table => |table| table,
+            else => {
+                log.err("toml: line {d}: '{s}' is not a table", .{ line_num, name });
+                return ParseError.DuplicateKey;
+            },
+        };
+    }
+
+    const subtable = alloc.create(Table) catch return ParseError.OutOfMemory;
+    subtable.* = Table{ .entries = .{} };
+    errdefer {
+        subtable.deinit(alloc);
+        alloc.destroy(subtable);
+    }
+
+    const key = alloc.dupe(u8, name) catch return ParseError.OutOfMemory;
+    errdefer alloc.free(key);
+    parent.entries.put(alloc, key, Value{ .table = subtable }) catch return ParseError.OutOfMemory;
+    // the parent owns the key and subtable once insertion succeeds.
+    return subtable;
+}
+
+test "toml table paths reuse existing tables and trim segment whitespace" {
+    const alloc = std.testing.allocator;
+    var root = Table{ .entries = .{} };
+    defer root.deinit(alloc);
+
+    const web = try resolveTablePath(&root, alloc, "[ services . web ]", 1);
+    const reopened = try resolveTablePath(&root, alloc, "[services.web]", 2);
+    const worker = try resolveTablePath(&root, alloc, "[services.worker]", 3);
+    try std.testing.expect(web == reopened);
+    try std.testing.expect(web != worker);
+    try std.testing.expectEqual(@as(usize, 1), root.entries.count());
+    try std.testing.expectEqual(@as(usize, 2), root.getTable("services").?.entries.count());
+}
+
+test "toml table paths retain completed segments when a later segment is invalid" {
+    const alloc = std.testing.allocator;
+    var root = Table{ .entries = .{} };
+    defer root.deinit(alloc);
+
+    try std.testing.expectError(ParseError.InvalidTableHeader, resolveTablePath(&root, alloc, "[services..web]", 1));
+    const services = root.getTable("services") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), services.entries.count());
+}
+
+test "toml table paths release allocations when table creation fails" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkTablePathAllocations, .{});
+}
+
+fn checkTablePathAllocations(alloc: std.mem.Allocator) !void {
+    var root = Table{ .entries = .{} };
+    defer root.deinit(alloc);
+    _ = try resolveTablePath(&root, alloc, "[services.web]", 1);
+    _ = try resolveTablePath(&root, alloc, "[services.worker]", 2);
 }
