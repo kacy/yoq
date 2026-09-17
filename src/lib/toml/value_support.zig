@@ -172,3 +172,38 @@ fn parseArrayString(alloc: std.mem.Allocator, inner: []const u8, pos: *usize, li
     log.err("toml: line {d}: unterminated string in array", .{line_num});
     return ParseError.UnterminatedString;
 }
+
+test "toml array strings preserve escapes and permissive separators" {
+    const alloc = std.testing.allocator;
+    const value = try parseValue(alloc,
+        \\[, "" "quote\"slash\\",, "line\ntab\t",] trailing text
+    , 1);
+    defer freeValue(alloc, value);
+
+    try std.testing.expectEqual(@as(usize, 3), value.array.len);
+    try std.testing.expectEqualStrings("", value.array[0]);
+    try std.testing.expectEqualStrings("quote\"slash\\", value.array[1]);
+    try std.testing.expectEqualStrings("line\ntab\t", value.array[2]);
+}
+
+test "toml array strings release earlier items after malformed input" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(ParseError.UnexpectedCharacter, parseValue(alloc, "[\"first\", 42]", 1));
+    try std.testing.expectError(ParseError.UnexpectedCharacter, parseValue(alloc, "[\"first\", \"\\r\"]", 1));
+    try std.testing.expectError(ParseError.UnterminatedString, parseValue(alloc, "[\"first\", \"unfinished]", 1));
+    try std.testing.expectError(ParseError.UnterminatedString, parseValue(alloc, "[\"first\", \"escape\\]", 1));
+    // the parser treats the first closing bracket as the array boundary.
+    try std.testing.expectError(ParseError.UnterminatedString, parseValue(alloc, "[\"first\", \"bracket]inside\"]", 1));
+}
+
+test "toml array strings release allocations at each failure point" {
+    const Scenario = struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            const value = try parseValue(alloc, "[\"\", \"first\", \"second\\nline\", \"third\\tcolumn\"]", 1);
+            defer freeValue(alloc, value);
+            try std.testing.expectEqual(@as(usize, 4), value.array.len);
+            try std.testing.expectEqualStrings("second\nline", value.array[2]);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
+}
