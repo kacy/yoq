@@ -1263,6 +1263,48 @@ test "addPendingUpdate replaces existing update for same member" {
     try std.testing.expectEqual(@as(u64, 5), g.pending_updates.items[0].update.incarnation);
 }
 
+test "gossip queue eviction keeps priority ties and refreshes full queues" {
+    const alloc = std.testing.allocator;
+    const addr: MemberAddr = .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 };
+    var g = Gossip.init(alloc, 1, addr, .{});
+    defer g.deinit();
+
+    for (0..1000) |id| {
+        try g.pending_updates.append(alloc, .{
+            .update = .{ .id = @intCast(id), .addr = addr, .state = .dead, .incarnation = 1 },
+            .remaining = 1,
+        });
+    }
+    g.pending_updates.items[10].update.state = .alive;
+    g.pending_updates.items[10].remaining = 3;
+    g.pending_updates.items[20].update.state = .alive;
+    g.pending_updates.items[30].update.state = .alive;
+
+    // the first alive entry with one transmission left is evicted.
+    try g.addPendingUpdate(.{ .id = 9999, .addr = addr, .state = .suspect, .incarnation = 1 });
+    try std.testing.expectEqual(@as(usize, 1000), g.pending_updates.items.len);
+    try std.testing.expectEqual(@as(u64, 999), g.pending_updates.items[20].update.id);
+    try std.testing.expectEqual(@as(u64, 9999), g.pending_updates.items[999].update.id);
+    for (g.pending_updates.items) |pending| {
+        try std.testing.expect(pending.update.id != 20);
+    }
+    try std.testing.expectEqual(@as(u64, 10), g.pending_updates.items[10].update.id);
+    try std.testing.expectEqual(@as(u64, 30), g.pending_updates.items[30].update.id);
+
+    // replacing a member at capacity restarts its transmissions without eviction.
+    const replacement: StateUpdate = .{
+        .id = 30,
+        .addr = .{ .ip = .{ 10, 0, 1, 30 }, .port = 8000 },
+        .state = .dead,
+        .incarnation = 5,
+    };
+    try g.addPendingUpdate(replacement);
+    try std.testing.expectEqual(@as(usize, 1000), g.pending_updates.items.len);
+    try std.testing.expectEqualDeep(replacement, g.pending_updates.items[30].update);
+    try std.testing.expectEqual(@as(u8, 2), g.pending_updates.items[30].remaining);
+    try std.testing.expectEqual(@as(u64, 10), g.pending_updates.items[10].update.id);
+}
+
 test "collectPiggybackUpdates sorts by state priority" {
     const alloc = std.testing.allocator;
     var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
@@ -1327,6 +1369,43 @@ test "collectPiggybackUpdates decrements remaining and expires" {
     // second collect — should return nothing
     const second = g.collectPiggybackUpdates();
     try std.testing.expectEqual(@as(usize, 0), second.slice().len);
+}
+
+test "gossip queue collection preserves ties and counts only selected updates" {
+    const alloc = std.testing.allocator;
+    const addr: MemberAddr = .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 };
+    var g = Gossip.init(alloc, 1, addr, .{});
+    defer g.deinit();
+
+    for (10..18) |id| {
+        try g.pending_updates.append(alloc, .{
+            .update = .{ .id = @intCast(id), .addr = addr, .state = .suspect, .incarnation = 1 },
+            .remaining = 1,
+        });
+    }
+    g.pending_updates.items[6].remaining = 3;
+    g.pending_updates.items[7].remaining = 2;
+
+    const first = g.collectPiggybackUpdates();
+    try std.testing.expectEqual(@as(usize, 6), first.slice().len);
+    for (first.slice(), 10..) |update, id| {
+        try std.testing.expectEqual(@as(u64, @intCast(id)), update.id);
+    }
+
+    // removing expired entries moves the last two into the first two slots.
+    // neither was selected, so both keep their transmission counts.
+    try std.testing.expectEqual(@as(usize, 2), g.pending_updates.items.len);
+    try std.testing.expectEqual(@as(u64, 17), g.pending_updates.items[0].update.id);
+    try std.testing.expectEqual(@as(u8, 2), g.pending_updates.items[0].remaining);
+    try std.testing.expectEqual(@as(u64, 16), g.pending_updates.items[1].update.id);
+    try std.testing.expectEqual(@as(u8, 3), g.pending_updates.items[1].remaining);
+
+    const second = g.collectPiggybackUpdates();
+    try std.testing.expectEqual(@as(usize, 2), second.slice().len);
+    try std.testing.expectEqual(@as(u64, 17), second.slice()[0].id);
+    try std.testing.expectEqual(@as(u64, 16), second.slice()[1].id);
+    try std.testing.expectEqual(@as(u8, 1), g.pending_updates.items[0].remaining);
+    try std.testing.expectEqual(@as(u8, 2), g.pending_updates.items[1].remaining);
 }
 
 test "applyStateUpdate ignores lower incarnation" {
