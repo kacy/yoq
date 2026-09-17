@@ -199,6 +199,67 @@ test "register and get status" {
     try std.testing.expectEqual(HealthStatus.starting, status.?);
 }
 
+test "register resets existing health state and owns the replacement config" {
+    registry_support.resetForTest();
+    defer registry_support.resetForTest();
+
+    try registerService("api", "abcdef123456".*, .{ 10, 42, 0, 10 }, .{
+        .check_type = .{ .http = .{ .path = "/health", .port = 3000 } },
+    });
+    const old_snapshot = (try getServiceHealth(std.testing.allocator, "api")).?;
+    defer old_snapshot.config.deinit(std.testing.allocator);
+
+    {
+        registry_support.health_mutex.lockUncancelable(std.Options.debug_io);
+        defer registry_support.health_mutex.unlock(std.Options.debug_io);
+        const entry = &registry_support.health_states.items[0];
+        entry.status = .unhealthy;
+        entry.consecutive_failures = 3;
+        entry.consecutive_successes = 2;
+        entry.last_check = 42;
+        entry.last_error = "connection refused";
+        entry.started_at = 1;
+        entry.registration_epoch = 7;
+        entry.next_check_at = 99;
+        entry.in_flight = true;
+        entry.flap_count = 4;
+    }
+
+    var path = "/ready".*;
+    try registerService("api", "123456abcdef".*, .{ 10, 42, 0, 11 }, .{
+        .check_type = .{ .http = .{ .path = &path, .port = 8080 } },
+        .interval = 30,
+    });
+    // the registered config must not borrow the caller's path buffer.
+    @memset(&path, 'x');
+
+    const snapshot = (try getServiceHealth(std.testing.allocator, "api")).?;
+    defer snapshot.config.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), snapshotChecker().tracked_endpoints);
+    try std.testing.expectEqual(HealthStatus.starting, snapshot.status);
+    try std.testing.expectEqual(@as(u32, 0), snapshot.consecutive_failures);
+    try std.testing.expectEqual(@as(u32, 0), snapshot.consecutive_successes);
+    try std.testing.expectEqual(@as(?i64, null), snapshot.last_check);
+    try std.testing.expect(snapshot.last_error == null);
+    try std.testing.expect(snapshot.started_at.? > 1);
+    try std.testing.expectEqual(snapshot.started_at.?, snapshot.next_check_at);
+    try std.testing.expectEqual(@as(u64, 8), snapshot.registration_epoch);
+    try std.testing.expect(!snapshot.in_flight);
+    try std.testing.expectEqual(@as(u32, 0), snapshot.flap_count);
+    try std.testing.expectEqualStrings("api", snapshot.serviceName());
+    try std.testing.expectEqualStrings("123456abcdef", &snapshot.container_id);
+    try std.testing.expectEqual([4]u8{ 10, 42, 0, 11 }, snapshot.container_ip);
+    try std.testing.expectEqualStrings("123456abcdef:0", snapshot.endpointId());
+    try std.testing.expectEqualStrings("/ready", snapshot.config.check_type.http.path);
+    try std.testing.expectEqual(@as(u16, 8080), snapshot.config.check_type.http.port);
+    try std.testing.expectEqual(@as(u32, 30), snapshot.config.interval);
+
+    // replacing the registry entry must leave earlier owned snapshots usable.
+    try std.testing.expectEqualStrings("/health", old_snapshot.config.check_type.http.path);
+    try std.testing.expectEqualStrings("abcdef123456", &old_snapshot.container_id);
+    try std.testing.expectEqual(@as(u64, 1), old_snapshot.registration_epoch);
+}
+
 test "unregister removes service" {
     registry_support.resetForTest();
 
