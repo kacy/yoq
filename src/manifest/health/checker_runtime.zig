@@ -182,16 +182,12 @@ pub fn updateState(entry: *types.ServiceHealth, success: bool) Transition {
 
         switch (entry.status) {
             .starting => {
-                entry.status = .healthy;
-                entry.flap_count += 1;
-                service_observability.noteEndpointFlap(entry.serviceName());
+                changeStatus(entry, .healthy);
                 log.info("health: {s} is now healthy", .{entry.serviceName()});
                 return .became_healthy;
             },
             .unhealthy => {
-                entry.status = .healthy;
-                entry.flap_count += 1;
-                service_observability.noteEndpointFlap(entry.serviceName());
+                changeStatus(entry, .healthy);
                 log.info("health: {s} recovered, now healthy", .{entry.serviceName()});
                 return .became_healthy;
             },
@@ -201,35 +197,34 @@ pub fn updateState(entry: *types.ServiceHealth, success: bool) Transition {
 
     entry.consecutive_failures += 1;
     entry.consecutive_successes = 0;
+    if (entry.consecutive_failures < entry.config.retries) return .none;
 
     switch (entry.status) {
         .starting => {
-            if (entry.consecutive_failures >= entry.config.retries) {
-                entry.status = .unhealthy;
-                entry.flap_count += 1;
-                service_observability.noteEndpointFlap(entry.serviceName());
-                log.warn("health: {s} failed to start (after {d} retries)", .{
-                    entry.serviceName(),
-                    entry.config.retries,
-                });
-                return .became_unhealthy;
-            }
+            changeStatus(entry, .unhealthy);
+            log.warn("health: {s} failed to start (after {d} retries)", .{
+                entry.serviceName(),
+                entry.config.retries,
+            });
+            return .became_unhealthy;
         },
         .healthy => {
-            if (entry.consecutive_failures >= entry.config.retries) {
-                entry.status = .unhealthy;
-                entry.flap_count += 1;
-                service_observability.noteEndpointFlap(entry.serviceName());
-                log.warn("health: {s} is now unhealthy (after {d} consecutive failures)", .{
-                    entry.serviceName(),
-                    entry.config.retries,
-                });
-                return .became_unhealthy;
-            }
+            changeStatus(entry, .unhealthy);
+            log.warn("health: {s} is now unhealthy (after {d} consecutive failures)", .{
+                entry.serviceName(),
+                entry.config.retries,
+            });
+            return .became_unhealthy;
         },
-        .unhealthy => {},
+        .unhealthy => return .none,
     }
-    return .none;
+}
+
+fn changeStatus(entry: *types.ServiceHealth, status: types.HealthStatus) void {
+    // callers skip unchanged states so repeated results do not count as flaps.
+    entry.status = status;
+    entry.flap_count += 1;
+    service_observability.noteEndpointFlap(entry.serviceName());
 }
 
 fn nextIntervalSeconds(entry: *const types.ServiceHealth, success: bool) i64 {

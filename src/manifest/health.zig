@@ -116,6 +116,47 @@ test "state machine — healthy to unhealthy after retries" {
     try std.testing.expectEqual(HealthStatus.unhealthy, entry.status);
 }
 
+test "state machine reports the first failure when retries are zero" {
+    for ([_]HealthStatus{ .starting, .healthy }) |status| {
+        var entry = testEntry(status);
+        entry.config.retries = 0;
+
+        try std.testing.expect(checker_runtime.updateState(&entry, false) == .became_unhealthy);
+        try std.testing.expectEqual(HealthStatus.unhealthy, entry.status);
+        try std.testing.expectEqual(@as(u32, 1), entry.consecutive_failures);
+        try std.testing.expectEqual(@as(u32, 1), entry.flap_count);
+    }
+}
+
+test "state machine counts flaps only when health changes" {
+    var entry = testEntry(.healthy);
+    entry.config.retries = 2;
+    entry.last_error = "connection refused";
+
+    try std.testing.expect(checker_runtime.updateState(&entry, false) == .none);
+    try std.testing.expectEqual(@as(u32, 0), entry.flap_count);
+    try std.testing.expect(checker_runtime.updateState(&entry, false) == .became_unhealthy);
+    try std.testing.expectEqual(@as(u32, 1), entry.flap_count);
+
+    // further failures count toward backoff without another status transition.
+    try std.testing.expect(checker_runtime.updateState(&entry, false) == .none);
+    try std.testing.expectEqual(HealthStatus.unhealthy, entry.status);
+    try std.testing.expectEqual(@as(u32, 3), entry.consecutive_failures);
+    try std.testing.expectEqual(@as(u32, 1), entry.flap_count);
+    try std.testing.expectEqualStrings("connection refused", entry.last_error.?);
+
+    try std.testing.expect(checker_runtime.updateState(&entry, true) == .became_healthy);
+    try std.testing.expectEqual(HealthStatus.healthy, entry.status);
+    try std.testing.expectEqual(@as(u32, 0), entry.consecutive_failures);
+    try std.testing.expectEqual(@as(u32, 1), entry.consecutive_successes);
+    try std.testing.expectEqual(@as(u32, 2), entry.flap_count);
+    try std.testing.expect(entry.last_error == null);
+
+    try std.testing.expect(checker_runtime.updateState(&entry, true) == .none);
+    try std.testing.expectEqual(@as(u32, 2), entry.consecutive_successes);
+    try std.testing.expectEqual(@as(u32, 2), entry.flap_count);
+}
+
 test "state machine — unhealthy to healthy on single success" {
     var entry = testEntry(.unhealthy);
     entry.consecutive_failures = 5;
