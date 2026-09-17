@@ -1,11 +1,11 @@
-// cron scheduler — runs recurring tasks on a fixed interval
+// cron scheduler
 //
-// spawns a single thread that sleeps until the next cron is due,
-// runs it via runOneShot, and reschedules. checks for shutdown
-// every second while sleeping.
+// runs recurring tasks one at a time on a dedicated thread. each
+// interval starts when the previous run finishes. while waiting for
+// a task, the thread checks for shutdown every second.
 //
 // usage:
-//   var sched = CronScheduler.init(alloc, manifest.crons, manifest.volumes, app_name);
+//   var sched = try CronScheduler.init(alloc, manifest.crons, manifest.volumes, app_name);
 //   sched.start();
 //   // ... later ...
 //   sched.stop();
@@ -23,6 +23,19 @@ fn nowRealSeconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
 }
 
+fn nextRunIndex(next_runs: []const i64) ?usize {
+    var earliest_idx: ?usize = null;
+    var earliest_time: i64 = std.math.maxInt(i64);
+    for (next_runs, 0..) |next, i| {
+        // keep the first cron on ties; the maximum timestamp is a sentinel.
+        if (next < earliest_time) {
+            earliest_time = next;
+            earliest_idx = i;
+        }
+    }
+    return earliest_idx;
+}
+
 pub const CronScheduler = struct {
     alloc: std.mem.Allocator,
     crons: []const spec.Cron,
@@ -35,7 +48,7 @@ pub const CronScheduler = struct {
     pub fn init(alloc: std.mem.Allocator, crons: []const spec.Cron, manifest_volumes: []const spec.Volume, app_name: []const u8) !CronScheduler {
         const next_runs = try alloc.alloc(i64, crons.len);
 
-        // schedule first run of each cron at now + interval
+        // wait a full interval before each cron's first run.
         const now = nowRealSeconds();
         for (crons, 0..) |c, i| {
             next_runs[i] = now + @as(i64, @intCast(c.every));
@@ -52,7 +65,7 @@ pub const CronScheduler = struct {
         };
     }
 
-    /// start the scheduler thread. idempotent — does nothing if already running.
+    /// start the scheduler thread if it is not already running.
     pub fn start(self: *CronScheduler) void {
         if (self.running.load(.acquire)) return;
         self.running.store(true, .release);
@@ -81,23 +94,14 @@ pub const CronScheduler = struct {
         while (self.running.load(.acquire)) {
             const now = nowRealSeconds();
 
-            // find the soonest cron that's due
-            var earliest_idx: ?usize = null;
-            var earliest_time: i64 = std.math.maxInt(i64);
-            for (self.next_runs, 0..) |next, i| {
-                if (next < earliest_time) {
-                    earliest_time = next;
-                    earliest_idx = i;
-                }
-            }
-
-            const idx = earliest_idx orelse {
-                // no crons — shouldn't happen but sleep and retry
+            const idx = nextRunIndex(self.next_runs) orelse {
+                // no scheduled runs. check again after the idle wait.
                 if (!runtime_wait.sleep(std.Io.Duration.fromSeconds(1), "cron scheduler idle wait")) return;
                 continue;
             };
+            const earliest_time = self.next_runs[idx];
 
-            // sleep until the cron is due, checking shutdown every second
+            // check for shutdown each second while waiting for the next run.
             if (earliest_time > now) {
                 var remaining = earliest_time - now;
                 while (remaining > 0 and self.running.load(.acquire)) {
@@ -107,38 +111,52 @@ pub const CronScheduler = struct {
                 if (!self.running.load(.acquire)) break;
             }
 
-            // run the cron
-            const cron = self.crons[idx];
-            writeErr("cron: running {s}...\n", .{cron.name});
-
-            // pull image if needed
-            _ = orchestrator.ensureImageAvailable(self.alloc, cron.image);
-
-            const success = orchestrator.runOneShot(
-                self.alloc,
-                cron.image,
-                cron.command,
-                cron.env,
-                cron.volumes,
-                cron.working_dir,
-                cron.name,
-                self.manifest_volumes,
-                self.app_name,
-            );
-
-            if (success) {
-                writeErr("cron: {s} completed\n", .{cron.name});
-            } else {
-                writeErr("cron: {s} failed\n", .{cron.name});
-            }
-
-            // reschedule
-            self.next_runs[idx] = nowRealSeconds() + @as(i64, @intCast(cron.every));
+            self.runCron(idx);
         }
+    }
+
+    fn runCron(self: *CronScheduler, idx: usize) void {
+        const cron = self.crons[idx];
+        writeErr("cron: running {s}...\n", .{cron.name});
+
+        _ = orchestrator.ensureImageAvailable(self.alloc, cron.image);
+
+        const success = orchestrator.runOneShot(
+            self.alloc,
+            cron.image,
+            cron.command,
+            cron.env,
+            cron.volumes,
+            cron.working_dir,
+            cron.name,
+            self.manifest_volumes,
+            self.app_name,
+        );
+
+        if (success) {
+            writeErr("cron: {s} completed\n", .{cron.name});
+        } else {
+            writeErr("cron: {s} failed\n", .{cron.name});
+        }
+
+        // start the next interval after this attempt finishes, even if it failed.
+        self.next_runs[idx] = nowRealSeconds() + @as(i64, @intCast(cron.every));
     }
 };
 
 // -- tests --
+
+test "nextRunIndex keeps the first cron when run times match" {
+    try std.testing.expectEqual(@as(?usize, 1), nextRunIndex(&.{ 30, 10, 10, 20 }));
+}
+
+test "nextRunIndex skips the sentinel and accepts negative timestamps" {
+    const unscheduled = std.math.maxInt(i64);
+    try std.testing.expectEqual(@as(?usize, null), nextRunIndex(&.{}));
+    try std.testing.expectEqual(@as(?usize, null), nextRunIndex(&.{ unscheduled, unscheduled }));
+    try std.testing.expectEqual(@as(?usize, 2), nextRunIndex(&.{ unscheduled, 0, -10 }));
+    try std.testing.expectEqual(@as(?usize, 1), nextRunIndex(&.{ unscheduled, unscheduled - 1 }));
+}
 
 test "CronScheduler init sets next_runs" {
     const alloc = std.testing.allocator;
@@ -167,14 +185,14 @@ test "CronScheduler init sets next_runs" {
     var sched = try CronScheduler.init(alloc, &crons, &.{}, "test");
     defer sched.deinit();
 
-    // next_runs should be set to now + interval
+    // each first run is one interval after initialization.
     const now = nowRealSeconds();
     try std.testing.expect(sched.next_runs[0] >= now);
     try std.testing.expect(sched.next_runs[0] <= now + 3600);
     try std.testing.expect(sched.next_runs[1] >= now);
     try std.testing.expect(sched.next_runs[1] <= now + 60);
 
-    // cleanup (60s) should be scheduled before backup (3600s)
+    // cleanup's shorter interval puts it before backup.
     try std.testing.expect(sched.next_runs[1] < sched.next_runs[0]);
 }
 
@@ -189,14 +207,14 @@ test "CronScheduler starts and stops" {
             .env = &.{},
             .working_dir = null,
             .volumes = &.{},
-            .every = 999999, // far future — won't actually run
+            .every = 999999, // keep the cron from running during this test.
         },
     };
 
     var sched = try CronScheduler.init(alloc, &crons, &.{}, "test");
     defer sched.deinit();
 
-    // set next_run far in the future so the loop just sleeps
+    // keep the scheduler in its wait loop until shutdown.
     sched.next_runs[0] = nowRealSeconds() + 999999;
 
     sched.start();
