@@ -1,12 +1,10 @@
-// heartbeat_batcher — batches agent heartbeats for efficient raft proposals
+// batch agent heartbeats into one raft proposal
 //
-// HTTP threads call record() on every heartbeat request, which deduplicates
-// by agent ID and keeps the latest entry. the tick loop periodically calls
-// flush() to drain the buffer into a single concatenated SQL string that
-// gets proposed through raft as one entry instead of N individual proposals.
+// http threads call record() for each heartbeat. the buffer keeps the last
+// recorded entry for each agent, regardless of its timestamp. the tick loop
+// calls flush() to drain those entries into one sql string for raft.
 //
-// uses its own mutex (not node.mu) so HTTP threads and the tick loop
-// never contend on the raft lock for heartbeat writes.
+// a separate mutex protects the buffer without taking the raft lock.
 
 const std = @import("std");
 const agent_types = @import("agent_types.zig");
@@ -38,8 +36,8 @@ pub const HeartbeatBatcher = struct {
         self.buffer.deinit(self.alloc);
     }
 
-    /// record a heartbeat from an agent. deduplicates by agent ID,
-    /// keeping the latest entry. safe to call from any thread.
+    /// replace this agent's buffered heartbeat, even if its timestamp is older.
+    /// safe to call from any thread.
     pub fn record(self: *HeartbeatBatcher, id: []const u8, resources: AgentResources, now: i64) void {
         if (id.len != 12) return;
 
@@ -56,25 +54,28 @@ pub const HeartbeatBatcher = struct {
         }) catch return;
     }
 
-    /// drain the buffer and build concatenated SQL. returns null if empty.
-    /// caller must free the returned slice.
+    /// drain the buffer and build sql outside the lock. returns null if empty.
+    /// caller must free the returned slice with alloc. if sql construction
+    /// fails after the drain, the entries are not restored.
     pub fn flush(self: *HeartbeatBatcher, alloc: Allocator) !?[]const u8 {
-        // swap entries out under lock
-        var entries: []Entry = &.{};
-        {
-            self.mu.lockUncancelable(std.Options.debug_io);
-            defer self.mu.unlock(std.Options.debug_io);
-
-            if (self.buffer.count() == 0) return null;
-
-            const values = self.buffer.values();
-            entries = try alloc.alloc(Entry, values.len);
-            @memcpy(entries, values);
-            self.buffer.clearRetainingCapacity();
-        }
+        const entries = (try self.drainEntries(alloc)) orelse return null;
         defer alloc.free(entries);
+        return formatEntries(alloc, entries);
+    }
 
-        // build concatenated SQL outside the lock
+    fn drainEntries(self: *HeartbeatBatcher, alloc: Allocator) !?[]Entry {
+        self.mu.lockUncancelable(std.Options.debug_io);
+        defer self.mu.unlock(std.Options.debug_io);
+
+        if (self.buffer.count() == 0) return null;
+
+        // copy before clearing so allocation failure leaves the buffer intact.
+        const entries = try alloc.dupe(Entry, self.buffer.values());
+        self.buffer.clearRetainingCapacity();
+        return entries;
+    }
+
+    fn formatEntries(alloc: Allocator, entries: []const Entry) !?[]const u8 {
         var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(alloc);
 
@@ -120,7 +121,6 @@ test "record and flush single entry" {
     try std.testing.expect(sql != null);
     defer alloc.free(sql.?);
 
-    // should contain UPDATE statement with the agent ID
     try std.testing.expect(std.mem.indexOf(u8, sql.?, "agent1234567") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql.?, "UPDATE agents") != null);
 }
@@ -134,19 +134,19 @@ test "flush returns null when empty" {
     try std.testing.expect(sql == null);
 }
 
-test "deduplicates by agent ID" {
+test "record replaces an agent heartbeat even with an older timestamp" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
 
-    // record same agent twice — second should overwrite
+    // the second record replaces the first entry.
     batcher.record("agent1234567", .{
         .cpu_cores = 4,
         .memory_mb = 8192,
         .cpu_used = 1,
         .memory_used_mb = 1000,
         .containers = 1,
-    }, 1000);
+    }, 2000);
 
     batcher.record("agent1234567", .{
         .cpu_cores = 4,
@@ -154,14 +154,18 @@ test "deduplicates by agent ID" {
         .cpu_used = 3,
         .memory_used_mb = 6000,
         .containers = 5,
-    }, 2000);
+    }, 1000);
 
     const sql = try batcher.flush(alloc);
     try std.testing.expect(sql != null);
     defer alloc.free(sql.?);
 
-    // should only have one UPDATE (no separator space means single entry)
-    // count occurrences of "UPDATE agents"
+    try std.testing.expect(std.mem.indexOf(u8, sql.?, "cpu_used = 3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql.?, "memory_used_mb = 6000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql.?, "containers = 5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql.?, "last_heartbeat = 1000") != null);
+
+    // replacement produces one update for this agent.
     var count: usize = 0;
     var pos: usize = 0;
     while (std.mem.indexOfPos(u8, sql.?, pos, "UPDATE agents")) |idx| {
@@ -189,15 +193,17 @@ test "batches multiple agents" {
         .containers = 10,
     }, 1000);
 
+    // replacing an entry keeps its original position in the batch.
+    batcher.record("aaaa11112222", .{ .cpu_cores = 2, .memory_mb = 4096 }, 2000);
+
     const sql = try batcher.flush(alloc);
     try std.testing.expect(sql != null);
     defer alloc.free(sql.?);
 
-    // should contain both agent IDs
-    try std.testing.expect(std.mem.indexOf(u8, sql.?, "aaaa11112222") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sql.?, "bbbb33334444") != null);
+    const first_agent = std.mem.indexOf(u8, sql.?, "aaaa11112222") orelse return error.TestUnexpectedResult;
+    const second_agent = std.mem.indexOf(u8, sql.?, "bbbb33334444") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first_agent < second_agent);
 
-    // should have two UPDATE statements
     var count: usize = 0;
     var pos: usize = 0;
     while (std.mem.indexOfPos(u8, sql.?, pos, "UPDATE agents")) |idx| {
@@ -221,7 +227,6 @@ test "flush clears buffer" {
     try std.testing.expect(sql1 != null);
     alloc.free(sql1.?);
 
-    // second flush should return null
     const sql2 = try batcher.flush(alloc);
     try std.testing.expect(sql2 == null);
 }
@@ -238,4 +243,36 @@ test "ignores invalid id length" {
 
     const sql = try batcher.flush(alloc);
     try std.testing.expect(sql == null);
+}
+
+test "flush preserves heartbeats when the snapshot allocation fails" {
+    const alloc = std.testing.allocator;
+    var batcher = HeartbeatBatcher.init(alloc);
+    defer batcher.deinit();
+    batcher.record("agent1234567", .{ .cpu_cores = 4, .memory_mb = 8192 }, 1000);
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, batcher.flush(failing.allocator()));
+
+    const sql = (try batcher.flush(alloc)) orelse return error.TestUnexpectedResult;
+    defer alloc.free(sql);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "agent1234567") != null);
+    try std.testing.expect((try batcher.flush(alloc)) == null);
+}
+
+test "flush leaves heartbeats drained when sql allocation fails" {
+    const alloc = std.testing.allocator;
+    var batcher = HeartbeatBatcher.init(alloc);
+    defer batcher.deinit();
+    batcher.record("agent1234567", .{ .cpu_cores = 4, .memory_mb = 8192 }, 1000);
+
+    // allow the snapshot allocation, then fail the sql buffer allocation.
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 1 });
+    try std.testing.expectError(error.OutOfMemory, batcher.flush(failing.allocator()));
+    try std.testing.expect((try batcher.flush(alloc)) == null);
+
+    batcher.record("agent1234567", .{ .cpu_cores = 4, .memory_mb = 8192 }, 2000);
+    const sql = (try batcher.flush(alloc)) orelse return error.TestUnexpectedResult;
+    defer alloc.free(sql);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "last_heartbeat = 2000") != null);
 }
