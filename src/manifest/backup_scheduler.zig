@@ -1,10 +1,8 @@
-// backup scheduler — runs database backups on a fixed interval
+// backup scheduler
 //
-// spawns a single thread that sleeps until the next backup is due, writes a
-// timestamped artifact into the configured output directory via the internal
-// backup path, and reschedules. checks for shutdown every second while
-// sleeping. mirrors cron_scheduler, but runs yoq's own backup rather than a
-// container.
+// runs database backups on a dedicated thread and writes timestamped files
+// into the configured output directory. each interval starts when the previous
+// attempt finishes. while waiting, the thread checks for shutdown every second.
 //
 // usage:
 //   var sched = BackupScheduler.init(alloc, manifest.backup.?);
@@ -28,6 +26,21 @@ fn nowRealSeconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
 }
 
+/// acquire the directory's backup lock without waiting. close the returned
+/// descriptor after writing and pruning to release the lock.
+fn lockOutputDirectory(dir: std.Io.Dir) !std.posix.fd_t {
+    const linux = std.os.linux;
+    const rc = linux.openat(dir.handle, ".yoq-backup.lock", .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600);
+    if (linux.errno(rc) != .SUCCESS) return error.LockFailed;
+    const lock_fd: std.posix.fd_t = @intCast(rc);
+    errdefer linux_platform.posix.close(lock_fd);
+
+    const lock_exclusive = 2;
+    const lock_nonblocking = 4;
+    if (linux.errno(linux.flock(lock_fd, lock_exclusive | lock_nonblocking)) != .SUCCESS) return error.BackupBusy;
+    return lock_fd;
+}
+
 pub const BackupScheduler = struct {
     alloc: std.mem.Allocator,
     spec: spec.BackupSpec,
@@ -46,7 +59,7 @@ pub const BackupScheduler = struct {
         };
     }
 
-    /// start the scheduler thread. idempotent — does nothing if already running.
+    /// start the scheduler thread if it is not already running.
     pub fn start(self: *BackupScheduler) void {
         if (self.running.load(.acquire)) return;
         self.running.store(true, .release);
@@ -102,14 +115,11 @@ pub const BackupScheduler = struct {
         try linux_platform.cwd().makePath(self.spec.output_dir);
         var dir = try std.Io.Dir.cwd().openDir(std.Options.debug_io, self.spec.output_dir, .{ .iterate = true });
         defer dir.close(std.Options.debug_io);
-        // Serialize scheduled writers/pruning in this output directory. A
-        // concurrent scheduler skips this attempt instead of blocking stop().
-        const linux = std.os.linux;
-        const rc = linux.openat(dir.handle, ".yoq-backup.lock", .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600);
-        if (linux.errno(rc) != .SUCCESS) return error.LockFailed;
-        const lock_fd: std.posix.fd_t = @intCast(rc);
+
+        // hold the lock through pruning. a busy directory skips this attempt,
+        // so shutdown never has to wait for another scheduler's lock.
+        const lock_fd = try lockOutputDirectory(dir);
         defer linux_platform.posix.close(lock_fd);
-        if (linux.errno(linux.flock(lock_fd, 2 | 4)) != .SUCCESS) return error.BackupBusy; // LOCK_EX | LOCK_NB
 
         var random: [16]u8 = undefined;
         linux_platform.randomBytes(&random);
@@ -120,7 +130,7 @@ pub const BackupScheduler = struct {
         _ = self.metrics.successes.fetchAdd(1, .monotonic);
         self.metrics.last_success.store(now, .release);
 
-        // A failed or disk-full backup never removes an older recovery point.
+        // prune only after a successful write, so failures leave older backups intact.
         retention.prune(self.alloc, dir, std.fs.path.basename(path), now, self.spec.retention) catch |err| {
             _ = self.metrics.retention_failures.fetchAdd(1, .monotonic);
             writeErr("backup: artifact saved, but retention failed: {}\n", .{err});
@@ -144,7 +154,7 @@ test "BackupScheduler init schedules the first run after the interval" {
 
 test "BackupScheduler starts and stops" {
     var sched = BackupScheduler.init(std.testing.allocator, .{
-        .every = 999999, // far future — won't actually run
+        .every = 999999, // keep the backup from running during this test.
         .output_dir = "/tmp/yoq-backups",
         .encrypt = true,
     });
@@ -156,6 +166,51 @@ test "BackupScheduler starts and stops" {
     sched.stop();
     try std.testing.expect(!sched.running.load(.acquire));
     try std.testing.expect(sched.thread == null);
+}
+
+test "backup scheduler skips a locked directory and retries after release" {
+    const Fixture = struct {
+        var calls: usize = 0;
+
+        fn complete(_: std.mem.Allocator, path: [:0]const u8, _: bool) !void {
+            calls += 1;
+            try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = "complete backup" });
+        }
+    };
+    Fixture.calls = 0;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "yoq-backup-10.db", .data = "old valid backup" });
+    var path: [4096]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &path);
+    var metrics: backup_metrics.Metrics = .{};
+    var scheduler = BackupScheduler.init(std.testing.allocator, .{
+        .every = 100,
+        .output_dir = path[0..len],
+        .encrypt = false,
+        .retention = .{ .keep_count = 1 },
+    });
+    scheduler.metrics = &metrics;
+
+    {
+        const lock_fd = try lockOutputDirectory(tmp.dir);
+        defer linux_platform.posix.close(lock_fd);
+
+        try std.testing.expectError(error.BackupBusy, scheduler.runOnceWith(20, Fixture.complete));
+        try std.testing.expectEqual(@as(usize, 0), Fixture.calls);
+        try tmp.dir.access(std.testing.io, "yoq-backup-10.db", .{});
+        try std.testing.expectEqual(@as(u64, 1), metrics.failures.load(.monotonic));
+        try std.testing.expectEqual(@as(u64, 0), metrics.successes.load(.monotonic));
+        try std.testing.expectEqual(@as(i64, 0), metrics.last_success.load(.acquire));
+    }
+
+    try scheduler.runOnceWith(30, Fixture.complete);
+    try std.testing.expectEqual(@as(usize, 1), Fixture.calls);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "yoq-backup-10.db", .{}));
+    try std.testing.expectEqual(@as(u64, 1), metrics.failures.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), metrics.successes.load(.monotonic));
+    try std.testing.expectEqual(@as(i64, 30), metrics.last_success.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), metrics.retention_failures.load(.monotonic));
 }
 
 test "backup scheduler preserves recovery points on disk full and prunes only after success" {
