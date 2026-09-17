@@ -5,50 +5,51 @@ pub fn expandVariables(alloc: std.mem.Allocator, input: []const u8) common.LoadE
     var result: std.ArrayListUnmanaged(u8) = .empty;
     errdefer result.deinit(alloc);
 
-    var i: usize = 0;
-    while (i < input.len) {
-        if (input[i] == '$') {
-            if (i + 1 < input.len and input[i + 1] == '$') {
-                result.append(alloc, '$') catch return common.LoadError.OutOfMemory;
-                i += 2;
-                continue;
-            }
-
-            if (i + 1 < input.len and input[i + 1] == '{') {
-                const start = i + 2;
-                const close = std.mem.indexOfScalarPos(u8, input, start, '}') orelse {
-                    result.append(alloc, '$') catch return common.LoadError.OutOfMemory;
-                    i += 1;
-                    continue;
-                };
-
-                const content = input[start..close];
-                var var_name: []const u8 = content;
-                var default_value: ?[]const u8 = null;
-
-                if (std.mem.indexOf(u8, content, ":-")) |sep| {
-                    var_name = content[0..sep];
-                    default_value = content[sep + 2 ..];
-                }
-
-                const value = if (var_name.len > 0)
-                    getEnvVarOwned(alloc, var_name) catch return common.LoadError.OutOfMemory
-                else
-                    null;
-                defer if (value) |owned| alloc.free(owned);
-
-                const expanded = value orelse (default_value orelse "");
-                result.appendSlice(alloc, expanded) catch return common.LoadError.OutOfMemory;
-                i = close + 1;
-                continue;
-            }
-
-            result.append(alloc, '$') catch return common.LoadError.OutOfMemory;
-            i += 1;
-        } else {
-            result.append(alloc, input[i]) catch return common.LoadError.OutOfMemory;
-            i += 1;
+    var cursor: usize = 0;
+    while (cursor < input.len) {
+        if (input[cursor] != '$' or cursor + 1 == input.len) {
+            result.append(alloc, input[cursor]) catch return common.LoadError.OutOfMemory;
+            cursor += 1;
+            continue;
         }
+
+        if (input[cursor + 1] == '$') {
+            result.append(alloc, '$') catch return common.LoadError.OutOfMemory;
+            cursor += 2;
+            continue;
+        }
+
+        if (input[cursor + 1] != '{') {
+            result.append(alloc, '$') catch return common.LoadError.OutOfMemory;
+            cursor += 1;
+            continue;
+        }
+
+        const expression_start = cursor + 2;
+        const closing_brace = std.mem.indexOfScalarPos(u8, input, expression_start, '}') orelse {
+            result.append(alloc, '$') catch return common.LoadError.OutOfMemory;
+            cursor += 1;
+            continue;
+        };
+
+        const expression = input[expression_start..closing_brace];
+        var variable_name = expression;
+        var fallback: ?[]const u8 = null;
+        if (std.mem.indexOf(u8, expression, ":-")) |separator| {
+            variable_name = expression[0..separator];
+            fallback = expression[separator + 2 ..];
+        }
+
+        const value = if (variable_name.len > 0)
+            getEnvVarOwned(alloc, variable_name) catch return common.LoadError.OutOfMemory
+        else
+            null;
+        defer if (value) |owned| alloc.free(owned);
+
+        // an empty environment value takes precedence over the fallback.
+        const expanded = value orelse (fallback orelse "");
+        result.appendSlice(alloc, expanded) catch return common.LoadError.OutOfMemory;
+        cursor = closing_brace + 1;
     }
 
     return result.toOwnedSlice(alloc) catch return common.LoadError.OutOfMemory;
