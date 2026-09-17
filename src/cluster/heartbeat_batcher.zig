@@ -134,7 +134,7 @@ test "flush returns null when empty" {
     try std.testing.expect(sql == null);
 }
 
-test "deduplicates by agent id" {
+test "record replaces an agent heartbeat even with an older timestamp" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -146,7 +146,7 @@ test "deduplicates by agent id" {
         .cpu_used = 1,
         .memory_used_mb = 1000,
         .containers = 1,
-    }, 1000);
+    }, 2000);
 
     batcher.record("agent1234567", .{
         .cpu_cores = 4,
@@ -154,11 +154,16 @@ test "deduplicates by agent id" {
         .cpu_used = 3,
         .memory_used_mb = 6000,
         .containers = 5,
-    }, 2000);
+    }, 1000);
 
     const sql = try batcher.flush(alloc);
     try std.testing.expect(sql != null);
     defer alloc.free(sql.?);
+
+    try std.testing.expect(std.mem.indexOf(u8, sql.?, "cpu_used = 3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql.?, "memory_used_mb = 6000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql.?, "containers = 5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql.?, "last_heartbeat = 1000") != null);
 
     // replacement produces one update for this agent.
     var count: usize = 0;
@@ -188,12 +193,16 @@ test "batches multiple agents" {
         .containers = 10,
     }, 1000);
 
+    // replacing an entry keeps its original position in the batch.
+    batcher.record("aaaa11112222", .{ .cpu_cores = 2, .memory_mb = 4096 }, 2000);
+
     const sql = try batcher.flush(alloc);
     try std.testing.expect(sql != null);
     defer alloc.free(sql.?);
 
-    try std.testing.expect(std.mem.indexOf(u8, sql.?, "aaaa11112222") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sql.?, "bbbb33334444") != null);
+    const first_agent = std.mem.indexOf(u8, sql.?, "aaaa11112222") orelse return error.TestUnexpectedResult;
+    const second_agent = std.mem.indexOf(u8, sql.?, "bbbb33334444") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first_agent < second_agent);
 
     var count: usize = 0;
     var pos: usize = 0;
@@ -234,4 +243,36 @@ test "ignores invalid id length" {
 
     const sql = try batcher.flush(alloc);
     try std.testing.expect(sql == null);
+}
+
+test "flush preserves heartbeats when the snapshot allocation fails" {
+    const alloc = std.testing.allocator;
+    var batcher = HeartbeatBatcher.init(alloc);
+    defer batcher.deinit();
+    batcher.record("agent1234567", .{ .cpu_cores = 4, .memory_mb = 8192 }, 1000);
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, batcher.flush(failing.allocator()));
+
+    const sql = (try batcher.flush(alloc)) orelse return error.TestUnexpectedResult;
+    defer alloc.free(sql);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "agent1234567") != null);
+    try std.testing.expect((try batcher.flush(alloc)) == null);
+}
+
+test "flush leaves heartbeats drained when sql allocation fails" {
+    const alloc = std.testing.allocator;
+    var batcher = HeartbeatBatcher.init(alloc);
+    defer batcher.deinit();
+    batcher.record("agent1234567", .{ .cpu_cores = 4, .memory_mb = 8192 }, 1000);
+
+    // allow the snapshot allocation, then fail the sql buffer allocation.
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 1 });
+    try std.testing.expectError(error.OutOfMemory, batcher.flush(failing.allocator()));
+    try std.testing.expect((try batcher.flush(alloc)) == null);
+
+    batcher.record("agent1234567", .{ .cpu_cores = 4, .memory_mb = 8192 }, 2000);
+    const sql = (try batcher.flush(alloc)) orelse return error.TestUnexpectedResult;
+    defer alloc.free(sql);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "last_heartbeat = 2000") != null);
 }
