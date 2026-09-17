@@ -88,3 +88,91 @@ pub fn parseHostPort(s: []const u8) ?struct { addr: [4]u8, port: u16 } {
     const port = std.fmt.parseInt(u16, s[colon + 1 ..], 10) catch return null;
     return .{ .addr = addr, .port = port };
 }
+
+test "agent request registration preserves field order and string escaping" {
+    const body = try buildRegisterBody(
+        std.testing.allocator,
+        "tok\"en",
+        "host\\name",
+        7701,
+        .{ .cpu_cores = 4, .memory_mb = 8192, .gpu_count = 1, .gpu_model = "model\x01", .gpu_vram_mb = 40960 },
+        "pub\tkey",
+        51820,
+        .agent,
+        "zone\rname",
+        "reg\nkey",
+    );
+    defer std.testing.allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"token":"tok\"en","registration_key":"reg\nkey","address":"host\\name","agent_api_port":7701,"cpu_cores":4,"memory_mb":8192,"wg_public_key":"pub\tkey","wg_listen_port":51820,"role":"agent","region":"zone\rname","gpu_count":1,"gpu_vram_mb":40960,"gpu_model":"model\u0001"}
+    , body);
+}
+
+test "agent request registration omits absent options and all details for zero gpus" {
+    const body = try buildRegisterBody(
+        std.testing.allocator,
+        "",
+        "",
+        0,
+        .{ .cpu_cores = 0, .memory_mb = 0, .gpu_count = 0, .gpu_model = "unused", .gpu_vram_mb = 40960 },
+        "",
+        0,
+        .both,
+        null,
+        null,
+    );
+    defer std.testing.allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"token":"","address":"","agent_api_port":0,"cpu_cores":0,"memory_mb":0,"wg_public_key":"","wg_listen_port":0,"role":"both"}
+    , body);
+}
+
+test "agent request registration keeps empty options and omits a missing gpu model" {
+    const body = try buildRegisterBody(
+        std.testing.allocator,
+        "token",
+        "10.0.0.1",
+        7701,
+        .{ .cpu_cores = 4, .memory_mb = 8192, .gpu_count = 2, .gpu_model = null, .gpu_vram_mb = 0 },
+        "key",
+        51820,
+        .server,
+        "",
+        "",
+    );
+    defer std.testing.allocator.free(body);
+
+    try std.testing.expectEqualStrings(
+        \\{"token":"token","registration_key":"","address":"10.0.0.1","agent_api_port":7701,"cpu_cores":4,"memory_mb":8192,"wg_public_key":"key","wg_listen_port":51820,"role":"server","region":"","gpu_count":2,"gpu_vram_mb":0}
+    , body);
+}
+
+test "agent request heartbeat keeps zero gpu fields and escapes health labels" {
+    const cases = [_]struct { label: []const u8, expected: []const u8 }{
+        .{
+            .label = "",
+            .expected =
+            \\{"cpu_cores":4,"memory_mb":8192,"cpu_used":1,"memory_used_mb":2,"containers":3,"gpu_count":0,"gpu_used":0,"gpu_health":""}
+            ,
+        },
+        .{
+            .label = "\"\\\n\r\t\x00",
+            .expected =
+            \\{"cpu_cores":4,"memory_mb":8192,"cpu_used":1,"memory_used_mb":2,"containers":3,"gpu_count":0,"gpu_used":0,"gpu_health":"\"\\\n\r\t\u0000"}
+            ,
+        },
+    };
+    for (cases) |case| {
+        const body = try buildHeartbeatBody(std.testing.allocator, .{
+            .cpu_cores = 4,
+            .memory_mb = 8192,
+            .cpu_used = 1,
+            .memory_used_mb = 2,
+            .containers = 3,
+        }, case.label);
+        defer std.testing.allocator.free(body);
+        try std.testing.expectEqualStrings(case.expected, body);
+    }
+}
