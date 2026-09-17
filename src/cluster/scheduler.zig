@@ -1,7 +1,7 @@
-// scheduler — placement facade
+// scheduler entry points
 //
-// keep the public scheduler API stable while the bin-packing, constraint,
-// gang, and SQL helpers live in cluster/scheduler/.
+// regular placement favors agents with more free capacity. gang placement
+// requires room for every rank. the implementations live in cluster/scheduler/.
 
 const std = @import("std");
 const agent_types = @import("agent_types.zig");
@@ -67,7 +67,7 @@ test "schedule spreads across agents" {
     const results = try schedule(alloc, requests, agents);
     defer alloc.free(results);
 
-    // agent2 has more free resources, should be picked
+    // agent2 has more free capacity, so it receives the placement.
     try std.testing.expect(results[0] != null);
     try std.testing.expectEqualStrings("agent2", results[0].?.agent_id);
 }
@@ -163,7 +163,6 @@ test "schedule multiple containers tracks usage" {
     const agents = &[_]AgentRecord{
         makeAgent("agent1", "active", 2, 1024, 0, 0),
     };
-    // two containers that each need 1 core and 256MB
     const requests = &[_]PlacementRequest{
         .{ .image = "a", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256 },
         .{ .image = "b", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256 },
@@ -172,7 +171,6 @@ test "schedule multiple containers tracks usage" {
     const results = try schedule(alloc, requests, agents);
     defer alloc.free(results);
 
-    // both should fit on agent1 (2 cores, 1024MB)
     try std.testing.expect(results[0] != null);
     try std.testing.expect(results[1] != null);
 }
@@ -193,7 +191,7 @@ test "schedule third container exceeds tracked capacity" {
 
     try std.testing.expect(results[0] != null);
     try std.testing.expect(results[1] != null);
-    // third doesn't fit — only 2 cores
+    // the first two requests use both cores.
     try std.testing.expect(results[2] == null);
 }
 
@@ -233,7 +231,6 @@ test "schedule skips server-role agent" {
     const results = try schedule(alloc, requests, agents);
     defer alloc.free(results);
 
-    // should skip server1 and place on worker1
     try std.testing.expect(results[0] != null);
     try std.testing.expectEqualStrings("worker1", results[0].?.agent_id);
 }
@@ -379,30 +376,27 @@ test "scheduler with registry data: server-only skipped, capacity-based placemen
     const StateMachine = @import("state_machine.zig").StateMachine;
     const registry = @import("registry.zig");
 
-    // create state machine and register 3 agents via SQL
+    // use registry records to exercise the stored role and capacity fields.
     var sm = try StateMachine.initMemory();
     defer sm.deinit();
 
-    // agent 1: server-only (should be skipped for scheduling)
+    // the server has the same capacity as the large worker but cannot accept workloads.
     sm.apply(.{
         .index = 1,
         .term = 1,
         .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role) VALUES ('server-1', '10.0.0.1:9090', 'active', 8, 16384, 0, 0, 0, 1000, 1000, 'server');",
     });
-    // agent 2: large worker
     sm.apply(.{
         .index = 2,
         .term = 1,
         .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role) VALUES ('worker-large', '10.0.0.2:9090', 'active', 8, 16384, 0, 0, 0, 1000, 1000, 'agent');",
     });
-    // agent 3: small worker
     sm.apply(.{
         .index = 3,
         .term = 1,
         .data = "INSERT INTO agents (id, address, status, cpu_cores, memory_mb, cpu_used, memory_used_mb, containers, last_heartbeat, registered_at, role) VALUES ('worker-small', '10.0.0.3:9090', 'active', 2, 2048, 0, 0, 0, 1000, 1000, 'agent');",
     });
 
-    // read agents from the DB via registry
     const agents = try registry.listAgents(alloc, &sm.db);
     defer {
         for (agents) |*a| {
@@ -414,7 +408,6 @@ test "scheduler with registry data: server-only skipped, capacity-based placemen
 
     try std.testing.expectEqual(@as(usize, 3), agents.len);
 
-    // schedule a container that fits on either worker
     const requests = &[_]PlacementRequest{
         .{ .image = "nginx:latest", .command = "", .cpu_limit = 1000, .memory_limit_mb = 512 },
     };
@@ -422,7 +415,7 @@ test "scheduler with registry data: server-only skipped, capacity-based placemen
     const results = try schedule(alloc, requests, agents);
     defer alloc.free(results);
 
-    // server-only agent should be skipped, placed on the large worker (most resources)
+    // both workers fit, but worker-large has the higher capacity score.
     try std.testing.expect(results[0] != null);
     try std.testing.expectEqualStrings("worker-large", results[0].?.agent_id);
 }
@@ -433,7 +426,6 @@ test "schedule exact capacity boundary" {
         makeAgent("agent1", "active", 2, 4096, 0, 0), // 2000 millicores free
     };
 
-    // request exactly 2000 millicores — should succeed
     const requests = &[_]PlacementRequest{
         .{ .image = "app", .command = "", .cpu_limit = 2000, .memory_limit_mb = 256 },
         .{ .image = "app2", .command = "", .cpu_limit = 1, .memory_limit_mb = 1 },
@@ -442,11 +434,11 @@ test "schedule exact capacity boundary" {
     const results = try schedule(alloc, requests, agents);
     defer alloc.free(results);
 
-    // first container takes all CPU
+    // the first request uses all available cpu capacity.
     try std.testing.expect(results[0] != null);
     try std.testing.expectEqualStrings("agent1", results[0].?.agent_id);
 
-    // second container has no room — even 1 millicore exceeds capacity
+    // one additional millicore exceeds capacity.
     try std.testing.expect(results[1] == null);
 }
 
@@ -459,11 +451,9 @@ test "assignmentSql escapes single quotes in image name" {
         .memory_limit_mb = 256,
     }, 1000);
 
-    // single quotes in image should be doubled for SQL safety
+    // escape quotes in both values so they remain inside the sql string literals.
     try std.testing.expect(std.mem.indexOf(u8, sql, "nginx''latest") != null);
-    // single quotes in command should also be doubled
     try std.testing.expect(std.mem.indexOf(u8, sql, "echo ''hello''") != null);
-    // verify it's still valid-looking SQL
     try std.testing.expect(std.mem.indexOf(u8, sql, "INSERT INTO assignments") != null);
 }
 
@@ -473,7 +463,7 @@ test "schedule more requests than capacity" {
         makeAgent("agent1", "active", 1, 2048, 0, 0), // 1000 millicores
     };
 
-    // 10 requests each needing 500 millicores — only 2 fit
+    // only two 500-millicore requests fit on one core.
     var requests: [10]PlacementRequest = undefined;
     for (&requests) |*r| {
         r.* = .{ .image = "app", .command = "", .cpu_limit = 500, .memory_limit_mb = 128 };
@@ -499,7 +489,6 @@ test "schedule volume constraint pins to correct node" {
         makeAgentFull("node2", "active", 4, 8192, 0, 0, null, null, 0, 0),
         makeAgentFull("node3", "active", 4, 8192, 0, 0, null, null, 0, 0),
     };
-    // set node_ids
     var agents_mut: [3]AgentRecord = undefined;
     for (agents, 0..) |a, i| {
         agents_mut[i] = a;
@@ -519,7 +508,6 @@ test "schedule volume constraint pins to correct node" {
     const results = try schedule(alloc, requests, &agents_mut);
     defer alloc.free(results);
 
-    // should land on node2 (node_id=2)
     try std.testing.expect(results[0] != null);
     try std.testing.expectEqualStrings("node2", results[0].?.agent_id);
 }

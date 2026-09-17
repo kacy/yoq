@@ -47,7 +47,7 @@ pub fn schedule(
 
         for (agents, usage, 0..) |agent, used, agent_idx| {
             const score = placementScore(agent, used, request) orelse continue;
-            // keep the first agent when scores tie, so input order stays significant.
+            // equal scores keep the first agent in input order.
             if (score > best_score) {
                 best_score = score;
                 best_idx = agent_idx;
