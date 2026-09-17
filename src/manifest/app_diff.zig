@@ -83,6 +83,8 @@ pub const Summary = struct {
 };
 
 pub const AppDiff = struct {
+    // only the changes slice is owned. metadata and workload names borrow
+    // their strings from the arguments passed to compute.
     app_name: []const u8,
     proposed_manifest_hash: []const u8,
     current_release_id: ?[]const u8,
@@ -209,32 +211,37 @@ fn appendKindDiff(
 
     if (proposed_array) |array| {
         var iter = json_helpers.extractJsonObjects(array);
-        while (iter.next()) |proposed_obj| {
-            const name = json_helpers.extractJsonString(proposed_obj, "name") orelse continue;
-            const current_obj = if (current_array) |cur| findNamedObject(cur, name) else null;
-            const change: ChangeKind = if (current_obj) |cur_obj|
-                if (std.mem.eql(u8, cur_obj, proposed_obj)) .unchanged else .update
-            else
-                .create;
+        while (iter.next()) |proposed_object| {
+            const name = json_helpers.extractJsonString(proposed_object, "name") orelse continue;
+            const change = compareWorkload(current_array, name, proposed_object);
             try changes.append(alloc, .{ .kind = kind, .name = name, .change = change });
         }
     }
 
+    // keep proposed workloads in their original order, then append removals
+    // in the order they appeared in the current snapshot.
     if (current_array) |array| {
         var iter = json_helpers.extractJsonObjects(array);
-        while (iter.next()) |current_obj| {
-            const name = json_helpers.extractJsonString(current_obj, "name") orelse continue;
-            if (proposed_array != null and findNamedObject(proposed_array.?, name) != null) continue;
+        while (iter.next()) |current_object| {
+            const name = json_helpers.extractJsonString(current_object, "name") orelse continue;
+            if (findNamedObject(proposed_array, name) != null) continue;
             try changes.append(alloc, .{ .kind = kind, .name = name, .change = .delete });
         }
     }
 }
 
-fn findNamedObject(array_json: []const u8, name: []const u8) ?[]const u8 {
-    var iter = json_helpers.extractJsonObjects(array_json);
-    while (iter.next()) |obj| {
-        const obj_name = json_helpers.extractJsonString(obj, "name") orelse continue;
-        if (std.mem.eql(u8, obj_name, name)) return obj;
+fn compareWorkload(current_array: ?[]const u8, name: []const u8, proposed_object: []const u8) ChangeKind {
+    const current_object = findNamedObject(current_array, name) orelse return .create;
+    // snapshots are compared byte for byte, so formatting changes count too.
+    return if (std.mem.eql(u8, current_object, proposed_object)) .unchanged else .update;
+}
+
+fn findNamedObject(array_json: ?[]const u8, name: []const u8) ?[]const u8 {
+    const array = array_json orelse return null;
+    var iter = json_helpers.extractJsonObjects(array);
+    while (iter.next()) |object| {
+        const object_name = json_helpers.extractJsonString(object, "name") orelse continue;
+        if (std.mem.eql(u8, object_name, name)) return object;
     }
     return null;
 }
@@ -282,6 +289,64 @@ test "diff detects unchanged update and delete" {
     try std.testing.expectEqual(@as(usize, 1), diff.summary.update);
     try std.testing.expectEqual(@as(usize, 1), diff.summary.delete);
     try std.testing.expectEqual(@as(usize, 1), diff.summary.unchanged);
+}
+
+test "diff skips unnamed objects and orders changes with missing workload arrays" {
+    const alloc = std.testing.allocator;
+    const current =
+        \\{"services":[{"name":"old"},{"image":"unnamed"},{"name":"kept"}],"workers":[{"name":"retired"}]}
+    ;
+    const proposed =
+        \\{"services":[{"image":"unnamed"},{"name":"new"},{"name":"kept"}],"crons":[{"name":"nightly"}]}
+    ;
+    var diff = try compute(alloc, "demo", "new", null, null, current, proposed);
+    defer diff.deinit();
+
+    const expected = [_]WorkloadChange{
+        .{ .kind = .service, .name = "new", .change = .create },
+        .{ .kind = .service, .name = "kept", .change = .unchanged },
+        .{ .kind = .service, .name = "old", .change = .delete },
+        .{ .kind = .worker, .name = "retired", .change = .delete },
+        .{ .kind = .cron, .name = "nightly", .change = .create },
+    };
+    try std.testing.expectEqual(expected.len, diff.changes.len);
+    for (expected, diff.changes) |want, actual| {
+        try std.testing.expectEqual(want.kind, actual.kind);
+        try std.testing.expectEqualStrings(want.name, actual.name);
+        try std.testing.expectEqual(want.change, actual.change);
+    }
+    try std.testing.expectEqualDeep(Summary{ .create = 2, .delete = 2, .unchanged = 1 }, diff.summary);
+
+    // surviving names borrow the proposed snapshot; removed names borrow the current one.
+    const kept_start = std.mem.indexOf(u8, proposed, "kept").?;
+    const old_start = std.mem.indexOf(u8, current, "old").?;
+    try std.testing.expect(diff.changes[1].name.ptr == proposed[kept_start..].ptr);
+    try std.testing.expect(diff.changes[2].name.ptr == current[old_start..].ptr);
+}
+
+test "diff compares raw json and matches the first occurrence of a name" {
+    const alloc = std.testing.allocator;
+    var diff = try compute(alloc, "demo", "new", null, null,
+        \\{"services":[{"name":"ordered","image":"one"},{"name":"spaced","image":"one"},{"name":"duplicate","image":"one"},{"name":"duplicate","image":"two"},{"name":"\u0077eb"}]}
+    ,
+        \\{"services":[{"image":"one","name":"ordered"},{"name":"spaced", "image":"one"},{"name":"duplicate","image":"two"},{"name":"web"}]}
+    );
+    defer diff.deinit();
+
+    const expected = [_]WorkloadChange{
+        .{ .kind = .service, .name = "ordered", .change = .update },
+        .{ .kind = .service, .name = "spaced", .change = .update },
+        .{ .kind = .service, .name = "duplicate", .change = .update },
+        .{ .kind = .service, .name = "web", .change = .create },
+        .{ .kind = .service, .name = "\\u0077eb", .change = .delete },
+    };
+    try std.testing.expectEqual(expected.len, diff.changes.len);
+    for (expected, diff.changes) |want, actual| {
+        try std.testing.expectEqual(want.kind, actual.kind);
+        try std.testing.expectEqualStrings(want.name, actual.name);
+        try std.testing.expectEqual(want.change, actual.change);
+    }
+    try std.testing.expectEqualDeep(Summary{ .create = 1, .update = 3, .delete = 1 }, diff.summary);
 }
 
 test "diff renders json and text" {
