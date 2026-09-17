@@ -578,3 +578,54 @@ test "matchesVolumeConstraints — agent without node_id fails constrained" {
     };
     try std.testing.expect(!matchesVolumeConstraints(agent, &constraints));
 }
+
+test "schedule gang respects memory per rank without changing agent capacity" {
+    const alloc = std.testing.allocator;
+    const agents = [_]AgentRecord{
+        makeAgentFull("agent1", "active", 4, 1024, 0, 256, "agent", null, 4, 1),
+    };
+    var request = PlacementRequest{
+        .image = "training",
+        .command = "",
+        .cpu_limit = 0,
+        .memory_limit_mb = 512,
+        .gang_world_size = 2,
+    };
+
+    // three free gpus fit two ranks, but the remaining memory fits only one.
+    try std.testing.expect((try scheduleGang(alloc, request, &agents)) == null);
+
+    request.memory_limit_mb = 384;
+    const placements = (try scheduleGang(alloc, request, &agents)).?;
+    defer alloc.free(placements);
+    try std.testing.expectEqual(@as(usize, 2), placements.len);
+    for (placements) |rank| {
+        try std.testing.expectEqualStrings("agent1", rank.agent_id);
+    }
+    try std.testing.expectEqual(@as(i64, 4), agents[0].gpu_count);
+    try std.testing.expectEqual(@as(i64, 1), agents[0].gpu_used);
+}
+
+test "schedule gang with zero cpu and memory limits uses available gpus" {
+    const alloc = std.testing.allocator;
+    const agents = [_]AgentRecord{
+        makeAgentFull("agent1", "active", 0, 0, 0, 0, "agent", null, 5, 1),
+    };
+    const request = PlacementRequest{
+        .image = "training",
+        .command = "",
+        .cpu_limit = 0,
+        .memory_limit_mb = 0,
+        .gang_world_size = 2,
+        .gpus_per_rank = 2,
+    };
+
+    const placements = (try scheduleGang(alloc, request, &agents)).?;
+    defer alloc.free(placements);
+    try std.testing.expectEqual(@as(usize, 2), placements.len);
+    for (placements, 0..) |rank, index| {
+        try std.testing.expectEqualStrings("agent1", rank.agent_id);
+        try std.testing.expectEqual(@as(u32, 2), rank.gpu_count);
+        try std.testing.expectEqual(@as(u32, @intCast(1 + index * 2)), rank.gpu_start);
+    }
+}
