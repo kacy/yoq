@@ -62,3 +62,69 @@ fn getEnvVarOwned(alloc: std.mem.Allocator, name: []const u8) error{OutOfMemory}
     const value = std.c.getenv(name_z.ptr) orelse return null;
     return try alloc.dupe(u8, std.mem.span(value));
 }
+
+test "variable expansion keeps escapes and fallback text literal" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "$${:-fallback}", .expected = "${:-fallback}" },
+        .{ .input = "$$${:-fallback}", .expected = "$fallback" },
+        .{ .input = "${:-$$}", .expected = "$$" },
+        .{ .input = "${:-first:-second}", .expected = "first:-second" },
+        .{ .input = "${unclosed $$ tail$", .expected = "${unclosed $ tail$" },
+        .{ .input = "${:-left}${:-right}", .expected = "leftright" },
+    };
+
+    for (cases) |case| {
+        const expanded = try expandVariables(alloc, case.input);
+        defer alloc.free(expanded);
+        try std.testing.expectEqualStrings(case.expected, expanded);
+    }
+}
+
+test "variable expansion uses fallback only when the environment value is absent" {
+    const env = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    };
+    const alloc = std.testing.allocator;
+    const name = "YOQ_TEST_VARIABLE_EXPANSION_EMPTY_VALUE";
+    const original = if (std.c.getenv(name)) |value|
+        try alloc.dupeZ(u8, std.mem.span(value))
+    else
+        null;
+    defer if (original) |value| alloc.free(value);
+    defer {
+        if (original) |value| {
+            _ = env.setenv(name, value.ptr, 1);
+        } else {
+            _ = env.unsetenv(name);
+        }
+    }
+
+    try std.testing.expectEqual(@as(c_int, 0), env.setenv(name, "", 1));
+    const empty = try expandVariables(alloc, "${" ++ name ++ ":-fallback}");
+    defer alloc.free(empty);
+    try std.testing.expectEqualStrings("", empty);
+
+    try std.testing.expectEqual(@as(c_int, 0), env.unsetenv(name));
+    const absent = try expandVariables(alloc, "${" ++ name ++ ":-fallback}");
+    defer alloc.free(absent);
+    try std.testing.expectEqualStrings("fallback", absent);
+}
+
+test "variable expansion releases allocations on failure" {
+    const check = struct {
+        fn expand(alloc: std.mem.Allocator) !void {
+            const expanded = try expandVariables(alloc, "before ${PATH:-} $$ ${:-fallback} after");
+            defer alloc.free(expanded);
+
+            const prefix = "before ";
+            const suffix = " $ fallback after";
+            const path = if (std.c.getenv("PATH")) |value| std.mem.span(value) else "";
+            try std.testing.expect(std.mem.startsWith(u8, expanded, prefix));
+            try std.testing.expect(std.mem.endsWith(u8, expanded, suffix));
+            try std.testing.expectEqualStrings(path, expanded[prefix.len .. expanded.len - suffix.len]);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, check.expand, .{});
+}
