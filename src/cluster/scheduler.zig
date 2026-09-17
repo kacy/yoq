@@ -354,6 +354,11 @@ test "matchesLabels" {
     try std.testing.expect(!matchesLabels("zone=us-west", "zone=us-east"));
     try std.testing.expect(matchesLabels("zone=us-east", ""));
     try std.testing.expect(!matchesLabels("", "zone=us-east"));
+    try std.testing.expect(matchesLabels(" zone=us-east , tier=gpu ", " , zone=us-east, , tier=gpu, "));
+    try std.testing.expect(matchesLabels("", " , , "));
+    try std.testing.expect(!matchesLabels("zone=us-east-1", "zone=us-east"));
+    try std.testing.expect(!matchesLabels("\tzone=us-east", "zone=us-east"));
+    try std.testing.expect(!matchesLabels("zone=us-east", "\tzone=us-east"));
 }
 
 test "assignmentSql generates valid SQL" {
@@ -565,6 +570,16 @@ test "matchesVolumeConstraints — agent without node_id fails constrained" {
         .{ .driver = "local", .node_id = "1" },
     };
     try std.testing.expect(!matchesVolumeConstraints(agent, &constraints));
+}
+
+test "volume constraints require the decimal node id without extra characters" {
+    var agent = makeAgent("a", "active", 4, 8192, 0, 0);
+    agent.node_id = 1;
+
+    try std.testing.expect(matchesVolumeConstraints(agent, &.{.{ .driver = "local", .node_id = "1" }}));
+    for ([_][]const u8{ "01", "+1", " 1", "1 " }) |node_id| {
+        try std.testing.expect(!matchesVolumeConstraints(agent, &.{.{ .driver = "local", .node_id = node_id }}));
+    }
 }
 
 test "schedule gang respects memory per rank without changing agent capacity" {
