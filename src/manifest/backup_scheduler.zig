@@ -168,6 +168,51 @@ test "BackupScheduler starts and stops" {
     try std.testing.expect(sched.thread == null);
 }
 
+test "backup scheduler skips a locked directory and retries after release" {
+    const Fixture = struct {
+        var calls: usize = 0;
+
+        fn complete(_: std.mem.Allocator, path: [:0]const u8, _: bool) !void {
+            calls += 1;
+            try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = "complete backup" });
+        }
+    };
+    Fixture.calls = 0;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "yoq-backup-10.db", .data = "old valid backup" });
+    var path: [4096]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &path);
+    var metrics: backup_metrics.Metrics = .{};
+    var scheduler = BackupScheduler.init(std.testing.allocator, .{
+        .every = 100,
+        .output_dir = path[0..len],
+        .encrypt = false,
+        .retention = .{ .keep_count = 1 },
+    });
+    scheduler.metrics = &metrics;
+
+    {
+        const lock_fd = try lockOutputDirectory(tmp.dir);
+        defer linux_platform.posix.close(lock_fd);
+
+        try std.testing.expectError(error.BackupBusy, scheduler.runOnceWith(20, Fixture.complete));
+        try std.testing.expectEqual(@as(usize, 0), Fixture.calls);
+        try tmp.dir.access(std.testing.io, "yoq-backup-10.db", .{});
+        try std.testing.expectEqual(@as(u64, 1), metrics.failures.load(.monotonic));
+        try std.testing.expectEqual(@as(u64, 0), metrics.successes.load(.monotonic));
+        try std.testing.expectEqual(@as(i64, 0), metrics.last_success.load(.acquire));
+    }
+
+    try scheduler.runOnceWith(30, Fixture.complete);
+    try std.testing.expectEqual(@as(usize, 1), Fixture.calls);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "yoq-backup-10.db", .{}));
+    try std.testing.expectEqual(@as(u64, 1), metrics.failures.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), metrics.successes.load(.monotonic));
+    try std.testing.expectEqual(@as(i64, 30), metrics.last_success.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), metrics.retention_failures.load(.monotonic));
+}
+
 test "backup scheduler preserves recovery points on disk full and prunes only after success" {
     const Fixture = struct {
         fn full(_: std.mem.Allocator, _: [:0]const u8, _: bool) !void {
