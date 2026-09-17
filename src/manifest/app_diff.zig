@@ -291,6 +291,64 @@ test "diff detects unchanged update and delete" {
     try std.testing.expectEqual(@as(usize, 1), diff.summary.unchanged);
 }
 
+test "diff skips unnamed objects and orders changes with missing workload arrays" {
+    const alloc = std.testing.allocator;
+    const current =
+        \\{"services":[{"name":"old"},{"image":"unnamed"},{"name":"kept"}],"workers":[{"name":"retired"}]}
+    ;
+    const proposed =
+        \\{"services":[{"image":"unnamed"},{"name":"new"},{"name":"kept"}],"crons":[{"name":"nightly"}]}
+    ;
+    var diff = try compute(alloc, "demo", "new", null, null, current, proposed);
+    defer diff.deinit();
+
+    const expected = [_]WorkloadChange{
+        .{ .kind = .service, .name = "new", .change = .create },
+        .{ .kind = .service, .name = "kept", .change = .unchanged },
+        .{ .kind = .service, .name = "old", .change = .delete },
+        .{ .kind = .worker, .name = "retired", .change = .delete },
+        .{ .kind = .cron, .name = "nightly", .change = .create },
+    };
+    try std.testing.expectEqual(expected.len, diff.changes.len);
+    for (expected, diff.changes) |want, actual| {
+        try std.testing.expectEqual(want.kind, actual.kind);
+        try std.testing.expectEqualStrings(want.name, actual.name);
+        try std.testing.expectEqual(want.change, actual.change);
+    }
+    try std.testing.expectEqualDeep(Summary{ .create = 2, .delete = 2, .unchanged = 1 }, diff.summary);
+
+    // surviving names borrow the proposed snapshot; removed names borrow the current one.
+    const kept_start = std.mem.indexOf(u8, proposed, "kept").?;
+    const old_start = std.mem.indexOf(u8, current, "old").?;
+    try std.testing.expect(diff.changes[1].name.ptr == proposed[kept_start..].ptr);
+    try std.testing.expect(diff.changes[2].name.ptr == current[old_start..].ptr);
+}
+
+test "diff compares raw json and matches the first occurrence of a name" {
+    const alloc = std.testing.allocator;
+    var diff = try compute(alloc, "demo", "new", null, null,
+        \\{"services":[{"name":"ordered","image":"one"},{"name":"spaced","image":"one"},{"name":"duplicate","image":"one"},{"name":"duplicate","image":"two"},{"name":"\u0077eb"}]}
+    ,
+        \\{"services":[{"image":"one","name":"ordered"},{"name":"spaced", "image":"one"},{"name":"duplicate","image":"two"},{"name":"web"}]}
+    );
+    defer diff.deinit();
+
+    const expected = [_]WorkloadChange{
+        .{ .kind = .service, .name = "ordered", .change = .update },
+        .{ .kind = .service, .name = "spaced", .change = .update },
+        .{ .kind = .service, .name = "duplicate", .change = .update },
+        .{ .kind = .service, .name = "web", .change = .create },
+        .{ .kind = .service, .name = "\\u0077eb", .change = .delete },
+    };
+    try std.testing.expectEqual(expected.len, diff.changes.len);
+    for (expected, diff.changes) |want, actual| {
+        try std.testing.expectEqual(want.kind, actual.kind);
+        try std.testing.expectEqualStrings(want.name, actual.name);
+        try std.testing.expectEqual(want.change, actual.change);
+    }
+    try std.testing.expectEqualDeep(Summary{ .create = 1, .update = 3, .delete = 1 }, diff.summary);
+}
+
 test "diff renders json and text" {
     const alloc = std.testing.allocator;
     var diff = try compute(alloc, "demo", "sha256:new", null, null, null,
