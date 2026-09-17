@@ -56,11 +56,11 @@ fn eligibleForGang(agent: AgentRecord, request: PlacementRequest) bool {
 // each rank needs its own cpu, memory, and gpus. a zero cpu or memory limit
 // leaves that resource out of the capacity calculation.
 fn rankCapacity(agent: AgentRecord, request: PlacementRequest) i64 {
-    const free_cpu = @max(0, agent.cpu_cores * 1000 -| agent.cpu_used);
-    const free_memory = @max(0, agent.memory_mb -| agent.memory_used_mb);
-    const free_gpu = @max(0, agent.gpu_count -| agent.gpu_used);
+    const free_cpu: i64 = @max(0, agent.cpu_cores * 1000 -| agent.cpu_used);
+    const free_memory: i64 = @max(0, agent.memory_mb -| agent.memory_used_mb);
+    const free_gpu: i64 = @max(0, agent.gpu_count -| agent.gpu_used);
 
-    var ranks = @divTrunc(free_gpu, request.gpus_per_rank);
+    var ranks: i64 = @divTrunc(free_gpu, request.gpus_per_rank);
     if (request.cpu_limit > 0) ranks = @min(ranks, @divTrunc(free_cpu, request.cpu_limit));
     if (request.memory_limit_mb > 0) ranks = @min(ranks, @divTrunc(free_memory, request.memory_limit_mb));
     return ranks;
