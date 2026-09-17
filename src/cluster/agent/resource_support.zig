@@ -12,7 +12,6 @@ const AgentResources = agent_types.AgentResources;
 pub fn getSystemResources() AgentResources {
     const cpu_cores: u32 = @intCast(std.Thread.getCpuCount() catch 1);
 
-    var memory_mb: u64 = 0;
     const meminfo = blk: {
         const file = linux_platform.openFileAbsolute("/proc/meminfo", .{}) catch break :blk "";
         defer file.close();
@@ -20,19 +19,7 @@ pub fn getSystemResources() AgentResources {
     };
     defer if (meminfo.len > 0) std.heap.page_allocator.free(meminfo);
 
-    if (meminfo.len > 0) {
-        if (std.mem.indexOf(u8, meminfo, "MemTotal:")) |pos| {
-            var start = pos + "MemTotal:".len;
-            while (start < meminfo.len and meminfo[start] == ' ') start += 1;
-            var end = start;
-            while (end < meminfo.len and meminfo[end] >= '0' and meminfo[end] <= '9') end += 1;
-            if (end > start) {
-                const kb = std.fmt.parseInt(u64, meminfo[start..end], 10) catch 0;
-                memory_mb = kb / 1024;
-            }
-        }
-    }
-
+    const memory_mb = parseMemoryMb(meminfo);
     const gpu_info = cachedGpuDetect();
     return .{
         .cpu_cores = cpu_cores,
@@ -41,6 +28,22 @@ pub fn getSystemResources() AgentResources {
         .gpu_model = gpu_info.model,
         .gpu_vram_mb = gpu_info.vram_mb,
     };
+}
+
+fn parseMemoryMb(meminfo: []const u8) u64 {
+    const field = "MemTotal:";
+    const field_start = std.mem.indexOf(u8, meminfo, field) orelse return 0;
+
+    // use the first match and skip only spaces before its value.
+    var value_start = field_start + field.len;
+    while (value_start < meminfo.len and meminfo[value_start] == ' ') value_start += 1;
+
+    var value_end = value_start;
+    while (value_end < meminfo.len and std.ascii.isDigit(meminfo[value_end])) value_end += 1;
+    if (value_end == value_start) return 0;
+
+    const memory_kb = std.fmt.parseInt(u64, meminfo[value_start..value_end], 10) catch return 0;
+    return memory_kb / 1024;
 }
 
 pub fn detectLocalIp(target: [4]u8, buf: *[16]u8) []const u8 {
@@ -123,4 +126,51 @@ pub fn cachedGpuDetect() CachedGpuInfo {
     };
     cached_gpu_info = info;
     return info;
+}
+
+test "agent memory parsing converts kilobytes to whole megabytes" {
+    const cases = .{
+        .{ "MemTotal:       8388608 kB\nMemFree: 1024 kB\n", 8192 },
+        .{ "MemFree: 1024 kB\nMemTotal: 2048 kB\n", 2 },
+        .{ "MemTotal:0", 0 },
+        .{ "MemTotal:1023", 0 },
+        .{ "MemTotal:1024", 1 },
+        .{ "MemTotal:2047", 1 },
+        .{ "MemTotal:18446744073709551615 kB", 18014398509481983 },
+    };
+    inline for (cases) |case| {
+        try std.testing.expectEqual(@as(u64, case[1]), parseMemoryMb(case[0]));
+    }
+}
+
+test "agent memory parsing returns zero for missing or invalid values" {
+    const inputs = [_][]const u8{
+        "",
+        "MemFree: 2048 kB\n",
+        "MemTotal:",
+        "MemTotal:    ",
+        "MemTotal:\t2048 kB",
+        "MemTotal: \n2048 kB",
+        "MemTotal: -2048 kB",
+        "MemTotal: +2048 kB",
+        "MemTotal: unknown",
+        "MemTotal: 18446744073709551616 kB",
+    };
+    for (inputs) |input| {
+        try std.testing.expectEqual(@as(u64, 0), parseMemoryMb(input));
+    }
+}
+
+test "agent memory parsing uses the first substring and stops at the first non digit" {
+    // keep the existing scan rules, including matches within longer field names.
+    const cases = .{
+        .{ "OtherMemTotal: 2048 kB\nMemTotal: 4096 kB", 2 },
+        .{ "MemTotal: invalid\nMemTotal: 4096 kB", 0 },
+        .{ "MemTotal: 18446744073709551616\nMemTotal: 4096 kB", 0 },
+        .{ "MemTotal: 2048ignored", 2 },
+        .{ "MemTotal: 2048 4096 kB", 2 },
+    };
+    inline for (cases) |case| {
+        try std.testing.expectEqual(@as(u64, case[1]), parseMemoryMb(case[0]));
+    }
 }
