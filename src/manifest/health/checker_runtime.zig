@@ -221,7 +221,7 @@ pub fn updateState(entry: *types.ServiceHealth, success: bool) Transition {
 }
 
 fn changeStatus(entry: *types.ServiceHealth, status: types.HealthStatus) void {
-    // count a flap only when the status changes.
+    // callers skip unchanged states so repeated results do not count as flaps.
     entry.status = status;
     entry.flap_count += 1;
     service_observability.noteEndpointFlap(entry.serviceName());
