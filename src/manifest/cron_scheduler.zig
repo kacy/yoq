@@ -23,6 +23,19 @@ fn nowRealSeconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
 }
 
+fn nextRunIndex(next_runs: []const i64) ?usize {
+    var earliest_idx: ?usize = null;
+    var earliest_time: i64 = std.math.maxInt(i64);
+    for (next_runs, 0..) |next, i| {
+        // keep the first cron on ties; maxInt is not a scheduled run.
+        if (next < earliest_time) {
+            earliest_time = next;
+            earliest_idx = i;
+        }
+    }
+    return earliest_idx;
+}
+
 pub const CronScheduler = struct {
     alloc: std.mem.Allocator,
     crons: []const spec.Cron,
@@ -81,21 +94,12 @@ pub const CronScheduler = struct {
         while (self.running.load(.acquire)) {
             const now = nowRealSeconds();
 
-            // find the soonest cron that's due
-            var earliest_idx: ?usize = null;
-            var earliest_time: i64 = std.math.maxInt(i64);
-            for (self.next_runs, 0..) |next, i| {
-                if (next < earliest_time) {
-                    earliest_time = next;
-                    earliest_idx = i;
-                }
-            }
-
-            const idx = earliest_idx orelse {
+            const idx = nextRunIndex(self.next_runs) orelse {
                 // no crons — shouldn't happen but sleep and retry
                 if (!runtime_wait.sleep(std.Io.Duration.fromSeconds(1), "cron scheduler idle wait")) return;
                 continue;
             };
+            const earliest_time = self.next_runs[idx];
 
             // sleep until the cron is due, checking shutdown every second
             if (earliest_time > now) {
@@ -139,6 +143,18 @@ pub const CronScheduler = struct {
 };
 
 // -- tests --
+
+test "nextRunIndex keeps the first cron when run times match" {
+    try std.testing.expectEqual(@as(?usize, 1), nextRunIndex(&.{ 30, 10, 10, 20 }));
+}
+
+test "nextRunIndex skips the sentinel and accepts negative timestamps" {
+    const unscheduled = std.math.maxInt(i64);
+    try std.testing.expectEqual(@as(?usize, null), nextRunIndex(&.{}));
+    try std.testing.expectEqual(@as(?usize, null), nextRunIndex(&.{ unscheduled, unscheduled }));
+    try std.testing.expectEqual(@as(?usize, 2), nextRunIndex(&.{ unscheduled, 0, -10 }));
+    try std.testing.expectEqual(@as(?usize, 1), nextRunIndex(&.{ unscheduled, unscheduled - 1 }));
+}
 
 test "CronScheduler init sets next_runs" {
     const alloc = std.testing.allocator;
