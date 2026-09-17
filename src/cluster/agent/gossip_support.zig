@@ -138,16 +138,7 @@ pub fn tickGossipLoop(self: anytype) void {
     };
     defer gossip.freeActions(actions);
 
-    for (actions) |action| {
-        switch (action) {
-            .send_message => |msg| {
-                var encode_buf: [512]u8 = undefined;
-                const len = gossip_mod.Gossip.encode(&encode_buf, msg.message) catch continue;
-                transport.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
-            },
-            .member_dead, .member_alive, .member_suspect => {},
-        }
-    }
+    sendGossipActions(transport, actions);
 }
 
 pub fn receiveGossipLoop(self: anytype) void {
@@ -176,15 +167,21 @@ pub fn receiveGossipLoop(self: anytype) void {
             return;
         };
         defer gossip.freeActions(actions);
-        for (actions) |action| {
-            switch (action) {
-                .send_message => |send| {
-                    var encode_buf: [512]u8 = undefined;
-                    const len = gossip_mod.Gossip.encode(&encode_buf, send.message) catch continue;
-                    transport.sendGossip(send.addr.ip, send.addr.port, encode_buf[0..len]) catch {};
-                },
-                .member_dead, .member_alive, .member_suspect => {},
-            }
+        sendGossipActions(transport, actions);
+    }
+}
+
+// both tick and receive paths send messages in action order. a failed send
+// leaves later actions eligible for delivery.
+fn sendGossipActions(transport: anytype, actions: []const gossip_mod.Action) void {
+    for (actions) |action| {
+        switch (action) {
+            .send_message => |msg| {
+                var encode_buf: [512]u8 = undefined;
+                const len = gossip_mod.Gossip.encode(&encode_buf, msg.message) catch continue;
+                transport.sendGossip(msg.addr.ip, msg.addr.port, encode_buf[0..len]) catch {};
+            },
+            .member_dead, .member_alive, .member_suspect => {},
         }
     }
 }
@@ -213,8 +210,8 @@ test "gossip bootstrap pins first worker to server identity and actual port" {
         for (seeds) |seed| alloc.free(seed);
         alloc.free(seeds);
     };
-    // A self seed and a conflicting server endpoint must not replace the API
-    // server's pinned address. Non-default server gossip ports are preserved.
+    // the api server keeps its pinned address and advertised port, even when
+    // the seed list includes this node or a conflicting server endpoint.
     parseGossipSeeds(&agent, "{\"gossip_server\":{\"id\":1,\"port\":19800},\"gossip_seeds\":[\"2@10.0.0.2\",\"1@10.0.0.99:9800\"]}");
     const seeds = agent.gossip_seeds.?;
     try std.testing.expectEqual(@as(usize, 1), seeds.len);
