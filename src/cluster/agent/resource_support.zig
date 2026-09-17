@@ -127,3 +127,50 @@ pub fn cachedGpuDetect() CachedGpuInfo {
     cached_gpu_info = info;
     return info;
 }
+
+test "agent memory parsing converts kilobytes to whole megabytes" {
+    const cases = .{
+        .{ "MemTotal:       8388608 kB\nMemFree: 1024 kB\n", 8192 },
+        .{ "MemFree: 1024 kB\nMemTotal: 2048 kB\n", 2 },
+        .{ "MemTotal:0", 0 },
+        .{ "MemTotal:1023", 0 },
+        .{ "MemTotal:1024", 1 },
+        .{ "MemTotal:2047", 1 },
+        .{ "MemTotal:18446744073709551615 kB", 18014398509481983 },
+    };
+    inline for (cases) |case| {
+        try std.testing.expectEqual(@as(u64, case[1]), parseMemoryMb(case[0]));
+    }
+}
+
+test "agent memory parsing returns zero for missing or invalid values" {
+    const inputs = [_][]const u8{
+        "",
+        "MemFree: 2048 kB\n",
+        "MemTotal:",
+        "MemTotal:    ",
+        "MemTotal:\t2048 kB",
+        "MemTotal: \n2048 kB",
+        "MemTotal: -2048 kB",
+        "MemTotal: +2048 kB",
+        "MemTotal: unknown",
+        "MemTotal: 18446744073709551616 kB",
+    };
+    for (inputs) |input| {
+        try std.testing.expectEqual(@as(u64, 0), parseMemoryMb(input));
+    }
+}
+
+test "agent memory parsing uses the first substring and stops at the first non digit" {
+    // keep the existing scan rules, including matches within longer field names.
+    const cases = .{
+        .{ "OtherMemTotal: 2048 kB\nMemTotal: 4096 kB", 2 },
+        .{ "MemTotal: invalid\nMemTotal: 4096 kB", 0 },
+        .{ "MemTotal: 18446744073709551616\nMemTotal: 4096 kB", 0 },
+        .{ "MemTotal: 2048ignored", 2 },
+        .{ "MemTotal: 2048 4096 kB", 2 },
+    };
+    inline for (cases) |case| {
+        try std.testing.expectEqual(@as(u64, case[1]), parseMemoryMb(case[0]));
+    }
+}
