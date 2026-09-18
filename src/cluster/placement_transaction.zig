@@ -595,8 +595,11 @@ test "rollback capacity conflict preserves current assignments and later restore
     try rollback.activateTarget(session, current_target);
     var other_request = new_request;
     other_request.app_name = "other";
+    other_request.workload_name = "other-service";
     other_request.cpu_limit = 700;
-    const other = (try place(alloc, session, other_request, "other-release")).?;
+    const other_placement = try place(alloc, session, other_request, "other-release");
+    try std.testing.expect(other_placement != null);
+    const other = other_placement.?;
     defer other.deinit(alloc);
     try std.testing.expectError(error.Conflict, state.rollbackActivatedTargets(session));
     const current_count = (try node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignments WHERE id = ?;", .{}, .{current.assignment_ids[0]})).?.count;

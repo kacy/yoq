@@ -76,7 +76,7 @@ test "formatAppHistoryResponse emits release records" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"placement failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release\":{\"id\":\"dep-2\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":0,\"workers\":0,\"crons\":0,\"training_jobs\":0}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":0,\"service_instances\":0,\"workers\":0,\"crons\":0,\"training_jobs\":0}") != null);
 }
 
 test "formatAppStatusResponse summarizes latest release" {
@@ -105,7 +105,7 @@ test "formatAppStatusResponse summarizes latest release" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_release_id\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"previous_successful_release_id\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"current_release\":{\"id\":\"dep-2\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":2,\"workers\":0,\"crons\":0,\"training_jobs\":0}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":2,\"service_instances\":2,\"workers\":0,\"crons\":0,\"training_jobs\":0}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"training_runtime\":{\"active\":0,\"paused\":0,\"failed\":0}") != null);
 }
 
