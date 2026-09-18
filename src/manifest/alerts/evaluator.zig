@@ -39,10 +39,8 @@ pub const Rule = struct {
     pending: ?Event = null,
     in_flight: bool = false,
     next_attempt_ms: u64 = 0,
-    transitioned: bool = false,
 
     pub fn observe(self: *Rule, observed: ?f64) void {
-        self.transitioned = false;
         self.value = if (observed) |value| (if (std.math.isFinite(value) and value >= 0) value else null) else null;
         const value = self.value orelse {
             // missing data cannot resolve an alert or count toward a new one.
@@ -63,7 +61,6 @@ pub const Rule = struct {
 
     fn transition(self: *Rule, active: bool, value: f64) void {
         self.active = active;
-        self.transitioned = true;
         self.revision +|= 1;
         self.pending = .{ .revision = self.revision, .state = if (active) .firing else .resolved, .value = value };
         self.next_attempt_ms = 0;

@@ -18,6 +18,11 @@ const handleGpuMetrics = metrics_routes.handleGpuMetrics;
 pub fn route(request: http.Request, alloc: std.mem.Allocator) ?Response {
     const path = request.path_only;
 
+    if (request.method == .GET and std.mem.eql(u8, path, "/v1/status/alerts")) {
+        const body = @import("../../state/store/alerts.zig").listJson(alloc, common.extractQueryParam(request.path, "app")) catch return common.internalError();
+        return .{ .status = .ok, .body = body, .allocated = true };
+    }
+
     if (request.method == .GET and std.mem.eql(u8, path, "/v1/status/bpf")) {
         return status_routes.handleBpfMapStatus(alloc);
     }
@@ -1437,4 +1442,13 @@ test "route dispatches mode=gpu" {
 
     try testing.expectEqual(http.StatusCode.ok, resp.status);
     try testing.expect(std.mem.indexOf(u8, resp.body, "gpu_metrics") != null);
+}
+
+test "route exposes persisted alert status separately from container status" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const response = route(.{ .method = .GET, .path = "/v1/status/alerts?app=missing", .path_only = "/v1/status/alerts", .query = "app=missing", .headers_raw = "", .body = "", .content_length = 0 }, testing.allocator).?;
+    defer if (response.allocated) testing.allocator.free(response.body);
+    try testing.expectEqual(http.StatusCode.ok, response.status);
+    try testing.expectEqualStrings("[]", response.body);
 }

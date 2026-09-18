@@ -22,6 +22,7 @@ const spec = @import("spec.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const health = @import("health.zig");
 const cron_scheduler = @import("cron_scheduler.zig");
+const alert_runtime = @import("alerts/runtime.zig");
 const backup_scheduler = @import("backup_scheduler.zig");
 const instances = @import("orchestrator/instances.zig");
 const lifecycle_support = @import("orchestrator/lifecycle_support.zig");
@@ -92,6 +93,7 @@ pub const Orchestrator = struct {
     tls_resources: ?startup_runtime.TlsResources = null,
     cron_sched: ?*cron_scheduler.CronScheduler = null,
     backup_sched: ?*backup_scheduler.BackupScheduler = null,
+    alert_registrations: std.ArrayList(alert_runtime.Registration) = .empty,
     /// when set, only start these services (+ transitive deps).
     /// null means start everything.
     service_filter: ?[]const []const u8 = null,
@@ -133,6 +135,7 @@ pub const Orchestrator = struct {
     }
 
     pub fn deinit(self: *Orchestrator) void {
+        self.stopAlerts();
         if (self.tls_resources) |*resources| resources.deinit(self.alloc);
         if (self.cron_sched) |cs| {
             cs.deinit();
@@ -151,6 +154,27 @@ pub const Orchestrator = struct {
         if (self.restart_requested.len > 0) {
             self.alloc.free(self.restart_requested);
         }
+    }
+
+    pub fn startAlerts(self: *Orchestrator) !void {
+        if (self.alert_registrations.items.len != 0) return;
+        errdefer self.stopAlerts();
+        for (self.manifest.services) |service| {
+            if (!self.shouldStart(service.name)) continue;
+            const config = service.alerts orelse continue;
+            const registration = try alert_runtime.register(self.app_name, service.name, config, true);
+            self.alert_registrations.append(self.alloc, registration) catch |err| {
+                registration.release();
+                return err;
+            };
+        }
+    }
+
+    pub fn stopAlerts(self: *Orchestrator) void {
+        for (self.alert_registrations.items) |registration| registration.release();
+        self.alert_registrations.deinit(self.alloc);
+        self.alert_registrations = .empty;
+        alert_runtime.shutdownIfUnused();
     }
 
     /// compute the set of services to start from a list of target names.

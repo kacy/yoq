@@ -17,6 +17,15 @@ pub const secrets_create_table_sql =
 
 pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
     try exec(db,
+        \\CREATE TABLE IF NOT EXISTS alert_status (
+        \\    app TEXT NOT NULL,
+        \\    service TEXT NOT NULL,
+        \\    metric TEXT NOT NULL,
+        \\    status_json TEXT NOT NULL,
+        \\    PRIMARY KEY (app, service, metric)
+        \\);
+    );
+    try exec(db,
         \\CREATE TABLE IF NOT EXISTS containers (
         \\    id TEXT PRIMARY KEY,
         \\    rootfs TEXT NOT NULL,

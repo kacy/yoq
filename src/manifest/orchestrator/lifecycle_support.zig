@@ -61,6 +61,8 @@ pub fn startAll(self: anytype, comptime OrchestratorError: type, serviceThreadFn
     if (services.len == 0) return OrchestratorError.ManifestEmpty;
 
     try self.computeStartSet();
+    self.startAlerts() catch return OrchestratorError.StartFailed;
+    errdefer self.stopAlerts();
 
     var pull_io = std.Io.Threaded.init(self.alloc, .{});
     defer pull_io.deinit();
@@ -208,6 +210,7 @@ pub fn startServiceByIndex(
 }
 
 pub fn stopAll(self: anytype) void {
+    self.stopAlerts();
     if (self.cron_sched) |cs| {
         cs.stop();
         writeErr("stopped cron scheduler\n", .{});
