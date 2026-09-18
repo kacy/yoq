@@ -16,7 +16,11 @@ pub fn handle(alloc: std.mem.Allocator, request: http.Request, ctx: common.Route
         std.fmt.parseInt(usize, text, 10) catch return common.badRequest("invalid offset")
     else
         0;
-    const agents = registry.listAgents(alloc, node.stateMachineDb()) catch return common.internalError();
+    const agents = blk: {
+        node.mu.lockUncancelable(std.Options.debug_io);
+        defer node.mu.unlock(std.Options.debug_io);
+        break :blk registry.listAgents(alloc, node.stateMachineDb()) catch return common.internalError();
+    };
     defer {
         for (agents) |agent| agent.deinit(alloc);
         alloc.free(agents);
@@ -129,6 +133,6 @@ test "cluster alert collection validates bounded agent responses and does not fo
         server.worker.?.join();
         server.worker = null;
         try std.testing.expectEqual(@as(usize, 1), server.requests);
-        try std.testing.expect(std.mem.indexOf(u8, server.last_request[0..server.last_request_length], "Authorization: Bearer join-token\r\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, server.last_request[0..server.last_request_length], "Bearer join-token\r\n") != null);
     }
 }

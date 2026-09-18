@@ -159,6 +159,13 @@ comptime {
     _ = @import("gpu/lease.zig");
     _ = @import("cluster/training_reconciler.zig");
     _ = @import("manifest/alerting.zig");
+    _ = @import("manifest/alerts/evaluator.zig");
+    _ = @import("manifest/alerts/sampling.zig");
+    _ = @import("manifest/alerts/webhook.zig");
+    _ = @import("manifest/alerts/runtime.zig");
+    _ = @import("network/proxy/observations.zig");
+    _ = @import("state/store/proxy_observations.zig");
+    _ = @import("api/routes/cluster_agents/alert_status.zig");
     _ = @import("dev/log_mux.zig");
     _ = @import("dev/watcher.zig");
     _ = @import("api/http.zig");

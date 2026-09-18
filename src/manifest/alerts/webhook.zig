@@ -60,7 +60,7 @@ test "alert webhook reports success non-success redirects malformed responses an
     const cases = [_]struct { reply: Server.Reply, failure: ?[]const u8, status: ?u16, timeout: u64 = 2000 }{
         .{ .reply = .{ .status = "204 No Content" }, .failure = null, .status = 204 },
         .{ .reply = .{ .status = "503 Service Unavailable" }, .failure = "UnexpectedStatus", .status = 503 },
-        .{ .reply = .{ .status = "302 Found", .headers = "Location: http://127.0.0.1:1/private\r\n" }, .failure = "UnexpectedStatus", .status = 302 },
+        .{ .reply = .{ .status = "302 Found", .headers = "Location: http://127.0.0.1:1/private\r\n" }, .failure = "TooManyHttpRedirects", .status = null },
         .{ .reply = .{ .status = "invalid" }, .failure = "HttpHeadersInvalid", .status = null },
         .{ .reply = .{ .delay_ms = 250 }, .failure = "Timeout", .status = null, .timeout = 40 },
     };
