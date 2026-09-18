@@ -471,7 +471,7 @@ for a shorter end-to-end checklist, see [golden-path.md](golden-path.md).
 
 `yoq cluster backup` captures one stopped voter. stop **every voter and agent before the first capture**, and keep them stopped until every bundle is complete. wait for every voter to apply the cluster CA bootstrap before stopping them; a voter without that persisted identity cannot be captured. use a new set ID for each coordinated stop. the command cannot prove that another host has stopped; taking bundles while any voter is running is unsupported.
 
-on each voter, use the same set ID and a different destination. the join-token file must contain the existing cluster join token and have owner-only permissions:
+on each voter, use the same set ID and a different destination. keep the effective API token in the data root's private `api_token` file, including when the server used a `--api-token` override. the join-token file must contain the existing cluster join token and have owner-only permissions:
 
 ```sh
 sudo -H "$(command -v yoq)" cluster backup /srv/backups/maintenance-2026-voter-1 \
@@ -481,7 +481,7 @@ sudo -H "$(command -v yoq)" cluster backup /srv/backups/maintenance-2026-voter-1
 
 `--data-dir <root>` selects a different source root. the default is `$HOME/.local/share/yoq`, with raft and replicated state under `cluster/`. the source lock rejects a running server; exclusive SQLite locks also reject open database users from older binaries. these checks apply only to the local voter.
 
-bundles contain `raft.db`, `state.db`, `yoq.db` when present, the selected snapshot, the API token, the join token, and `secrets.key` when present. a missing secrets key is rejected if encrypted secrets exist. files are private, and publication never replaces an existing destination. bundles contain credentials in readable form: preserve their `0700` directory and `0600` file permissions when copying them to protected storage. container filesystems, image blobs, application volumes, agent enrollment files, and agent result queues need their own backup.
+bundles contain `raft.db`, `state.db`, `yoq.db` when present, the selected snapshot, the API token, the join token, and `secrets.key` when present. a missing secrets key is rejected if encrypted secrets or locally encrypted certificates exist. files are private, and publication never replaces an existing destination. bundles contain credentials in readable form: preserve their `0700` directory and `0600` file permissions when copying them to protected storage. container filesystems, image blobs, application volumes, agent enrollment files, and agent result queues need their own backup.
 
 collect every voter bundle from that stop on a recovery host, then verify the complete set:
 
