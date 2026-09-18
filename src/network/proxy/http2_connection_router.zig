@@ -454,6 +454,7 @@ const ConnectionRouter = struct {
 
             if (self.downstream_buf.items.len < http2.frame_header_len) return;
             const frame = http2.parseFrameHeader(self.downstream_buf.items[0..http2.frame_header_len]).?;
+            if (frame.length > flow.max_frame_payload) return error.InvalidFrameSequence;
             if (http2.frame_header_len + frame.length > self.downstream_buf.items.len) return;
 
             const before = self.downstream_buf.items.len;
@@ -465,7 +466,8 @@ const ConnectionRouter = struct {
                 .data => try self.forwardClientStreamFrame(.data),
                 .rst_stream => try self.forwardClientStreamFrame(.rst_stream),
                 .window_update => try self.handleClientWindowUpdate(frame),
-                .priority, .continuation, .unknown, .push_promise => {
+                .continuation => return error.InvalidFrameSequence,
+                .priority, .unknown, .push_promise => {
                     try self.discardFrame();
                 },
             }
@@ -474,6 +476,7 @@ const ConnectionRouter = struct {
     }
 
     fn handleClientSettings(self: *ConnectionRouter, frame: http2.FrameHeader) !void {
+        try flow.validateSettings(frame);
         if ((frame.flags & 0x1) == 0) {
             try self.applyClientSettings(self.downstream_buf.items[9..][0..frame.length]);
             const ack = try http2.buildFrame(self.allocator, .{
@@ -504,6 +507,10 @@ const ConnectionRouter = struct {
     }
 
     fn handleClientHeaders(self: *ConnectionRouter) !void {
+        _ = flow.sequenceLength(self.downstream_buf.items) catch |err| switch (err) {
+            error.BufferTooShort => return,
+            else => return err,
+        };
         const observation_started_ns = observations.nowNs();
         const parsed = http2_request.parseRequestHeaderSequence(self.allocator, self.downstream_buf.items, 0) catch |err| switch (err) {
             error.BufferTooShort => return,
@@ -717,7 +724,8 @@ const ConnectionRouter = struct {
                     try active.flow_state.update(frame.stream_id, active.upstream_buf.items[9..][0..frame.length]);
                     try self.discardUpstreamFrame(session_idx);
                 },
-                .priority, .continuation, .unknown, .push_promise, .goaway => try self.discardUpstreamFrame(session_idx),
+                .continuation => return error.InvalidFrameSequence,
+                .priority, .unknown, .push_promise, .goaway => try self.discardUpstreamFrame(session_idx),
             }
         }
     }
@@ -785,7 +793,8 @@ const ConnectionRouter = struct {
                     };
                     try self.discardMirrorFrame(session_idx);
                 },
-                .priority, .continuation, .unknown, .push_promise, .goaway => self.discardMirrorFrame(session_idx) catch {
+                .continuation => return error.InvalidFrameSequence,
+                .priority, .unknown, .push_promise, .goaway => self.discardMirrorFrame(session_idx) catch {
                     self.failMirrorSession(session_idx);
                     return;
                 },
@@ -794,6 +803,7 @@ const ConnectionRouter = struct {
     }
 
     fn handleUpstreamSettings(self: *ConnectionRouter, session_idx: usize, frame: http2.FrameHeader) !void {
+        try flow.validateSettings(frame);
         const payload = self.streams.items[session_idx].upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
         if ((frame.flags & 0x1) == 0) {
             try self.streams.items[session_idx].flow_state.settings(payload);
@@ -1154,6 +1164,7 @@ const ConnectionRouter = struct {
     }
 
     fn handleMirrorSettings(self: *ConnectionRouter, session_idx: usize, frame: http2.FrameHeader) !void {
+        try flow.validateSettings(frame);
         const mirror = if (self.streams.items[session_idx].mirror) |*value| value else return;
         const payload = mirror.upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
         if ((frame.flags & 0x1) == 0) {

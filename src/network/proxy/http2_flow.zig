@@ -44,6 +44,8 @@ pub fn initialSetting(payload: []const u8) !?i64 {
     while (offset < payload.len) : (offset += 6) {
         const id = std.mem.readInt(u16, payload[offset..][0..2], .big);
         const setting = std.mem.readInt(u32, payload[offset + 2 ..][0..4], .big);
+        if (id == 2 and setting > 1) return error.InvalidFrameSequence;
+        if (id == 5 and (setting < max_frame_payload or setting > 0x00ffffff)) return error.InvalidFrameSequence;
         if (id == 4) {
             if (setting > max_window) return error.FlowControlError;
             value = setting;
@@ -52,9 +54,17 @@ pub fn initialSetting(payload: []const u8) !?i64 {
     return value;
 }
 
+pub fn validateSettings(frame: http2.FrameHeader) !void {
+    if (frame.stream_id != 0) return error.InvalidFrameSequence;
+    if (frame.flags & 1 != 0) {
+        if (frame.length != 0) return error.InvalidFrameSequence;
+    } else if (frame.length % 6 != 0) return error.InvalidFrameSequence;
+}
+
 pub fn windowUpdate(stream_id: u32, count: u32) [13]u8 {
-    var frame: [13]u8 = undefined;
-    http2.writeFrameHeader(&frame, .{ .length = 4, .frame_type = .window_update, .flags = 0, .stream_id = stream_id }) catch unreachable;
+    // this frame has a fixed four-byte payload and no flags.
+    var frame = [_]u8{ 0, 0, 4, @intFromEnum(http2.FrameType.window_update), 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    std.mem.writeInt(u32, frame[5..9], stream_id & 0x7fffffff, .big);
     std.mem.writeInt(u32, frame[9..13], count, .big);
     return frame;
 }
@@ -130,12 +140,13 @@ pub const Queue = struct {
 
 pub fn sequenceLength(bytes: []const u8) !usize {
     const first = http2.parseFrameHeader(bytes) orelse return error.BufferTooShort;
+    if (first.length > max_frame_payload) return error.InvalidFrameSequence;
     var length: usize = http2.frame_header_len + first.length;
     if (bytes.len < length) return error.BufferTooShort;
     if (first.frame_type == .headers and first.flags & 4 == 0) {
         while (true) {
             const next = http2.parseFrameHeader(bytes[length..]) orelse return error.BufferTooShort;
-            if (next.frame_type != .continuation or next.stream_id != first.stream_id) return error.InvalidFrameSequence;
+            if (next.length > max_frame_payload or next.frame_type != .continuation or next.stream_id != first.stream_id) return error.InvalidFrameSequence;
             length += http2.frame_header_len + next.length;
             if (bytes.len < length) return error.BufferTooShort;
             if (next.flags & 4 != 0) break;
@@ -336,4 +347,20 @@ test "http2 flow sends control frames while data waits for stream credit" {
         try std.testing.expectEqual(byte, sink.bytes.items[offset + 9]);
         offset += 10;
     }
+}
+
+test "http2 flow rejects malformed settings and oversized continuation frames" {
+    try std.testing.expectError(error.InvalidFrameSequence, validateSettings(.{ .length = 0, .frame_type = .settings, .flags = 0, .stream_id = 1 }));
+    try std.testing.expectError(error.InvalidFrameSequence, validateSettings(.{ .length = 6, .frame_type = .settings, .flags = 1, .stream_id = 0 }));
+    try std.testing.expectError(error.InvalidFrameSequence, initialSetting(&.{ 0, 5, 0, 0, 0, 1 }));
+    try std.testing.expectError(error.InvalidFrameSequence, initialSetting(&.{ 0, 5, 1, 0, 0, 0 }));
+    try std.testing.expectError(error.InvalidFrameSequence, initialSetting(&.{ 0, 2, 0, 0, 0, 2 }));
+    var frames: [18]u8 = undefined;
+    try http2.writeFrameHeader(frames[0..9], .{ .length = 0, .frame_type = .headers, .flags = 0, .stream_id = 1 });
+    try http2.writeFrameHeader(frames[9..], .{ .length = max_frame_payload + 1, .frame_type = .continuation, .flags = 4, .stream_id = 1 });
+    try std.testing.expectError(error.InvalidFrameSequence, sequenceLength(&frames));
+    try http2.writeFrameHeader(frames[9..], .{ .length = 0, .frame_type = .continuation, .flags = 4, .stream_id = 3 });
+    try std.testing.expectError(error.InvalidFrameSequence, sequenceLength(&frames));
+    try http2.writeFrameHeader(frames[9..], .{ .length = 0, .frame_type = .continuation, .flags = 4, .stream_id = 1 });
+    try std.testing.expectEqual(@as(usize, 18), try sequenceLength(&frames));
 }
