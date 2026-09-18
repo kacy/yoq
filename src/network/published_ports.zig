@@ -262,7 +262,7 @@ fn applyRules(alloc: Allocator, claims: []const Claim) !void {
     defer file.close(io);
     defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
     try file.writeStreamingAll(io, rules);
-    _ = try platform.posix.lseek(file.handle, 0, std.posix.SEEK.SET);
+    _ = try platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
     try run(&.{ "iptables-restore", "--wait", "5", "--noflush" }, file);
     try ensureJump("filter", "FORWARD", "YOQ-PUBLISHED-FWD", false);
     try ensureJump("filter", "INPUT", "YOQ-PUBLISHED-IN", false);
@@ -303,4 +303,67 @@ test "published ports balance eligible replicas and reject an empty service" {
     try std.testing.expect(std.mem.indexOf(u8, rules, "10.42.0.3:80") != null);
     try std.testing.expect(std.mem.indexOf(u8, rules, "10.42.0.4") == null);
     try std.testing.expect(std.mem.indexOf(u8, rules, "--dport 9090 -j REJECT") != null);
+}
+
+test "published ports preserve durable sibling claims after removal and apply failure" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    registry.resetForTest();
+    defer registry.resetForTest();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    for ([_][]const u8{ "one", "two", "replacement" }) |id| try store.save(.{
+        .id = id,
+        .rootfs = "/rootfs",
+        .command = "server",
+        .hostname = "web",
+        .status = "running",
+        .pid = 1,
+        .exit_code = null,
+        .app_name = "shop",
+        .created_at = 0,
+    });
+    const Fake = struct {
+        var fail_next: bool = false;
+        var calls: usize = 0;
+        fn apply(_: Allocator, _: []const Claim) !void {
+            calls += 1;
+            if (fail_next) {
+                fail_next = false;
+                return error.InjectedFirewallFailure;
+            }
+        }
+    };
+    Fake.fail_next = false;
+    Fake.calls = 0;
+    const ports = [_]spec.PortMapping{.{ .host_port = 8080, .container_port = 80 }};
+    for ([_][]const u8{ "one", "two" }) |id| try change(alloc, .{ .publish = .{
+        .app = "shop",
+        .service = "web",
+        .container = id,
+        .ports = &ports,
+    } }, Fake.apply);
+    try std.testing.expectEqual(@as(usize, 2), (try loadClaims(alloc)).items.len);
+    try change(alloc, .{ .remove = "one" }, Fake.apply);
+    // an old supervisor can repeat cleanup after its replacement has started.
+    try change(alloc, .{ .remove = "one" }, Fake.apply);
+    var saved = try loadClaims(alloc);
+    try std.testing.expectEqual(@as(usize, 1), saved.items.len);
+    try std.testing.expectEqualStrings("two", saved.items[0].container);
+    Fake.fail_next = true;
+    const before = Fake.calls;
+    try std.testing.expectError(error.InjectedFirewallFailure, change(alloc, .{ .publish = .{
+        .app = "shop",
+        .service = "web",
+        .container = "replacement",
+        .ports = &ports,
+    } }, Fake.apply));
+    try std.testing.expectEqual(before + 2, Fake.calls);
+    saved = try loadClaims(alloc);
+    try std.testing.expectEqual(@as(usize, 1), saved.items.len);
+    try std.testing.expectEqualStrings("two", saved.items[0].container);
+    try store.updateStatus("two", "stopped", null, 0);
+    try change(alloc, .refresh, Fake.apply);
+    try std.testing.expectEqual(@as(usize, 0), (try loadClaims(alloc)).items.len);
 }
