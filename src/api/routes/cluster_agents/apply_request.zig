@@ -79,11 +79,11 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
                 alloc.free(command);
                 return ParseError.InvalidRequest;
             };
-            const replicas = numbers.field(u32, numeric.value, "replicas", 1, 4096, 1) catch {
+            const replicas = numbers.field(u32, numeric.value, "replicas", 1, spec.max_service_replicas, 1) catch {
                 alloc.free(command);
                 return ParseError.InvalidRequest;
             };
-            if (@as(u64, replicas) * @max(@as(u64, 1), resources.world_size) > 4096) {
+            if (@as(u64, replicas) * @max(@as(u64, 1), resources.world_size) > spec.max_service_replicas) {
                 alloc.free(command);
                 return ParseError.InvalidRequest;
             }

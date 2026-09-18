@@ -83,13 +83,13 @@ pub fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const to
     const gpu_mesh_spec = try fields.parseGpuMeshSpec(table.getTable("gpu_mesh"));
 
     const replicas_raw = table.getInt("replicas") orelse 1;
-    if (replicas_raw < 1 or replicas_raw > 4096) {
-        log.err("manifest: service.{s}.replicas must be between 1 and 4096", .{name});
+    if (replicas_raw < 1 or replicas_raw > spec.max_service_replicas) {
+        log.err("manifest: service.{s}.replicas must be between 1 and {d}", .{ name, spec.max_service_replicas });
         return error.InvalidServiceConfig;
     }
     if (gpu_mesh_spec) |mesh| {
-        if (@as(u64, @intCast(replicas_raw)) * mesh.world_size > 4096) {
-            log.err("manifest: service.{s} exceeds 4096 replica ranks", .{name});
+        if (@as(u64, @intCast(replicas_raw)) * mesh.world_size > spec.max_service_replicas) {
+            log.err("manifest: service.{s} exceeds {d} service endpoints", .{ name, spec.max_service_replicas });
             return error.InvalidServiceConfig;
         }
     }

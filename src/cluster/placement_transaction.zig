@@ -131,8 +131,9 @@ pub fn replaceWorkload(alloc: std.mem.Allocator, session: mutation.Session, requ
 
 fn placeWithMetadata(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8, metadata_sql: ?[]const u8, replicas: u32) mutation.Error!?Placement {
     // bound the full replica group before allocating or building sql.
-    if (replicas == 0 or replicas > 4096 or @as(u64, replicas) * @max(@as(u64, 1), request.gang_world_size) > max_gang_ranks) return error.Conflict;
+    if (replicas == 0 or replicas > @import("../manifest/spec.zig").max_service_replicas or @as(u64, replicas) * @max(@as(u64, 1), request.gang_world_size) > max_gang_ranks) return error.Conflict;
     if (request.cpu_limit <= 0 or request.memory_limit_mb <= 0 or request.gpu_limit < 0 or request.gang_world_size > max_gang_ranks) return error.Conflict;
+    if (std.mem.eql(u8, request.workload_kind orelse "", "service") and @as(u64, replicas) * @max(@as(u64, 1), request.gang_world_size) > @import("../manifest/spec.zig").max_service_replicas) return error.Conflict;
     for (0..3) |_| {
         return placeOnce(alloc, session, request, release_id, metadata_sql, replicas) catch |err| {
             if (err == error.Conflict) continue;

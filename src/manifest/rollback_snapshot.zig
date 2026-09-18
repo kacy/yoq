@@ -274,7 +274,10 @@ fn manifestFromSnapshot(alloc: std.mem.Allocator, parsed: JsonApp) !spec.Manifes
 }
 
 fn serviceFromSnapshot(alloc: std.mem.Allocator, svc: JsonService) !spec.Service {
-    if (svc.replicas < 1 or svc.replicas > 4096) return error.InvalidServiceConfig;
+    if (svc.replicas < 1 or svc.replicas > spec.max_service_replicas) return error.InvalidServiceConfig;
+    if (svc.gpu_mesh) |mesh| {
+        if (@as(u64, svc.replicas) * mesh.world_size > spec.max_service_replicas) return error.InvalidServiceConfig;
+    }
     var result: spec.Service = .{ .name = "", .image = "", .command = &.{}, .env = &.{}, .depends_on = &.{}, .volumes = &.{}, .ports = &.{}, .working_dir = null };
     errdefer result.deinit(alloc);
     result.name = try alloc.dupe(u8, svc.name);

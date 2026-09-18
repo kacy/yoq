@@ -2233,7 +2233,7 @@ test "manifest rejects ignored controls and invalid replica or alert values" {
     try std.testing.expectError(error.UnknownField, loadFromString(alloc, prefix ++ "repilcas = 3"));
     try std.testing.expectError(error.InvalidFieldType, loadFromString(alloc, prefix ++ "replicas = \"3\""));
     try std.testing.expectError(error.InvalidServiceConfig, loadFromString(alloc, prefix ++ "replicas = 0"));
-    try std.testing.expectError(error.InvalidServiceConfig, loadFromString(alloc, prefix ++ "replicas = 4097"));
+    try std.testing.expectError(error.InvalidServiceConfig, loadFromString(alloc, prefix ++ "replicas = 65"));
     try std.testing.expectError(error.InvalidServiceConfig, loadFromString(alloc, prefix ++ "required_labels = \"eu\""));
     try std.testing.expectError(error.InvalidAlertConfig, loadFromString(alloc, prefix ++ "[service.web.alerts]\ncpu_percent = 101"));
     try std.testing.expectError(error.InvalidAlertConfig, loadFromString(alloc, prefix ++ "[service.web.alerts]\nwebhook = \"file:///tmp/alert\""));
