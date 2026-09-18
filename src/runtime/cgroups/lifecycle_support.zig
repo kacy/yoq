@@ -286,6 +286,30 @@ pub const Cgroup = struct {
         }
     }
 
+    pub fn setFrozen(self: *const Cgroup, frozen: bool) !void {
+        return @import("admin.zig").setFrozen(self, frozen);
+    }
+
+    pub fn isFrozen(self: *const Cgroup) !bool {
+        return @import("admin.zig").isFrozen(self);
+    }
+
+    pub fn processes(self: *const Cgroup, alloc: std.mem.Allocator) ![]std.posix.pid_t {
+        var path_buffer: [512]u8 = undefined;
+        const filename = try std.fmt.bufPrint(&path_buffer, "{s}/cgroup.procs", .{self.path()});
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, filename, alloc, .limited(1024 * 1024));
+        defer alloc.free(bytes);
+        var pids: std.ArrayList(std.posix.pid_t) = .empty;
+        errdefer pids.deinit(alloc);
+        var lines = std.mem.tokenizeAny(u8, bytes, " \t\r\n");
+        while (lines.next()) |line| {
+            const pid = std.fmt.parseInt(std.posix.pid_t, line, 10) catch return error.ReadFailed;
+            if (pid <= 0) return error.ReadFailed;
+            try pids.append(alloc, pid);
+        }
+        return pids.toOwnedSlice(alloc);
+    }
+
     pub fn path(self: *const Cgroup) []const u8 {
         return self.path_buf[0..self.path_len];
     }
@@ -302,7 +326,7 @@ pub const Cgroup = struct {
         }
     }
 
-    fn writeFile(self: *const Cgroup, filename: []const u8, value: []const u8) !void {
+    pub fn writeFile(self: *const Cgroup, filename: []const u8, value: []const u8) !void {
         var path_buf: [512]u8 = undefined;
         const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ self.path(), filename }) catch return error.WriteFailed;
 
@@ -311,7 +335,7 @@ pub const Cgroup = struct {
         file.writeStreamingAll(std.Options.debug_io, value) catch return error.WriteFailed;
     }
 
-    fn readFile(self: *const Cgroup, filename: []const u8, buf: []u8) ![]const u8 {
+    pub fn readFile(self: *const Cgroup, filename: []const u8, buf: []u8) ![]const u8 {
         var path_buf: [512]u8 = undefined;
         const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ self.path(), filename }) catch return error.ReadFailed;
 
