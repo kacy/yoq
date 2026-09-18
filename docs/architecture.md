@@ -328,7 +328,7 @@ certificate management and TLS termination.
 
 **upstream request policy:** buffered HTTP/1 and HTTP/2 share a single upstream exchange for deadlines, response framing, connection ownership, and service identity verification. Routing owns retries and circuit accounting; the transport never silently replays a failed pooled write. Both buffered protocols use the same method and status retry policy. Mirror tasks use bounded, joined workers and the same exchange.
 
-Streaming HTTP/2 keeps its frame router and applies the shared method retry predicate before forwarding response frames. Its sessions currently own plaintext sockets: a required peer-TLS upstream is rejected before dialing, while permissive `warn` mode logs the plaintext fallback. Verified TLS streaming requires a session transport implementation; buffered HTTP/2 already uses the verified TLS exchange.
+streaming http/2 keeps its frame router and uses the shared verified tls transport for required peer authentication, including mirrors. incremental record reads let other streams progress while a peer sends a partial tls record. connection and stream windows bound data forwarding in both directions; queued writes preserve frame boundaries and allow control frames to pass when data has no credit. each upstream stream has its own connection, and a stalled mirror is dropped when its bounded queue fills.
 
 **TLS proxy:** a reverse proxy that terminates TLS 1.3 (AES-256-GCM). routes connections based on SNI (Server Name Indication) extracted from the ClientHello message.
 
