@@ -183,6 +183,19 @@ class HeldRegistry:
         self.socket.close()
 
 
+def propose_update(rig, leader, command):
+    """pace idempotent fixture writes without changing the api's admission limits."""
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            return rig.request(leader, "/cluster/propose", command.encode())
+        except urllib.error.HTTPError as error:
+            with error:
+                if error.code != 429 or time.monotonic() >= deadline:
+                    raise
+            time.sleep(0.25)
+
+
 def exercise(rig):
     rig.prepare()
     for node in range(1, 4):
@@ -254,10 +267,10 @@ def exercise(rig):
         payload = "x" * (20 * 1024)
         for sequence in range(65):
             command = f"UPDATE agents SET labels = 'backlog-{sequence}-{payload}' WHERE id = '{agent_id}';"
-            rig.request(leader, "/cluster/propose", command.encode())
+            propose_update(rig, leader, command)
         rig.start_server(first)
         wait_for("restarted voter catches up", lambda: rig.request(first, "/cluster/status")["last_applied"] >= rig.request(leader, "/cluster/status")["commit_index"])
-        rig.request(leader, "/cluster/propose", f"UPDATE agents SET labels = 'caught-up' WHERE id = '{agent_id}';".encode())
+        propose_update(rig, leader, f"UPDATE agents SET labels = 'caught-up' WHERE id = '{agent_id}';")
         wait_for("small write after large catch-up", lambda: rig.request(first, "/agents")[0]["labels"] == "caught-up")
         (rig.artifacts / "result.json").write_text(json.dumps({"agent_id": agent_id, "killed_leader": first, "surviving_leader": leader, "terminal_assignment": terminal}, indent=2))
         print("leader loss, assignment delivery, agent restart, and durable result recovery passed")
