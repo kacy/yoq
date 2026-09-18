@@ -15,6 +15,8 @@ const service_runtime = @import("service_runtime.zig");
 const startup_runtime = @import("startup_runtime.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 
+const instances = @import("instances.zig");
+
 const writeErr = cli.writeErr;
 
 const initial_backoff_ms: u64 = service_runtime.initial_backoff_ms;
@@ -36,7 +38,7 @@ const PreparedService = struct {
     mesh_support: ?gpu_runtime.MeshSupport,
 
     fn init(io: std.Io, orch: anytype, idx: usize) ?PreparedService {
-        const svc = orch.manifest.services[idx];
+        const svc = orch.manifest.services[instances.serviceIndex(orch.manifest.services, idx)];
         const alloc = orch.alloc;
 
         var img = service_runtime.resolveServiceImageWithIo(io, alloc, svc.image) orelse return null;
@@ -152,7 +154,7 @@ const PreparedService = struct {
 };
 
 pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.atomic.Value(bool)) void {
-    const svc = orch.manifest.services[idx];
+    const svc = orch.manifest.services[instances.serviceIndex(orch.manifest.services, idx)];
 
     var threaded_io = std.Io.Threaded.init(orch.alloc, .{});
     defer threaded_io.deinit();
@@ -165,7 +167,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
 
     var backoff_ms: u64 = initial_backoff_ms;
 
-    while (true) {
+    while (!orch.states[idx].stop_requested.load(.acquire) and !shutdown_requested.load(.acquire)) {
         var id_buf: [12]u8 = undefined;
         container.generateId(&id_buf) catch {
             writeErr("failed to generate container ID for {s}\n", .{svc.name});
@@ -208,10 +210,11 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
         );
 
         const exit_code = c.wait() catch 255;
+        @import("../health.zig").unregisterContainer(id);
         const run_duration_ns = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds() - start_time;
         cleanupContainerArtifacts(id);
 
-        if (shutdown_requested.load(.acquire)) break;
+        if (shutdown_requested.load(.acquire) or orch.states[idx].stop_requested.load(.acquire)) break;
 
         if (orch.dev_mode) {
             if (!handleDevModeRestart(orch, idx, svc.name, shutdown_requested)) break;
@@ -242,16 +245,19 @@ pub fn watcherThread(orch: anytype, w: *watcher_mod.Watcher, shutdown_requested:
             const svc = orch.manifest.services[service_idx];
             writeErr("change detected in {s}, restarting...\n", .{svc.name});
 
-            const id = orch.states[service_idx].container_id;
-            const record = store.load(orch.alloc, id[0..]) catch |err| {
-                log.debug("watcher: container {s} not found (may have exited): {}", .{ svc.name, err });
-                orch.restart_requested[service_idx].store(true, .release);
-                continue;
-            };
-            defer record.deinit(orch.alloc);
+            for (0..svc.replicas) |replica| {
+                const instance = instances.instanceIndex(orch.manifest.services, service_idx, replica);
+                const id = orch.states[instance].container_id;
+                const record = store.load(orch.alloc, id[0..]) catch |err| {
+                    log.debug("watcher: container {s} not found (may have exited): {}", .{ svc.name, err });
+                    orch.restart_requested[instance].store(true, .release);
+                    continue;
+                };
+                defer record.deinit(orch.alloc);
 
-            terminateStableProcess(orch, svc.name, id[0..], record.pid);
-            orch.restart_requested[service_idx].store(true, .release);
+                terminateStableProcess(orch, svc.name, id[0..], record.pid);
+                orch.restart_requested[instance].store(true, .release);
+            }
         }
     }
 }
@@ -275,7 +281,7 @@ fn handleDevModeRestart(
     }
 
     orch.states[idx].status = .stopped;
-    while (!shutdown_requested.load(.acquire)) {
+    while (!shutdown_requested.load(.acquire) and !orch.states[idx].stop_requested.load(.acquire)) {
         if (orch.restart_requested[idx].load(.acquire)) {
             orch.restart_requested[idx].store(false, .release);
             writeErr("restarting {s}...\n", .{service_name});

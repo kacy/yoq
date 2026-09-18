@@ -22,6 +22,7 @@ const watcher_mod = @import("../dev/watcher.zig");
 const health = @import("health.zig");
 const cron_scheduler = @import("cron_scheduler.zig");
 const backup_scheduler = @import("backup_scheduler.zig");
+const instances = @import("orchestrator/instances.zig");
 const lifecycle_support = @import("orchestrator/lifecycle_support.zig");
 const runtime_loop = @import("orchestrator/runtime_loop.zig");
 const signal_support = @import("orchestrator/signal_support.zig");
@@ -43,6 +44,7 @@ pub const ServiceState = struct {
     thread: ?std.Thread,
     status: Status,
     health_status: ?health.HealthStatus = null,
+    stop_requested: std.atomic.Value(bool) = .init(false),
 
     pub const Status = enum {
         pending,
@@ -74,7 +76,8 @@ pub const Orchestrator = struct {
     start_set: ?std.StringHashMapUnmanaged(void) = null,
 
     pub fn init(alloc: std.mem.Allocator, manifest: *spec.Manifest, app_name: []const u8) !Orchestrator {
-        const states = try alloc.alloc(ServiceState, manifest.services.len);
+        const instance_count = try instances.count(manifest.services);
+        const states = try alloc.alloc(ServiceState, instance_count);
         errdefer alloc.free(states);
         for (states) |*s| {
             s.* = .{
@@ -84,7 +87,7 @@ pub const Orchestrator = struct {
             };
         }
 
-        const restart_flags = try alloc.alloc(std.atomic.Value(bool), manifest.services.len);
+        const restart_flags = try alloc.alloc(std.atomic.Value(bool), instance_count);
         for (restart_flags) |*f| {
             f.* = std.atomic.Value(bool).init(false);
         }
@@ -143,6 +146,24 @@ pub const Orchestrator = struct {
         completed_workers: *std.StringHashMapUnmanaged(void),
     ) OrchestratorError!void {
         return lifecycle_support.startServiceByIndex(self, OrchestratorError, idx, completed_workers, serviceThread);
+    }
+
+    pub fn serviceHealth(self: *const Orchestrator, service_index: usize) health.HealthStatus {
+        var result: health.HealthStatus = .healthy;
+        for (0..self.manifest.services[service_index].replicas) |replica| {
+            const state = self.states[instances.instanceIndex(self.manifest.services, service_index, replica)];
+            if (state.status == .failed or state.status == .stopped) return .unhealthy;
+            if (state.status != .running) {
+                result = .starting;
+                continue;
+            }
+            if (self.manifest.services[service_index].health_check != null) {
+                const status = health.getContainerStatus(&state.container_id) orelse .starting;
+                if (status == .unhealthy) return .unhealthy;
+                if (status == .starting) result = .starting;
+            }
+        }
+        return result;
     }
 
     /// register services for health checking and start the checker thread.
@@ -726,4 +747,28 @@ fn checkOrchestratorInit(alloc: std.mem.Allocator) !void {
 
 test "orchestrator init releases service states if restart allocation fails" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkOrchestratorInit, .{});
+}
+
+test "orchestrator starts and joins all three replicas as one service" {
+    const alloc = std.testing.allocator;
+    try @import("../state/store.zig").initTestDb();
+    defer @import("../state/store.zig").deinitTestDb();
+    var services = [_]spec.Service{testSvc("web", &.{})};
+    services[0].replicas = 3;
+    var manifest: spec.Manifest = .{ .services = &services, .workers = &.{}, .crons = &.{}, .training_jobs = &.{}, .volumes = &.{}, .alloc = alloc };
+    var orch = try Orchestrator.init(alloc, &manifest, "demo");
+    defer orch.deinit();
+    var completed_workers: std.StringHashMapUnmanaged(void) = .empty;
+    defer completed_workers.deinit(alloc);
+    try lifecycle_support.startServiceByIndex(&orch, OrchestratorError, 0, &completed_workers, fakeStartServiceThread);
+    for (orch.states) |state| {
+        try std.testing.expectEqual(ServiceState.Status.running, state.status);
+        try std.testing.expect(state.thread != null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), manifest.services.len);
+    orch.stopServiceByIndex(0);
+    for (orch.states) |state| {
+        try std.testing.expectEqual(ServiceState.Status.stopped, state.status);
+        try std.testing.expect(state.thread == null);
+    }
 }

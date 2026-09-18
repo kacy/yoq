@@ -11,6 +11,8 @@ const backup_scheduler = @import("../backup_scheduler.zig");
 const service_runtime = @import("service_runtime.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 
+const instances = @import("instances.zig");
+
 const writeErr = cli.writeErr;
 
 pub fn computeStartSet(self: anytype, comptime OrchestratorError: type) OrchestratorError!void {
@@ -173,27 +175,32 @@ pub fn startServiceByIndex(
         }
     }
 
-    self.states[idx].status = .starting;
-    container.generateId(&self.states[idx].container_id) catch {
-        writeErr("failed to generate container ID for {s}\n", .{svc.name});
-        self.states[idx].status = .failed;
-        return OrchestratorError.StartFailed;
-    };
+    errdefer stopServiceByIndex(self, idx);
+    for (0..svc.replicas) |replica| {
+        const instance = instances.instanceIndex(self.manifest.services, idx, replica);
+        self.states[instance].stop_requested.store(false, .release);
+        self.states[instance].status = .starting;
+        container.generateId(&self.states[instance].container_id) catch {
+            writeErr("failed to generate container ID for {s}\n", .{svc.name});
+            self.states[instance].status = .failed;
+            return OrchestratorError.StartFailed;
+        };
 
-    const thread = std.Thread.spawn(.{}, serviceThreadFn, .{ self, idx }) catch {
-        writeErr("failed to spawn thread for {s}\n", .{svc.name});
-        self.states[idx].status = .failed;
-        return OrchestratorError.StartFailed;
-    };
-    self.states[idx].thread = thread;
+        const thread = std.Thread.spawn(.{}, serviceThreadFn, .{ self, instance }) catch {
+            writeErr("failed to spawn thread for {s}\n", .{svc.name});
+            self.states[instance].status = .failed;
+            return OrchestratorError.StartFailed;
+        };
+        self.states[instance].thread = thread;
 
-    if (!waitForRunning(self, idx)) {
-        writeErr("service '{s}' failed to start\n", .{svc.name});
-        return OrchestratorError.StartFailed;
+        if (!waitForInstanceRunning(self, instance)) {
+            writeErr("service '{s}' failed to start\n", .{svc.name});
+            return OrchestratorError.StartFailed;
+        }
+
+        const id = self.states[instance].container_id;
+        writeErr("started {s} ({s})\n", .{ svc.name, id[0..] });
     }
-
-    const id = self.states[idx].container_id;
-    writeErr("started {s} ({s})\n", .{ svc.name, id[0..] });
 }
 
 pub fn stopAll(self: anytype) void {
@@ -227,35 +234,36 @@ pub fn stopAll(self: anytype) void {
 }
 
 pub fn stopServiceByIndex(self: anytype, idx: usize) void {
-    if (self.states[idx].status != .running and self.states[idx].status != .starting) return;
-
     const svc = self.manifest.services[idx];
+    // request every replica to stop before joining any supervisor thread.
+    for (0..svc.replicas) |replica| {
+        const instance = instances.instanceIndex(self.manifest.services, idx, replica);
+        self.states[instance].stop_requested.store(true, .release);
+    }
     health.unregisterService(svc.name);
 
-    const id = self.states[idx].container_id;
-    writeErr("stopping {s}...\n", .{svc.name});
-
-    const record = store.load(self.alloc, id[0..]) catch {
-        log.warn("orchestrator: failed to load container for shutdown: {s}", .{svc.name});
-        self.states[idx].status = .stopped;
-        if (self.states[idx].thread) |thread| {
-            thread.join();
-            self.states[idx].thread = null;
-        }
+    // include persisted replicas from the previous release, even during scale-down.
+    var records = store.listAll(self.alloc) catch {
+        log.warn("orchestrator: failed to list containers for shutdown: {s}", .{svc.name});
         return;
     };
-    defer record.deinit(self.alloc);
-
-    if (record.pid) |pid| {
-        process.terminate(pid) catch {
+    defer {
+        for (records.items) |record| record.deinit(self.alloc);
+        records.deinit(self.alloc);
+    }
+    for (records.items) |record| {
+        if (!std.mem.eql(u8, record.app_name orelse "", self.app_name) or !std.mem.eql(u8, record.hostname, svc.name)) continue;
+        if (record.pid) |pid| process.terminate(pid) catch {
             process.kill(pid) catch {};
         };
     }
-
-    self.states[idx].status = .stopped;
-    if (self.states[idx].thread) |thread| {
-        thread.join();
-        self.states[idx].thread = null;
+    for (0..svc.replicas) |replica| {
+        const instance = instances.instanceIndex(self.manifest.services, idx, replica);
+        if (self.states[instance].thread) |thread| {
+            thread.join();
+            self.states[instance].thread = null;
+        }
+        self.states[instance].status = .stopped;
     }
 }
 
@@ -282,6 +290,13 @@ pub fn serviceIndex(self: anytype, name: []const u8) ?usize {
 }
 
 pub fn waitForRunning(self: anytype, idx: usize) bool {
+    for (0..self.manifest.services[idx].replicas) |replica| {
+        if (!waitForInstanceRunning(self, instances.instanceIndex(self.manifest.services, idx, replica))) return false;
+    }
+    return true;
+}
+
+fn waitForInstanceRunning(self: anytype, idx: usize) bool {
     const timeout_ns: u64 = 30 * std.time.ns_per_s;
     const start = @as(u64, @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds()));
 

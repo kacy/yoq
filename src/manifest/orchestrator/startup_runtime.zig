@@ -14,6 +14,8 @@ const cli = @import("../../lib/cli.zig");
 const RouteInputs = @import("route_inputs.zig").RouteInputs;
 const tls_support = @import("tls_support.zig");
 
+const instances = @import("instances.zig");
+
 const writeErr = cli.writeErr;
 
 pub const TlsResources = @import("tls_resources.zig").TlsResources;
@@ -26,7 +28,8 @@ pub fn registerHealthChecks(
 ) void {
     var has_checks = false;
 
-    for (services, 0..) |svc, i| {
+    for (states, 0..) |_, i| {
+        const svc = services[instances.serviceIndex(services, i)];
         if (!shouldStart(start_set, svc.name)) continue;
         const hc = svc.health_check orelse continue;
         has_checks = true;
@@ -43,7 +46,7 @@ pub fn registerHealthChecks(
         else
             [4]u8{ 0, 0, 0, 0 };
 
-        health.registerService(svc.name, id, container_ip, hc) catch |err| {
+        health.registerReplicaService(svc.name, id, container_ip, hc) catch |err| {
             writeErr("health: failed to register checks for {s}: {}\n", .{ svc.name, err });
         };
         states[i].health_status = .starting;
@@ -105,8 +108,7 @@ pub fn refreshServiceRuntimeBindings(
         [4]u8{ 0, 0, 0, 0 };
 
     if (svc.health_check) |hc| {
-        health.unregisterService(svc.name);
-        health.registerService(svc.name, id, container_ip, hc) catch |err| {
+        health.registerReplicaService(svc.name, id, container_ip, hc) catch |err| {
             writeErr("health: failed to register checks for {s}: {}\n", .{ svc.name, err });
         };
         state.health_status = .starting;
@@ -173,7 +175,8 @@ fn registerTlsBackends(
     states: anytype,
     start_set: ?std.StringHashMapUnmanaged(void),
 ) void {
-    for (services, 0..) |svc, i| {
+    for (states, 0..) |_, i| {
+        const svc = services[instances.serviceIndex(services, i)];
         if (!shouldStart(start_set, svc.name)) continue;
         const tls = svc.tls orelse continue;
 

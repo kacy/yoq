@@ -223,10 +223,13 @@ fn classifyServiceIndexes(
 }
 
 fn existingServiceState(alloc: std.mem.Allocator, app_name: []const u8, service_name: []const u8) ExistingServiceState {
-    const record = store.findAppContainer(alloc, app_name, service_name) catch return .inactive;
-    if (record) |container| {
-        defer container.deinit(alloc);
-        return if (std.mem.eql(u8, container.status, "stopped")) .inactive else .active;
+    var records = store.listAll(alloc) catch return .inactive;
+    defer {
+        for (records.items) |record| record.deinit(alloc);
+        records.deinit(alloc);
+    }
+    for (records.items) |record| {
+        if (std.mem.eql(u8, record.app_name orelse "", app_name) and std.mem.eql(u8, record.hostname, service_name)) return .active;
     }
     return .inactive;
 }
@@ -276,15 +279,22 @@ fn nextRolloutBatchEnd(
 }
 
 fn syncExistingServiceStates(orch: *orchestrator.Orchestrator, release: *const release_plan.ReleasePlan) void {
+    var records = store.listAll(orch.alloc) catch return;
+    defer {
+        for (records.items) |record| record.deinit(orch.alloc);
+        records.deinit(orch.alloc);
+    }
     for (orch.manifest.services, 0..) |svc, idx| {
         if (!release.includesService(svc.name)) continue;
-        const record = store.findAppContainer(orch.alloc, release.app.app_name, svc.name) catch continue;
-        if (record) |container| {
-            defer container.deinit(orch.alloc);
-            if (std.mem.eql(u8, container.status, "stopped")) continue;
-            if (container.id.len != orch.states[idx].container_id.len) continue;
-            @memcpy(&orch.states[idx].container_id, container.id);
-            orch.states[idx].status = .running;
+        var replica: usize = 0;
+        for (records.items) |record| {
+            if (!std.mem.eql(u8, record.app_name orelse "", release.app.app_name) or !std.mem.eql(u8, record.hostname, svc.name)) continue;
+            if (replica >= svc.replicas) break;
+            const instance = @import("orchestrator/instances.zig").instanceIndex(orch.manifest.services, idx, replica);
+            if (record.id.len != orch.states[instance].container_id.len) continue;
+            @memcpy(&orch.states[instance].container_id, record.id);
+            orch.states[instance].status = .running;
+            replica += 1;
         }
     }
 }
@@ -900,15 +910,7 @@ const LocalApplyBackend = struct {
                     }
                     for (indexes, 0..) |idx, i| {
                         if (results[i] != .timeout) continue;
-                        const svc = runner_self.orch.manifest.services[idx];
-                        if (svc.health_check == null) {
-                            results[i] = .healthy;
-                            remaining -= 1;
-                            continue;
-                        }
-                        const status = health.getStatus(svc.name) orelse {
-                            break;
-                        };
+                        const status = runner_self.orch.serviceHealth(idx);
                         switch (status) {
                             .healthy => {
                                 results[i] = .healthy;
