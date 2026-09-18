@@ -69,8 +69,8 @@ def exercise_bundles(rig):
     agent_id = expected["agent_id"]
 
     def restored_assignment():
-        return [item for item in rig.request(restored_leader, f"/agents/{agent_id}/assignments")
-                if item["id"] == "outage000001" and item["status"] == "failed"]
+        return [item for item in rig.request(restored_leader, f"/agents/{agent_id}/assignments", credential=rig.worker_credential())
+                if item["id"] == "a11ce0000001" and item["status"] == "failed"]
 
     wait_for("terminal assignment after cluster restore", restored_assignment)
     # the original enrollment belongs to the same restored cluster and still works.

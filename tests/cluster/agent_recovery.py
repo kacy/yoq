@@ -107,9 +107,15 @@ class Rig:
         self.require_running(4)
         return self.request(server, "/agents")
 
-    def request(self, node, path, body=None):
+    def worker_credential(self):
+        identities = [path for path in (self.data(4) / "enrollment").iterdir() if len(path.name) == 64]
+        if len(identities) != 1:
+            raise RuntimeError("expected one persisted enrollment identity")
+        return identities[0].read_bytes()[:32].hex()
+
+    def request(self, node, path, body=None, credential=None):
         request = urllib.request.Request(f"http://10.233.0.{node}:7700{path}", data=body,
-                                         headers={"Authorization": f"Bearer {self.api_token}"})
+                                         headers={"Authorization": f"Bearer {credential or self.api_token}"})
         with self.http.open(request, timeout=3) as response:
             return json.load(response)
 
@@ -191,18 +197,18 @@ def exercise(rig):
     registry = HeldRegistry()
     try:
         sql = ("INSERT INTO assignments (id, agent_id, image, command, status, workload_kind, created_at) "
-               f"VALUES ('outage000001', '{agent_id}', '10.233.0.254:5000/missing:latest', '', 'pending', 'worker', {int(time.time())});")
+               f"VALUES ('a11ce0000001', '{agent_id}', '10.233.0.254:5000/missing:latest', '', 'pending', 'worker', {int(time.time())});")
         rig.request(leader, "/cluster/propose", sql.encode())
         wait_for("assignment received after leader loss", registry.connected.is_set)
         rig.run(*rig.inside(4, "iptables", "-A", "OUTPUT", "-p", "tcp", "--dport", "7700", "-j", "REJECT"))
         registry.close()
-        wait_for("durable undelivered terminal report", lambda: ("outage000001", "failed", 0) in rig.reports())
+        wait_for("durable undelivered terminal report", lambda: ("a11ce0000001", "failed", 0) in rig.reports())
         rig.stop(4)
         # restart with the original, dead seed. both credentials and alternate
         # endpoints must come from the existing enrollment files.
         rig.start(4, "join", seed, "--port", "7700", "--token", rig.token)
         rig.run(*rig.inside(4, "iptables", "-D", "OUTPUT", "-p", "tcp", "--dport", "7700", "-j", "REJECT"))
-        terminal = wait_for("committed result after agent restart", lambda: [item for item in rig.request(leader, f"/agents/{agent_id}/assignments") if item["id"] == "outage000001" and item["status"] == "failed"])
+        terminal = wait_for("committed result after agent restart", lambda: [item for item in rig.request(leader, f"/agents/{agent_id}/assignments", credential=rig.worker_credential()) if item["id"] == "a11ce0000001" and item["status"] == "failed"])
         current = rig.request(leader, "/agents")
         if [item["id"] for item in current] != [agent_id]:
             raise RuntimeError("agent restart changed the enrollment identity")
