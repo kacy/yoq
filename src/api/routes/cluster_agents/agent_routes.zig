@@ -831,7 +831,7 @@ test "agent recovery refuses follower heartbeats with or without a leader hint" 
         try std.testing.expect((try node.heartbeat_batcher.flush(alloc)) == null);
     }
     node.raft.role = .leader;
-    const accepted = handleAgentHeartbeat(alloc, request, "worker000001", .{ .cluster = &node });
+    const accepted = handleAgentHeartbeat(alloc, request, "worker000001", .{ .cluster = &node, .join_token = null });
     defer if (accepted.allocated) alloc.free(accepted.body);
     try std.testing.expectEqual(http.StatusCode.ok, accepted.status);
     const batch = (try node.heartbeat_batcher.flush(alloc)) orelse return error.MissingHeartbeat;
