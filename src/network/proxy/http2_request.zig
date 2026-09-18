@@ -376,9 +376,9 @@ fn appendForwardedHeaders(out: *std.ArrayList(u8), alloc: std.mem.Allocator, hea
     defer alloc.free(rewritten);
     var fragments: @import("http2_flow.zig").Queue = .{};
     defer fragments.deinit(alloc);
-    fragments.appendHeaders(alloc, rewritten) catch |err| switch (err) {
-        error.QueueFull => return error.InvalidFrameSequence,
-        else => return err,
+    fragments.appendHeaders(alloc, rewritten) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidFrameSequence,
     };
     try out.appendSlice(alloc, fragments.bytes.items);
 }
