@@ -41,10 +41,20 @@ see the [operator evaluation guide](golden-path.md) for manual application check
 
 the `runtime-validation` workflow runs every lane on its schedule. manual runs can select `cluster` or `bpf` for a focused rerun; `all` includes the core and network lanes. normal pull request ci also checks the installer contract and runs real backup, verification, corruption-rejection, and restore commands against disposable state.
 
-ci also runs `agent-recovery` with three real server processes and one joined agent in isolated network namespaces. it checks leader death, follower redirects, persisted terminal results, offline agent restart, and recovery of a complete fixed-voter backup set into fresh data roots. run it locally after building:
+## cluster process drills
+
+ci runs `agent-recovery` with real server and agent processes. the scheduled cluster lane also runs the drain fixture. run both on a disposable linux host after building the runtime helpers; these commands run sequentially and print their artifact directories:
 
 ```bash
+make test-runtime-cluster
 sudo env YOQ_BIN="$PWD/zig-out/bin/yoq" YOQ_RECOVERY_BUNDLES=1 bash scripts/agent-recovery-smoke.sh
+sudo env YOQ_BIN="$PWD/zig-out/bin/yoq" bash scripts/agent-drain-smoke.sh
 ```
 
-the fixture needs `unshare`, `nsenter`, iproute2, iptables, python3, and wireguard kernel support. it uses local dummy credentials and a failing local registry, so it does not pull an external image. its private artifact directory retains voter state and credentials; the ci recovery-log artifact contains only logs and the result summary. failed runs also retain the executable briefly for local reproduction.
+the recovery fixture needs `unshare`, `nsenter`, iproute2, iptables, python3, and wireguard kernel support. it uses local dummy credentials and a failing local registry, so it does not pull an external image. its private artifact directory retains voter state and credentials; the ci recovery-log artifact contains only logs and the result summary. failed runs also retain the executable briefly for local reproduction.
+
+the drain fixture also needs curl, openssl, and the built `yoq-test-http-server` helper. it serves its test image from a local fixture registry.
+
+the recovery fixture exercises three voting servers, agent restart, durable result delivery, and offline bundle restore. it also brings a stopped voter back after 65 commands of roughly 20 kib each and checks that a subsequent small write reaches that voter. the drain fixture uses two workers and a live service to check blocked capacity, replacement readiness, a leader restart during handoff, and source agent shutdown after `drained`.
+
+save the binary hash, command output, and fixture artifacts for the revision being reviewed. report the result of each fixture invocation separately. cloud and physical gpu acceptance require the separate procedures in the [gcp validation guide](gcp-cluster-validation.md) and [gpu validation guide](gpu-validation.md).

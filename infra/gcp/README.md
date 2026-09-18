@@ -24,4 +24,7 @@ Notes:
 - The CPU image family defaults to `ubuntu-2204-lts`; older configs using `ubuntu-2204-lts-amd64` are translated automatically.
 - GPU mode requires non-zero `GPUS_ALL_REGIONS` quota.
 - `down.sh` uses `infra/gcp/.state/current` when available and exits cleanly if no rig state exists.
-- Full usage details are in `docs/gcp-cluster-validation.md`.
+- record the installed version and executable hash on every node. the release installer does not deploy the checkout, and `YOQ_BINARY_PATH` selects only the local validation cli.
+- `validate.sh` covers its listed smoke checks. drain handoffs, leader restart during a handoff, and large-command follower catch-up need the [additional reliability acceptance checks](../../docs/gcp-cluster-validation.md#additional-reliability-acceptance).
+- read the [upgrade requirements](../../docs/install-and-recovery.md#cluster-upgrades) before reusing a rig with existing state. complete older apply and training commands before switching local lock protocols.
+- full usage details are in the [gcp validation guide](../../docs/gcp-cluster-validation.md).

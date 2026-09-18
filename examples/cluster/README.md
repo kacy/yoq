@@ -38,6 +38,12 @@ sudo -H "$(command -v yoq)" status --server 10.0.0.1:7700
 sudo -H "$(command -v yoq)" metrics --server 10.0.0.1:7700
 ```
 
+## maintenance
+
+follow the [cluster upgrade procedure](../../docs/install-and-recovery.md#cluster-upgrades) before draining or replacing a node. upgrade every voter before using the new drain transitions. keep a draining agent online until its status is `drained` and it has no running containers.
+
+this example's `pgdata` and `backups` volumes are node-local. automatic drain cannot move that data, so a host running a volume-backed service can remain `drain_blocked`. plan the data move and verify the saved postgres rows after recovery. stateless services need spare placement capacity and a ready replacement before the original stops; see [draining a node](../../docs/cluster-guide.md#draining-a-node).
+
 ## notes
 
 - open ports 80 and 443 on the node serving `myapp.example.com` if you want ACME issuance to succeed
