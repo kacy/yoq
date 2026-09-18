@@ -129,13 +129,9 @@ It performs eight classes of checks:
 
 Artifacts are written under `infra/gcp/artifacts/<rig>/<timestamp>/`.
 
-## current limitation
+## smoke coverage
 
-The current cluster training path transports a single executable string, not a
-full argv array. Because of that, the default training smoke uses
-`/usr/bin/env` inside the training image to prove mesh-related environment
-injection and gang placement. GPU execution itself is validated separately with
-direct `yoq run ... nvidia-smi` container smoke on each GPU agent.
+cluster assignments preserve the full command argument list. the default training smoke uses `/usr/bin/env` to check environment injection and gang placement; it does not execute a distributed training framework. direct `yoq run ... nvidia-smi` checks device visibility on each gpu agent. use the [gpu validation guide](gpu-validation.md) for concurrent ranks, communication, cancellation, and recovery.
 
 The included [`infra/gcp/train/smoke.py`](../infra/gcp/train/smoke.py) is there
 for a richer future smoke image or for manual experiments on the nodes, but the

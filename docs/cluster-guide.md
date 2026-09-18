@@ -127,10 +127,10 @@ the agent writes its private enrollment identity under `~/.local/share/yoq/enrol
 
 keep this directory across agent restarts. changing the join address, port or token selects a separate identity. older servers remain compatible but do not deduplicate enrollment; upgrade servers before relying on retry recovery. registrations created without a durable enrollment identity are not matched retroactively.
 
-after joining, verify the agent appears:
+from a server or operator host with the installed api token, verify the agent appears:
 
 ```
-sudo -H yoq nodes
+sudo -H yoq nodes --server 10.0.0.1:7700
 ```
 
 ---

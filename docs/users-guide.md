@@ -341,7 +341,7 @@ distributed training workloads use all-or-nothing scheduling: either all request
 
 ### InfiniBand and NCCL
 
-yoq detects InfiniBand HCAs, generates NCCL topology XML for optimal GPU-NIC affinity, and injects NCCL environment variables into training containers (`MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE`, `RANK`, `LOCAL_RANK`).
+yoq detects infiniband devices and injects communication settings and rank metadata (`MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE`, `RANK`, `LOCAL_RANK`) into training containers. the current training paths do not generate or attach an nccl topology file.
 
 ### health monitoring
 
@@ -353,9 +353,9 @@ local jobs lease distinct gpus and start all ranks before waiting. pause and sto
 
 training jobs follow a state machine: pending → scheduling → running → paused → completed/failed/stopped.
 
-- **checkpoints:** configurable interval (default 1800s) and retention (default 5)
+- **checkpoints:** the requested interval is passed to the application, which writes its own checkpoints. local synchronization applies the configured retention count.
 - **fault tolerance:** bounded job restarts and checkpoint metadata; applications restore their own checkpoints. automatic spare-rank failover is not implemented.
-- **data:** dataset path, sharding strategy, optional preprocessing pipeline
+- **data:** prepared datasets mounted as volumes; preprocessing belongs in the job command
 - **resources:** CPU, memory, and InfiniBand requirements per rank
 
 ### CLI

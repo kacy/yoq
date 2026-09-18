@@ -613,8 +613,8 @@ defined under `[training.<name>.checkpoint]`. the path is inside each container 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
 | `path` | string | yes | — | checkpoint storage path |
-| `interval_secs` | integer | no | `1800` | seconds between checkpoints |
-| `keep` | integer | no | `5` | number of checkpoints to retain |
+| `interval_secs` | integer | no | `1800` | requested interval passed as `YOQ_CHECKPOINT_INTERVAL`; the application controls writes |
+| `keep` | integer | no | `5` | checkpoints retained during local synchronization; cluster storage needs its own retention policy |
 
 ```toml
 [training.llm-finetune.checkpoint]
