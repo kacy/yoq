@@ -23,9 +23,11 @@ pub const ParsedUpgrade = struct {
     authority: []const u8,
     path: []const u8,
     request_headers: []const router.RequestHeader,
+    settings: []const u8 = &.{},
 
     pub fn deinit(self: ParsedUpgrade, alloc: std.mem.Allocator) void {
         alloc.free(self.request_headers);
+        alloc.free(self.settings);
     }
 };
 
@@ -52,9 +54,8 @@ pub fn parseUpgradeRequest(alloc: std.mem.Allocator, raw_request: []const u8) Pa
         return error.UnsupportedBody;
     }
 
-    if (settings_value) |encoded| {
-        try validateSettingsHeader(encoded);
-    }
+    const settings = if (settings_value) |encoded| try decodeSettingsHeader(alloc, encoded) else &.{};
+    errdefer alloc.free(settings);
 
     const host_header = http.findHeaderValue(request.headers_raw, "Host") orelse return error.MissingHostHeader;
 
@@ -63,6 +64,7 @@ pub fn parseUpgradeRequest(alloc: std.mem.Allocator, raw_request: []const u8) Pa
         .authority = host_header,
         .path = request.path,
         .request_headers = try router.collectHttp1Headers(alloc, request.headers_raw),
+        .settings = settings,
     };
 }
 
@@ -110,14 +112,15 @@ pub fn buildStream1HeadersFrame(
     }, header_block);
 }
 
-fn validateSettingsHeader(value: []const u8) ParseError!void {
+fn decodeSettingsHeader(alloc: std.mem.Allocator, value: []const u8) ParseError![]const u8 {
     const decoder = std.base64.url_safe_no_pad.Decoder;
-    const decoded_len = decoder.calcSizeForSlice(value) catch return error.InvalidSettings;
-    if (decoded_len % 6 != 0) return error.InvalidSettings;
-
-    var buf: [256]u8 = undefined;
-    if (decoded_len > buf.len) return error.InvalidSettings;
-    decoder.decode(buf[0..decoded_len], value) catch return error.InvalidSettings;
+    const length = decoder.calcSizeForSlice(value) catch return error.InvalidSettings;
+    if (length % 6 != 0 or length > 256) return error.InvalidSettings;
+    const bytes = try alloc.alloc(u8, length);
+    errdefer alloc.free(bytes);
+    decoder.decode(bytes, value) catch return error.InvalidSettings;
+    _ = @import("http2_flow.zig").initialSetting(bytes) catch return error.InvalidSettings;
+    return bytes;
 }
 
 fn isHttp11Request(raw_request: []const u8) bool {
@@ -267,4 +270,18 @@ test "h2c leaves ordinary http1.0 and websocket requests to the http1 handler" {
         "GET / HTTP/1.0\r\nHost: api.internal\r\n\r\n",
         "GET /socket HTTP/1.1\r\nHost: api.internal\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
     }) |request| try std.testing.expectEqual(null, try parseUpgradeRequest(std.testing.allocator, request));
+}
+
+test "http2 flow retains upgrade initial window settings and rejects overflow" {
+    const alloc = std.testing.allocator;
+    const parsed = (try parseUpgradeRequest(
+        alloc,
+        "GET / HTTP/1.1\r\nHost: api\r\nConnection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AAQAAAAA\r\n\r\n",
+    )).?;
+    defer parsed.deinit(alloc);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 4, 0, 0, 0, 0 }, parsed.settings);
+    try std.testing.expectError(error.InvalidSettings, parseUpgradeRequest(
+        alloc,
+        "GET / HTTP/1.1\r\nHost: api\r\nConnection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AASAAAAA\r\n\r\n",
+    ));
 }

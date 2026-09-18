@@ -9,6 +9,7 @@ const proxy_helpers = @import("proxy_helpers.zig");
 const socket_helpers = @import("socket_helpers.zig");
 const transport = @import("../../tls/client_transport.zig");
 const exchange = @import("upstream_exchange.zig");
+const flow = @import("http2_flow.zig");
 const PeerKey = @import("../../tls/proxy_credentials.zig").Key;
 const http2_request = @import("http2_request.zig");
 const http2_response = @import("http2_response.zig");
@@ -64,6 +65,7 @@ pub fn proxyUpgradedConnection(
     };
     defer connection.deinit();
 
+    try connection.applyClientSettings(upgraded.settings);
     try connection.bootstrapUpgradedStream(upgraded);
     try connection.run();
 }
@@ -79,10 +81,21 @@ const ConnectionRouter = struct {
     saw_client_preface: bool = false,
     sent_settings: bool = false,
     last_activity_ms: i64 = 0,
+    downstream_send: flow.Window = .{},
+    downstream_receive: flow.Window = .{},
+    downstream_initial_window: i64 = flow.initial_window,
+    downstream_control: flow.Queue = .{},
+    downstream_active: flow.Queue = .{},
+    active_stream: ?u32 = null,
+    active_cost: usize = 0,
+    active_end: bool = false,
+    next_response_index: usize = 0,
 
     fn deinit(self: *ConnectionRouter) void {
         if (self.peer_key) |*key| std.crypto.secureZero(u8, key);
         self.downstream_buf.deinit(self.allocator);
+        self.downstream_control.deinit(self.allocator);
+        self.downstream_active.deinit(self.allocator);
         for (self.streams.items) |*session| session.deinit(self.allocator);
         self.streams.deinit(self.allocator);
     }
@@ -91,6 +104,8 @@ const ConnectionRouter = struct {
         self.last_activity_ms = nowMs();
         while (true) {
             try self.processDownstreamBuffer();
+            try self.flushStreams();
+            try self.flushDownstream();
 
             const now = nowMs();
             if (try self.expireTimedOutStreams(now)) continue;
@@ -107,23 +122,23 @@ const ConnectionRouter = struct {
 
             try poll_fds.append(self.allocator, .{
                 .fd = self.client_fd,
-                .events = posix.POLL.IN,
+                .events = posix.POLL.IN | (if (self.downstreamWantsWrite()) @as(i16, posix.POLL.OUT) else 0),
                 .revents = 0,
             });
             var buffered_input = false;
             for (self.streams.items, 0..) |session, idx| {
-                buffered_input = buffered_input or session.connection.buffered();
+                buffered_input = buffered_input or (!session.upstream_end_received and session.connection.buffered());
                 try poll_fds.append(self.allocator, .{
-                    .fd = session.connection.fd(),
-                    .events = posix.POLL.IN,
+                    .fd = if (session.upstream_end_received) -1 else session.connection.fd(),
+                    .events = (if (session.upstream_end_received) @as(i16, 0) else posix.POLL.IN) | (if (session.flow_state.wantsWrite() or session.connection.pendingWrite()) @as(i16, posix.POLL.OUT) else 0),
                     .revents = 0,
                 });
-                try session_targets.append(self.allocator, .{ .stream_idx = idx, .kind = .primary, .buffered = session.connection.buffered() });
+                try session_targets.append(self.allocator, .{ .stream_idx = idx, .kind = .primary, .buffered = (!session.upstream_end_received and session.connection.buffered()) });
                 if (session.mirror) |mirror| {
                     buffered_input = buffered_input or mirror.connection.buffered();
                     try poll_fds.append(self.allocator, .{
                         .fd = mirror.connection.fd(),
-                        .events = posix.POLL.IN,
+                        .events = posix.POLL.IN | (if (mirror.flow_state.wantsWrite() or mirror.connection.pendingWrite()) @as(i16, posix.POLL.OUT) else 0),
                         .revents = 0,
                     });
                     try session_targets.append(self.allocator, .{ .stream_idx = idx, .kind = .mirror, .buffered = mirror.connection.buffered() });
@@ -166,8 +181,152 @@ const ConnectionRouter = struct {
                 const target = session_targets.items[target_idx];
                 if (target.stream_idx >= self.streams.items.len) continue;
                 switch (target.kind) {
-                    .primary => try self.readUpstream(target.stream_idx),
-                    .mirror => try self.readMirrorUpstream(target.stream_idx),
+                    .primary => self.readUpstream(target.stream_idx) catch {
+                        if (target.stream_idx < self.streams.items.len) try self.failSession(target.stream_idx, .receive, "{\"error\":\"invalid upstream frame\"}");
+                    },
+                    .mirror => self.readMirrorUpstream(target.stream_idx) catch self.failMirrorSession(target.stream_idx),
+                }
+            }
+        }
+    }
+
+    fn queueDownstreamControl(self: *ConnectionRouter, bytes: []const u8) !void {
+        try self.downstream_control.append(self.allocator, bytes);
+    }
+
+    fn handleClientWindowUpdate(self: *ConnectionRouter, frame: http2.FrameHeader) !void {
+        const payload = self.downstream_buf.items[9..][0..frame.length];
+        const amount = try flow.increment(payload);
+        if (frame.stream_id == 0) {
+            try self.downstream_send.add(amount);
+        } else if (self.findStreamIndex(frame.stream_id)) |index| {
+            try self.streams.items[index].downstream_send.add(amount);
+        }
+        try self.discardFrame();
+    }
+
+    fn applyClientSettings(self: *ConnectionRouter, payload: []const u8) !void {
+        if (try flow.initialSetting(payload)) |next| {
+            const delta = next - self.downstream_initial_window;
+            for (self.streams.items) |*session| try session.downstream_send.adjust(delta);
+            self.downstream_initial_window = next;
+        }
+    }
+
+    fn returnClientCredit(self: *ConnectionRouter, session: *StreamSession, count: usize) !void {
+        if (count == 0) return;
+        const connection = flow.windowUpdate(0, @intCast(count));
+        const stream = flow.windowUpdate(session.downstream_stream_id, @intCast(count));
+        var updates: [26]u8 = undefined;
+        @memcpy(updates[0..13], &connection);
+        @memcpy(updates[13..], &stream);
+        try self.downstream_control.append(self.allocator, &updates);
+        try self.downstream_receive.add(@intCast(count));
+        try session.downstream_receive.add(@intCast(count));
+    }
+
+    fn flushStreams(self: *ConnectionRouter) !void {
+        var index = self.streams.items.len;
+        while (index > 0) {
+            index -= 1;
+            const session = &self.streams.items[index];
+            session.connection.operation_deadline = if (session.response_started) null else deadlineAt(session.request_deadline_at_ms);
+            const forwarded = if (session.upstream_end_received) @as(usize, 0) else session.flow_state.flush(self.allocator, &session.connection) catch {
+                try self.failSession(index, .send, "{\"error\":\"upstream send failed\"}");
+                continue;
+            };
+            try self.returnClientCredit(session, forwarded);
+            if (session.mirror) |*mirror| {
+                mirror.connection.operation_deadline = if (mirror.response_started) null else deadlineAt(mirror.request_deadline_at_ms);
+                _ = mirror.flow_state.flush(self.allocator, &mirror.connection) catch {
+                    proxy_runtime.recordMirrorRouteUpstreamFailure(session.route.name, session.route.service, mirror.backend_service);
+                    self.closeMirrorSession(index);
+                    continue;
+                };
+            }
+        }
+    }
+
+    fn downstreamWantsWrite(self: *const ConnectionRouter) bool {
+        if (self.downstream_active.bytes.items.len > 0 or self.downstream_control.bytes.items.len > 0) return true;
+        for (self.streams.items) |*session| {
+            const frame = (session.response.front() catch return true) orelse continue;
+            const header = http2.parseFrameHeader(frame).?;
+            if (header.frame_type != .data or (header.length == 0 or (self.downstream_send.canSend(1) and session.downstream_send.canSend(1)))) return true;
+        }
+        return false;
+    }
+
+    fn flushDownstream(self: *ConnectionRouter) !void {
+        var written: usize = 0;
+        while (written < flow.max_queue_bytes) {
+            if (self.downstream_active.bytes.items.len == 0 and self.downstream_control.bytes.items.len > 0) {
+                const queue = &self.downstream_control;
+                const frame = (try queue.front()).?;
+                const count = linux_platform.posix.send(self.client_fd, frame[queue.offset..], posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL) catch |err| switch (err) {
+                    error.WouldBlock => return,
+                    else => return err,
+                };
+                if (count == 0) return error.SendFailed;
+                queue.offset += count;
+                written += count;
+                self.last_activity_ms = nowMs();
+                if (queue.offset == frame.len) queue.remove(frame.len);
+                continue;
+            }
+            if (self.downstream_active.bytes.items.len == 0) {
+                var selected = false;
+                for (0..self.streams.items.len) |offset| {
+                    const index = (self.next_response_index + offset) % self.streams.items.len;
+                    const session = &self.streams.items[index];
+                    const pending = (try session.response.front()) orelse continue;
+                    const pending_header = http2.parseFrameHeader(pending).?;
+                    if (pending_header.frame_type == .data and pending_header.length > 0) {
+                        const credit = @min(self.downstream_send.value, session.downstream_send.value);
+                        if (credit <= 0) continue;
+                        try session.response.limitData(self.allocator, @intCast(credit));
+                    }
+                    const frame = (try session.response.front()).?;
+                    const header = http2.parseFrameHeader(frame).?;
+                    const cost: usize = if (header.frame_type == .data) header.length else 0;
+                    if (cost > 0 and (!self.downstream_send.canSend(cost) or !session.downstream_send.canSend(cost))) continue;
+                    const rewritten = try rewriteFrameSequenceStreamId(self.allocator, frame, 0, session.downstream_stream_id);
+                    defer rewritten.deinit(self.allocator);
+                    try self.downstream_active.append(self.allocator, rewritten.bytes);
+                    if (cost > 0) {
+                        try self.downstream_send.consume(cost);
+                        try session.downstream_send.consume(cost);
+                    }
+                    self.active_stream = session.downstream_stream_id;
+                    self.active_cost = cost;
+                    self.active_end = header.frame_type == .rst_stream or header.flags & 1 != 0;
+                    session.response.remove(frame.len);
+                    self.next_response_index = index + 1;
+                    selected = true;
+                    break;
+                }
+                if (!selected) return;
+            }
+            const queue = &self.downstream_active;
+            const count = linux_platform.posix.send(self.client_fd, queue.bytes.items[queue.offset..], posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL) catch |err| switch (err) {
+                error.WouldBlock => return,
+                else => return err,
+            };
+            if (count == 0) return error.SendFailed;
+            written += count;
+            queue.offset += count;
+            self.last_activity_ms = nowMs();
+            if (queue.offset != queue.bytes.items.len) continue;
+            queue.remove(queue.bytes.items.len);
+            const stream_id = self.active_stream.?;
+            self.active_stream = null;
+            if (self.findStreamIndex(stream_id)) |index| {
+                const session = &self.streams.items[index];
+                try session.flow_state.returnCredit(self.allocator, self.active_cost);
+                if (self.active_end) {
+                    observations.record(session.backend_service, session.observation_started_ns, (session.response_status orelse 500) >= 500);
+                    proxy_runtime.recordRouteRecovered(session.route.name);
+                    try self.removeSession(index);
                 }
             }
         }
@@ -266,6 +425,7 @@ const ConnectionRouter = struct {
             try self.streams.append(self.allocator, .{
                 .downstream_stream_id = 1,
                 .route = route,
+                .downstream_send = .{ .value = self.downstream_initial_window },
                 .backend_service = owned_backend,
                 .upstream = upstream,
                 .connection = connection,
@@ -289,12 +449,14 @@ const ConnectionRouter = struct {
                 if (self.downstream_buf.items.len < http2.client_preface.len) return;
                 self.downstream_buf.replaceRange(self.allocator, 0, http2.client_preface.len, "") catch return error.OutOfMemory;
                 self.saw_client_preface = true;
+                if (!self.sent_settings) try self.sendDownstreamSettingsFrame("");
             }
 
             if (self.downstream_buf.items.len < http2.frame_header_len) return;
             const frame = http2.parseFrameHeader(self.downstream_buf.items[0..http2.frame_header_len]).?;
             if (http2.frame_header_len + frame.length > self.downstream_buf.items.len) return;
 
+            const before = self.downstream_buf.items.len;
             switch (frame.frame_type) {
                 .settings => try self.handleClientSettings(frame),
                 .ping => try self.handleClientPing(frame),
@@ -302,15 +464,18 @@ const ConnectionRouter = struct {
                 .headers => try self.handleClientHeaders(),
                 .data => try self.forwardClientStreamFrame(.data),
                 .rst_stream => try self.forwardClientStreamFrame(.rst_stream),
-                .window_update, .priority, .continuation, .unknown, .push_promise => {
+                .window_update => try self.handleClientWindowUpdate(frame),
+                .priority, .continuation, .unknown, .push_promise => {
                     try self.discardFrame();
                 },
             }
+            if (self.downstream_buf.items.len == before) return;
         }
     }
 
     fn handleClientSettings(self: *ConnectionRouter, frame: http2.FrameHeader) !void {
         if ((frame.flags & 0x1) == 0) {
+            try self.applyClientSettings(self.downstream_buf.items[9..][0..frame.length]);
             const ack = try http2.buildFrame(self.allocator, .{
                 .length = 0,
                 .frame_type = .settings,
@@ -318,7 +483,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, "");
             defer self.allocator.free(ack);
-            try socket_helpers.writeAll(self.client_fd, ack);
+            try self.queueDownstreamControl(ack);
         }
         try self.discardFrame();
     }
@@ -333,7 +498,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, payload);
             defer self.allocator.free(ack);
-            try socket_helpers.writeAll(self.client_fd, ack);
+            try self.queueDownstreamControl(ack);
         }
         try self.discardFrame();
     }
@@ -353,7 +518,7 @@ const ConnectionRouter = struct {
                 .stream_id = 1,
             });
             defer rewritten.deinit(self.allocator);
-            try writeSession(&self.streams.items[stream_idx], rewritten.bytes);
+            try self.streams.items[stream_idx].flow_state.request.append(self.allocator, rewritten.bytes);
             try self.consumeDownstreamBytes(rewritten.consumed);
             self.last_activity_ms = nowMs();
             return;
@@ -446,6 +611,7 @@ const ConnectionRouter = struct {
             try self.streams.append(self.allocator, .{
                 .downstream_stream_id = parsed.request.stream_id,
                 .route = route,
+                .downstream_send = .{ .value = self.downstream_initial_window },
                 .backend_service = owned_backend,
                 .upstream = upstream,
                 .connection = connection,
@@ -466,12 +632,35 @@ const ConnectionRouter = struct {
         const frame = http2.parseFrameHeader(self.downstream_buf.items[0..http2.frame_header_len]).?;
         if (frame.frame_type != expected_type) return error.InvalidFrameSequence;
         const stream_idx = self.findStreamIndex(frame.stream_id) orelse {
+            // data already in flight after a reset still consumes connection
+            // credit. return that credit so unrelated streams can continue.
+            if (frame.frame_type == .data and frame.length > 0) {
+                if (frame.length > flow.max_frame_payload) return error.FlowControlError;
+                try self.downstream_receive.consume(frame.length);
+                const update = flow.windowUpdate(0, frame.length);
+                try self.downstream_control.append(self.allocator, &update);
+                try self.downstream_receive.add(frame.length);
+            }
             try self.discardFrame();
             return;
         };
+        if (frame.frame_type == .rst_stream) {
+            try self.discardFrame();
+            try self.removeSession(stream_idx);
+            return;
+        }
         const rewritten = try rewriteFrameSequenceStreamId(self.allocator, self.downstream_buf.items, 0, 1);
         defer rewritten.deinit(self.allocator);
-        try writeSession(&self.streams.items[stream_idx], rewritten.bytes);
+        const session = &self.streams.items[stream_idx];
+        if (frame.frame_type == .data) {
+            if (frame.length > flow.max_frame_payload or !self.downstream_receive.canSend(frame.length) or !session.downstream_receive.canSend(frame.length)) return error.FlowControlError;
+            try self.downstream_receive.consume(frame.length);
+            try session.downstream_receive.consume(frame.length);
+        }
+        if (frame.frame_type == .data) {
+            const padding = try session.flow_state.request.appendData(self.allocator, rewritten.bytes);
+            try self.returnClientCredit(session, padding);
+        } else try session.flow_state.request.append(self.allocator, rewritten.bytes);
         if (self.streams.items[stream_idx].mirror) |*mirror| {
             self.forwardMirrorFrame(mirror, rewritten.bytes) catch {
                 proxy_runtime.recordMirrorRouteUpstreamFailure(
@@ -493,20 +682,18 @@ const ConnectionRouter = struct {
     fn readUpstream(self: *ConnectionRouter, session_idx: usize) !void {
         var buf: [16 * 1024]u8 = undefined;
         const session = &self.streams.items[session_idx];
+        if (session.upstream_end_received) return;
         session.connection.operation_deadline = if (session.response_started) null else deadlineAt(session.request_deadline_at_ms);
         const bytes_read = (session.connection.readAvailable(&buf) catch {
             try self.failSession(session_idx, .receive, "{\"error\":\"upstream receive failed\"}");
             return;
         }) orelse return;
         if (bytes_read == 0) {
-            if (!session.response_started) {
-                try self.failSession(session_idx, .receive, "{\"error\":\"upstream closed before response\"}");
-            } else {
-                self.removeSession(session_idx);
-            }
+            try self.failSession(session_idx, .receive, "{\"error\":\"upstream closed before end stream\"}");
             return;
         }
 
+        if (bytes_read > flow.max_queue_bytes - session.upstream_buf.items.len) return error.ReceiveFailed;
         try session.upstream_buf.appendSlice(self.allocator, buf[0..bytes_read]);
         self.last_activity_ms = nowMs();
 
@@ -514,14 +701,23 @@ const ConnectionRouter = struct {
             const active = &self.streams.items[session_idx];
             if (active.upstream_buf.items.len < http2.frame_header_len) return;
             const frame = http2.parseFrameHeader(active.upstream_buf.items[0..http2.frame_header_len]).?;
+            if (frame.length > flow.max_frame_payload) return error.InvalidFrameSequence;
             if (http2.frame_header_len + frame.length > active.upstream_buf.items.len) return;
+            if (frame.frame_type == .headers) _ = flow.sequenceLength(active.upstream_buf.items) catch |err| switch (err) {
+                error.BufferTooShort => return,
+                else => return err,
+            };
 
             switch (frame.frame_type) {
                 .settings => try self.handleUpstreamSettings(session_idx, frame),
                 .ping => try self.handleUpstreamPing(session_idx, frame),
                 .headers => try self.handleUpstreamHeaders(session_idx),
                 .data, .rst_stream => try self.forwardUpstreamStreamFrame(session_idx),
-                .window_update, .priority, .continuation, .unknown, .push_promise, .goaway => try self.discardUpstreamFrame(session_idx),
+                .window_update => {
+                    try active.flow_state.update(frame.stream_id, active.upstream_buf.items[9..][0..frame.length]);
+                    try self.discardUpstreamFrame(session_idx);
+                },
+                .priority, .continuation, .unknown, .push_promise, .goaway => try self.discardUpstreamFrame(session_idx),
             }
         }
     }
@@ -544,6 +740,10 @@ const ConnectionRouter = struct {
             return;
         }
 
+        if (bytes_read > flow.max_queue_bytes - mirror.upstream_buf.items.len) {
+            self.failMirrorSession(session_idx);
+            return;
+        }
         mirror.upstream_buf.appendSlice(self.allocator, buf[0..bytes_read]) catch {
             self.failMirrorSession(session_idx);
             return;
@@ -554,7 +754,12 @@ const ConnectionRouter = struct {
             const active = &(self.streams.items[session_idx].mirror.?);
             if (active.upstream_buf.items.len < http2.frame_header_len) return;
             const frame = http2.parseFrameHeader(active.upstream_buf.items[0..http2.frame_header_len]).?;
+            if (frame.length > flow.max_frame_payload) return error.InvalidFrameSequence;
             if (http2.frame_header_len + frame.length > active.upstream_buf.items.len) return;
+            if (frame.frame_type == .headers) _ = flow.sequenceLength(active.upstream_buf.items) catch |err| switch (err) {
+                error.BufferTooShort => return,
+                else => return err,
+            };
 
             switch (frame.frame_type) {
                 .settings => self.handleMirrorSettings(session_idx, frame) catch {
@@ -573,7 +778,14 @@ const ConnectionRouter = struct {
                     self.failMirrorSession(session_idx);
                     return;
                 },
-                .window_update, .priority, .continuation, .unknown, .push_promise, .goaway => self.discardMirrorFrame(session_idx) catch {
+                .window_update => {
+                    active.flow_state.update(frame.stream_id, active.upstream_buf.items[9..][0..frame.length]) catch {
+                        self.failMirrorSession(session_idx);
+                        return;
+                    };
+                    try self.discardMirrorFrame(session_idx);
+                },
+                .priority, .continuation, .unknown, .push_promise, .goaway => self.discardMirrorFrame(session_idx) catch {
                     self.failMirrorSession(session_idx);
                     return;
                 },
@@ -584,8 +796,9 @@ const ConnectionRouter = struct {
     fn handleUpstreamSettings(self: *ConnectionRouter, session_idx: usize, frame: http2.FrameHeader) !void {
         const payload = self.streams.items[session_idx].upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
         if ((frame.flags & 0x1) == 0) {
+            try self.streams.items[session_idx].flow_state.settings(payload);
             if (!self.sent_settings) {
-                try self.sendDownstreamSettingsFrame(payload);
+                try self.sendDownstreamSettingsFrame("");
             }
             const ack = try http2.buildFrame(self.allocator, .{
                 .length = 0,
@@ -594,7 +807,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, "");
             defer self.allocator.free(ack);
-            try writeSession(&self.streams.items[session_idx], ack);
+            try self.streams.items[session_idx].flow_state.control.append(self.allocator, ack);
         }
         try self.discardUpstreamFrame(session_idx);
     }
@@ -609,7 +822,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, payload);
             defer self.allocator.free(ack);
-            try writeSession(&self.streams.items[session_idx], ack);
+            try self.streams.items[session_idx].flow_state.control.append(self.allocator, ack);
         }
         try self.discardUpstreamFrame(session_idx);
     }
@@ -635,20 +848,17 @@ const ConnectionRouter = struct {
 
     fn forwardUpstreamStreamFrame(self: *ConnectionRouter, session_idx: usize) !void {
         const session = &self.streams.items[session_idx];
-        const frame = http2.parseFrameHeader(session.upstream_buf.items[0..http2.frame_header_len]).?;
-        if (!self.sent_settings and frame.frame_type != .settings) {
-            try self.sendDownstreamSettingsFrame("");
-        }
-        const rewritten = try rewriteFrameSequenceStreamId(self.allocator, session.upstream_buf.items, 0, session.downstream_stream_id);
-        defer rewritten.deinit(self.allocator);
-        try socket_helpers.writeAll(self.client_fd, rewritten.bytes);
-        try self.consumeUpstreamBytes(session_idx, rewritten.consumed);
-
-        if (frame.frame_type == .rst_stream or (frame.flags & 0x1) != 0) {
-            observations.record(session.backend_service, session.observation_started_ns, frame.frame_type == .rst_stream or (session.response_status orelse 500) >= 500);
-            proxy_runtime.recordRouteRecovered(session.route.name);
-            self.removeSession(session_idx);
-        }
+        const frame = http2.parseFrameHeader(session.upstream_buf.items).?;
+        const length = try flow.sequenceLength(session.upstream_buf.items);
+        if (frame.frame_type == .data) try session.flow_state.acceptData(frame.length);
+        if (!self.sent_settings) try self.sendDownstreamSettingsFrame("");
+        if (frame.frame_type == .data) {
+            const padding = try session.response.appendData(self.allocator, session.upstream_buf.items[0..length]);
+            try session.flow_state.returnCredit(self.allocator, padding);
+        } else try session.response.append(self.allocator, session.upstream_buf.items[0..length]);
+        if (frame.frame_type == .rst_stream or frame.flags & 1 != 0) session.upstream_end_received = true;
+        try self.consumeUpstreamBytes(session_idx, length);
+        try self.flushDownstream();
     }
 
     fn failSession(
@@ -672,8 +882,12 @@ const ConnectionRouter = struct {
         });
         observations.record(session.backend_service, session.observation_started_ns, true);
         proxy_runtime.recordResponse(.bad_gateway);
-        try self.sendLocalStreamResponse(session.downstream_stream_id, .bad_gateway, body);
-        self.removeSession(session_idx);
+        if (session.response_started) {
+            const reset = try http2.buildFrame(self.allocator, .{ .length = 4, .frame_type = .rst_stream, .flags = 0, .stream_id = session.downstream_stream_id }, &.{ 0, 0, 0, 2 });
+            defer self.allocator.free(reset);
+            try self.queueDownstreamControl(reset);
+        } else try self.sendLocalStreamResponse(session.downstream_stream_id, .bad_gateway, body);
+        try self.removeSession(session_idx);
     }
 
     fn expireTimedOutStreams(self: *ConnectionRouter, now: i64) !bool {
@@ -736,13 +950,20 @@ const ConnectionRouter = struct {
     }
 
     fn sendLocalStreamResponse(self: *ConnectionRouter, stream_id: u32, status: http.StatusCode, body: []const u8) !void {
+        const index = self.findStreamIndex(stream_id);
+        const stream_credit = if (index) |value| self.streams.items[value].downstream_send.value else self.downstream_initial_window;
+        const payload = if (self.downstream_send.canSend(body.len) and stream_credit >= @as(i64, @intCast(body.len))) body else "";
+        if (payload.len > 0) {
+            try self.downstream_send.consume(payload.len);
+            if (index) |value| try self.streams.items[value].downstream_send.consume(payload.len);
+        }
         const response = if (self.sent_settings)
-            try http2_response.formatSimpleStreamResponse(self.allocator, stream_id, @intFromEnum(status), "application/json", body)
+            try http2_response.formatSimpleStreamResponse(self.allocator, stream_id, @intFromEnum(status), "application/json", payload)
         else
-            try http2_response.formatSimpleResponse(self.allocator, stream_id, @intFromEnum(status), "application/json", body);
+            try http2_response.formatSimpleResponse(self.allocator, stream_id, @intFromEnum(status), "application/json", payload);
         defer self.allocator.free(response);
         self.sent_settings = true;
-        try socket_helpers.writeAll(self.client_fd, response);
+        try self.queueDownstreamControl(response);
     }
 
     fn sendDownstreamSettingsFrame(self: *ConnectionRouter, payload: []const u8) !void {
@@ -755,7 +976,7 @@ const ConnectionRouter = struct {
         }, payload);
         defer self.allocator.free(frame);
         self.sent_settings = true;
-        try socket_helpers.writeAll(self.client_fd, frame);
+        try self.queueDownstreamControl(frame);
     }
 
     fn discardFrame(self: *ConnectionRouter) !void {
@@ -776,9 +997,15 @@ const ConnectionRouter = struct {
         try self.streams.items[session_idx].upstream_buf.replaceRange(self.allocator, 0, consumed, "");
     }
 
-    fn removeSession(self: *ConnectionRouter, session_idx: usize) void {
+    fn removeSession(self: *ConnectionRouter, session_idx: usize) !void {
         var session = self.streams.swapRemove(session_idx);
-        session.deinit(self.allocator);
+        defer session.deinit(self.allocator);
+        const unforwarded = flow.initial_window - session.downstream_receive.value;
+        if (unforwarded > 0) {
+            const update = flow.windowUpdate(0, @intCast(unforwarded));
+            try self.downstream_control.append(self.allocator, &update);
+            try self.downstream_receive.add(@intCast(unforwarded));
+        }
     }
 
     fn findStreamIndex(self: *const ConnectionRouter, stream_id: u32) ?usize {
@@ -906,10 +1133,10 @@ const ConnectionRouter = struct {
     }
 
     fn forwardMirrorFrame(self: *ConnectionRouter, mirror: *MirrorSession, frame_bytes: []const u8) !void {
-        _ = self;
-        writeSession(mirror, frame_bytes) catch {
-            return error.WriteFailed;
-        };
+        const header = http2.parseFrameHeader(frame_bytes) orelse return error.BufferTooShort;
+        if (header.frame_type == .data) {
+            _ = try mirror.flow_state.request.appendData(self.allocator, frame_bytes);
+        } else try mirror.flow_state.request.append(self.allocator, frame_bytes);
     }
 
     fn closeMirrorSession(self: *ConnectionRouter, session_idx: usize) void {
@@ -930,6 +1157,7 @@ const ConnectionRouter = struct {
         const mirror = if (self.streams.items[session_idx].mirror) |*value| value else return;
         const payload = mirror.upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
         if ((frame.flags & 0x1) == 0) {
+            try mirror.flow_state.settings(payload);
             const ack = try http2.buildFrame(self.allocator, .{
                 .length = 0,
                 .frame_type = .settings,
@@ -937,7 +1165,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, "");
             defer self.allocator.free(ack);
-            try writeSession(mirror, ack);
+            try mirror.flow_state.control.append(self.allocator, ack);
         }
         _ = payload;
         try self.discardMirrorFrame(session_idx);
@@ -954,7 +1182,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, payload);
             defer self.allocator.free(ack);
-            try writeSession(mirror, ack);
+            try mirror.flow_state.control.append(self.allocator, ack);
         }
         try self.discardMirrorFrame(session_idx);
     }
@@ -977,6 +1205,10 @@ const ConnectionRouter = struct {
     fn discardMirrorStreamFrame(self: *ConnectionRouter, session_idx: usize) !void {
         const mirror = if (self.streams.items[session_idx].mirror) |*value| value else return;
         const frame = http2.parseFrameHeader(mirror.upstream_buf.items[0..http2.frame_header_len]).?;
+        if (frame.frame_type == .data) {
+            try mirror.flow_state.acceptData(frame.length);
+            try mirror.flow_state.returnCredit(self.allocator, frame.length);
+        }
         try self.consumeMirrorBytes(session_idx, http2.frame_header_len + frame.length);
         if (frame.frame_type == .rst_stream or (frame.flags & 0x1) != 0) {
             self.closeMirrorSession(session_idx);
@@ -1001,9 +1233,14 @@ const StreamSession = struct {
     backend_service: []u8,
     upstream: upstream_mod.Upstream,
     connection: exchange.StreamingConnection,
+    flow_state: flow.Upstream = .{},
     upstream_buf: std.ArrayList(u8) = .empty,
     mirror: ?MirrorSession = null,
+    downstream_send: flow.Window = .{},
+    downstream_receive: flow.Window = .{},
+    response: flow.Queue = .{},
     response_started: bool = false,
+    upstream_end_received: bool = false,
     response_status: ?u16 = null,
     downstream_end_stream: bool = false,
     request_deadline_at_ms: i64,
@@ -1011,6 +1248,8 @@ const StreamSession = struct {
 
     fn deinit(self: *StreamSession, alloc: std.mem.Allocator) void {
         self.connection.deinit();
+        self.flow_state.deinit(alloc);
+        self.response.deinit(alloc);
         alloc.free(self.backend_service);
         self.upstream.deinit(alloc);
         self.upstream_buf.deinit(alloc);
@@ -1022,12 +1261,14 @@ const MirrorSession = struct {
     backend_service: []u8,
     upstream: upstream_mod.Upstream,
     connection: exchange.StreamingConnection,
+    flow_state: flow.Upstream = .{},
     upstream_buf: std.ArrayList(u8) = .empty,
     response_started: bool = false,
     request_deadline_at_ms: i64,
 
     fn deinit(self: *MirrorSession, alloc: std.mem.Allocator) void {
         self.connection.deinit();
+        self.flow_state.deinit(alloc);
         alloc.free(self.backend_service);
         self.upstream.deinit(alloc);
         self.upstream_buf.deinit(alloc);
@@ -1177,11 +1418,6 @@ fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64
     hasher.update(host);
     hasher.update(path);
     return hasher.final();
-}
-
-fn writeSession(session: anytype, bytes: []const u8) !void {
-    session.connection.operation_deadline = if (session.response_started) null else deadlineAt(session.request_deadline_at_ms);
-    try session.connection.writeAll(bytes);
 }
 
 fn connectAndSendUpstream(alloc: std.mem.Allocator, peer_key: ?PeerKey, route: router.Route, upstream: *const upstream_mod.Upstream, request_bytes: []const u8, request_deadline_at_ms: i64) !exchange.StreamingConnection {
@@ -1417,5 +1653,174 @@ test "http2 partial tls record does not block another stream or its timeout" {
     while (offset < header.len) offset += try socket.read(header[offset..]);
     try std.testing.expectEqual(@as(u32, 3), http2.parseFrameHeader(&header).?.stream_id);
     try std.testing.expect(try routing.expireTimedOutStreams(deadline));
+    try std.testing.expectEqual(@as(usize, 0), routing.streams.items.len);
+}
+
+const FlowTestPeer = struct {
+    fd: posix.fd_t,
+    stream_id: u32,
+    send_connection: flow.Window = .{},
+    send_stream: flow.Window = .{},
+    receive_connection: flow.Window = .{},
+    receive_stream: flow.Window = .{ .value = 1024 },
+    input: std.ArrayList(u8) = .empty,
+    sent: usize = 0,
+    received: usize = 0,
+    ended: bool = false,
+
+    fn deinit(self: *FlowTestPeer) void {
+        self.input.deinit(std.testing.allocator);
+        linux_platform.posix.close(self.fd);
+    }
+
+    fn sendData(self: *FlowTestPeer, total: usize, end_stream: bool) !void {
+        const credit = @min(self.send_connection.value, self.send_stream.value);
+        if (credit <= 0 or self.sent == total) return;
+        const count = @min(@as(usize, @intCast(credit)), @min(4096, total - self.sent));
+        var frame: [4105]u8 = undefined;
+        try http2.writeFrameHeader(frame[0..9], .{ .length = @intCast(count), .frame_type = .data, .flags = if (end_stream and self.sent + count == total) 1 else 0, .stream_id = self.stream_id });
+        @memset(frame[9..][0..count], 'x');
+        try (transport.Stream{ .fd = self.fd, .deadline = transport.Deadline.afterMilliseconds(1000) }).writeAll(frame[0 .. 9 + count]);
+        try self.send_connection.consume(count);
+        try self.send_stream.consume(count);
+        self.sent += count;
+    }
+
+    fn receive(self: *FlowTestPeer) !void {
+        var bytes: [65536]u8 = undefined;
+        while (true) {
+            const count = linux_platform.posix.recv(self.fd, &bytes, posix.MSG.DONTWAIT) catch |err| switch (err) {
+                error.WouldBlock => break,
+                else => return err,
+            };
+            if (count == 0) break;
+            try self.input.appendSlice(std.testing.allocator, bytes[0..count]);
+        }
+        while (http2.parseFrameHeader(self.input.items)) |header| {
+            const length = 9 + header.length;
+            if (length > self.input.items.len) break;
+            const payload = self.input.items[9..length];
+            switch (header.frame_type) {
+                .window_update => {
+                    const amount = try flow.increment(payload);
+                    if (header.stream_id == 0) try self.send_connection.add(amount) else {
+                        try std.testing.expectEqual(self.stream_id, header.stream_id);
+                        try self.send_stream.add(amount);
+                    }
+                },
+                .data => {
+                    try std.testing.expectEqual(self.stream_id, header.stream_id);
+                    try self.receive_connection.consume(header.length);
+                    try self.receive_stream.consume(header.length);
+                    for (payload) |byte| try std.testing.expectEqual(@as(u8, 'x'), byte);
+                    self.received += payload.len;
+                    self.ended = header.flags & 1 != 0;
+                    // a compliant receiver grants credit only after consuming
+                    // the payload. the router must split frames to this window.
+                    if (header.length > 0 and !self.ended) {
+                        const connection = flow.windowUpdate(0, header.length);
+                        const stream = flow.windowUpdate(self.stream_id, header.length);
+                        const wire = transport.Stream{ .fd = self.fd, .deadline = transport.Deadline.afterMilliseconds(1000) };
+                        try wire.writeAll(&connection);
+                        try wire.writeAll(&stream);
+                        try self.receive_connection.add(header.length);
+                        try self.receive_stream.add(header.length);
+                    }
+                },
+                else => {},
+            }
+            self.input.replaceRangeAssumeCapacity(0, length, &.{});
+        }
+    }
+};
+
+test "http2 flow streams large requests and responses with compliant small windows and a stalled mirror" {
+    const alloc = std.testing.allocator;
+    var downstream: [2]i32 = undefined;
+    var upstream_pair: [2]i32 = undefined;
+    var mirror_pair: [2]i32 = undefined;
+    for ([_]*[2]i32{ &downstream, &upstream_pair, &mirror_pair }) |pair| {
+        if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, pair) != 0) return error.SocketFailed;
+    }
+    defer linux_platform.posix.close(downstream[0]);
+    defer linux_platform.posix.close(mirror_pair[1]);
+    var client = FlowTestPeer{ .fd = downstream[1], .stream_id = 3, .receive_stream = .{ .value = 0 } };
+    defer client.deinit();
+    var server = FlowTestPeer{ .fd = upstream_pair[1], .stream_id = 1, .receive_stream = .{ .value = 0 } };
+    defer server.deinit();
+    var routing = ConnectionRouter{ .allocator = alloc, .routes = &.{}, .client_fd = downstream[0], .client_ip = null, .sent_settings = true, .saw_client_preface = true };
+    defer routing.deinit();
+    const route = router.Route{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" } };
+    const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-flow", .address = "127.0.0.1", .port = 1 };
+    try routing.streams.append(alloc, .{
+        .downstream_stream_id = 3,
+        .route = route,
+        .backend_service = try alloc.dupe(u8, "api"),
+        .upstream = try ownedTestUpstream(alloc, upstream),
+        .connection = .{ .connection = .{ .bare = upstream_pair[0] }, .timeout_ms = 2000 },
+        .request_deadline_at_ms = nowMs() + 2000,
+        .response_started = true,
+        .response_status = 200,
+        .mirror = .{
+            .backend_service = try alloc.dupe(u8, "mirror"),
+            .upstream = try ownedTestUpstream(alloc, upstream),
+            .connection = .{ .connection = .{ .bare = mirror_pair[0] }, .timeout_ms = 2000 },
+            .request_deadline_at_ms = nowMs() + 2000,
+            .response_started = true,
+        },
+    });
+    try routing.applyClientSettings(&.{ 0, 4, 0, 0, 0, 0 });
+    try routing.streams.items[0].flow_state.settings(&.{ 0, 4, 0, 0, 0, 0 });
+    try routing.streams.items[0].mirror.?.flow_state.settings(&.{ 0, 4, 0, 0, 0, 0 });
+    const total = 512 * 1024;
+    var mirror_dropped = false;
+    var response_resumed = false;
+    var iterations: usize = 0;
+    while (client.received < total) : (iterations += 1) {
+        if (iterations > 5000) return error.StreamDidNotProgress;
+        if (iterations == 10) {
+            try std.testing.expectEqual(@as(usize, 0), server.received);
+            try std.testing.expect(routing.streams.items[0].flow_state.request.bytes.items.len > 0);
+            const update = flow.windowUpdate(1, 1024);
+            try (transport.Stream{ .fd = server.fd }).writeAll(&update);
+            try server.receive_stream.add(1024);
+        }
+        try client.sendData(total, true);
+        // finish the upload before ending the response, as a normal RPC does.
+        if (server.received == total) try server.sendData(total, true);
+        var bytes: [65536]u8 = undefined;
+        const count = linux_platform.posix.recv(downstream[0], &bytes, posix.MSG.DONTWAIT) catch |err| switch (err) {
+            error.WouldBlock => 0,
+            else => return err,
+        };
+        try routing.downstream_buf.appendSlice(alloc, bytes[0..count]);
+        try routing.processDownstreamBuffer();
+        try routing.flushStreams();
+        try routing.flushDownstream();
+        if (routing.streams.items.len > 0) {
+            try routing.readUpstream(0);
+            if (routing.streams.items.len > 0) {
+                const session = &routing.streams.items[0];
+                mirror_dropped = mirror_dropped or session.mirror == null;
+                try std.testing.expect(session.flow_state.request.bytes.items.len <= flow.max_queue_bytes);
+                try std.testing.expect(session.response.bytes.items.len <= flow.max_queue_bytes);
+                try std.testing.expect(session.upstream_buf.items.len <= flow.max_queue_bytes);
+                if (session.mirror) |mirror| try std.testing.expect(mirror.flow_state.request.bytes.items.len <= flow.max_queue_bytes);
+            }
+        }
+        try server.receive();
+        try client.receive();
+        if (!response_resumed and server.sent > 0 and routing.streams.items[0].response.bytes.items.len > 0) {
+            try std.testing.expectEqual(@as(usize, 0), client.received);
+            const update = flow.windowUpdate(3, 1024);
+            try (transport.Stream{ .fd = client.fd }).writeAll(&update);
+            try client.receive_stream.add(1024);
+            response_resumed = true;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, total), server.received);
+    try std.testing.expectEqual(@as(usize, total), client.received);
+    try std.testing.expect(server.ended and client.ended);
+    try std.testing.expect(mirror_dropped and response_resumed);
     try std.testing.expectEqual(@as(usize, 0), routing.streams.items.len);
 }
