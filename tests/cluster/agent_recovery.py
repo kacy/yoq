@@ -96,6 +96,15 @@ class Rig:
             process.kill()
             process.wait(timeout=10)
 
+    def require_running(self, node):
+        status = self.processes[node].poll()
+        if status is not None:
+            raise RuntimeError(f"node {node} exited with status {status}")
+
+    def registered_agents(self, server):
+        self.require_running(4)
+        return self.request(server, "/agents")
+
     def request(self, node, path, body=None):
         request = urllib.request.Request(f"http://10.233.0.{node}:7700{path}", data=body,
                                          headers={"Authorization": f"Bearer {self.api_token}"})
@@ -167,7 +176,7 @@ def exercise(rig):
     first = wait_for("initial leader", rig.leader)
     seed = f"10.233.0.{first}"
     rig.start(4, "join", seed, "--port", "7700", "--token", rig.token)
-    agents = wait_for("joined agent", lambda: rig.request(first, "/agents"))
+    agents = wait_for("joined agent", lambda: rig.registered_agents(first))
     if len(agents) != 1:
         raise RuntimeError(f"expected one joined agent, got {len(agents)}")
     agent_id = agents[0]["id"]
