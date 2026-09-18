@@ -192,3 +192,33 @@ test "registry authenticated request methods refuse redirects before contacting 
         }
     }
 }
+
+test "registry anonymous requests retain automatic redirect handling" {
+    const Server = @import("test_support.zig").Server;
+    var target = try Server.init(&.{.{}});
+    defer target.deinit();
+    try target.start();
+    var target_host: [64]u8 = undefined;
+    var location_buffer: [160]u8 = undefined;
+    const location = try std.fmt.bufPrint(&location_buffer, "Location: http://{s}/anonymous\r\n", .{try target.host(&target_host)});
+    var source = try Server.init(&.{.{ .status = "302 Found", .headers = location }});
+    defer source.deinit();
+    try source.start();
+    var source_host: [64]u8 = undefined;
+    var url_buffer: [160]u8 = undefined;
+    const uri = try std.Uri.parse(try std.fmt.bufPrint(&url_buffer, "http://{s}/registry", .{try source.host(&source_host)}));
+    var client: std.http.Client = .{ .io = std.testing.io, .allocator = std.testing.allocator };
+    defer client.deinit();
+    var request = try requestWithTimeout(&client, .GET, uri, .{ .redirect_behavior = @enumFromInt(3), .keep_alive = false });
+    defer request.deinit();
+    try request.sendBodiless();
+    var redirects: [1024]u8 = undefined;
+    const response = try request.receiveHead(&redirects);
+    try std.testing.expectEqual(std.http.Status.ok, response.head.status);
+    source.worker.?.join();
+    source.worker = null;
+    target.worker.?.join();
+    target.worker = null;
+    try std.testing.expectEqual(@as(usize, 1), target.requests);
+    try std.testing.expect(@import("../../api/http.zig").findHeaderValue(target.last_request[0..target.last_request_length], "Authorization") == null);
+}
