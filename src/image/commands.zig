@@ -47,3 +47,8 @@ pub fn prune(alloc: std.mem.Allocator) !void {
 pub fn tag(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     return @import("cli/tag_command.zig").tag(args, ctx.alloc);
 }
+
+test {
+    _ = @import("cli/tag_command.zig");
+    _ = @import("cli/resolution.zig");
+}

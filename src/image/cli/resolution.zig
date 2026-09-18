@@ -158,7 +158,7 @@ test "local image resolution uses cached tags and rejects missing images without
         defer result.deinit();
         try std.testing.expectEqualStrings("cached", result.default_cmd[1]);
         try std.testing.expectEqual(@as(usize, 1), result.layer_paths.len);
-        try std.testing.expect(std.mem.startsWith(u8, result.rootfs, "/"));
+        try std.testing.expectEqualStrings(result.layer_paths[0], result.rootfs);
         try std.testing.expectEqualStrings(digest.string(&digest_buf), result.manifest_digest);
         try std.testing.expectEqualStrings("SIGTERM", result.stop_signal.?);
     }
