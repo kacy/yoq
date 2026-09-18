@@ -33,6 +33,10 @@ pub const CheckerSnapshot = types.CheckerSnapshot;
 pub const max_worker_threads = types.max_worker_threads;
 pub const max_queued_checks = types.max_queued_checks;
 
+pub const registerReplicaService = registry_support.registerReplicaService;
+pub const unregisterContainer = registry_support.unregisterContainer;
+pub const getContainerStatus = registry_support.getContainerStatus;
+
 pub fn registerService(
     service_name: []const u8,
     container_id: [12]u8,

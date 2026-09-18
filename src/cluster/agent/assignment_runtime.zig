@@ -525,7 +525,7 @@ fn runAssignment(
 
     log.info("container {s} exited for assignment {s}", .{ container_id, assignment_id });
     if (meta.workload_kind != null and meta.workload_name != null and std.mem.eql(u8, meta.workload_kind.?, "service")) {
-        manifest_health.unregisterService(meta.workload_name.?);
+        manifest_health.unregisterContainer(container_id);
     }
     if (stopping.load(.acquire) or exit_code == 0) {
         setContainerState(self, assignment_id, .stopped);
@@ -585,17 +585,17 @@ fn waitForServiceReadiness(stopping: anytype, alloc: std.mem.Allocator, containe
     if (container_id.len != id_buf.len) return .invalid;
     @memcpy(&id_buf, container_id[0..id_buf.len]);
 
-    manifest_health.registerService(service_name, id_buf, container_ip, health_check) catch return .invalid;
+    manifest_health.registerReplicaService(service_name, id_buf, container_ip, health_check) catch return .invalid;
     manifest_health.startChecker();
 
     const deadline_ns = nowAwakeNanoseconds() + (@as(i128, @intCast(estimateHealthStartupWindowSeconds(health_check))) * std.time.ns_per_s);
     defer {
-        const final_status = manifest_health.getStatus(service_name) orelse .starting;
-        if (final_status != .healthy) manifest_health.unregisterService(service_name);
+        const final_status = manifest_health.getContainerStatus(container_id) orelse .starting;
+        if (final_status != .healthy) manifest_health.unregisterContainer(container_id);
     }
     while (nowAwakeNanoseconds() < deadline_ns) {
         if (stopping.load(.acquire)) return .timeout;
-        switch (manifest_health.getStatus(service_name) orelse .starting) {
+        switch (manifest_health.getContainerStatus(container_id) orelse .starting) {
             .healthy => return .healthy,
             .unhealthy => return .unhealthy,
             .starting => if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(100), "assignment readiness wait")) return .timeout,
