@@ -118,8 +118,7 @@ pub fn transferLeadership(self: anytype, min_election_ticks: u32, max_election_t
 pub fn startElection(self: anytype, min_election_ticks: u32, max_election_ticks: u32) void {
     const new_term = self.persistent_state.current_term + 1;
     // persist the term and our own vote before changing role or sending requests.
-    if (!self.persistTerm(new_term)) return;
-    if (!self.persistVote(self.id)) return;
+    if (!self.persistElectionState(new_term, self.id)) return;
 
     self.role = .candidate;
     @memset(self.votes_granted, false);
@@ -247,7 +246,7 @@ test "failed vote persistence does not grant a vote or reset the election timer"
     try testing.expectEqual(@as(u32, 0), raft.ticks_since_event);
 }
 
-test "election waits for both durable writes before changing role or sending requests" {
+test "election persists term and vote together before changing role or sending requests" {
     var log = try Log.initMemory();
     defer log.deinit();
     try testing.expect(log.setCurrentTerm(3));
@@ -267,8 +266,8 @@ test "election waits for both durable writes before changing role or sending req
     try log.db.exec("DROP TRIGGER refuse_term;", .{}, .{});
     try log.db.exec("CREATE TRIGGER refuse_vote BEFORE UPDATE OF voted_for ON raft_state BEGIN SELECT RAISE(ABORT, 'vote write failed'); END;", .{}, .{});
     startElection(&raft, 10, 10);
-    // the term write succeeded, but the failed vote still prevents campaigning.
-    try testing.expectEqual(@as(types.Term, 4), try log.getCurrentTerm());
+    // rejecting the vote also leaves the term unchanged.
+    try testing.expectEqual(@as(types.Term, 3), try log.getCurrentTerm());
     try testing.expectEqual(@as(?types.NodeId, null), try log.getVotedFor());
     try testing.expectEqual(types.Role.follower, raft.role);
     try testing.expectEqual(@as(u32, 7), raft.ticks_since_event);
@@ -276,7 +275,7 @@ test "election waits for both durable writes before changing role or sending req
 
     try log.db.exec("DROP TRIGGER refuse_vote;", .{}, .{});
     startElection(&raft, 10, 10);
-    try testing.expectEqual(@as(types.Term, 5), try log.getCurrentTerm());
+    try testing.expectEqual(@as(types.Term, 4), try log.getCurrentTerm());
     try testing.expectEqual(@as(?types.NodeId, 1), try log.getVotedFor());
     try testing.expectEqual(types.Role.candidate, raft.role);
     try testing.expectEqual(@as(u32, 1), raft.votes_received);
@@ -287,10 +286,41 @@ test "election waits for both durable writes before changing role or sending req
         try testing.expect(action == .send_request_vote);
         try testing.expectEqual(peer, action.send_request_vote.target);
         try testing.expectEqualDeep(RequestVoteArgs{
-            .term = 5,
+            .term = 4,
             .candidate_id = 1,
             .last_log_term = 3,
             .last_log_index = 1,
         }, action.send_request_vote.args);
     }
+}
+
+test "failed term transition cannot leave a leader in an unelected term" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+    try testing.expect(log.setElectionState(3, 1));
+    var raft = try Raft.init(testing.allocator, 1, &.{ 2, 3 }, &log);
+    defer raft.deinit();
+    raft.role = .leader;
+    raft.ticks_since_event = 7;
+    try log.db.exec("CREATE TRIGGER refuse_vote BEFORE UPDATE OF voted_for ON raft_state BEGIN SELECT RAISE(ABORT, 'vote write failed'); END;", .{}, .{});
+
+    try testing.expect(!raft.transferLeadership());
+    const reply = raft.handleRequestVote(.{ .term = 4, .candidate_id = 2, .last_log_term = 0, .last_log_index = 0 });
+    try testing.expect(!reply.vote_granted);
+    try testing.expectEqual(@as(types.Term, 3), reply.term);
+    raft.handleRequestVoteReply(2, .{ .term = 4, .vote_granted = false });
+    try testing.expectEqualDeep(@import("../log.zig").State{ .current_term = 3, .voted_for = 1 }, try log.readState());
+    try testing.expectEqualDeep(try log.readState(), raft.persistent_state);
+    try testing.expectEqual(types.Role.leader, raft.role);
+    try testing.expectEqual(@as(u32, 7), raft.ticks_since_event);
+    try testing.expectEqual(@as(usize, 0), raft.actions.items.len);
+
+    try log.db.exec("DROP TRIGGER refuse_vote;", .{}, .{});
+    try testing.expect(raft.transferLeadership());
+    try testing.expectEqualDeep(@import("../log.zig").State{ .current_term = 4, .voted_for = null }, try log.readState());
+    try testing.expectEqualDeep(try log.readState(), raft.persistent_state);
+    try testing.expectEqual(types.Role.follower, raft.role);
+    try testing.expectEqual(@as(u32, 0), raft.ticks_since_event);
+    try testing.expectEqual(@as(usize, 1), raft.actions.items.len);
+    try testing.expect(raft.actions.items[0] == .become_follower);
 }

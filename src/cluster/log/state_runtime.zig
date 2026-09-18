@@ -59,6 +59,16 @@ pub fn readState(db: *sqlite.Db) LogError!State {
     };
 }
 
+// term changes also replace the vote, so both values must survive or fail together.
+pub fn setElectionState(db: *sqlite.Db, term: Term, voted_for: ?NodeId) LogError!void {
+    const vote: ?i64 = if (voted_for) |id| @intCast(id) else null;
+    common.execStatement(
+        db,
+        "UPDATE raft_state SET current_term = ?, voted_for = ? WHERE id = 1;",
+        .{ @as(i64, @intCast(term)), vote },
+    ) catch return LogError.WriteFailed;
+}
+
 pub fn getCurrentTerm(db: *sqlite.Db) LogError!Term {
     return (try readState(db)).current_term;
 }
