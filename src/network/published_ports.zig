@@ -24,12 +24,19 @@ const Claim = struct {
     target_port: u16,
     address: [4]u8 = .{ 0, 0, 0, 0 },
     eligible: bool = false,
+    bootstrap: bool = false,
 };
 const Claims = std.ArrayList(Claim);
 const Apply = *const fn (Allocator, []const Claim) anyerror!void;
 var mutex: std.Io.Mutex = .init;
 
 pub fn publishInstance(alloc: Allocator, app_name: ?[]const u8, service_name: []const u8, container_id: []const u8, ports: []const spec.PortMapping) !void {
+    return publishInstanceWithBootstrap(alloc, app_name, service_name, container_id, ports, null);
+}
+
+/// a gang's rendezvous port must work while its ranks are still becoming ready.
+/// only that port bypasses probe health; ordinary service ports remain gated.
+pub fn publishInstanceWithBootstrap(alloc: Allocator, app_name: ?[]const u8, service_name: []const u8, container_id: []const u8, ports: []const spec.PortMapping, bootstrap_port: ?u16) !void {
     if (ports.len == 0) return;
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
@@ -42,6 +49,7 @@ pub fn publishInstance(alloc: Allocator, app_name: ?[]const u8, service_name: []
         .service = service_name,
         .container = container_id,
         .ports = ports,
+        .bootstrap_port = bootstrap_port,
     } }, applyRules);
 }
 
@@ -56,7 +64,17 @@ pub fn removeInstance(alloc: Allocator, container_id: []const u8) !void {
 }
 
 /// called after registry events, once registry and store locks are released.
-pub fn refreshAll() void {
+pub fn refreshService(service_name: []const u8) void {
+    refresh(.{ .service = service_name });
+}
+
+pub fn refreshContainer(container_id: []const u8) void {
+    refresh(.{ .container = container_id });
+}
+
+const Selector = union(enum) { service: []const u8, container: []const u8 };
+
+fn refresh(selector: Selector) void {
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -71,21 +89,20 @@ pub fn refreshAll() void {
         return;
     };
     defer platform.posix.close(lock);
-    change(alloc, .refresh, applyRules) catch |err| {
+    change(alloc, .{ .refresh = selector }, applyRules) catch |err| {
         log.warn("published ports: cannot refresh host rules: {}", .{err});
     };
 }
 
 const Change = union(enum) {
-    publish: struct { app: []const u8, service: []const u8, container: []const u8, ports: []const spec.PortMapping },
+    publish: struct { app: []const u8, service: []const u8, container: []const u8, ports: []const spec.PortMapping, bootstrap_port: ?u16 = null },
     remove: []const u8,
-    refresh,
+    refresh: ?Selector,
 };
 
 fn change(alloc: Allocator, operation: Change, apply: Apply) !void {
     const previous = try loadClaims(alloc);
     if (previous.items.len == 0 and operation != .publish) return;
-    try resolveBackends(alloc, previous.items);
     var next: Claims = .empty;
     for (previous.items) |claim| {
         const record = store.load(alloc, claim.container) catch |err| switch (err) {
@@ -105,10 +122,16 @@ fn change(alloc: Allocator, operation: Change, apply: Apply) !void {
             !std.mem.eql(u8, record.hostname, request.service)) return error.ContainerOwnerMismatch;
         for (request.ports) |port| {
             if (port.host_port == 0 or port.container_port == 0) return error.InvalidPort;
-            try appendClaim(alloc, &next, .{ .app = request.app, .service = request.service, .container = request.container, .host_port = port.host_port, .target_port = port.container_port });
+            try appendClaim(alloc, &next, .{ .app = request.app, .service = request.service, .container = request.container, .host_port = port.host_port, .target_port = port.container_port, .bootstrap = request.bootstrap_port == port.host_port });
         }
     }
-    try resolveBackends(alloc, next.items);
+    // other supervisors own their probe observations. retain those durable
+    // values instead of rebuilding their health from this process's registry.
+    switch (operation) {
+        .publish => |request| try resolveBackends(alloc, next.items, .{ .container = request.container }),
+        .refresh => |selector| if (selector) |selected| try resolveBackends(alloc, next.items, selected),
+        .remove => {},
+    }
     // a failed database commit or partial table update restores the prior
     // dataplane. the durable claims remain the source for the next retry.
     apply(alloc, next.items) catch |err| {
@@ -132,15 +155,22 @@ fn appendClaim(alloc: Allocator, claims: *Claims, claim: Claim) !void {
     try claims.append(alloc, claim);
 }
 
-fn resolveBackends(alloc: Allocator, claims: []Claim) !void {
+fn resolveBackends(alloc: Allocator, claims: []Claim, selected: Selector) !void {
     for (claims) |*claim| {
+        const matches = switch (selected) {
+            .service => |name| std.mem.eql(u8, claim.service, name),
+            .container => |id| std.mem.eql(u8, claim.container, id),
+        };
+        if (!matches) continue;
         claim.eligible = false;
         const endpoints = registry.snapshotServiceEndpoints(alloc, claim.service) catch |err| switch (err) {
             error.ServiceNotFound => continue,
             else => return err,
         };
         for (endpoints.items) |endpoint| {
-            if (!endpoint.eligible or !std.mem.eql(u8, endpoint.container_id, claim.container)) continue;
+            if (!std.mem.eql(u8, endpoint.container_id, claim.container)) continue;
+            const ready = endpoint.eligible or (claim.bootstrap and std.mem.eql(u8, endpoint.admin_state, "active"));
+            if (!ready) continue;
             claim.address = ip.parseIp(endpoint.ip_address) orelse return error.InvalidAddress;
             claim.eligible = true;
             break;
@@ -151,21 +181,22 @@ fn resolveBackends(alloc: Allocator, claims: []Claim) !void {
 const schema_sql =
     "CREATE TABLE IF NOT EXISTS published_port_claims (" ++
     "app TEXT NOT NULL, service TEXT NOT NULL, container TEXT NOT NULL, " ++
-    "host_port INTEGER NOT NULL, target_port INTEGER NOT NULL, PRIMARY KEY(container, host_port));";
+    "host_port INTEGER NOT NULL, target_port INTEGER NOT NULL, address TEXT NOT NULL, " ++
+    "eligible INTEGER NOT NULL, bootstrap INTEGER NOT NULL, PRIMARY KEY(container, host_port));";
 
 // callers use a temporary arena so row strings and snapshots have one lifetime.
 fn loadClaims(alloc: Allocator) !Claims {
     var lease = try common.leaseDb();
     defer lease.deinit();
     try lease.db.exec(schema_sql, .{}, .{});
-    var stmt = try lease.db.prepare("SELECT app, service, container, host_port, target_port FROM published_port_claims ORDER BY host_port, container;");
+    var stmt = try lease.db.prepare("SELECT app, service, container, host_port, target_port, address, eligible, bootstrap FROM published_port_claims ORDER BY host_port, container;");
     defer stmt.deinit();
-    const Row = struct { app: sqlite.Text, service: sqlite.Text, container: sqlite.Text, host_port: i64, target_port: i64 };
+    const Row = struct { app: sqlite.Text, service: sqlite.Text, container: sqlite.Text, host_port: i64, target_port: i64, address: sqlite.Text, eligible: i64, bootstrap: i64 };
     var iter = try stmt.iterator(Row, .{});
     var claims: Claims = .empty;
     while (try iter.nextAlloc(alloc, .{})) |row| {
         if (row.host_port < 1 or row.host_port > 65535 or row.target_port < 1 or row.target_port > 65535) return error.InvalidPort;
-        try claims.append(alloc, .{ .app = row.app.data, .service = row.service.data, .container = row.container.data, .host_port = @intCast(row.host_port), .target_port = @intCast(row.target_port) });
+        try claims.append(alloc, .{ .app = row.app.data, .service = row.service.data, .container = row.container.data, .host_port = @intCast(row.host_port), .target_port = @intCast(row.target_port), .address = ip.parseIp(row.address.data) orelse return error.InvalidAddress, .eligible = row.eligible != 0, .bootstrap = row.bootstrap != 0 });
     }
     return claims;
 }
@@ -176,7 +207,11 @@ fn saveClaims(claims: []const Claim) !void {
     try lease.db.exec("BEGIN IMMEDIATE;", .{}, .{});
     errdefer lease.db.exec("ROLLBACK;", .{}, .{}) catch {};
     try lease.db.exec("DELETE FROM published_port_claims;", .{}, .{});
-    for (claims) |claim| try lease.db.exec("INSERT INTO published_port_claims (app, service, container, host_port, target_port) VALUES (?, ?, ?, ?, ?);", .{}, .{ claim.app, claim.service, claim.container, claim.host_port, claim.target_port });
+    for (claims) |claim| {
+        var address_buf: [16]u8 = undefined;
+        const address = ip.formatIp(claim.address, &address_buf);
+        try lease.db.exec("INSERT INTO published_port_claims (app, service, container, host_port, target_port, address, eligible, bootstrap) VALUES (?, ?, ?, ?, ?, ?, ?, ?);", .{}, .{ claim.app, claim.service, claim.container, claim.host_port, claim.target_port, address, @as(i64, @intFromBool(claim.eligible)), @as(i64, @intFromBool(claim.bootstrap)) });
+    }
     try lease.db.exec("COMMIT;", .{}, .{});
 }
 
@@ -298,6 +333,60 @@ test "published ports preserve durable sibling claims after removal and apply fa
     try std.testing.expectEqual(@as(usize, 1), saved.items.len);
     try std.testing.expectEqualStrings("two", saved.items[0].container);
     try store.updateStatus("two", "stopped", null, 0);
-    try change(alloc, .refresh, Fake.apply);
+    try change(alloc, .{ .refresh = null }, Fake.apply);
     try std.testing.expectEqual(@as(usize, 0), (try loadClaims(alloc)).items.len);
+}
+
+test "published ports keep rendezvous reachable during readiness and honor draining" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    registry.resetForTest();
+    defer registry.resetForTest();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    _ = try store.ensureService(alloc, "workers", "round_robin");
+    try store.upsertServiceEndpoint(.{
+        .service_name = "workers",
+        .endpoint_id = "rank0:0",
+        .container_id = "rank0",
+        .node_id = null,
+        .ip_address = "10.42.0.2",
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 0,
+        .last_seen_at = 0,
+    });
+    registry.syncServiceFromStore("workers");
+    _ = registry.markEndpointPending("workers", "rank0:0", 1);
+    var claims = [_]Claim{
+        .{ .app = "a", .service = "workers", .container = "rank0", .host_port = 8080, .target_port = 80 },
+        .{ .app = "a", .service = "workers", .container = "rank0", .host_port = 29500, .target_port = 29500, .bootstrap = true },
+        .{ .app = "other", .service = "unobserved", .container = "remote", .host_port = 9090, .target_port = 90, .eligible = true, .address = .{ 10, 42, 0, 9 } },
+    };
+    try resolveBackends(alloc, &claims, .{ .service = "workers" });
+    try std.testing.expect(!claims[0].eligible);
+    try std.testing.expect(claims[1].eligible);
+    // a local event must not overwrite another supervisor's observation.
+    try std.testing.expect(claims[2].eligible);
+    try store.markServiceEndpointAdminState("workers", "rank0:0", "draining");
+    registry.syncServiceFromStore("workers");
+    try resolveBackends(alloc, &claims, .{ .container = "rank0" });
+    try std.testing.expect(!claims[0].eligible);
+    try std.testing.expect(!claims[1].eligible);
+    _ = try loadClaims(alloc);
+    try saveClaims(&claims);
+    const restored = try loadClaims(alloc);
+    try std.testing.expectEqual(@as(usize, 3), restored.items.len);
+    var bootstrap_count: usize = 0;
+    for (restored.items) |claim| {
+        if (claim.bootstrap) bootstrap_count += 1;
+        if (std.mem.eql(u8, claim.container, "remote")) {
+            try std.testing.expect(claim.eligible);
+            try std.testing.expectEqualSlices(u8, &.{ 10, 42, 0, 9 }, &claim.address);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), bootstrap_count);
 }
