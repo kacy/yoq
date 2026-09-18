@@ -715,7 +715,7 @@ test "runtime reliability waits through a stopped child until its actual exit" {
         return error.PidfdOpenFailed;
     }
     const pidfd: posix.fd_t = @intCast(opened);
-    defer posix.close(pidfd);
+    defer _ = linux.close(pidfd);
     defer {
         _ = linux.pidfd_send_signal(pidfd, .KILL, null, 0);
         _ = process.wait(pid, false) catch {};

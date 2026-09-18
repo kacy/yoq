@@ -287,3 +287,33 @@ test "contract: s3 invalid bucket and key return exact client errors" {
     try std.testing.expectEqualStrings("application/xml", invalid_key.content_type.?);
     try std.testing.expect(std.mem.indexOf(u8, invalid_key.body, "<Code>InvalidKey</Code>") != null);
 }
+
+test "contract: s3 paginates encoded keys with actual etags" {
+    try support.lockContractTests();
+    defer support.unlockContractTests();
+    try support.cleanupS3TestState();
+    defer support.cleanupS3TestState() catch {};
+    freeResponse(try routeRequest(.PUT, "/s3/page-bucket", ""));
+    freeResponse(try routeRequest(.PUT, "/s3/page-bucket/folder/a%20b", "alpha"));
+    freeResponse(try routeRequest(.PUT, "/s3/page-bucket/folder/c%2Bd", "beta"));
+    const first = try routeRequest(.GET, "/s3/page-bucket?prefix=folder%2F&max-keys=1", "");
+    defer freeResponse(first);
+    try std.testing.expectEqual(http.StatusCode.ok, first.status);
+    try std.testing.expectEqualStrings("true", try expectXmlTag(first.body, "IsTruncated"));
+    try std.testing.expectEqualStrings("folder/a b", try expectXmlTag(first.body, "Key"));
+    const token = try expectXmlTag(first.body, "NextContinuationToken");
+    var path_buf: [2048]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/s3/page-bucket?prefix=folder%2F&max-keys=1&continuation-token={s}", .{token});
+    const second = try routeRequest(.GET, path, "");
+    defer freeResponse(second);
+    try std.testing.expectEqual(http.StatusCode.ok, second.status);
+    try std.testing.expectEqualStrings("false", try expectXmlTag(second.body, "IsTruncated"));
+    try std.testing.expectEqualStrings("folder/c+d", try expectXmlTag(second.body, "Key"));
+    try std.testing.expect(std.mem.indexOf(u8, first.body, "2c1743a391305fbf367df8e4f069f9f9") != null);
+    const get = try routeRequest(.GET, "/s3/page-bucket/folder/c%2Bd", "");
+    defer freeResponse(get);
+    try std.testing.expectEqualStrings("beta", get.body);
+    const bad = try routeRequest(.GET, "/s3/page-bucket/folder/bad%xx", "");
+    defer freeResponse(bad);
+    try std.testing.expectEqual(http.StatusCode.bad_request, bad.status);
+}
