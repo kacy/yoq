@@ -42,6 +42,7 @@ pub const CommandSpec = struct {
 };
 
 pub const command_specs = [_]CommandSpec{
+    .{ .name = "__healthcheck", .group = .runtime, .usage = "__healthcheck", .description = "internal healthcheck helper", .handler = @import("../runtime/local_health.zig").helper, .hidden = true },
     .{ .name = "cp", .group = .runtime, .usage = "cp <source> <destination>", .description = "copy files to or from a container", .handler = @import("../runtime/cli/container/filesystem_commands.zig").cp },
     .{ .name = "diff", .group = .runtime, .usage = "diff <id|name>", .description = "list changes in a container writable layer", .handler = @import("../runtime/cli/container/filesystem_commands.zig").diff },
     .{ .name = "__container-filesystem", .group = .runtime, .usage = "__container-filesystem", .description = "internal filesystem helper", .handler = @import("../runtime/cli/container/filesystem_commands.zig").helper, .hidden = true },

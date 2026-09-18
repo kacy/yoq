@@ -49,6 +49,8 @@ pub const ExecConfig = struct {
     env: []const []const u8,
     /// working directory inside the container
     working_dir: []const u8,
+    user: ?[]const u8 = null,
+    cgroup_id: ?[]const u8 = null,
     interactive: bool = false,
     tty: bool = false,
 };
@@ -88,6 +90,10 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
     // terminal and namespace context while relaying input and output.
     const helper_pid = try sysFork();
     if (helper_pid == 0) {
+        if (config.cgroup_id) |id| {
+            const group = @import("cgroups.zig").Cgroup.open(id) catch linux.exit_group(126);
+            group.addProcess(linux.getpid()) catch linux.exit_group(126);
+        }
         for (ns_fds) |fd| sysSetns(fd, 0) catch linux.exit_group(126);
         const child_pid = sysFork() catch linux.exit_group(126);
         if (child_pid == 0) {
@@ -97,7 +103,10 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
             if (linux.errno(linux.chroot(".")) != .SUCCESS) linux.exit_group(126);
             linux_platform.posix.close(root_fd);
             linux_platform.posix.chdir(config.working_dir) catch linux.exit_group(126);
+            const identity = @import("identity.zig");
+            const account = identity.resolve(config.user) catch linux.exit_group(126);
             security.apply() catch linux.exit_group(1);
+            identity.apply(account, false) catch linux.exit_group(126);
             linux.exit_group(process_config.execCommand(config.command, config.args, config.env));
         }
         channels.deinit();

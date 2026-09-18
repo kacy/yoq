@@ -71,6 +71,7 @@ pub fn inspect(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const output = try std.json.Stringify.valueAlloc(ctx.alloc, .{
         .name = name orelse record.hostname,
         .state = record,
+        .health = try @import("../../local_health.zig").read(ctx.alloc, record.id),
         .desired_running = try control.wantsRunning(record.id),
         .config = cfg,
     }, .{ .whitespace = .indent_2 });

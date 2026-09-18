@@ -135,6 +135,8 @@ pub fn exec_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !voi
         .args = exec_args.items,
         .env = saved.env,
         .working_dir = saved.working_dir,
+        .user = saved.user,
+        .cgroup_id = record.id,
         .interactive = interactive,
         .tty = tty,
     }) catch |err| {

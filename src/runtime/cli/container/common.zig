@@ -36,6 +36,15 @@ pub const RunFlags = struct {
     auto_remove: bool = false,
     interactive: bool = false,
     tty: bool = false,
+    no_healthcheck: bool = false,
+    health_command: ?[]const u8 = null,
+    health_interval: ?i64 = null,
+    health_timeout: ?i64 = null,
+    health_start_period: ?i64 = null,
+    health_start_interval: ?i64 = null,
+    health_retries: ?i64 = null,
+    network_name: ?[]const u8 = null,
+    network_aliases: std.ArrayList([]const u8) = .empty,
     stop_signal: ?u8 = null,
     stop_timeout_seconds: u32 = 10,
     limits: cgroups.ResourceLimits = .{},
@@ -45,6 +54,7 @@ pub const RunFlags = struct {
 
     pub fn deinit(self: *RunFlags, alloc: std.mem.Allocator) void {
         self.port_maps.deinit(alloc);
+        self.network_aliases.deinit(alloc);
         for (self.env.items) |value| alloc.free(value);
         self.env.deinit(alloc);
         self.volume_specs.deinit(alloc);

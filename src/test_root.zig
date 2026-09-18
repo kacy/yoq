@@ -292,3 +292,7 @@ comptime {
 test {
     _ = @import("runtime/cli/container/list_commands.zig");
 }
+
+test {
+    _ = @import("runtime/local_health.zig");
+}

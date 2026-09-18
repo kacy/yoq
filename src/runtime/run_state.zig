@@ -42,6 +42,8 @@ pub const SavedRunConfig = struct {
     user: ?[]const u8 = null,
     image_reference: ?[]const u8 = null,
     healthcheck_json: ?[]const u8 = null,
+    network_name: ?[]const u8 = null,
+    network_aliases: []const []const u8 = &.{},
     stop_signal: u8 = 15,
     stop_timeout_seconds: u32 = 10,
     auto_remove: bool = false,
@@ -64,6 +66,8 @@ pub const SavedRunConfig = struct {
         if (self.user) |user| alloc.free(user);
         if (self.image_reference) |value| alloc.free(value);
         if (self.healthcheck_json) |value| alloc.free(value);
+        if (self.network_name) |value| alloc.free(value);
+        freeStringList(alloc, self.network_aliases);
         freeStringList(alloc, self.args);
         freeStringList(alloc, self.env);
         freeStringList(alloc, self.lower_dirs);
@@ -87,7 +91,7 @@ pub const RunStateError = error{
 };
 
 const configs_subdir = "run_configs";
-const format_version: u32 = 5;
+const format_version: u32 = 6;
 const max_serialized_string_bytes: u32 = 64 * 1024;
 const max_serialized_list_items: u32 = 1024;
 const max_serialized_mounts: u32 = 256;
@@ -139,6 +143,8 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     out.writeByte(@intFromBool(cfg.interactive)) catch return RunStateError.WriteFailed;
     out.writeByte(@intFromBool(cfg.tty)) catch return RunStateError.WriteFailed;
     writeString(out, cfg.healthcheck_json orelse "") catch return RunStateError.WriteFailed;
+    writeString(out, cfg.network_name orelse "") catch return RunStateError.WriteFailed;
+    writeStringList(out, cfg.network_aliases) catch return RunStateError.WriteFailed;
     out.flush() catch return RunStateError.WriteFailed;
     file.sync(std.Options.debug_io) catch return RunStateError.WriteFailed;
     cwd().rename(tmp_path, cwd(), path, std.Options.debug_io) catch return RunStateError.WriteFailed;
@@ -218,12 +224,22 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
         break :blk null;
     } else null;
     errdefer if (healthcheck_json) |value| alloc.free(value);
+    const network_text = if (version >= 6) readString(alloc, input) catch |err| return mapReadError(err) else null;
+    const network_name = if (network_text) |value| if (value.len > 0) value else blk: {
+        alloc.free(value);
+        break :blk null;
+    } else null;
+    errdefer if (network_name) |value| alloc.free(value);
+    const network_aliases: []const []const u8 = if (version >= 6) readStringList(alloc, input) catch |err| return mapReadError(err) else &.{};
+    errdefer freeStringList(alloc, network_aliases);
     if (stop_signal == 0 or stop_signal > 64) return RunStateError.InvalidFormat;
 
     return .{
         .user = user,
         .image_reference = image_reference,
         .healthcheck_json = healthcheck_json,
+        .network_name = network_name,
+        .network_aliases = network_aliases,
         .stop_signal = stop_signal,
         .stop_timeout_seconds = stop_timeout_seconds,
         .auto_remove = auto_remove,

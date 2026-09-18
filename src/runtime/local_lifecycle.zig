@@ -142,6 +142,7 @@ pub fn removeWithVolumes(id: []const u8, alloc: std.mem.Allocator, remove_anonym
     try removeArtifacts(id);
     try @import("local_volumes.zig").releaseContainer(id, remove_anonymous);
     try @import("../network/port_allocator.zig").release(id);
+    try @import("local_health.zig").remove(id);
     try removeSavedConfig(id);
     try control.removeRecord(id);
 }
@@ -164,6 +165,7 @@ fn removeArtifacts(id: []const u8) !void {
 // reconstruct teardown after a supervisor exit using the saved run spec and
 // resource handles recorded before launch. this also retries cleanup_failed.
 fn cleanupRuntime(alloc: std.mem.Allocator, record: *const store.ContainerRecord) !void {
+    try @import("local_health.zig").cleanupOrphans(record.id);
     const cg = try @import("cgroups.zig").Cgroup.open(record.id);
     const io = std.Options.debug_io;
     if (std.Io.Dir.cwd().access(io, cg.path(), .{})) |_| {

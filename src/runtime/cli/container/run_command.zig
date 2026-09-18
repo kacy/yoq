@@ -119,6 +119,34 @@ fn parseRunFlags(args: anytype, alloc: std.mem.Allocator, io: std.Io) ContainerE
         } else if (std.mem.eql(u8, arg, "-it") or std.mem.eql(u8, arg, "-ti")) {
             flags.interactive = true;
             flags.tty = true;
+        } else if (std.mem.eql(u8, arg, "--no-healthcheck")) {
+            flags.no_healthcheck = true;
+        } else if (std.mem.eql(u8, arg, "--health-cmd")) {
+            flags.health_command = try optionValue(args, arg, inline_value);
+        } else if (std.mem.eql(u8, arg, "--health-retries")) {
+            flags.health_retries = std.fmt.parseInt(i64, try optionValue(args, arg, inline_value), 10) catch return ContainerError.InvalidArgument;
+        } else if (std.mem.eql(u8, arg, "--health-interval") or std.mem.eql(u8, arg, "--health-timeout") or
+            std.mem.eql(u8, arg, "--health-start-period") or std.mem.eql(u8, arg, "--health-start-interval"))
+        {
+            const value = try optionValue(args, arg, inline_value);
+            const duration = if (std.mem.eql(u8, value, "0") and std.mem.eql(u8, arg, "--health-start-period")) 0 else @import("../../../lib/duration.zig").nanoseconds(value) catch return ContainerError.InvalidArgument;
+            if (std.mem.eql(u8, arg, "--health-interval")) flags.health_interval = duration;
+            if (std.mem.eql(u8, arg, "--health-timeout")) flags.health_timeout = duration;
+            if (std.mem.eql(u8, arg, "--health-start-period")) flags.health_start_period = duration;
+            if (std.mem.eql(u8, arg, "--health-start-interval")) flags.health_start_interval = duration;
+        } else if (std.mem.eql(u8, arg, "--network-alias")) {
+            const value = try optionValue(args, arg, inline_value);
+            if (!isValidContainerName(value)) return ContainerError.InvalidArgument;
+            flags.network_aliases.append(alloc, value) catch return ContainerError.OutOfMemory;
+        } else if (std.mem.eql(u8, arg, "--network")) {
+            const value = try optionValue(args, arg, inline_value);
+            if (std.mem.eql(u8, value, "none")) {
+                flags.networking_enabled = false;
+                flags.network_name = null;
+            } else {
+                flags.networking_enabled = true;
+                flags.network_name = if (std.mem.eql(u8, value, "default")) null else value;
+            }
         } else if (std.mem.eql(u8, arg, "--stop-signal")) {
             flags.stop_signal = @import("../../signals.zig").parse(try optionValue(args, arg, inline_value)) orelse return ContainerError.InvalidArgument;
         } else if (std.mem.eql(u8, arg, "--stop-timeout")) {
@@ -159,6 +187,7 @@ fn parseRunFlags(args: anytype, alloc: std.mem.Allocator, io: std.Io) ContainerE
             flags.volume_specs.append(alloc, mount) catch return ContainerError.OutOfMemory;
         } else if (std.mem.eql(u8, arg, "--no-net")) {
             flags.networking_enabled = false;
+            flags.network_name = null;
         } else if (std.mem.eql(u8, arg, "--net")) {
             flags.networking_enabled = true;
         } else if (std.mem.eql(u8, arg, "--memory")) {
@@ -497,7 +526,11 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
     var saved = buildSavedRunConfig(alloc, &flags, &img, &resolved, id) catch |e| return e;
     defer saved.deinit(alloc);
     try @import("../../../network/port_allocator.zig").reserve(id, saved.port_maps);
-    if (img.healthcheck) |health| saved.healthcheck_json = try std.json.Stringify.valueAlloc(alloc, health, .{});
+    saved.healthcheck_json = try effectiveHealthcheck(alloc, &flags, img.healthcheck);
+    if (flags.network_aliases.items.len > 0 and flags.network_name == null) return error.NamedNetworkRequired;
+    if (!flags.networking_enabled and saved.port_maps.len > 0) return error.NetworkRequired;
+    if (flags.network_name) |name| saved.network_name = try alloc.dupe(u8, name);
+    saved.network_aliases = try duplicateStrings(alloc, flags.network_aliases.items);
     saved.auto_remove = flags.auto_remove;
     saved.interactive = flags.interactive;
     saved.tty = flags.tty;
@@ -561,6 +594,51 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
         },
     };
     std.process.exit(exit_code);
+}
+
+fn duplicateStrings(alloc: std.mem.Allocator, source: []const []const u8) ![][]const u8 {
+    const result = try alloc.alloc([]const u8, source.len);
+    errdefer alloc.free(result);
+    var count: usize = 0;
+    errdefer for (result[0..count]) |value| alloc.free(value);
+    for (source, 0..) |value, i| {
+        result[i] = try alloc.dupe(u8, value);
+        count += 1;
+    }
+    return result;
+}
+
+fn effectiveHealthcheck(alloc: std.mem.Allocator, flags: *const RunFlags, image: ?@import("../../../image/spec.zig").Healthcheck) !?[]const u8 {
+    const overrides = flags.health_command != null or flags.health_interval != null or flags.health_timeout != null or
+        flags.health_start_period != null or flags.health_start_interval != null or flags.health_retries != null;
+    if (flags.no_healthcheck) {
+        if (overrides) return error.ConflictingHealthOptions;
+        return null;
+    }
+    if (image == null and !overrides) return null;
+    var health = image orelse @import("../../../image/spec.zig").Healthcheck{};
+    var command: [2][]const u8 = undefined;
+    if (flags.health_command) |value| {
+        if (value.len == 0) return error.InvalidHealthcheck;
+        command = .{ "CMD-SHELL", value };
+        health.Test = &command;
+    }
+    if (flags.health_interval) |value| health.Interval = value;
+    if (flags.health_timeout) |value| health.Timeout = value;
+    if (flags.health_start_period) |value| health.StartPeriod = value;
+    if (flags.health_start_interval) |value| health.StartInterval = value;
+    if (flags.health_retries) |value| health.Retries = value;
+    if ((try @import("../../local_health.zig").Settings.fromImage(health)) == null and overrides) return error.MissingHealthCommand;
+    return try std.json.Stringify.valueAlloc(alloc, health, .{});
+}
+
+test "health overrides require a command and reject conflicting disable" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.ConflictingHealthOptions, effectiveHealthcheck(alloc, &.{ .no_healthcheck = true, .health_command = "true" }, null));
+    try std.testing.expectError(error.MissingHealthCommand, effectiveHealthcheck(alloc, &.{ .health_interval = std.time.ns_per_s }, null));
+    const result = (try effectiveHealthcheck(alloc, &.{ .health_command = "exit 0", .health_interval = std.time.ns_per_s }, null)).?;
+    defer alloc.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "CMD-SHELL") != null);
 }
 
 test "filesystem target detection matches supported rootfs shapes" {

@@ -18,7 +18,7 @@ pub fn parse(alloc: std.mem.Allocator, input: []const u8) types.BuildError![]con
             if (retries <= 0) return error.MetadataFailed;
             config.Retries = retries;
         } else {
-            const ns = try duration(value);
+            const ns = @import("../../lib/duration.zig").nanoseconds(value) catch return error.MetadataFailed;
             if (std.mem.eql(u8, key, "--interval")) config.Interval = ns else if (std.mem.eql(u8, key, "--timeout")) config.Timeout = ns else if (std.mem.eql(u8, key, "--start-period")) config.StartPeriod = ns else if (std.mem.eql(u8, key, "--start-interval")) config.StartInterval = ns else return error.MetadataFailed;
         }
         remaining = std.mem.trimStart(u8, remaining[end..], " \t");
@@ -43,22 +43,4 @@ pub fn parse(alloc: std.mem.Allocator, input: []const u8) types.BuildError![]con
     @memcpy(test_args[1..], argv);
     config.Test = test_args;
     return std.json.Stringify.valueAlloc(alloc, config, .{ .emit_null_optional_fields = false });
-}
-
-fn duration(value: []const u8) types.BuildError!i64 {
-    var offset: usize = 0;
-    var total: f64 = 0;
-    while (offset < value.len) {
-        const start = offset;
-        while (offset < value.len and (std.ascii.isDigit(value[offset]) or value[offset] == '.')) : (offset += 1) {}
-        if (offset == start) return error.MetadataFailed;
-        const number = std.fmt.parseFloat(f64, value[start..offset]) catch return error.MetadataFailed;
-        const unit_start = offset;
-        while (offset < value.len and std.ascii.isAlphabetic(value[offset])) : (offset += 1) {}
-        const unit = value[unit_start..offset];
-        const multiplier: f64 = if (std.mem.eql(u8, unit, "ns")) 1 else if (std.mem.eql(u8, unit, "us")) 1_000 else if (std.mem.eql(u8, unit, "ms")) 1_000_000 else if (std.mem.eql(u8, unit, "s")) 1_000_000_000 else if (std.mem.eql(u8, unit, "m")) 60_000_000_000 else if (std.mem.eql(u8, unit, "h")) 3_600_000_000_000 else return error.MetadataFailed;
-        total += number * multiplier;
-    }
-    if (!std.math.isFinite(total) or total < 1 or total >= 9223372036854775808.0) return error.MetadataFailed;
-    return @intFromFloat(total);
 }

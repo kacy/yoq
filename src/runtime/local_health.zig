@@ -160,6 +160,7 @@ pub fn helper(args: *std.process.Args.Iterator, ctx: AppContext) !void {
         .args = if (shell) &.{ "-c", command[1] } else command[2..],
         .env = cfg.env,
         .working_dir = cfg.working_dir,
+        .user = cfg.user,
     });
     std.process.exit(code);
 }

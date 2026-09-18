@@ -83,6 +83,7 @@ fn acquireOwner(id: []const u8, generation: i64) !control.Lock {
 fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, attach: bool, generation: i64) u8 {
     const owner = acquireOwner(id, generation) catch return 255;
     defer owner.deinit();
+    @import("../../local_health.zig").cleanupOrphans(id) catch return 255;
     defer control.finish(id, generation) catch {};
     var backoff_ms: u32 = 1000;
     var first_start = true;
@@ -112,6 +113,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         defer ports.deinit();
         var channels = session.ProcessIo.init(current_cfg.interactive, current_cfg.tty) catch return 255;
         defer channels.deinit();
+        var monitor: ?*@import("../../local_health.zig").Monitor = null;
         var c = containerFromSaved(id, &current_cfg, false);
         c.config.session_io = &channels;
         c.config.session_output = .{ .context = &server, .write = session.Server.output };
@@ -134,10 +136,18 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
             };
             server.childStarted();
             server.setInput(&channels, c.pid.?);
+            monitor = @import("../../local_health.zig").Monitor.start(id, c.pid.?, generation, &current_cfg) catch |err| {
+                c.forceStop() catch {};
+                _ = c.wait() catch 255;
+                store.setStartupOutcome(id, .failed) catch {};
+                writeErr("failed to start container healthcheck: {}\n", .{err});
+                return 255;
+            };
             if (first_start) {
                 store.setStartupOutcome(id, .succeeded) catch |err| {
                     c.forceStop() catch {};
                     _ = c.wait() catch 255;
+                    if (monitor) |worker| worker.stop() catch {};
                     writeErr("failed to record container startup: {}\n", .{err});
                     return 255;
                 };
@@ -145,6 +155,11 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         }
 
         last_exit = c.wait() catch 255;
+        if (monitor) |worker| worker.stop() catch |err| {
+            store.updateStatus(id, "cleanup_failed", null, last_exit) catch {};
+            writeErr("failed to stop container healthcheck: {}\n", .{err});
+            return last_exit;
+        };
         server.clearInput();
         // Attached callers observe this attempt's exit, even if policy restarts it.
         server.finish(last_exit);
