@@ -5,6 +5,8 @@ const store = @import("../../state/store.zig");
 const common = @import("common.zig");
 
 pub fn save(io: std.Io, alloc: std.mem.Allocator, writer: *std.Io.Writer, references: []const []const u8) !void {
+    var store_lease = try @import("../store_lock.zig").Lock.acquire(.shared);
+    defer store_lease.deinit();
     if (references.len == 0 or references.len > common.max_images) return error.InvalidArgument;
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();

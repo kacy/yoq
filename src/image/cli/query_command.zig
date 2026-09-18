@@ -45,6 +45,8 @@ pub fn images(alloc: std.mem.Allocator) !void {
 }
 
 pub fn rmi(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+    var store_lease = try @import("../store_lock.zig").Lock.acquire(.shared);
+    defer store_lease.deinit();
     const image_str = requireArg(args, "usage: yoq rmi <image>\n");
     const ref = spec.parseImageRef(image_str);
     const image = store.findImage(alloc, ref.host, ref.repository, ref.reference) catch |err| {

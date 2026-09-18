@@ -42,6 +42,8 @@ pub fn pullAndResolveImage(io: std.Io, alloc: std.mem.Allocator, target: []const
 }
 
 pub fn resolveImage(io: std.Io, alloc: std.mem.Allocator, target: []const u8, policy: PullPolicy) common.ImageCommandsError!ImageResolution {
+    var store_lease = @import("../store_lock.zig").Lock.acquire(.shared) catch return error.StoreFailed;
+    defer store_lease.deinit();
     return resolveWithPull(io, alloc, target, policy, registry.pull);
 }
 

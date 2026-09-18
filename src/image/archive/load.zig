@@ -6,6 +6,8 @@ const common = @import("common.zig");
 const TarIterator = @import("../../lib/tar_entries.zig").Iterator;
 
 pub fn load(io: std.Io, alloc: std.mem.Allocator, reader: *std.Io.Reader) !usize {
+    var store_lease = try @import("../store_lock.zig").Lock.acquire(.shared);
+    defer store_lease.deinit();
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const scratch = arena.allocator();

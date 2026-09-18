@@ -18,6 +18,8 @@ fn usage() common.ImageCommandsError {
 }
 
 pub fn tagImage(alloc: std.mem.Allocator, source: []const u8, target: []const u8) common.ImageCommandsError!void {
+    var store_lease = @import("../store_lock.zig").Lock.acquire(.shared) catch return error.StoreFailed;
+    defer store_lease.deinit();
     const source_ref = spec.parseImageRef(source);
     const target_ref = spec.parseImageRef(target);
     if (target.len == 0 or target[0] == '-' or target_ref.digest_reference or
