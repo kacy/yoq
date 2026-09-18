@@ -2360,6 +2360,52 @@ fn buildHttp2Frame(alloc: std.mem.Allocator, header: http2.FrameHeader, payload:
     return buf;
 }
 
+// the server preface must precede its acknowledgment of client settings.
+fn expectHttp2SettingsPrefix(bytes: []const u8) !usize {
+    var offset: usize = 0;
+    for ([_]u8{ 0, 1 }) |flags| {
+        const frame = http2.parseFrameHeader(bytes[offset..]) orelse return error.IncompleteFrame;
+        try std.testing.expectEqual(http2.FrameType.settings, frame.frame_type);
+        try std.testing.expectEqual(@as(u32, 0), frame.stream_id);
+        try std.testing.expectEqual(@as(u32, 0), frame.length);
+        try std.testing.expectEqual(flags, frame.flags);
+        offset += http2.frame_header_len;
+    }
+    return offset;
+}
+
+fn expectHttp2ResponseWithCredit(bytes: []const u8, upstream_response: []const u8, stream_id: u32, uploaded_bytes: u32) !void {
+    var offset = try expectHttp2SettingsPrefix(bytes);
+    const settings = http2.parseFrameHeader(upstream_response).?;
+    try std.testing.expect(http2.isInitialServerSettingsFrame(settings));
+    var expected_offset: usize = http2.frame_header_len + settings.length;
+    var connection_credit: u64 = 0;
+    var stream_credit: u64 = 0;
+    while (offset < bytes.len) {
+        const frame = http2.parseFrameHeader(bytes[offset..]) orelse return error.IncompleteFrame;
+        const length = http2.frame_header_len + frame.length;
+        if (length > bytes.len - offset) return error.IncompleteFrame;
+        if (frame.frame_type == .window_update) {
+            try std.testing.expectEqual(@as(u32, 4), frame.length);
+            try std.testing.expectEqual(@as(u8, 0), frame.flags);
+            const increment = std.mem.readInt(u32, bytes[offset + 9 ..][0..4], .big);
+            try std.testing.expect(increment > 0 and increment <= 0x7fffffff);
+            if (frame.stream_id == 0) connection_credit += increment else {
+                try std.testing.expectEqual(stream_id, frame.stream_id);
+                stream_credit += increment;
+            }
+        } else {
+            if (length > upstream_response.len - expected_offset) return error.UnexpectedFrame;
+            try std.testing.expectEqualSlices(u8, upstream_response[expected_offset..][0..length], bytes[offset..][0..length]);
+            expected_offset += length;
+        }
+        offset += length;
+    }
+    try std.testing.expectEqual(upstream_response.len, expected_offset);
+    try std.testing.expectEqual(@as(u64, uploaded_bytes), connection_credit);
+    try std.testing.expectEqual(@as(u64, uploaded_bytes), stream_credit);
+}
+
 fn buildHttp2SettingsAckFrame(alloc: std.mem.Allocator) ![]u8 {
     return buildHttp2Frame(alloc, .{
         .length = 0,
@@ -3570,17 +3616,10 @@ test "handleConnection proxies HTTP/2 upstream response bytes" {
     defer std.testing.allocator.free(request);
     try socket_helpers.writeAll(client_fd, request);
 
-    const settings_ack = try buildHttp2SettingsAckFrame(std.testing.allocator);
-    defer std.testing.allocator.free(settings_ack);
-    var expected: std.ArrayList(u8) = .empty;
-    defer expected.deinit(std.testing.allocator);
-    try expected.appendSlice(std.testing.allocator, settings_ack);
-    try expected.appendSlice(std.testing.allocator, upstream_response);
-
     var response_buf: [1024]u8 = undefined;
     socket_helpers.setSocketTimeoutMs(client_fd, 1000);
     const bytes_read = readSocketBytes(client_fd, &response_buf);
-    try std.testing.expectEqualSlices(u8, expected.items, response_buf[0..bytes_read]);
+    try expectHttp2ResponseWithCredit(response_buf[0..bytes_read], upstream_response, 7, 0);
 
     upstream.wait();
     try std.testing.expect(std.mem.eql(u8, http2.client_preface, upstream.request(0)[0..http2.client_preface.len]));
@@ -4264,20 +4303,19 @@ test "handleConnection streams HTTP/2 upstream frames before stream end" {
     try socket_helpers.writeAll(client_fd, request);
 
     socket_helpers.setSocketTimeoutMs(client_fd, 1000);
-    const settings_ack = try buildHttp2SettingsAckFrame(std.testing.allocator);
-    defer std.testing.allocator.free(settings_ack);
-    var ack_read_buf: [1024]u8 = undefined;
-    // TCP may split a frame or coalesce several frames into one read. Read
-    // only each expected prefix, leaving subsequent bytes for the next step.
-    const ack_read_len = readSocketBytes(client_fd, ack_read_buf[0..settings_ack.len]);
-    try std.testing.expectEqualSlices(u8, settings_ack, ack_read_buf[0..ack_read_len]);
+    var preface: [2 * http2.frame_header_len]u8 = undefined;
+    const preface_len = readSocketBytes(client_fd, &preface);
+    _ = try expectHttp2SettingsPrefix(preface[0..preface_len]);
 
+    // read only the response headers, leaving DATA for the next step. the
+    // upstream settings were consumed by the proxy's own connection preface.
+    const expected_headers = first_chunk[headers_start..];
     var first_read_buf: [1024]u8 = undefined;
-    const first_read_len = readSocketBytes(client_fd, first_read_buf[0..first_chunk.len]);
-    try std.testing.expectEqualSlices(u8, first_chunk, first_read_buf[0..first_read_len]);
+    const first_read_len = readSocketBytes(client_fd, first_read_buf[0..expected_headers.len]);
+    try std.testing.expectEqualSlices(u8, expected_headers, first_read_buf[0..first_read_len]);
 
-    // The upstream cannot send END_STREAM until the forwarded headers were
-    // observed. This proves streaming without relying on a timing window.
+    // the upstream cannot send END_STREAM until the forwarded headers were
+    // observed. this proves streaming without relying on a timing window.
     release_tail.post(std.Options.debug_io);
     var second_read_buf: [1024]u8 = undefined;
     const second_read_len = readSocketBytes(client_fd, second_read_buf[0..second_chunk.len]);
@@ -4381,17 +4419,10 @@ test "handleConnection relays HTTP/2 client data frames upstream" {
     std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(25), .awake) catch unreachable;
     try socket_helpers.writeAll(client_fd, data);
 
-    const settings_ack = try buildHttp2SettingsAckFrame(std.testing.allocator);
-    defer std.testing.allocator.free(settings_ack);
-    var expected: std.ArrayList(u8) = .empty;
-    defer expected.deinit(std.testing.allocator);
-    try expected.appendSlice(std.testing.allocator, settings_ack);
-    try expected.appendSlice(std.testing.allocator, upstream_response);
-
     var response_buf: [1024]u8 = undefined;
     socket_helpers.setSocketTimeoutMs(client_fd, 1000);
     const bytes_read = readSocketBytes(client_fd, &response_buf);
-    try std.testing.expectEqualSlices(u8, expected.items, response_buf[0..bytes_read]);
+    try expectHttp2ResponseWithCredit(response_buf[0..bytes_read], upstream_response, 11, 5);
 
     upstream.wait();
     try std.testing.expect(std.mem.eql(u8, http2.client_preface, upstream.request(0)[0..http2.client_preface.len]));
@@ -4437,16 +4468,6 @@ test "handleConnection routes later HTTP/2 streams independently on one client c
         "two",
     );
     defer std.testing.allocator.free(second_response);
-    const settings_ack = try buildHttp2SettingsAckFrame(std.testing.allocator);
-    defer std.testing.allocator.free(settings_ack);
-    const downstream_settings = try buildHttp2Frame(std.testing.allocator, .{
-        .length = 0,
-        .frame_type = .settings,
-        .flags = 0,
-        .stream_id = 0,
-    }, "");
-    defer std.testing.allocator.free(downstream_settings);
-
     const upstream_one_actions = [_]TestUpstreamAction{
         .{ .respond = upstream_one_response },
     };
@@ -4569,8 +4590,8 @@ test "handleConnection routes later HTTP/2 streams independently on one client c
     var response_buf: [2048]u8 = undefined;
     socket_helpers.setSocketTimeoutMs(client_fd, 1000);
     const bytes_read = readSocketBytes(client_fd, &response_buf);
-    try std.testing.expectEqualSlices(u8, settings_ack, response_buf[0..settings_ack.len]);
-    try std.testing.expectEqualSlices(u8, downstream_settings, response_buf[settings_ack.len .. settings_ack.len + downstream_settings.len]);
+    const response_start = try expectHttp2SettingsPrefix(response_buf[0..bytes_read]);
+    try std.testing.expectEqual(response_start + first_response.len + second_response.len, bytes_read);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], first_response) != null);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], second_response) != null);
 
