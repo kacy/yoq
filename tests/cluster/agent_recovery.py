@@ -213,6 +213,11 @@ def main():
     rig = Rig(args.binary, args.artifacts)
     try:
         exercise(rig)
+    except Exception:
+        for path in sorted(rig.artifacts.glob("*.log")):
+            print(f"--- {path.name} ---", flush=True)
+            print(path.read_text(errors="replace")[-6000:], flush=True)
+        raise
     finally:
         rig.cleanup()
 

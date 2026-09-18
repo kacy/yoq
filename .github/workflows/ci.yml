@@ -373,15 +373,28 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe
       - name: recover a joined agent after leader death and interrupted result delivery
         run: sudo env YOQ_BIN="$PWD/zig-out/bin/yoq" YOQ_SMOKE_DIR="$RUNNER_TEMP/agent-recovery" bash scripts/agent-recovery-smoke.sh
+      - name: export fixture logs without credentials
+        if: always()
+        run: |
+          sudo install -d -m 0755 "$RUNNER_TEMP/agent-recovery-logs"
+          sudo find "$RUNNER_TEMP/agent-recovery" -maxdepth 1 -type f \( -name '*.log' -o -name result.json \) \
+            -exec install -m 0644 -t "$RUNNER_TEMP/agent-recovery-logs" {} +
       - name: retain recovery logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agent-recovery-logs
           path: |
-            ${{ runner.temp }}/agent-recovery/*.log
-            ${{ runner.temp }}/agent-recovery/result.json
+            ${{ runner.temp }}/agent-recovery-logs/*.log
+            ${{ runner.temp }}/agent-recovery-logs/result.json
           retention-days: 7
+      - name: retain the fixture executable for local reproduction
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agent-recovery-binary
+          path: zig-out/bin/yoq
+          retention-days: 1
 
   registry-tls:
     name: registry-tls
