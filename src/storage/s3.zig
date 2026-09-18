@@ -4,8 +4,8 @@
 // buckets are directories within a designated storage root, objects are
 // files within bucket directories. multipart uploads use a staging area.
 //
-// not a full S3 implementation — just enough for apps to use S3 SDKs
-// for blob storage without external dependencies.
+// the gateway exposes a limited s3-style contract with yoq authentication.
+// see docs/storage-api.md for supported operations and client limitations.
 
 const std = @import("std");
 const linux_platform = @import("linux_platform");
