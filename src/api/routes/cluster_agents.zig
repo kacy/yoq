@@ -20,6 +20,7 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator, ctx: RouteContext)
     const path = request.path_only;
 
     if (request.method == .GET) {
+        if (std.mem.eql(u8, path, "/cluster/alerts")) return @import("cluster_agents/alert_status.zig").handle(alloc, request, ctx);
         if (std.mem.eql(u8, path, "/cluster/status")) return cluster_routes.handleClusterStatus(alloc, ctx);
         if (std.mem.eql(u8, path, "/agents")) return agent_routes.handleListAgents(alloc, ctx);
         if (std.mem.eql(u8, path, "/wireguard/peers")) return agent_routes.handleWireguardPeers(alloc, request, ctx);

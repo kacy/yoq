@@ -576,6 +576,18 @@ fn runAssignment(
             return;
         };
     }
+    const alert_registration = if (execution.value.alerts) |config|
+        @import("../../manifest/alerts/runtime.zig").register(meta.app_name orelse "", meta.workload_name orelse container_id, config, false) catch {
+            c.forceStop() catch {};
+            _ = c.wait() catch 255;
+            cleanup(container_id);
+            setContainerState(self, assignment_id, .failed);
+            reportStatus(self, assignment_id, "failed", "alert_runtime_unavailable");
+            return;
+        }
+    else
+        null;
+    defer if (alert_registration) |registration| registration.release();
 
     reportStatus(self, assignment_id, "running", null);
     setContainerState(self, assignment_id, .running);

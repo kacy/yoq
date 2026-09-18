@@ -155,6 +155,16 @@ fn handleConnection(self: *LogServer, client_fd: posix.fd_t) void {
         return;
     }
 
+    if (std.mem.eql(u8, request.path_only, "/v1/status/alerts")) {
+        const body = @import("../../state/store/alerts.zig").listJson(self.alloc, common.extractQueryParam(request.path, "app")) catch {
+            sendError(client_fd, .internal_server_error, "alert status unavailable");
+            return;
+        };
+        defer self.alloc.free(body);
+        writeResponse(client_fd, .ok, "application/json", body);
+        return;
+    }
+
     if (matchTrainingLogs(request.path_only)) |path| {
         if (!common.validateClusterInput(path.app_name) or !common.validateClusterInput(path.job_name)) {
             sendError(client_fd, .bad_request, "invalid app or training job name");

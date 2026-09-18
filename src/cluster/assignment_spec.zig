@@ -12,6 +12,7 @@ pub const Execution = struct {
     argv: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
     working_dir: ?[]const u8 = null,
+    alerts: ?manifest.AlertSpec = null,
     volumes: []const manifest.VolumeMount = &.{},
     volume_definitions: []const manifest.Volume = &.{},
     ports: []const manifest.PortMapping = &.{},
@@ -28,6 +29,7 @@ pub fn fromWorkload(alloc: std.mem.Allocator, json: []const u8) ![]u8 {
         command: std.json.Value = .null,
         env: []const []const u8 = &.{},
         working_dir: ?[]const u8 = null,
+        alerts: ?manifest.AlertSpec = null,
         volumes: []const manifest.VolumeMount = &.{},
         volume_definitions: []const manifest.Volume = &.{},
         ports: []const manifest.PortMapping = &.{},
@@ -61,6 +63,7 @@ pub fn fromWorkload(alloc: std.mem.Allocator, json: []const u8) ![]u8 {
         .argv = argv.items,
         .env = parsed.value.env,
         .working_dir = parsed.value.working_dir,
+        .alerts = parsed.value.alerts,
         .volumes = parsed.value.volumes,
         .volume_definitions = parsed.value.volume_definitions,
         .ports = parsed.value.ports,
@@ -281,4 +284,16 @@ test "training execution retains named mounts gpu settings and published ports" 
     try std.testing.expectEqualStrings("storage", execution.value.volume_definitions[0].driver.nfs.server);
     try std.testing.expectEqual(@as(u16, 9090), execution.value.ports[0].host_port);
     try std.testing.expectEqual(@as(u64, 60), execution.value.checkpoint.?.interval_secs);
+}
+
+test "assignment preserves service alert configuration" {
+    const alloc = std.testing.allocator;
+    const encoded = try fromWorkload(alloc,
+        \\{"alerts":{"cpu_percent":90,"restart_count":3,"webhook":"https://example.com/hook"}}
+    );
+    defer alloc.free(encoded);
+    var execution = try decode(alloc, encoded);
+    defer execution.deinit();
+    try std.testing.expectEqual(@as(f64, 90), execution.value.alerts.?.cpu_percent.?);
+    try std.testing.expectEqualStrings("https://example.com/hook", execution.value.alerts.?.webhook.?);
 }

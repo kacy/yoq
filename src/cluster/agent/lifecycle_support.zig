@@ -96,6 +96,7 @@ pub fn wait(self: anytype) void {
 }
 
 pub fn deinit(self: anytype) void {
+    defer @import("../../manifest/alerts/runtime.zig").shutdownIfUnused();
     stop(self);
 
     self.container_lock.lockUncancelable(std.Options.debug_io);
