@@ -8,6 +8,7 @@ const blob_transfer = @import("registry/blob_transfer.zig");
 const upload = @import("registry/upload.zig");
 
 pub const RegistryError = common.RegistryError;
+pub const PullOptions = common.PullOptions;
 pub const PullResult = common.PullResult;
 pub const PushResult = common.PushResult;
 
@@ -24,6 +25,11 @@ pub fn pull(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.ImageRef) Regi
 /// Resolve an explicit target; callers doing cross-platform builds need not
 /// pretend to be the architecture running this process.
 pub fn pullForPlatform(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.ImageRef, platform: spec.Platform) RegistryError!PullResult {
+    return pullForPlatformWithOptions(io, alloc, image_ref, platform, try PullOptions.fromEnvironment());
+}
+
+pub fn pullForPlatformWithOptions(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.ImageRef, platform: spec.Platform, options: PullOptions) RegistryError!PullResult {
+    if (options.max_layer_bytes == 0) return error.InvalidSizeLimit;
     if (image_ref.digest_reference and blob_store.Digest.parse(image_ref.reference) == null)
         return RegistryError.DigestMismatch;
     var client: std.http.Client = .{ .io = io, .allocator = alloc };
@@ -64,8 +70,12 @@ pub fn pullForPlatform(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.Ima
 
     var parsed = spec.parseManifest(alloc, manifest_bytes) catch
         return RegistryError.ParseError;
-    defer parsed.deinit();
+    errdefer parsed.deinit();
     const manifest = parsed.value;
+    for (manifest.layers) |layer| {
+        if (spec.layerCompression(layer.mediaType) == null) return error.UnsupportedMediaType;
+        if (layer.size > options.max_layer_bytes) return error.ResponseTooLarge;
+    }
 
     const config_bytes = blob_transfer.fetchBlob(alloc, &client, image_ref.host, repository, manifest.config.digest, token) catch |e|
         return switch (e) {
@@ -86,14 +96,14 @@ pub fn pullForPlatform(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.Ima
     const layer_count = manifest.layers.len;
     if (layer_count <= 1) {
         for (manifest.layers) |layer| {
-            blob_transfer.downloadLayerBlob(alloc, &client, image_ref.host, repository, layer.digest, token) catch |e|
+            blob_transfer.downloadLayerBlob(alloc, &client, image_ref.host, repository, layer.digest, token, options.max_layer_bytes) catch |e|
                 return switch (e) {
                     error.BlobNotFound => RegistryError.BlobNotFound,
                     error.NetworkError => RegistryError.NetworkError,
                     error.ResponseTooLarge => RegistryError.ResponseTooLarge,
                     error.DigestMismatch => RegistryError.DigestMismatch,
                 };
-            total_size += layer.size;
+            total_size = std.math.add(u64, total_size, layer.size) catch return error.ResponseTooLarge;
         }
     } else {
         var batch_start: usize = 0;
@@ -107,13 +117,14 @@ pub fn pullForPlatform(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.Ima
                 .repository = repository,
                 .token = token,
                 .layers = manifest.layers[batch_start..batch_end],
+                .max_layer_bytes = options.max_layer_bytes,
             };
             try downloadBatch(LayerDownloads, &downloads, downloads.layers.len);
             batch_start = batch_end;
         }
 
         for (manifest.layers) |layer| {
-            total_size += layer.size;
+            total_size = std.math.add(u64, total_size, layer.size) catch return error.ResponseTooLarge;
         }
     }
 
@@ -133,6 +144,8 @@ pub fn pullForPlatform(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.Ima
         .layer_digests = layer_digests.toOwnedSlice(alloc) catch
             return RegistryError.NetworkError,
         .total_size = total_size,
+        .layers = manifest.layers,
+        .parsed_manifest = parsed,
         .alloc = alloc,
     };
 }
@@ -146,15 +159,16 @@ const LayerDownloads = struct {
     repository: []const u8,
     token: common.Token,
     layers: []const spec.Descriptor,
+    max_layer_bytes: u64,
 
     fn spawn(self: *LayerDownloads, index: usize, failed: *std.atomic.Value(bool), result: *?RegistryError) !Thread {
         return std.Thread.spawn(.{}, blob_transfer.downloadLayerWorker, .{
-            self.io, self.alloc, self.host, self.repository, self.layers[index].digest, self.token, failed, result,
+            self.io, self.alloc, self.host, self.repository, self.layers[index].digest, self.token, self.max_layer_bytes, failed, result,
         });
     }
 
     fn download(self: *LayerDownloads, index: usize) RegistryError!void {
-        return blob_transfer.downloadLayerBlob(self.alloc, self.client, self.host, self.repository, self.layers[index].digest, self.token);
+        return blob_transfer.downloadLayerBlob(self.alloc, self.client, self.host, self.repository, self.layers[index].digest, self.token, self.max_layer_bytes);
     }
 };
 

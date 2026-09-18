@@ -34,3 +34,11 @@ for a private registry with a separate token service, add its https origin expli
 this setting authorizes sending that registry's basic credentials to any token path on `https://auth.example:443`. a different hostname, port, or scheme does not match. use an origin without a path, query, fragment, or user information. authentication fails if a credential-bearing registry challenge names an untrusted token origin. anonymous challenges may use another https token service because no configured credentials are sent.
 
 authentication redirects are refused. blob downloads may follow redirects, but drop authorization before doing so. configuration files are limited to 1 mib, authentication response headers to 8 kib, and token response bodies to 64 kib, including chunked bodies. the repository probe and token exchange share a 30-second deadline; cancellation joins outstanding work before returning an error.
+
+# layer formats and size limits
+
+pull results retain each layer's media type, digest, and size. extraction accepts raw tar, gzip, and zstd oci layers, including the corresponding nondistributable media types and docker gzip layers. unsupported media types fail before layer downloads. compressed blobs are verified by digest before extraction; the declared compression must match the blob even when its extracted directory is cached.
+
+a compressed layer is limited to 512 mib by default. set `YOQ_MAX_LAYER_BYTES` to a positive decimal byte count to change the limit; `8589934592` allows layers up to 8 gib. the limit applies to both declared sizes and bytes received, including responses without a content length. callers of the zig api can supply `PullOptions` to `pullForPlatformWithOptions` instead. configuration and manifest response limits stay separate.
+
+zstd extraction uses an 8 mib decoder window. layers requiring a larger window fail extraction even if their compressed size fits the download policy. archive extraction also retains its 10 gib per-file limit.

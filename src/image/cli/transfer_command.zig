@@ -26,7 +26,7 @@ pub fn pull(io: std.Io, args: *std.process.Args.Iterator, alloc: std.mem.Allocat
     // Pulling needs no privilege. Native whiteout preparation is deferred
     // until a privileged runtime/build assembles its root filesystem.
     if (std.os.linux.geteuid() == 0) {
-        const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch |err| {
+        const layer_paths = layer.assembleRootfsDescriptors(alloc, result.layers) catch |err| {
             writeErr("failed to extract image layers: {}\n", .{err});
             return common.ImageCommandsError.PullFailed;
         };

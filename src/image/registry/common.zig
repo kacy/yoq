@@ -2,6 +2,7 @@ const std = @import("std");
 const spec = @import("../spec.zig");
 
 pub const RegistryError = error{
+    InvalidSizeLimit,
     AuthFailed,
     ManifestNotFound,
     BlobNotFound,
@@ -46,6 +47,29 @@ pub const max_blob_size: usize = 512 * 1024 * 1024;
 pub const max_parallel_downloads = 4;
 pub const registry_timeout_sec = 30;
 
+pub const PullOptions = struct {
+    max_layer_bytes: u64 = max_blob_size,
+
+    pub fn fromEnvironment() error{InvalidSizeLimit}!PullOptions {
+        const value = std.c.getenv("YOQ_MAX_LAYER_BYTES") orelse return .{};
+        return .{ .max_layer_bytes = try parseLayerLimit(std.mem.span(value)) };
+    }
+};
+
+fn parseLayerLimit(value: []const u8) error{InvalidSizeLimit}!u64 {
+    if (value.len == 0) return error.InvalidSizeLimit;
+    for (value) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidSizeLimit;
+    const limit = std.fmt.parseInt(u64, value, 10) catch return error.InvalidSizeLimit;
+    if (limit == 0) return error.InvalidSizeLimit;
+    return limit;
+}
+
+test "registry layer size policy accepts large explicit byte limits and rejects invalid configuration" {
+    try std.testing.expectEqual(@as(u64, 8 * 1024 * 1024 * 1024), try parseLayerLimit("8589934592"));
+    for ([_][]const u8{ "", "0", "-1", "+1", "8GiB", "18446744073709551616" }) |invalid|
+        try std.testing.expectError(error.InvalidSizeLimit, parseLayerLimit(invalid));
+}
+
 pub const Token = struct {
     value: []const u8,
     kind: enum { bearer, basic } = .bearer,
@@ -62,10 +86,14 @@ pub const PullResult = struct {
     config_bytes: []const u8,
     layer_digests: []const []const u8,
     total_size: u64,
+    /// descriptors borrow the retained manifest and remain valid until deinit.
+    layers: []const spec.Descriptor = &.{},
+    parsed_manifest: ?std.json.Parsed(spec.Manifest) = null,
 
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *PullResult) void {
+        if (self.parsed_manifest) |parsed| parsed.deinit();
         self.alloc.free(self.manifest_bytes);
         self.alloc.free(self.config_bytes);
         for (self.layer_digests) |digest| self.alloc.free(digest);
