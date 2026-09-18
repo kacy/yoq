@@ -211,7 +211,8 @@ pub const Container = struct {
             if (!exec_runtime.isSafeRoot(lower)) return ContainerError.StartFailed;
         }
         if (!config.host_mode and !config.namespaces.mount) return ContainerError.StartFailed;
-        errdefer if (config.lower_dirs.len > 0) cleanupContainerDirs(config.id);
+        // a failed execution attempt still belongs to the existing container.
+        // removal owns its writable layer, including startup failure recovery.
         const overlay = start_support.prepareOverlayRuntime(config, containers_subdir) catch return ContainerError.StartFailed;
         var child_ctx = start_support.initChildContext(config, &overlay);
         var channel = startup.Channel.init() catch return ContainerError.StartFailed;

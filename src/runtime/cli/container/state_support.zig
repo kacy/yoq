@@ -16,6 +16,9 @@ const LivenessState = enum {
 };
 
 pub fn resolveContainerRef(alloc: std.mem.Allocator, ref: []const u8) ContainerError!store.ContainerRecord {
+    if (store.load(alloc, ref)) |record| return record else |err| {
+        if (err != error.NotFound) return ContainerError.StoreError;
+    }
     if (@import("../../local_control.zig").findName(alloc, ref) catch return ContainerError.StoreError) |id| {
         defer alloc.free(id);
         return store.load(alloc, id) catch return ContainerError.ContainerNotFound;

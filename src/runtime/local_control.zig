@@ -45,7 +45,7 @@ pub fn register(id: []const u8, name: ?[]const u8) !void {
     var lease = try db_store.leaseDb();
     defer lease.deinit();
     if (name) |value| {
-        const legacy = try lease.db.one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM containers WHERE hostname = ? AND id NOT IN (SELECT container_id FROM local_containers);", .{}, .{value});
+        const legacy = try lease.db.one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM containers WHERE hostname = ? AND id NOT IN (SELECT container_id FROM local_containers WHERE name IS NOT NULL);", .{}, .{value});
         if (legacy != null and legacy.?.count > 0) return error.NameInUse;
     }
     try lease.db.exec("INSERT INTO local_containers (container_id, name) VALUES (?, ?);", .{}, .{ id, name });
@@ -132,4 +132,16 @@ test "local container owner lock has one holder" {
     const first = try lock("aabbccddeeff", .owner, false);
     defer first.deinit();
     try std.testing.expectError(error.Busy, lock("aabbccddeeff", .owner, false));
+}
+
+// metadata is removed together, so a failed database write cannot release the
+// name while leaving a container that still owns storage.
+pub fn removeRecord(id: []const u8) !void {
+    var lease = try db_store.leaseDb();
+    defer lease.deinit();
+    try lease.db.exec("SAVEPOINT remove_local_container;", .{}, .{});
+    errdefer lease.db.exec("ROLLBACK TO remove_local_container; RELEASE remove_local_container;", .{}, .{}) catch {};
+    try lease.db.exec("DELETE FROM containers WHERE id = ?;", .{}, .{id});
+    try lease.db.exec("DELETE FROM local_containers WHERE container_id = ?;", .{}, .{id});
+    try lease.db.exec("RELEASE remove_local_container;", .{}, .{});
 }

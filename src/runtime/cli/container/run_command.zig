@@ -510,6 +510,8 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
 
     {
         const control = @import("../../local_control.zig");
+        const creation_lock = try control.lock(id, .command, true);
+        defer creation_lock.deinit();
         control.register(id, flags.container_name) catch |err| {
             writeErr("cannot reserve container name: {}\n", .{err});
             return ContainerError.ConfigSaveFailed;

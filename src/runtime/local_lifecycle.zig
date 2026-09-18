@@ -74,7 +74,12 @@ fn stopLocked(id: []const u8, alloc: std.mem.Allocator) !void {
     try waitForOwner(id);
     const record = try store.load(alloc, id);
     defer record.deinit(alloc);
-    if (std.mem.eql(u8, record.status, "cleanup_failed")) return error.CleanupFailed;
+    const owner = try control.lock(id, .owner, true);
+    defer owner.deinit();
+    cleanupRuntime(alloc, &record) catch |err| {
+        store.updateStatus(id, "cleanup_failed", null, record.exit_code) catch {};
+        return err;
+    };
     try store.updateStatus(id, "stopped", null, record.exit_code);
 }
 
@@ -101,7 +106,8 @@ pub fn start(io: std.Io, alloc: std.mem.Allocator, id: []const u8) !void {
 fn startLocked(io: std.Io, alloc: std.mem.Allocator, id: []const u8) !void {
     const record = try store.load(alloc, id);
     defer record.deinit(alloc);
-    if (std.mem.eql(u8, record.status, "cleanup_failed")) return error.CleanupFailed;
+    if (std.mem.eql(u8, record.status, "removing")) return error.InvalidStatus;
+    if (std.mem.eql(u8, record.status, "cleanup_failed")) try stopLocked(id, alloc);
     if (record.pid != null or std.mem.eql(u8, record.status, "running")) return error.ContainerRunning;
     const cfg = try run_state.loadConfig(alloc, id);
     defer cfg.deinit(alloc);
@@ -128,6 +134,59 @@ pub fn removeWithVolumes(id: []const u8, alloc: std.mem.Allocator, remove_anonym
     defer record.deinit(alloc);
     if (record.pid != null or std.mem.eql(u8, record.status, "running")) return error.ContainerRunning;
     try stopLocked(id, alloc);
+    try store.updateStatus(id, "removing", null, record.exit_code);
+    try removeArtifacts(id);
     try @import("local_volumes.zig").releaseContainer(id, remove_anonymous);
-    cleanupStoppedContainer(id, record.ip_address, record.veth_host);
+    try removeSavedConfig(id);
+    try control.removeRecord(id);
+}
+
+fn removeArtifacts(id: []const u8) !void {
+    const paths = @import("../lib/paths.zig");
+    const io = std.Options.debug_io;
+    var path_buf: [paths.max_path]u8 = undefined;
+    const directory = try paths.dataPathFmt(&path_buf, "containers/{s}", .{id});
+    try std.Io.Dir.cwd().deleteTree(io, directory);
+    inline for (.{ "logs/{s}.log", "logs/{s}.log.1" }) |pattern| {
+        const path = try paths.dataPathFmt(&path_buf, pattern, .{id});
+        std.Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+    }
+}
+
+// reconstruct teardown after a supervisor exit using the saved run spec and
+// resource handles recorded before launch. this also retries cleanup_failed.
+fn cleanupRuntime(alloc: std.mem.Allocator, record: *const store.ContainerRecord) !void {
+    const cg = try @import("cgroups.zig").Cgroup.open(record.id);
+    const io = std.Options.debug_io;
+    if (std.Io.Dir.cwd().access(io, cg.path(), .{})) |_| {
+        try cg.destroy();
+    } else |err| if (err != error.FileNotFound) return err;
+    if (record.ip_address) |address| {
+        const cfg = try run_state.loadConfig(alloc, record.id);
+        defer cfg.deinit(alloc);
+        const setup = @import("../network/setup.zig");
+        var info: setup.NetworkInfo = .{ .ip = ip.parseIp(address) orelse return error.InvalidAddress, .veth_host = undefined, .veth_host_len = 0 };
+        if (record.veth_host) |name| {
+            if (name.len > info.veth_host.len) return error.InvalidAddress;
+            @memcpy(info.veth_host[0..name.len], name);
+            info.veth_host_len = name.len;
+        }
+        var db = try store.openDb();
+        defer db.deinit();
+        setup.teardownContainer(record.id, &info, .{ .port_maps = cfg.port_maps }, &db);
+        try store.updateNetwork(record.id, null, null);
+    }
+}
+
+fn removeSavedConfig(id: []const u8) !void {
+    const paths = @import("../lib/paths.zig");
+    var buf: [paths.max_path]u8 = undefined;
+    const path = try paths.dataPathFmt(&buf, "run_configs/{s}.bin", .{id});
+    std.Io.Dir.cwd().deleteFile(std.Options.debug_io, path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
 }
