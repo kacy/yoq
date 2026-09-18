@@ -781,3 +781,44 @@ test "orchestrator starts and joins all three replicas as one service" {
         try std.testing.expect(state.thread == null);
     }
 }
+
+test "local rollout and snapshot rollback restore three independent replicas" {
+    const alloc = std.testing.allocator;
+    const loader = @import("loader.zig");
+    try @import("../state/store.zig").initTestDb();
+    defer @import("../state/store.zig").deinitTestDb();
+    var original = try loader.loadFromString(alloc, "[service.web]\nimage = \"nginx:old\"\nreplicas = 3");
+    defer original.deinit();
+    var app = try @import("app_spec.zig").fromManifest(alloc, "demo", &original);
+    defer app.deinit();
+    const snapshot = try app.toApplyJson(alloc);
+    defer alloc.free(snapshot);
+    var completed: std.StringHashMapUnmanaged(void) = .empty;
+    defer completed.deinit(alloc);
+
+    var old_runtime = try Orchestrator.init(alloc, &original, "demo");
+    defer old_runtime.deinit();
+    try lifecycle_support.startServiceByIndex(&old_runtime, OrchestratorError, 0, &completed, fakeStartServiceThread);
+    old_runtime.stopServiceByIndex(0);
+
+    var replacement = try loader.loadFromString(alloc, "[service.web]\nimage = \"nginx:new\"\nreplicas = 1");
+    defer replacement.deinit();
+    var new_runtime = try Orchestrator.init(alloc, &replacement, "demo");
+    defer new_runtime.deinit();
+    try lifecycle_support.startServiceByIndex(&new_runtime, OrchestratorError, 0, &completed, fakeStartServiceThread);
+    try std.testing.expectEqual(@as(usize, 1), new_runtime.states.len);
+    new_runtime.stopServiceByIndex(0);
+
+    var restored = try @import("rollback_snapshot.zig").loadLocalRollbackSnapshot(alloc, snapshot);
+    defer restored.deinit();
+    var restored_runtime = try Orchestrator.init(alloc, &restored.manifest, "demo");
+    defer restored_runtime.deinit();
+    try lifecycle_support.startServiceByIndex(&restored_runtime, OrchestratorError, 0, &completed, fakeStartServiceThread);
+    defer restored_runtime.stopServiceByIndex(0);
+    try std.testing.expectEqual(@as(usize, 3), restored_runtime.states.len);
+    try std.testing.expectEqualStrings("nginx:old", restored.manifest.services[0].image);
+    for (restored_runtime.states, 0..) |*state, index| {
+        try std.testing.expectEqual(ServiceState.Status.running, state.getStatus());
+        for (restored_runtime.states[0..index]) |other| try std.testing.expect(!std.mem.eql(u8, &state.container_id, &other.container_id));
+    }
+}
