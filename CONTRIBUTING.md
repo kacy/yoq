@@ -11,7 +11,7 @@ thanks for your interest in contributing. this document covers the basics.
 
 ```bash
 make build        # build the binary
-make test         # run all tests
+make test         # run unit tests
 make fmt          # format source code
 make bpf          # regenerate eBPF bytecode (only needed if you change bpf/ sources)
 ```
@@ -33,7 +33,7 @@ make install      # copies to /usr/local/bin/yoq
 
 add tests for core functionality and edge cases. avoid tests for the sake of tests — if a test doesn't catch a real bug or protect important behavior, it's not worth writing.
 
-run tests with:
+run one test suite at a time. start with the suite that covers your change; [development](docs/development.md) lists focused and privileged lanes. run unit tests with:
 
 ```bash
 make test
@@ -47,7 +47,7 @@ every PR should include:
 2. **what was tested** — how you verified it works
 3. **design notes** (optional) — tradeoffs, alternatives considered
 
-keep PRs focused. one feature or fix per PR. no massive changesets.
+keep prs focused on one feature or related set of fixes. larger prs can contain several focused commits. merge with squash only.
 
 ## eBPF programs
 

@@ -10,10 +10,13 @@ recommended required checks, using the check names reported by github:
 - `examples-validate`
 - `unit-tests / unit-tests`
 - `hardening-smoke / hardening-smoke`
+- `agent-recovery`
+- `dependency-security`
 - `bpf-consistency`
 
 recommended settings:
 
+- allow squash merges only
 - require branches to be up to date before merging if ci duration stays acceptable
 - do not require `quality`, `runtime-validation`, or `release`
 - no repository secrets are required for the base workflow set
