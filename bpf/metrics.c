@@ -1,33 +1,19 @@
-// metrics.c — per-IP and per-service-pair packet/byte counters
+// packet and payload-byte counters for bridge ingress.
 //
-// attached to the bridge ingress at priority 40 (after DNS interceptor
-// and load balancer). counts packets and bytes per source IP using an
-// LRU hash map, and per (src, dst, port) pair for service-to-service
-// visibility. always returns TC_ACT_UNSPEC — this is a passive observer
-// that never drops or modifies packets.
-//
-// SECURITY HARDENING:
-//   - All packet accesses validated against data_end
-//   - IP header length (IHL) validated before use
-//   - TCP header offset calculated safely
-//   - Integer overflow protection on byte counters
-//
-// the userspace MetricsCollector reads both maps to report per-container
-// traffic stats via `yoq metrics` and `yoq metrics --pairs`.
-//
-// compile with:
-//   clang -target bpf -O2 -g -c bpf/metrics.c -o bpf/metrics.o
+// source counters include all valid ipv4 traffic. tcp pair counters also
+// track connection attempts and resets. this observer leaves packets alone
+// and returns tc_act_unspec so later filters can run.
 
 #include "common.h"
 
-// -- per-IP metrics value --
+// -- source counters --
 
 struct ip_metrics {
     __u64 packets;
     __u64 bytes;
 };
 
-// -- per-pair key and metrics --
+// -- tcp pair counters --
 
 struct pair_key {
     __u32 src_ip;
@@ -43,9 +29,9 @@ struct pair_metrics {
     __u64 errors;
 }; // 32 bytes
 
-// -- BPF maps --
+// -- maps --
 
-// map 0: per-source-IP counters (backward compatible)
+// map order and layouts must match the userspace metrics collector.
 struct bpf_map_def SEC("maps") metrics_map = {
     .type        = BPF_MAP_TYPE_LRU_HASH,
     .key_size    = sizeof(__u32),
@@ -63,7 +49,43 @@ struct bpf_map_def SEC("maps") pair_metrics_map = {
     .map_flags   = 0,
 };
 
-// -- TC ingress program --
+static __inline __attribute__((always_inline)) void count_source(__u32 src_ip, __u32 payload_bytes)
+{
+    struct ip_metrics *metrics = bpf_map_lookup_elem(&metrics_map, &src_ip);
+    if (!metrics) {
+        // another cpu may create this key between lookup and insertion.
+        struct ip_metrics empty = {};
+        bpf_map_update_elem(&metrics_map, &src_ip, &empty, BPF_NOEXIST);
+        metrics = bpf_map_lookup_elem(&metrics_map, &src_ip);
+        if (!metrics)
+            return;
+    }
+
+    __sync_fetch_and_add(&metrics->packets, 1);
+    __sync_fetch_and_add(&metrics->bytes, payload_bytes);
+}
+
+static __inline __attribute__((always_inline)) void count_pair(const struct pair_key *key,
+                               __u32 payload_bytes, __u16 tcp_flags)
+{
+    struct pair_metrics *metrics = bpf_map_lookup_elem(&pair_metrics_map, key);
+    if (!metrics) {
+        struct pair_metrics empty = {};
+        bpf_map_update_elem(&pair_metrics_map, key, &empty, BPF_NOEXIST);
+        metrics = bpf_map_lookup_elem(&pair_metrics_map, key);
+        if (!metrics)
+            return;
+    }
+
+    __sync_fetch_and_add(&metrics->packets, 1);
+    __sync_fetch_and_add(&metrics->bytes, payload_bytes);
+
+    // a syn without ack starts a connection; a reset counts as an error.
+    if ((tcp_flags & 0x12) == 0x02)
+        __sync_fetch_and_add(&metrics->connections, 1);
+    if (tcp_flags & 0x04)
+        __sync_fetch_and_add(&metrics->errors, 1);
+}
 
 SEC("tc_ingress")
 int metrics_count(struct __sk_buff *skb)
@@ -71,119 +93,55 @@ int metrics_count(struct __sk_buff *skb)
     void *data     = (void *)(__u64)skb->data;
     void *data_end = (void *)(__u64)skb->data_end;
 
-    // parse ethernet header
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         return TC_ACT_UNSPEC;
-
-    // only count IPv4 packets
     if (eth->h_proto != htons(ETH_P_IP))
         return TC_ACT_UNSPEC;
 
-    // parse IP header
     struct iphdr *iph = (void *)(eth + 1);
     if ((void *)(iph + 1) > data_end)
         return TC_ACT_UNSPEC;
-
-    __u32 src_ip = iph->saddr;
-    
-    // SECURITY: Validate IP total length before using it
-    __u16 ip_tot_len = ntohs(iph->tot_len);
-    if (ip_tot_len < 20 || ip_tot_len > 65535) // Minimum IP header is 20 bytes
-        return TC_ACT_UNSPEC;
-    
-    // SECURITY: Validate TTL is reasonable
-    if (iph->ttl < 1)
-        return TC_ACT_UNSPEC;
-    
-    // SECURITY: Validate IHL (header length) is at least 5 (20 bytes)
-    __u8 ihl = iph->ihl_version & 0x0F;
-    if (ihl < 5 || ihl > 15) // RFC 791: IHL is 4 bits, min 5, max 15
-        return TC_ACT_UNSPEC;
-    
-    // SECURITY: Ensure IHL matches the actual header size we're reading
-    // We need at least eth(14) + ip_header(ihl*4) bytes
-    __u32 ip_header_len = ihl * 4;
-    if ((void *)((char *)iph + ip_header_len) > data_end)
-        return TC_ACT_UNSPEC;
-    
-    // Calculate payload length safely (avoid underflow)
-    __u32 pkt_bytes;
-    if (ip_tot_len > ip_header_len)
-        pkt_bytes = ip_tot_len - ip_header_len;
-    else
-        pkt_bytes = 0;
-
-    // -- per-source-IP counting (backward compatible) --
-
-    struct ip_metrics *existing = bpf_map_lookup_elem(&metrics_map, &src_ip);
-    if (existing) {
-        __sync_fetch_and_add(&existing->packets, 1);
-        // SECURITY: Cap bytes at reasonable maximum to prevent overflow abuse
-        if (pkt_bytes < 65535) // Max reasonable single packet payload
-            __sync_fetch_and_add(&existing->bytes, pkt_bytes);
-    } else {
-        struct ip_metrics new_entry = {
-            .packets = 1,
-            .bytes   = pkt_bytes,
-        };
-        bpf_map_update_elem(&metrics_map, &src_ip, &new_entry, 0);
-    }
-
-    // -- per-pair counting (TCP only) --
-
-    if (iph->protocol != IPPROTO_TCP)
+    if ((iph->ihl_version >> 4) != 4 || iph->ttl == 0)
         return TC_ACT_UNSPEC;
 
-    // SECURITY: Calculate TCP header offset safely using validated IHL
-    struct tcphdr *tcp = (void *)((char *)iph + ip_header_len);
+    __u32 ip_header_len = (iph->ihl_version & 0x0f) * 4;
+    if (ip_header_len < sizeof(*iph))
+        return TC_ACT_UNSPEC;
+    if ((void *)iph + ip_header_len > data_end)
+        return TC_ACT_UNSPEC;
+
+    // skb->len includes payload stored outside the linear packet buffer.
+    __u32 ip_total_len = ntohs(iph->tot_len);
+    if (ip_total_len < ip_header_len || sizeof(*eth) + ip_total_len > skb->len)
+        return TC_ACT_UNSPEC;
+    __u32 payload_bytes = ip_total_len - ip_header_len;
+    count_source(iph->saddr, payload_bytes);
+
+    // fragments cannot reliably identify a complete transport header.
+    if (iph->protocol != IPPROTO_TCP ||
+        (ntohs(iph->frag_off) & IPV4_FRAGMENT_MASK))
+        return TC_ACT_UNSPEC;
+    if (payload_bytes < sizeof(struct tcphdr))
+        return TC_ACT_UNSPEC;
+
+    struct tcphdr *tcp = (void *)iph + ip_header_len;
     if ((void *)(tcp + 1) > data_end)
         return TC_ACT_UNSPEC;
-    
-    // SECURITY: Validate TCP data offset (header length)
     __u16 tcp_flags = ntohs(tcp->flags);
-    __u8 tcp_doff = (tcp_flags >> 12) & 0x0F; // Data offset in upper 4 bits
-    if (tcp_doff < 5 || tcp_doff > 15) // Min 20 bytes, max 60 bytes
+    __u32 tcp_header_len = (tcp_flags >> 12) * 4;
+    if (tcp_header_len < sizeof(*tcp) || tcp_header_len > payload_bytes)
         return TC_ACT_UNSPEC;
-    
-    // SECURITY: Ensure TCP header doesn't exceed packet bounds
-    __u32 tcp_header_len = tcp_doff * 4;
-    if ((void *)((char *)tcp + tcp_header_len) > data_end)
+    if ((void *)tcp + tcp_header_len > data_end)
         return TC_ACT_UNSPEC;
 
-    struct pair_key pk = {
+    struct pair_key key = {
         .src_ip   = iph->saddr,
         .dst_ip   = iph->daddr,
         .dst_port = tcp->dest,
         .pad      = 0,
     };
-
-    // detect SYN (new connection) and RST (error)
-    __u8 syn = (tcp_flags >> 1) & 1;
-    __u8 ack = (tcp_flags >> 4) & 1;
-    __u8 rst = (tcp_flags >> 2) & 1;
-    __u64 is_connection = (syn && !ack) ? 1 : 0;
-    __u64 is_error = rst ? 1 : 0;
-
-    struct pair_metrics *pm = bpf_map_lookup_elem(&pair_metrics_map, &pk);
-    if (pm) {
-        __sync_fetch_and_add(&pm->packets, 1);
-        if (pkt_bytes < 65535)
-            __sync_fetch_and_add(&pm->bytes, pkt_bytes);
-        if (is_connection)
-            __sync_fetch_and_add(&pm->connections, is_connection);
-        if (is_error)
-            __sync_fetch_and_add(&pm->errors, is_error);
-    } else {
-        struct pair_metrics new_pm = {
-            .packets     = 1,
-            .bytes       = pkt_bytes,
-            .connections = is_connection,
-            .errors      = is_error,
-        };
-        bpf_map_update_elem(&pair_metrics_map, &pk, &new_pm, 0);
-    }
-
+    count_pair(&key, payload_bytes, tcp_flags);
     return TC_ACT_UNSPEC;
 }
 
