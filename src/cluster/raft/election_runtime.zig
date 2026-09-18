@@ -176,3 +176,121 @@ pub fn becomeLeader(self: anytype) void {
 pub fn resetElectionTimeout(self: anytype, min_election_ticks: u32, max_election_ticks: u32) void {
     common.resetElectionTimeout(self, min_election_ticks, max_election_ticks);
 }
+
+const testing = std.testing;
+const Raft = @import("../raft.zig").Raft;
+const Log = @import("../log.zig").Log;
+
+test "vote eligibility compares snapshot terms before length and permits repeat votes" {
+    const Case = struct {
+        last_term: types.Term,
+        last_index: types.LogIndex,
+        voted_for: ?types.NodeId = null,
+        granted: bool,
+    };
+    const cases = [_]Case{
+        .{ .last_term = 2, .last_index = 9, .granted = false },
+        .{ .last_term = 4, .last_index = 1, .granted = true },
+        .{ .last_term = 3, .last_index = 7, .granted = false },
+        .{ .last_term = 3, .last_index = 8, .granted = true },
+        .{ .last_term = 3, .last_index = 9, .granted = true },
+        .{ .last_term = 3, .last_index = 8, .voted_for = 2, .granted = true },
+        .{ .last_term = 4, .last_index = 9, .voted_for = 3, .granted = false },
+    };
+    for (cases) |case| {
+        var log = try Log.initMemory();
+        defer log.deinit();
+        try testing.expect(log.setCurrentTerm(5));
+        try testing.expect(log.setVotedFor(case.voted_for));
+        try testing.expect(log.setSnapshotMeta(.{
+            .last_included_index = 8,
+            .last_included_term = 3,
+            .data_len = 0,
+        }));
+        var raft = try Raft.init(testing.allocator, 1, &.{ 2, 3 }, &log);
+        defer raft.deinit();
+        raft.ticks_since_event = 7;
+
+        const reply = raft.handleRequestVote(.{
+            .term = 5,
+            .candidate_id = 2,
+            .last_log_term = case.last_term,
+            .last_log_index = case.last_index,
+        });
+        try testing.expectEqual(case.granted, reply.vote_granted);
+        try testing.expectEqual(@as(types.Term, 5), reply.term);
+        try testing.expectEqual(@as(u32, if (case.granted) 0 else 7), raft.ticks_since_event);
+        try testing.expectEqual(if (case.granted) @as(?types.NodeId, 2) else case.voted_for, try log.getVotedFor());
+    }
+}
+
+test "failed vote persistence does not grant a vote or reset the election timer" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+    try testing.expect(log.setCurrentTerm(5));
+    var raft = try Raft.init(testing.allocator, 1, &.{ 2, 3 }, &log);
+    defer raft.deinit();
+    raft.ticks_since_event = 7;
+    try log.db.exec("CREATE TRIGGER refuse_vote BEFORE UPDATE OF voted_for ON raft_state BEGIN SELECT RAISE(ABORT, 'vote write failed'); END;", .{}, .{});
+
+    const args: RequestVoteArgs = .{ .term = 5, .candidate_id = 2, .last_log_term = 0, .last_log_index = 0 };
+    const failed = raft.handleRequestVote(args);
+    try testing.expect(!failed.vote_granted);
+    try testing.expectEqual(@as(types.Term, 5), failed.term);
+    try testing.expectEqual(@as(?types.NodeId, null), try log.getVotedFor());
+    try testing.expectEqual(@as(u32, 7), raft.ticks_since_event);
+    try testing.expectEqual(@as(usize, 0), raft.actions.items.len);
+
+    try log.db.exec("DROP TRIGGER refuse_vote;", .{}, .{});
+    try testing.expect(raft.handleRequestVote(args).vote_granted);
+    try testing.expectEqual(@as(?types.NodeId, 2), try log.getVotedFor());
+    try testing.expectEqual(@as(u32, 0), raft.ticks_since_event);
+}
+
+test "election waits for both durable writes before changing role or sending requests" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+    try testing.expect(log.setCurrentTerm(3));
+    try log.append(.{ .index = 1, .term = 3, .data = "command" });
+    var raft = try Raft.init(testing.allocator, 1, &.{ 2, 3 }, &log);
+    defer raft.deinit();
+    raft.ticks_since_event = 7;
+
+    try log.db.exec("CREATE TRIGGER refuse_term BEFORE UPDATE OF current_term ON raft_state BEGIN SELECT RAISE(ABORT, 'term write failed'); END;", .{}, .{});
+    startElection(&raft, 10, 10);
+    try testing.expectEqual(@as(types.Term, 3), try log.getCurrentTerm());
+    try testing.expectEqual(@as(?types.NodeId, null), try log.getVotedFor());
+    try testing.expectEqual(types.Role.follower, raft.role);
+    try testing.expectEqual(@as(u32, 7), raft.ticks_since_event);
+    try testing.expectEqual(@as(usize, 0), raft.actions.items.len);
+
+    try log.db.exec("DROP TRIGGER refuse_term;", .{}, .{});
+    try log.db.exec("CREATE TRIGGER refuse_vote BEFORE UPDATE OF voted_for ON raft_state BEGIN SELECT RAISE(ABORT, 'vote write failed'); END;", .{}, .{});
+    startElection(&raft, 10, 10);
+    // the term write succeeded, but the failed vote still prevents campaigning.
+    try testing.expectEqual(@as(types.Term, 4), try log.getCurrentTerm());
+    try testing.expectEqual(@as(?types.NodeId, null), try log.getVotedFor());
+    try testing.expectEqual(types.Role.follower, raft.role);
+    try testing.expectEqual(@as(u32, 7), raft.ticks_since_event);
+    try testing.expectEqual(@as(usize, 0), raft.actions.items.len);
+
+    try log.db.exec("DROP TRIGGER refuse_vote;", .{}, .{});
+    startElection(&raft, 10, 10);
+    try testing.expectEqual(@as(types.Term, 5), try log.getCurrentTerm());
+    try testing.expectEqual(@as(?types.NodeId, 1), try log.getVotedFor());
+    try testing.expectEqual(types.Role.candidate, raft.role);
+    try testing.expectEqual(@as(u32, 1), raft.votes_received);
+    try testing.expectEqual(@as(u32, 0), raft.ticks_since_event);
+    try testing.expectEqual(@as(u32, 10), raft.election_timeout);
+    try testing.expectEqual(@as(usize, 2), raft.actions.items.len);
+    for (raft.actions.items, raft.peers) |action, peer| {
+        try testing.expect(action == .send_request_vote);
+        try testing.expectEqual(peer, action.send_request_vote.target);
+        try testing.expectEqualDeep(RequestVoteArgs{
+            .term = 5,
+            .candidate_id = 1,
+            .last_log_term = 3,
+            .last_log_index = 1,
+        }, action.send_request_vote.args);
+    }
+}
