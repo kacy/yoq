@@ -106,3 +106,70 @@ pub fn verifyAuthenticatedBody(
         .payload = authenticated.payload,
     };
 }
+
+test "authenticated frames enforce buffer limits and allow empty payloads" {
+    const key = [_]u8{0x5a} ** 32;
+    var buf: [1500]u8 = undefined;
+    const max_payload = [_]u8{0xab} ** 1460;
+    const oversized_payload = [_]u8{0xab} ** 1461;
+
+    try std.testing.expectError(TransportError.SendFailed, encodeAuthenticatedFrame(buf[0..39], key, 7, ""));
+    try std.testing.expectError(TransportError.SendFailed, encodeAuthenticatedFrame(buf[0..40], key, 7, "x"));
+    try std.testing.expectError(TransportError.SendFailed, encodeAuthenticatedFrame(&buf, key, 7, &oversized_payload));
+
+    const empty_frame = try encodeAuthenticatedFrame(buf[0..40], key, 7, "");
+    const empty = try verifyAuthenticatedFrame(empty_frame, key);
+    try std.testing.expectEqual(@as(NodeId, 7), empty.sender_id);
+    try std.testing.expectEqual(@as(usize, 0), empty.payload.len);
+
+    const full_frame = try encodeAuthenticatedFrame(&buf, key, 7, &max_payload);
+    try std.testing.expectEqual(buf.len, full_frame.len);
+    const full = try verifyAuthenticatedFrame(full_frame, key);
+    try std.testing.expectEqualSlices(u8, &max_payload, full.payload);
+    try std.testing.expectEqual(buf[40..].ptr, full.payload.ptr);
+}
+
+test "authenticated frames reject tampering truncation and a wrong key" {
+    const key = [_]u8{0x5a} ** 32;
+    const wrong_key = [_]u8{0xa5} ** 32;
+    var buf: [43]u8 = undefined;
+    const frame = try encodeAuthenticatedFrame(&buf, key, 7, "abc");
+
+    try std.testing.expectError(TransportError.AuthenticationFailed, verifyAuthenticatedFrame(frame, wrong_key));
+    for (0..frame.len) |len| {
+        try std.testing.expectError(TransportError.AuthenticationFailed, verifyAuthenticatedFrame(frame[0..len], key));
+    }
+
+    // each sender, tag, and payload byte must be covered by verification.
+    for (&buf) |*byte| {
+        byte.* ^= 1;
+        try std.testing.expectError(TransportError.AuthenticationFailed, verifyAuthenticatedFrame(frame, key));
+        byte.* ^= 1;
+    }
+    const verified = try verifyAuthenticatedFrame(frame, key);
+    try std.testing.expectEqualSlices(u8, "abc", verified.payload);
+}
+
+test "authenticated tcp bodies require a payload and a known sender ip" {
+    const key = [_]u8{0x5a} ** 32;
+    var peers = std.AutoHashMap(NodeId, PeerAddr).init(std.testing.allocator);
+    defer peers.deinit();
+    try peers.put(7, .{ .addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 7 }, 9700) });
+
+    // tcp connections use ephemeral source ports; peer identity is bound to the ip.
+    const source = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 7 }, 40000);
+    var buf: [41]u8 = undefined;
+    const empty = try encodeAuthenticatedFrame(&buf, key, 7, "");
+    try std.testing.expectError(TransportError.AuthenticationFailed, verifyAuthenticatedBody(empty, key, source, &peers));
+
+    const body = try encodeAuthenticatedFrame(&buf, key, 7, "x");
+    const verified = try verifyAuthenticatedBody(body, key, source, &peers);
+    try std.testing.expectEqual(@as(?NodeId, 7), verified.sender_id);
+    try std.testing.expectEqualSlices(u8, "x", verified.payload);
+    try std.testing.expectEqual(buf[40..].ptr, verified.payload.ptr);
+
+    const wrong_source = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 8 }, 40000);
+    try std.testing.expectError(TransportError.AuthenticationFailed, verifyAuthenticatedBody(body, key, wrong_source, &peers));
+    const unknown_sender = try encodeAuthenticatedFrame(&buf, key, 8, "x");
+    try std.testing.expectError(TransportError.AuthenticationFailed, verifyAuthenticatedBody(unknown_sender, key, source, &peers));
+}
