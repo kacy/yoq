@@ -292,13 +292,20 @@ test "cluster loses quorum when majority fails" {
     const body = try std.fmt.bufPrint(&body_buf,
         \\{{"token":"{s}","address":"10.0.0.77:9090","cpu_cores":4,"memory_mb":8192}}
     , .{cluster.join_token});
-    var response = try cluster.registerAgent(leader, body);
-    defer response.deinit(alloc);
-    try std.testing.expect(response.status_code == 400 or response.status_code == 503);
-    if (response.status_code == 400) {
-        try helpers.expectContains(response.body, "not leader");
-    } else {
-        try helpers.expectContains(response.body, "mutation outcome unknown");
+    // the client read timeout and commit wait are both five seconds. either
+    // an explicit rejection or no response is valid; neither may apply a row.
+    var response: ?@import("http_client").Response = cluster.registerAgent(leader, body) catch |err| switch (err) {
+        error.ReceiveFailed => null,
+        else => return err,
+    };
+    if (response) |*reply| {
+        defer reply.deinit(alloc);
+        try std.testing.expect(reply.status_code == 400 or reply.status_code == 503);
+        if (reply.status_code == 400) {
+            try helpers.expectContains(reply.body, "not leader");
+        } else {
+            try helpers.expectContains(reply.body, "mutation outcome unknown");
+        }
     }
     try std.testing.expectEqual(before, try readCommitIndex(&cluster, leader));
     var agents = try cluster.getFromNode(leader, "/agents");
