@@ -44,6 +44,7 @@ pub const TrainingJob = workloads.TrainingJob;
 pub const Service = workloads.Service;
 /// a logical service cannot exceed the dataplane backend capacity.
 pub const max_service_replicas: u32 = 64;
+pub const max_training_ranks: u32 = 4096;
 pub const Worker = workloads.Worker;
 pub const Cron = workloads.Cron;
 pub const BackupSpec = workloads.BackupSpec;

@@ -158,6 +158,7 @@ comptime {
     _ = @import("manifest/training.zig");
     _ = @import("manifest/checkpoint.zig");
     _ = @import("manifest/training/local_runner.zig");
+    _ = @import("manifest/training/rank_ownership.zig");
     _ = @import("gpu/lease.zig");
     _ = @import("cluster/training_reconciler.zig");
     _ = @import("manifest/alerting.zig");

@@ -2244,3 +2244,15 @@ test "all example manifests satisfy the strict schema" {
         defer manifest.deinit();
     }
 }
+
+test "training gpu count rejects overflow and counts above the scheduling limit" {
+    const alloc = std.testing.allocator;
+    for ([_]i64{ 0, -1, 4097, 4294967296, std.math.maxInt(i64) }) |count| {
+        const source = try std.fmt.allocPrint(alloc, "[training.train]\nimage = \"scratch\"\ngpus = {d}\n", .{count});
+        defer alloc.free(source);
+        try std.testing.expectError(error.InvalidTrainingConfig, loadFromString(alloc, source));
+    }
+    var maximum = try loadFromString(alloc, "[training.train]\nimage = \"scratch\"\ngpus = 4096\n");
+    defer maximum.deinit();
+    try std.testing.expectEqual(spec.max_training_ranks, maximum.training_jobs[0].gpus);
+}

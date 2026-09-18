@@ -58,6 +58,7 @@ pub const TrainingController = struct {
     restart_count: u32 = 0,
 
     pub fn init(alloc: std.mem.Allocator, job: *const spec.TrainingJob, app_name: []const u8) !TrainingController {
+        if (job.gpus == 0 or job.gpus > spec.max_training_ranks) return error.InvalidGpuCount;
         const rank_status = try alloc.alloc(RankStatus, job.gpus);
         errdefer alloc.free(rank_status);
         @memset(rank_status, .pending);
@@ -105,7 +106,7 @@ pub const TrainingController = struct {
     }
 
     pub fn resizeRanks(self: *TrainingController, gpus: u32) !void {
-        if (gpus == 0 or gpus > @import("../cluster/placement_transaction.zig").max_gang_ranks) return error.InvalidGpuCount;
+        if (gpus == 0 or gpus > spec.max_training_ranks) return error.InvalidGpuCount;
         const statuses = try self.alloc.alloc(RankStatus, gpus);
         @memset(statuses, .pending);
         self.alloc.free(self.rank_status);
@@ -393,4 +394,12 @@ test "training pause survives late runner updates until the previous owner exits
     // a second caller that loaded the old paused state cannot resume it again.
     ctrl.state = .paused;
     try std.testing.expectError(error.InvalidTrainingState, ctrl.resume_());
+}
+
+test "training controller rejects invalid gpu counts before allocation" {
+    var job = spec.TrainingJob{ .name = "train", .image = "scratch", .command = &.{}, .env = &.{}, .working_dir = null, .volumes = &.{}, .gpus = 0 };
+    for ([_]u32{ 0, spec.max_training_ranks + 1, std.math.maxInt(u32) }) |count| {
+        job.gpus = count;
+        try std.testing.expectError(error.InvalidGpuCount, TrainingController.init(std.testing.failing_allocator, &job, "demo"));
+    }
 }

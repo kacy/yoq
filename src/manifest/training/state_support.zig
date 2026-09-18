@@ -106,27 +106,33 @@ pub fn syncCheckpoints(self: anytype) void {
 }
 
 pub fn stopRunningRanks(self: anytype) !void {
+    const job_id = self.job_id orelse return;
+    return stopOwnedRanks(self, job_id);
+}
+
+/// called only while holding the controller owner lock, before starting ranks.
+pub fn stopPriorRanks(self: anytype) !void {
+    return stopOwnedRanks(self, null);
+}
+
+fn stopOwnedRanks(self: anytype, job_id: ?[]const u8) !void {
     const runtime_state = @import("../../runtime/cli/container/state_support.zig");
     const supervisor = @import("../../runtime/cli/container/supervisor_runtime.zig");
     if (isClusterManaged(self)) return error.RemoteControlRequired;
     if (self.job_id != null) {
-        const prefix = try std.fmt.allocPrint(self.alloc, "{s}-rank-", .{self.job.name});
-        defer self.alloc.free(prefix);
-        var ids = try store.listAppContainerIds(self.alloc, self.app_name);
+        var ids = try @import("rank_ownership.zig").listOwned(self.alloc, self.app_name, self.job.name, job_id);
         defer {
             for (ids.items) |id| self.alloc.free(id);
             ids.deinit(self.alloc);
         }
-        // inspect every stored rank, including ranks beyond a newly reduced
-        // manifest count and duplicate records left by an interrupted attempt.
+        // durable markers include ranks beyond a reduced manifest count and
+        // prior attempts. hostnames never establish training ownership.
         for (ids.items) |id| {
             const record = store.load(self.alloc, id) catch |err| switch (err) {
                 error.NotFound => continue,
                 else => return err,
             };
             defer record.deinit(self.alloc);
-            if (!std.mem.startsWith(u8, record.hostname, prefix)) continue;
-            _ = std.fmt.parseInt(u32, record.hostname[prefix.len..], 10) catch continue;
             if (runtime_state.currentOwnedRunningPid(&record)) |pid| {
                 try supervisor.stopProcess(pid);
                 if (!runtime_state.waitForStoppedState(self.alloc, record.id)) return error.RanksStillRunning;
