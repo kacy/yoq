@@ -50,7 +50,7 @@ restart with a binary compatible with the restored database, then repeat the sta
 
 `yoq backup` covers the local `yoq.db`; it is not a coordinated backup of the raft log, replicated `cluster/state.db`, agent state, or application volumes. do not restore that archive over cluster state or copy one live sqlite file while omitting its wal.
 
-run `sudo -H "$(command -v yoq)" upgrade preflight --server <server-ip>:7700` before maintenance. keep the original fixed voter set. for an ordinary compatible upgrade, drain agents and replace servers while retaining quorum. this validation change requires a coordinated upgrade of all voters before accepting writes: follow [replicated command recovery](cluster-guide.md#upgrading-replicated-command-validation), including its checks for unsupported historical commands. do not assume that an old snapshot is consistent merely because it opens successfully.
+run `sudo -H "$(command -v yoq)" upgrade preflight --server <server-ip>:7700` before maintenance. keep the original fixed voter set. for an ordinary compatible upgrade, drain agents and replace servers while retaining quorum. the replicated-command validation and assignment-generation changes require a coordinated upgrade: pause writes and rescheduling, then upgrade every voter and agent before resuming. follow [replicated command recovery](cluster-guide.md#upgrading-replicated-command-validation), including its checks for unsupported historical commands. do not assume that an old snapshot is consistent merely because it opens successfully.
 
 ## offline cluster recovery
 
