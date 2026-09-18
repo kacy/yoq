@@ -114,6 +114,8 @@ join agents:
 sudo -H yoq join 10.0.0.1:7700 --token "$TOKEN"
 ```
 
+query `sudo -H yoq cluster status` on the servers to identify the current leader. the following operator commands assume it is `10.0.0.1:7700`; substitute the actual leader address. app deployment does not retry automatically after a leader hint.
+
 deploy the cluster example:
 
 ```bash

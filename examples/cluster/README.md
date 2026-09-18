@@ -24,6 +24,8 @@ sudo -H yoq join 10.0.0.1:7700 --token "$TOKEN"
 
 ## 3. deploy the manifest
 
+identify the leader with `sudo -H yoq cluster status` on the servers. the command below assumes `10.0.0.1:7700` is the leader; substitute its current address. run it from a server or operator host with the api token installed.
+
 ```bash
 sudo -H env DB_PASSWORD=supersecret yoq up --server 10.0.0.1:7700 -f examples/cluster/manifest.toml
 ```

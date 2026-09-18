@@ -378,7 +378,7 @@ only the Raft leader can accept write operations (deploy, register, drain, etc.)
 
 clients can use the `leader` field to redirect their request. agents do this automatically — both during registration and on every heartbeat, agents check for leader hints and update their target server address. this means agents tolerate leadership changes without manual reconfiguration.
 
-for the CLI, point `--server` at any cluster member. if you get a `"not leader"` error, the response tells you where to send writes.
+point deployment and rollout commands at the current leader. the examples use `10.0.0.1:7700` as that leader; substitute the address reported by cluster status. the app cli does not automatically retry a deployment after a `"not leader"` response. read-only status requests can query other members.
 
 for app operations, the important write paths are:
 
