@@ -6,10 +6,44 @@ const LogEntry = common.LogEntry;
 const AppendEntriesArgs = common.AppendEntriesArgs;
 const InstallSnapshotArgs = common.InstallSnapshotArgs;
 
-pub fn encode(buf: []u8, msg: Message) !usize {
-    if (buf.len < 5) return error.BufferTooSmall;
+const frame_prefix_size = 4;
+const message_tag_size = 1;
+// payload sizes exclude the length prefix and message tag.
+const vote_payload_size = 32;
+const vote_reply_payload_size = 9;
+const append_entries_header_size = 44;
+const append_reply_payload_size = 17;
+const entry_header_size = 20;
+const snapshot_header_size = 36;
+const snapshot_reply_payload_size = 8;
 
-    var offset: usize = 4;
+// check the whole frame before writing fields or narrowing lengths to u32.
+fn encodedSize(msg: Message) !usize {
+    var payload_size: usize = switch (msg) {
+        .request_vote => vote_payload_size,
+        .request_vote_reply => vote_reply_payload_size,
+        .append_entries => append_entries_header_size,
+        .append_entries_reply => append_reply_payload_size,
+        .install_snapshot => return error.BufferTooSmall,
+        .install_snapshot_reply => snapshot_reply_payload_size,
+    };
+    if (msg == .append_entries) {
+        const entries = msg.append_entries.entries;
+        if (entries.len > std.math.maxInt(u32)) return error.BufferTooSmall;
+        for (entries) |entry| {
+            payload_size = std.math.add(usize, payload_size, entry_header_size) catch return error.BufferTooSmall;
+            payload_size = std.math.add(usize, payload_size, entry.data.len) catch return error.BufferTooSmall;
+        }
+    }
+    if (payload_size > std.math.maxInt(u32) - message_tag_size) return error.BufferTooSmall;
+    return std.math.add(usize, frame_prefix_size + message_tag_size, payload_size) catch error.BufferTooSmall;
+}
+
+pub fn encode(buf: []u8, msg: Message) !usize {
+    const frame_size = try encodedSize(msg);
+    if (buf.len < frame_size) return error.BufferTooSmall;
+
+    var offset: usize = frame_prefix_size;
     switch (msg) {
         .request_vote => |args| {
             buf[offset] = common.msg_request_vote;
@@ -31,7 +65,7 @@ pub fn encode(buf: []u8, msg: Message) !usize {
             buf[offset] = if (reply.vote_granted) 1 else 0;
             offset += 1;
         },
-        .append_entries => |args| try encodeAppendEntries(buf, &offset, args),
+        .append_entries => |args| encodeAppendEntries(buf, &offset, args),
         .append_entries_reply => |reply| {
             buf[offset] = common.msg_append_entries_reply;
             offset += 1;
@@ -51,12 +85,11 @@ pub fn encode(buf: []u8, msg: Message) !usize {
         },
     }
 
-    if (offset - 4 > std.math.maxInt(u32)) return error.BufferTooSmall;
-    std.mem.writeInt(u32, buf[0..4], @intCast(offset - 4), .little);
+    std.mem.writeInt(u32, buf[0..frame_prefix_size], @intCast(frame_size - frame_prefix_size), .little);
     return offset;
 }
 
-fn encodeAppendEntries(buf: []u8, offset: *usize, args: AppendEntriesArgs) !void {
+fn encodeAppendEntries(buf: []u8, offset: *usize, args: AppendEntriesArgs) void {
     buf[offset.*] = common.msg_append_entries;
     offset.* += 1;
     common.writeU64(buf[offset.*..], args.term);
@@ -69,17 +102,14 @@ fn encodeAppendEntries(buf: []u8, offset: *usize, args: AppendEntriesArgs) !void
     offset.* += 8;
     common.writeU64(buf[offset.*..], args.leader_commit);
     offset.* += 8;
-    if (args.entries.len > std.math.maxInt(u32)) return error.BufferTooSmall;
     common.writeU32(buf[offset.*..], @intCast(args.entries.len));
     offset.* += 4;
 
     for (args.entries) |entry| {
-        if (offset.* + 20 + entry.data.len > buf.len) return error.BufferTooSmall;
         common.writeU64(buf[offset.*..], entry.index);
         offset.* += 8;
         common.writeU64(buf[offset.*..], entry.term);
         offset.* += 8;
-        if (entry.data.len > std.math.maxInt(u32)) return error.BufferTooSmall;
         common.writeU32(buf[offset.*..], @intCast(entry.data.len));
         offset.* += 4;
         @memcpy(buf[offset.*..][0..entry.data.len], entry.data);
@@ -88,12 +118,12 @@ fn encodeAppendEntries(buf: []u8, offset: *usize, args: AppendEntriesArgs) !void
 }
 
 pub fn encodeSnapshot(alloc: std.mem.Allocator, args: InstallSnapshotArgs) ![]u8 {
-    const header_size = 4 + 1 + 32 + 4;
-    const total = header_size + args.data.len;
+    const body_header_size = message_tag_size + snapshot_header_size;
+    if (args.data.len > std.math.maxInt(u32) - body_header_size) return error.OutOfMemory;
+    const total = std.math.add(usize, frame_prefix_size + body_header_size, args.data.len) catch return error.OutOfMemory;
     const buf = try alloc.alloc(u8, total);
-    errdefer alloc.free(buf);
 
-    var offset: usize = 4;
+    var offset: usize = frame_prefix_size;
     buf[offset] = common.msg_install_snapshot;
     offset += 1;
     common.writeU64(buf[offset..], args.term);
@@ -104,14 +134,11 @@ pub fn encodeSnapshot(alloc: std.mem.Allocator, args: InstallSnapshotArgs) ![]u8
     offset += 8;
     common.writeU64(buf[offset..], args.last_included_term);
     offset += 8;
-    if (args.data.len > std.math.maxInt(u32)) return error.OutOfMemory;
     common.writeU32(buf[offset..], @intCast(args.data.len));
     offset += 4;
     @memcpy(buf[offset..][0..args.data.len], args.data);
-    offset += args.data.len;
 
-    if (offset - 4 > std.math.maxInt(u32)) return error.OutOfMemory;
-    std.mem.writeInt(u32, buf[0..4], @intCast(offset - 4), .little);
+    std.mem.writeInt(u32, buf[0..frame_prefix_size], @intCast(total - frame_prefix_size), .little);
     return buf;
 }
 
@@ -209,4 +236,29 @@ fn decodeAppendEntries(alloc: std.mem.Allocator, payload: []const u8) !Message {
         .entries = entries,
         .leader_commit = common.readU64(payload[32..]),
     } };
+}
+
+test "encode rejects every short buffer before writing the frame" {
+    const entries = [_]LogEntry{
+        .{ .index = 2, .term = 1, .data = "abc" },
+        .{ .index = 3, .term = 1, .data = "" },
+    };
+    const cases = [_]struct { message: Message, frame_size: usize }{
+        .{ .message = .{ .request_vote = .{ .term = 1, .candidate_id = 2, .last_log_index = 3, .last_log_term = 4 } }, .frame_size = 37 },
+        .{ .message = .{ .request_vote_reply = .{ .term = 1, .vote_granted = true } }, .frame_size = 14 },
+        .{ .message = .{ .append_entries = .{ .term = 1, .leader_id = 2, .prev_log_index = 3, .prev_log_term = 4, .leader_commit = 5, .entries = &.{} } }, .frame_size = 49 },
+        .{ .message = .{ .append_entries = .{ .term = 1, .leader_id = 2, .prev_log_index = 3, .prev_log_term = 4, .leader_commit = 5, .entries = &entries } }, .frame_size = 92 },
+        .{ .message = .{ .append_entries_reply = .{ .term = 1, .success = true, .match_index = 2 } }, .frame_size = 22 },
+        .{ .message = .{ .install_snapshot_reply = .{ .term = 1 } }, .frame_size = 13 },
+    };
+    var buf: [128]u8 = undefined;
+    for (cases) |case| {
+        for (0..case.frame_size) |length| {
+            @memset(&buf, 0xaa);
+            try std.testing.expectError(error.BufferTooSmall, encode(buf[0..length], case.message));
+            try std.testing.expect(std.mem.allEqual(u8, &buf, 0xaa));
+        }
+        try std.testing.expectEqual(case.frame_size, try encode(buf[0..case.frame_size], case.message));
+        try std.testing.expectEqual(case.frame_size - 4, common.readU32(&buf));
+    }
 }
