@@ -31,6 +31,8 @@ pub const ServiceImageConfig = struct {
         if (self.pull_result) |*r| r.deinit();
         if (self.config_parsed) |*c| c.deinit();
         if (self.img_record) |img| img.deinit(alloc);
+        for (self.layer_paths) |path| alloc.free(path);
+        alloc.free(self.layer_paths);
     }
 };
 
@@ -99,6 +101,8 @@ pub fn resolveServiceImageWithIo(io: std.Io, alloc: std.mem.Allocator, image: []
     const img = store.findImage(alloc, ref.repository, ref.reference) catch return null;
 
     var result = ServiceImageConfig{ .rootfs = "/", .img_record = img };
+    var resolved = false;
+    defer if (!resolved) result.deinit(alloc);
 
     result.pull_result = registry.pull(io, alloc, ref) catch return null;
     result.config_parsed = image_spec.parseImageConfig(alloc, result.pull_result.?.config_bytes) catch return null;
@@ -116,10 +120,12 @@ pub fn resolveServiceImageWithIo(io: std.Io, alloc: std.mem.Allocator, image: []
     }
 
     result.layer_paths = layer.assembleRootfs(alloc, result.pull_result.?.layer_digests) catch return null;
-    if (result.layer_paths.len > 0) {
-        result.rootfs = result.layer_paths[result.layer_paths.len - 1];
+    if (result.layer_paths.len == 0) {
+        log.err("image {s} has no extracted root filesystem", .{image});
+        return null;
     }
-
+    result.rootfs = result.layer_paths[result.layer_paths.len - 1];
+    resolved = true;
     return result;
 }
 
@@ -165,67 +171,39 @@ pub fn resolveServiceVolumes(
         .resolved_sources = .empty,
     };
 
+    errdefer result.deinit(alloc);
     for (volumes) |vol| {
-        switch (vol.kind) {
-            .bind => {
-                var resolve_buf: [4096]u8 = undefined;
-                const abs_source_len = std.Io.Dir.cwd().realPathFile(std.Options.debug_io, vol.source, &resolve_buf) catch {
-                    log.warn("failed to resolve bind mount source: {s}", .{vol.source});
-                    continue;
+        var path_buf: [4096]u8 = undefined;
+        const source = switch (vol.kind) {
+            .bind => blk: {
+                const length = std.Io.Dir.cwd().realPathFile(std.Options.debug_io, vol.source, &path_buf) catch |err| {
+                    log.err("cannot resolve required bind mount {s}: {}", .{ vol.source, err });
+                    return error.VolumeFailed;
                 };
-                const abs_source = resolve_buf[0..abs_source_len];
-
-                const duped = alloc.dupe(u8, abs_source) catch {
-                    log.warn("orchestrator: failed to allocate bind mount source: {s}", .{vol.source});
-                    continue;
-                };
-                result.resolved_sources.append(alloc, duped) catch {
-                    alloc.free(duped);
-                    continue;
-                };
-
-                result.bind_mounts.append(alloc, .{
-                    .source = duped,
-                    .target = vol.target,
-                }) catch |err| {
-                    log.warn("failed to add bind mount for {s}: {}", .{ vol.target, err });
-                };
+                break :blk path_buf[0..length];
             },
-            .named => {
-                const vol_def = findVolumeByName(manifest_volumes, vol.source) orelse {
+            .named => blk: {
+                const definition = findVolumeByName(manifest_volumes, vol.source) orelse {
                     log.err("named volume '{s}' not defined in manifest", .{vol.source});
                     return error.VolumeFailed;
                 };
-
                 const timestamp = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
-                volumes_mod.createManaged(app_name, vol_def, timestamp, null) catch |err| {
+                volumes_mod.createManaged(app_name, definition, timestamp, null) catch |err| {
                     log.err("failed to create volume '{s}': {}", .{ vol.source, err });
                     return error.VolumeFailed;
                 };
-
-                var path_buf: [4096]u8 = undefined;
-                const vol_path = volumes_mod.resolveVolumePath(&path_buf, app_name, vol.source, vol_def.driver) catch |err| {
+                break :blk volumes_mod.resolveVolumePath(&path_buf, app_name, vol.source, definition.driver) catch |err| {
                     log.err("failed to resolve volume path '{s}': {}", .{ vol.source, err });
                     return error.VolumeFailed;
                 };
-
-                const duped = alloc.dupe(u8, vol_path) catch {
-                    log.warn("orchestrator: failed to allocate volume path: {s}", .{vol.source});
-                    continue;
-                };
-                result.resolved_sources.append(alloc, duped) catch {
-                    alloc.free(duped);
-                    continue;
-                };
-
-                result.bind_mounts.append(alloc, .{
-                    .source = duped,
-                    .target = vol.target,
-                }) catch |err| {
-                    log.warn("failed to add volume mount for {s}: {}", .{ vol.target, err });
-                };
             },
-        }
+        };
+        const owned = alloc.dupe(u8, source) catch return error.VolumeFailed;
+        result.resolved_sources.append(alloc, owned) catch {
+            alloc.free(owned);
+            return error.VolumeFailed;
+        };
+        result.bind_mounts.append(alloc, .{ .source = owned, .target = vol.target }) catch return error.VolumeFailed;
     }
 
     return result;
@@ -398,4 +376,23 @@ pub fn envKey(env_var: []const u8) []const u8 {
 test "local workers reject unsupported mesh execution" {
     const worker: spec.Worker = .{ .name = "mesh", .image = "scratch", .command = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{}, .gpu_mesh = .{ .world_size = 2 } };
     try std.testing.expectError(error.UnsupportedLocalWorkerMesh, validateLocalWorker(worker));
+}
+
+test "volume resolution releases earlier mounts when a required source is missing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source_buf: [4096]u8 = undefined;
+    const length = try tmp.dir.realPathFile(std.Options.debug_io, ".", &source_buf);
+    const missing = try std.fmt.allocPrint(std.testing.allocator, "{s}/missing", .{source_buf[0..length]});
+    defer std.testing.allocator.free(missing);
+    const mounts = [_]spec.VolumeMount{
+        .{ .source = source_buf[0..length], .target = "/data", .kind = .bind },
+        .{ .source = missing, .target = "/required", .kind = .bind },
+    };
+    try std.testing.expectError(error.VolumeFailed, resolveServiceVolumes(std.testing.allocator, &mounts, &.{}, "app"));
+}
+
+test "volume resolution fails rather than omitting a mount after allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    try std.testing.expectError(error.VolumeFailed, resolveServiceVolumes(failing.allocator(), &.{.{ .source = ".", .target = "/data", .kind = .bind }}, &.{}, "app"));
 }
