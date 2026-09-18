@@ -6,6 +6,7 @@ const log = @import("../../lib/log.zig");
 const proxy_helpers = @import("proxy_helpers.zig");
 const socket_helpers = @import("socket_helpers.zig");
 const ip = @import("../ip.zig");
+const http1_stream = @import("http1_stream.zig");
 const h2c_upgrade = @import("h2c_upgrade.zig");
 const http2 = @import("http2.zig");
 const http2_connection_router = @import("http2_connection_router.zig");
@@ -346,24 +347,78 @@ pub const ReverseProxy = struct {
 
                 proxy_runtime.recordRouteRequestStart(plan.route.name, plan.route.service, plan.backend_service);
                 self.startMirrorRequest(request, &plan, client_ip);
-                const response = self.forwardPlanWithClient(request, &plan, client_ip) catch {
-                    proxy_runtime.recordResponse(.internal_server_error);
-                    const internal = formatProxyResponse(self.allocator, .{
-                        .status = .internal_server_error,
-                        .body = "{\"error\":\"proxy request failed\"}",
-                    }) catch return;
-                    defer self.allocator.free(internal);
-                    _ = socket_helpers.writeAll(client_fd, internal) catch |e| {
-                        log.warn("l7 proxy client write failed: {}", .{e});
-                    };
-                    return;
-                };
-                defer self.allocator.free(response);
-                _ = socket_helpers.writeAll(client_fd, response) catch |e| {
-                    log.warn("l7 proxy client write failed: {}", .{e});
+                self.forwardStream(request, &plan, client_ip, client_fd) catch |err| {
+                    log.warn("l7 stream ended: {}", .{err});
                 };
             },
         }
+    }
+
+    fn forwardStream(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan, client_ip: ?[4]u8, client_fd: posix.fd_t) !void {
+        var started = false;
+        var downstream = http1_stream.Downstream{ .fd = client_fd, .timeout_ms = plan.route.request_timeout_ms, .started = &started };
+        self.forwardStreamAttempts(raw_request, plan, client_ip, &downstream) catch |err| {
+            if (started) return err;
+            const failure = proxyFailureResponse(err);
+            proxy_runtime.recordResponse(failure.status);
+            const response = try formatProxyResponse(self.allocator, failure);
+            defer self.allocator.free(response);
+            try downstream.writeAll(response);
+        };
+    }
+
+    fn forwardStreamAttempts(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan, client_ip: ?[4]u8, downstream: *http1_stream.Downstream) !void {
+        const policy = proxy_policy.RequestPolicy{ .retries = plan.route.retries, .retry_on_5xx = plan.route.retry_on_5xx };
+        const circuit = proxy_policy.CircuitBreakerPolicy{ .failure_threshold = plan.route.circuit_breaker_threshold, .open_timeout_ms = plan.route.circuit_breaker_timeout_ms };
+        const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
+        defer self.allocator.free(request);
+        const parsed = (try http.parseRequest(raw_request)) orelse return error.BadRequest;
+        const websocket = http1_stream.isWebSocket(parsed.headers_raw);
+        const http10 = std.mem.indexOf(u8, raw_request[0..(std.mem.indexOf(u8, raw_request, "\r\n") orelse raw_request.len)], "HTTP/1.0") != null;
+        var attempt: u16 = 0;
+        while (true) : (attempt += 1) {
+            var upstream = try resolveAttemptUpstream(self.allocator, plan, @intCast(attempt), circuit);
+            defer upstream.deinit(self.allocator);
+            const status = self.streamAttempt(request, plan, &upstream, downstream, websocket, raw_request[requestEndOffset(raw_request, parsed)..], http10, proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), @intCast(attempt), 503, false)) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                recordUpstreamError(upstream.endpoint_id, circuit, mapUpstreamFailure(err), plan.route.name, plan.route.service, upstream.service);
+                if (!downstream.started.* and proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), @intCast(attempt), null, true)) {
+                    proxy_runtime.recordRetry();
+                    proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
+                    continue;
+                }
+                proxy_runtime.recordRouteFailure(plan.route.name, mapRouteFailureKind(err));
+                return err;
+            };
+            if (status >= 500 and status <= 599) proxy_runtime.recordEndpointFailure(upstream.endpoint_id, circuit) else proxy_runtime.recordEndpointSuccess(upstream.endpoint_id);
+            if (!downstream.started.* and proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), @intCast(attempt), status, false)) {
+                proxy_runtime.recordRetry();
+                proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
+                continue;
+            }
+            proxy_runtime.recordResponseCode(status);
+            proxy_runtime.recordRouteResponseCode(plan.route.name, plan.route.service, upstream.service, status);
+            proxy_runtime.recordRouteRecovered(plan.route.name);
+            return;
+        }
+    }
+
+    fn streamAttempt(self: *const ReverseProxy, request: []const u8, plan: *const ForwardPlan, upstream: *upstream_mod.Upstream, downstream: *http1_stream.Downstream, websocket: bool, client_prefetched: []const u8, http10: bool, retry_server_error: bool) !u16 {
+        var connection = try self.upstreamClient().openStream(.{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms }, upstream);
+        defer connection.deinit();
+        try connection.writeAll(request);
+        const head = try http1_stream.Head.read(&connection, downstream.fd, plan.method == .HEAD);
+        if (retry_server_error and head.status >= 500 and head.status <= 599) return head.status;
+        if (head.framing == .upgrade and (!websocket or !http1_stream.isWebSocket(head.bytes[0..head.end]))) return error.UnsupportedUpgrade;
+        try http1_stream.writeHead(downstream, &head, http10);
+        if (head.framing == .upgrade) {
+            try connection.writeAll(client_prefetched);
+            try http1_stream.tunnel(&connection, downstream, head.bytes[head.end..head.used]);
+        } else {
+            var reader = http1_stream.Reader{ .connection = &connection, .client_fd = downstream.fd, .prefetched = head.bytes[head.end..head.used] };
+            try http1_stream.copyBody(&reader, downstream, head.framing, !http10);
+        }
+        return head.status;
     }
 
     pub fn buildForwardRequest(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
@@ -488,7 +543,9 @@ pub const ReverseProxy = struct {
         try writeTraceHeaders(writer, inbound_traceparent, inbound_tracestate);
         try writer.print("Content-Length: {d}\r\n", .{parsed.body.len});
         try writer.writeAll(proxy_loop_header ++ ": 1\r\n");
-        if (spec.keep_alive) {
+        if (http1_stream.isWebSocket(parsed.headers_raw)) {
+            try writer.writeAll("Connection: Upgrade\r\n\r\n");
+        } else if (spec.keep_alive) {
             try writer.writeAll("Connection: keep-alive\r\n\r\n");
         } else {
             try writer.writeAll("Connection: close\r\n\r\n");
@@ -963,6 +1020,10 @@ fn peekHttp2StreamId(raw_request: []const u8) ?u32 {
 
 fn proxyFailureResponse(err: anyerror) ProxyResponse {
     return switch (err) {
+        error.NoHealthyUpstream => .{
+            .status = .service_unavailable,
+            .body = "{\"error\":\"no eligible upstream\"}",
+        },
         error.InvalidUpstreamAddress => .{
             .status = .bad_gateway,
             .body = "{\"error\":\"invalid upstream address\"}",
@@ -1091,6 +1152,7 @@ fn readRequestBytes(fd: linux_platform.posix.socket_t, buf: []u8) ReadRequestErr
             else => error.MalformedRequest,
         };
         if (parsed) |request| {
+            if (http1_stream.isWebSocket(request.headers_raw)) return buf[0..total];
             return buf[0..requestEndOffset(buf[0..total], request)];
         }
     }
@@ -3179,14 +3241,17 @@ test "resolveAttemptUpstream retries onto a different weighted backend service" 
     try std.testing.expectEqual(@as(u16, 8081), retry_upstream.port);
 }
 
-test "handleConnection proxies a client socket request" {
+test "handleConnection streams a large response through a client socket" {
     const store = @import("../../state/store.zig");
     const service_rollout = @import("../service_rollout.zig");
     const service_registry_runtime = @import("../service_registry_runtime.zig");
 
-    const actions = [_]TestUpstreamAction{
-        .{ .respond = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello" },
-    };
+    const body = try std.testing.allocator.alloc(u8, 2 * 1024 * 1024);
+    defer std.testing.allocator.free(body);
+    @memset(body, 'x');
+    const upstream_response = try std.fmt.allocPrint(std.testing.allocator, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ body.len, body });
+    defer std.testing.allocator.free(upstream_response);
+    const actions = [_]TestUpstreamAction{.{ .respond = upstream_response }};
     var upstream = try TestUpstreamServer.init(&actions);
     defer upstream.deinit();
     try upstream.start();
@@ -3259,11 +3324,18 @@ test "handleConnection proxies a client socket request" {
     try linux_platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
 
     try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
-    var response_buf: [1024]u8 = undefined;
-    const bytes_read = try posix.read(client_fd, &response_buf);
+    const response_buf = try std.testing.allocator.alloc(u8, upstream_response.len + 64);
+    defer std.testing.allocator.free(response_buf);
+    var bytes_read: usize = 0;
+    while (bytes_read < response_buf.len) {
+        const count = try posix.read(client_fd, response_buf[bytes_read..]);
+        if (count == 0) break;
+        bytes_read += count;
+    }
     try std.testing.expect(bytes_read > 0);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "HTTP/1.1 200 OK\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "\r\n\r\nhello") != null);
+    const body_start = (std.mem.indexOf(u8, response_buf[0..bytes_read], "\r\n\r\n") orelse return error.MissingHeaders) + 4;
+    try std.testing.expectEqualSlices(u8, body, response_buf[body_start..bytes_read]);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-For: 127.0.0.1\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-Host: api.internal\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-Proto: http\r\n") != null);

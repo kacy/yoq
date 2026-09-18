@@ -31,7 +31,6 @@ pub const ParsedUpgrade = struct {
 
 pub fn parseUpgradeRequest(alloc: std.mem.Allocator, raw_request: []const u8) ParseError!?ParsedUpgrade {
     const request = (http.parseRequest(raw_request) catch return null) orelse return null;
-    if (!isHttp11Request(raw_request)) return error.InvalidUpgrade;
 
     const upgrade_value = http.findHeaderValue(request.headers_raw, "Upgrade");
     const connection_value = http.findHeaderValue(request.headers_raw, "Connection");
@@ -41,6 +40,10 @@ pub fn parseUpgradeRequest(alloc: std.mem.Allocator, raw_request: []const u8) Pa
         return null;
     }
 
+    if (upgrade_value) |value| {
+        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, value, " \t"), "websocket") and settings_value == null) return null;
+    }
+    if (!isHttp11Request(raw_request)) return error.InvalidUpgrade;
     if (upgrade_value == null or !tokenListContains(upgrade_value, "h2c")) {
         return error.InvalidUpgrade;
     }
@@ -257,4 +260,11 @@ test "buildStream1HeadersFrame strips hop-by-hop headers and preserves app heade
     try std.testing.expect(!saw_upgrade);
     try std.testing.expect(!saw_hop);
     try std.testing.expect(saw_forwarded_proto);
+}
+
+test "h2c leaves ordinary http1.0 and websocket requests to the http1 handler" {
+    for ([_][]const u8{
+        "GET / HTTP/1.0\r\nHost: api.internal\r\n\r\n",
+        "GET /socket HTTP/1.1\r\nHost: api.internal\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
+    }) |request| try std.testing.expectEqual(null, try parseUpgradeRequest(std.testing.allocator, request));
 }
