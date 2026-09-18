@@ -1156,3 +1156,30 @@ test "replicated poison rejection survives restart and validates retained histor
     try std.testing.expectError(error.UnsupportedAppliedCommand, sm.validateAppliedHistory(&raft_log, alloc));
     try expectBatchTestState(&sm, 2, 1, 2);
 }
+
+test "replicated admission and restored snapshots share the complete current schema" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const alloc = std.testing.allocator;
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPathFile(std.testing.io, ".", &root_buf);
+    const path = try std.fmt.allocPrint(alloc, "{s}/old-snapshot.dat", .{root_buf[0..root_len]});
+    defer alloc.free(path);
+    var old = try StateMachine.initMemory();
+    defer old.deinit();
+    try seedBatchTestAgents(&old);
+    const read_claims = "UPDATE agents SET cpu_used = (SELECT COUNT(*) FROM assignment_claims);";
+    old.apply(.{ .index = 1, .term = 1, .data = read_claims });
+    try expectBatchTestState(&old, 1, 0, 0);
+    // reproduce a snapshot from before these schema additions.
+    try old.db.exec("DROP TABLE assignment_claims;", .{}, .{});
+    try old.db.exec("ALTER TABLE agents DROP COLUMN credential_hash;", .{}, .{});
+    try old.takeSnapshot(path, .{ .last_included_index = 1, .last_included_term = 1, .data_len = 0 });
+
+    var restored = try StateMachine.initMemory();
+    defer restored.deinit();
+    _ = try restored.restoreFromSnapshot(path);
+    restored.apply(.{ .index = 2, .term = 1, .data = read_claims ++ " UPDATE agents SET credential_hash = 'restored';" });
+    try expectBatchTestState(&restored, 2, 0, 0);
+    try std.testing.expect(!try command.wasRejected(&restored.db, 2, 1));
+}

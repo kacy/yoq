@@ -17,7 +17,6 @@ pub const Validator = struct {
         errdefer db.deinit();
         try schema.init(&db);
         try db_runtime.initMeta(&db);
-        try db_runtime.execStatement(&db, @import("../placement_transaction.zig").schema_sql, .{});
         return .{ .db = db };
     }
 
