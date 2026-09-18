@@ -181,7 +181,7 @@ pub fn parseVolumeMount(str: []const u8) ?VolumeMountSpec {
     return .{ .kind = if (is_bind) .bind else .volume, .source = source, .target = target, .read_only = if (!is_bind and mode == null) false else read_only };
 }
 
-/// structured bind mounts are writable by default. legacy -v keeps its
+/// structured mounts are writable by default. legacy -v keeps its
 /// read-only default; callers choose the parser from the option spelling.
 pub fn parseStructuredMount(str: []const u8) ?VolumeMountSpec {
     var source: ?[]const u8 = null;

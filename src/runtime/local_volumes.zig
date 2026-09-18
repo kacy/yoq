@@ -5,6 +5,7 @@ const volumes = @import("../state/volumes.zig");
 const mount_support = @import("../state/volumes/mount_support.zig");
 const cli = @import("../lib/cli.zig");
 const cmd = @import("../lib/cmd.zig");
+const paths = @import("../lib/paths.zig");
 const container = @import("container.zig");
 
 // Standalone volumes use a separate namespace from manifest-managed apps.
@@ -42,13 +43,32 @@ pub fn validName(name: []const u8) bool {
     return true;
 }
 
-fn createInDb(db: *sqlite.Db, name: []const u8, anonymous: bool) VolumeError!void {
+const Creation = struct {
+    path_buf: [paths.max_path]u8 = undefined,
+    path_len: usize = 0,
+    created_path: bool = false,
+
+    fn undo(self: *const Creation) void {
+        if (self.created_path) std.Io.Dir.cwd().deleteTree(std.Options.debug_io, self.path_buf[0..self.path_len]) catch {};
+    }
+};
+
+fn createInDb(db: *sqlite.Db, name: []const u8, anonymous: bool) VolumeError!Creation {
     if (!validName(name)) return error.InvalidName;
+    var creation: Creation = .{};
+    const path = try volumes.resolveVolumePath(&creation.path_buf, app_name, name, .{ .local = .{} });
+    creation.path_len = path.len;
+    std.Io.Dir.cwd().access(std.Options.debug_io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => creation.created_path = true,
+        else => return error.IoError,
+    };
+    errdefer creation.undo();
     const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     try volumes.create(db, app_name, .{ .name = name, .driver = .{ .local = .{} } }, now, null);
     db.exec("INSERT OR IGNORE INTO local_volumes (name, anonymous, created_at) VALUES (?, ?, ?);", .{}, .{
         sqlite.Text{ .data = name }, @as(i64, if (anonymous) 1 else 0), now,
     }) catch return error.DbError;
+    return creation;
 }
 
 pub fn create(alloc: std.mem.Allocator, requested_name: ?[]const u8) VolumeError!Record {
@@ -62,7 +82,8 @@ pub fn create(alloc: std.mem.Allocator, requested_name: ?[]const u8) VolumeError
     defer lease.deinit();
     try begin(lease.db);
     errdefer rollback(lease.db);
-    try createInDb(lease.db, name, requested_name == null);
+    const creation = try createInDb(lease.db, name, requested_name == null);
+    errdefer creation.undo();
     const record = try inspectInDb(alloc, lease.db, name);
     errdefer record.deinit(alloc);
     try commit(lease.db);
@@ -152,13 +173,18 @@ pub fn resolveMount(alloc: std.mem.Allocator, id: []const u8, spec: cli.VolumeMo
     defer lease.deinit();
     try begin(lease.db);
     errdefer rollback(lease.db);
-    try createInDb(lease.db, name, anonymous);
+    const occupied = lease.db.one(i64, "SELECT COUNT(*) FROM local_volume_refs WHERE container_id = ? AND target = ?;", .{}, .{ sqlite.Text{ .data = id }, sqlite.Text{ .data = spec.target } }) catch return error.DbError;
+    if ((occupied orelse 0) != 0) return error.InvalidMount;
+    const creation = try createInDb(lease.db, name, anonymous);
+    errdefer creation.undo();
     lease.db.exec("INSERT INTO local_volume_refs (container_id, target, volume_name, nocopy) VALUES (?, ?, ?, ?);", .{}, .{
         sqlite.Text{ .data = id }, sqlite.Text{ .data = spec.target }, sqlite.Text{ .data = name }, @as(i64, if (spec.volume_nocopy) 1 else 0),
     }) catch return error.DbError;
     const record = try inspectInDb(alloc, lease.db, name);
     defer record.deinit(alloc);
-    const source = std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, record.path, alloc) catch return error.IoError;
+    const canonical = std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, record.path, alloc) catch return error.IoError;
+    defer alloc.free(canonical);
+    const source = alloc.dupe(u8, canonical) catch return error.OutOfMemory;
     errdefer alloc.free(source);
     const target = alloc.dupe(u8, spec.target) catch return error.OutOfMemory;
     errdefer alloc.free(target);
@@ -267,6 +293,19 @@ fn initializeEmptyVolume(io: std.Io, alloc: std.mem.Allocator, rootfs: []const u
     return true;
 }
 
+pub fn needsInitialization(id: []const u8) VolumeError!bool {
+    var lease = store.leaseDb() catch return error.DbError;
+    defer lease.deinit();
+    const count = lease.db.one(
+        i64,
+        "SELECT COUNT(*) FROM local_volume_refs r JOIN local_volumes v ON v.name = r.volume_name " ++
+            "WHERE r.container_id = ? AND r.nocopy = 0 AND v.initialized = 0;",
+        .{},
+        .{sqlite.Text{ .data = id }},
+    ) catch return error.DbError;
+    return (count orelse 0) != 0;
+}
+
 test "standalone volumes keep named data and remove anonymous data only when requested" {
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -335,15 +374,22 @@ test "standalone volume names cannot be empty or contain path components" {
     try std.testing.expect(validName("data_1.cache"));
 }
 
-pub fn needsInitialization(id: []const u8) VolumeError!bool {
-    var lease = store.leaseDb() catch return error.DbError;
-    defer lease.deinit();
-    const count = lease.db.one(
-        i64,
-        "SELECT COUNT(*) FROM local_volume_refs r JOIN local_volumes v ON v.name = r.volume_name " ++
-            "WHERE r.container_id = ? AND r.nocopy = 0 AND v.initialized = 0;",
-        .{},
-        .{sqlite.Text{ .data = id }},
-    ) catch return error.DbError;
-    return (count orelse 0) != 0;
+test "standalone volume attachment conflict preserves existing references" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const alloc = std.testing.allocator;
+    var id: [12]u8 = undefined;
+    try container.generateId(&id);
+    const first = try resolveMount(alloc, &id, .{ .kind = .volume, .source = "", .target = "/data" });
+    defer alloc.free(first.source);
+    defer alloc.free(first.target);
+    defer releaseContainer(&id, true) catch {};
+    var name_buf: [32]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "conflict-{s}", .{id});
+    try std.testing.expectError(error.InvalidMount, resolveMount(alloc, &id, .{ .kind = .volume, .source = name, .target = "/data" }));
+    try std.testing.expectError(error.NotFound, inspect(alloc, name));
+    var path_buf: [paths.max_path]u8 = undefined;
+    const path = try volumes.resolveVolumePath(&path_buf, app_name, name, .{ .local = .{} });
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, path, .{}));
+    try std.testing.expectError(error.InUse, remove(std.fs.path.basename(first.source)));
 }
