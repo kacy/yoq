@@ -106,8 +106,7 @@ pub fn syncCheckpoints(self: anytype) void {
 }
 
 pub fn stopRunningRanks(self: anytype) !void {
-    const job_id = self.job_id orelse return;
-    return stopOwnedRanks(self, job_id);
+    return stopOwnedRanks(self, self.job_id);
 }
 
 /// called only while holding the controller owner lock, before starting ranks.
