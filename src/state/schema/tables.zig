@@ -338,6 +338,34 @@ pub fn initSecurityTables(db: *sqlite.Db) SchemaError!void {
 
 pub fn initStorageTables(db: *sqlite.Db) SchemaError!void {
     try exec(db,
+        \\CREATE TABLE IF NOT EXISTS local_network_aliases (
+        \\    container_id TEXT NOT NULL,
+        \\    network_name TEXT NOT NULL,
+        \\    name TEXT COLLATE NOCASE NOT NULL,
+        \\    PRIMARY KEY(network_name, name)
+        \\);
+    );
+    try exec(db,
+        \\CREATE TABLE IF NOT EXISTS local_networks (
+        \\    name TEXT PRIMARY KEY,
+        \\    bridge TEXT NOT NULL UNIQUE,
+        \\    subnet INTEGER NOT NULL UNIQUE,
+        \\    provisioned INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL
+        \\);
+    );
+    try exec(db,
+        \\CREATE TABLE IF NOT EXISTS local_network_refs (
+        \\    container_id TEXT PRIMARY KEY,
+        \\    network_name TEXT NOT NULL REFERENCES local_networks(name),
+        \\    dns_name TEXT NOT NULL COLLATE NOCASE,
+        \\    ip_address TEXT,
+        \\    active INTEGER NOT NULL DEFAULT 0,
+        \\    UNIQUE (network_name, dns_name)
+        \\);
+    );
+
+    try exec(db,
         \\CREATE TABLE IF NOT EXISTS local_port_reservations (
         \\    container_id TEXT NOT NULL,
         \\    ordinal INTEGER NOT NULL,
