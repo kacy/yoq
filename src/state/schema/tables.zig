@@ -2,6 +2,8 @@ const sqlite = @import("sqlite");
 
 pub const SchemaError = error{InitFailed};
 
+pub const assignment_claims_create_table_sql = "CREATE TABLE IF NOT EXISTS assignment_claims (assignment_id TEXT PRIMARY KEY, gpu_count INTEGER NOT NULL CHECK (gpu_count >= 0), release_id TEXT, group_id TEXT, request_json TEXT);";
+
 pub const secrets_create_table_sql =
     \\CREATE TABLE IF NOT EXISTS secrets (
     \\    name TEXT PRIMARY KEY,
@@ -184,6 +186,7 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
 }
 
 pub fn initClusterTables(db: *sqlite.Db) SchemaError!void {
+    try exec(db, assignment_claims_create_table_sql);
     try exec(db,
         \\CREATE TABLE IF NOT EXISTS agents (
         \\    id TEXT PRIMARY KEY,
