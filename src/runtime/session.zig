@@ -1,5 +1,6 @@
 // Process stdio, terminal ownership, and attachment transport share one layer.
 pub const Server = @import("session/server.zig").Server;
+pub const attachOutcome = @import("session/client.zig").attachOutcome;
 pub const attach = @import("session/client.zig").attach;
 pub const ProcessIo = @import("session/process_io.zig").ProcessIo;
 pub const foreground = @import("session/foreground.zig");

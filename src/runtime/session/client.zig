@@ -13,7 +13,16 @@ fn receiveSignal(signal: linux.SIG) callconv(.c) void {
     pending_signal.store(@intCast(@intFromEnum(signal)), .release);
 }
 
+pub const Outcome = union(enum) { exited: u8, detached };
+
 pub fn attach(id: []const u8, interactive: bool) !u8 {
+    return switch (try attachOutcome(id, interactive)) {
+        .exited => |code| code,
+        .detached => 0,
+    };
+}
+
+pub fn attachOutcome(id: []const u8, interactive: bool) !Outcome {
     var path_buf: [paths.max_path]u8 = undefined;
     const endpoint = try server.address(id, &path_buf);
     const fd = try platform.socket(posix.AF.UNIX, posix.SOCK.SEQPACKET | posix.SOCK.CLOEXEC, 0);
@@ -32,10 +41,17 @@ pub fn attach(id: []const u8, interactive: bool) !u8 {
     }
     if (!connected) return error.SessionNotFound;
     try protocol.send(fd, .hello, &.{@intFromBool(interactive)}, false);
-    return run(fd);
+    return runOutcome(fd);
 }
 
 pub fn run(fd: posix.fd_t) !u8 {
+    return switch (try runOutcome(fd)) {
+        .exited => |code| code,
+        .detached => 0,
+    };
+}
+
+fn runOutcome(fd: posix.fd_t) !Outcome {
     var packet: protocol.Packet = .{};
     try protocol.receive(fd, &packet, false);
     if (try packet.kind() == .failure) {
@@ -83,7 +99,7 @@ pub fn run(fd: posix.fd_t) !u8 {
                 .stderr => try foreground.writeAll(posix.STDERR_FILENO, packet.payload()),
                 .exit => {
                     if (packet.payload().len != 1) return error.InvalidPacket;
-                    return packet.payload()[0];
+                    return .{ .exited = packet.payload()[0] };
                 },
                 else => return error.InvalidPacket,
             }
@@ -101,7 +117,7 @@ pub fn run(fd: posix.fd_t) !u8 {
                 if (result.count != 0) try protocol.send(fd, .stdin, filtered[0..result.count], false);
                 if (result.detached) {
                     try protocol.send(fd, .detach, "", false);
-                    return 0;
+                    return .detached;
                 }
             } else try protocol.send(fd, .stdin, input[0..count], false);
         }

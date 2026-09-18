@@ -146,6 +146,8 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
 
         last_exit = c.wait() catch 255;
         server.clearInput();
+        // Attached callers observe this attempt's exit, even if policy restarts it.
+        server.finish(last_exit);
         // the writable layer belongs to the container, not this process run.
         // failed teardown retains its handles and must never be overwritten.
         if (c.runtime.cgroup != null or c.net_info != null) return last_exit;

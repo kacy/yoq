@@ -81,6 +81,12 @@ pub const Server = struct {
     pub fn prepareChild(self: *Server, io: *channels.ProcessIo) void {
         self.mutex.lockUncancelable(std.Options.debug_io);
         defer self.mutex.unlock(std.Options.debug_io);
+        // A new execution attempt starts a new attachment history.
+        if (self.exit_code != null) {
+            self.exit_code = null;
+            self.history_len = 0;
+            self.history_next = 0;
+        }
         self.forking = true;
         io.close_in_child[0] = self.listener;
         for (self.clients, 1..) |client, i| io.close_in_child[i] = client.fd;
@@ -142,7 +148,8 @@ pub const Server = struct {
         defer self.mutex.unlock(std.Options.debug_io);
         self.exit_code = code;
         for (&self.clients) |*client| if (client.ready) {
-            protocol.send(client.fd, .exit, &.{code}, true) catch self.disconnect(client);
+            protocol.send(client.fd, .exit, &.{code}, true) catch {};
+            self.disconnect(client);
         };
     }
 

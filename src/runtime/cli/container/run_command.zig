@@ -83,7 +83,9 @@ fn parseRunFlags(args: anytype, alloc: std.mem.Allocator, io: std.Io) ContainerE
         const inline_value = if (eq) |i| raw_arg[i + 1 ..] else null;
         // Flags without a value must reject forms such as --detach=false.
         const takes_no_value = std.mem.eql(u8, option, "--detach") or std.mem.eql(u8, option, "--net") or
-            std.mem.eql(u8, option, "--no-net") or std.mem.eql(u8, option, "--");
+            std.mem.eql(u8, option, "--no-net") or std.mem.eql(u8, option, "--rm") or
+            std.mem.eql(u8, option, "--interactive") or std.mem.eql(u8, option, "--tty") or
+            std.mem.eql(u8, option, "--no-healthcheck") or std.mem.eql(u8, option, "--");
         const arg = if (inline_value != null and takes_no_value) raw_arg else option;
         if (std.mem.eql(u8, arg, "--")) {
             flags.target = try optionValue(args, "--", null);
@@ -544,7 +546,20 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
         defer lock.deinit();
         try supervisor_runtime.spawnAttachedSupervisor(ctx.io, alloc, id);
     }
-    const exit_code = try @import("../../session.zig").attach(id, saved.interactive);
+    const outcome = try @import("../../session.zig").attachOutcome(id, saved.interactive);
+    const exit_code: u8 = switch (outcome) {
+        .detached => 0,
+        .exited => |code| blk: {
+            if (saved.auto_remove) {
+                // Either caller can finish removal; command locking makes it
+                // idempotent. A detached session must leave its workload alive.
+                @import("../../local_lifecycle.zig").removeWithVolumes(id, alloc, true) catch |err| {
+                    if (err != error.NotFound) return err;
+                };
+            }
+            break :blk code;
+        },
+    };
     std.process.exit(exit_code);
 }
 
