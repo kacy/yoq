@@ -273,25 +273,48 @@ test "cluster loses quorum when majority fails" {
     defer cluster.deinit();
 
     try cluster.startAll();
-    _ = try cluster.waitForLeader(20000);
+    const leader = try cluster.waitForLeader(20000);
 
-    // kill 3 nodes (majority) — no quorum possible from remaining 2
+    // preserve the old leader and one follower. a leader can retain its role
+    // after losing quorum, but it must not commit another mutation.
     var killed: u32 = 0;
     for (cluster.nodes.items) |*node| {
-        if (killed < 3) {
-            cluster.stopNode(node.id);
+        if (node.id != leader.id and killed < 3) {
+            cluster.killNode(node.id);
             killed += 1;
         }
     }
-
-    // wait for election timeout to expire
+    try std.testing.expectEqual(@as(u32, 3), killed);
     std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(5 * std.time.ns_per_s)), .awake) catch unreachable;
+    const before = try readCommitIndex(&cluster, leader);
 
-    // no leader should be elected (quorum of 3 not met with only 2 alive)
-    const no_leader = try cluster.getLeader(5000);
-    try std.testing.expect(no_leader == null);
+    var body_buf: [256]u8 = undefined;
+    const body = try std.fmt.bufPrint(&body_buf,
+        \\{{"token":"{s}","address":"10.0.0.77:9090","cpu_cores":4,"memory_mb":8192}}
+    , .{cluster.join_token});
+    var response = try cluster.registerAgent(leader, body);
+    defer response.deinit(alloc);
+    try std.testing.expect(response.status_code == 400 or response.status_code == 503);
+    if (response.status_code == 400) {
+        try helpers.expectContains(response.body, "not leader");
+    } else {
+        try helpers.expectContains(response.body, "mutation outcome unknown");
+    }
+    try std.testing.expectEqual(before, try readCommitIndex(&cluster, leader));
+    var agents = try cluster.getFromNode(leader, "/agents");
+    defer agents.deinit(alloc);
+    try std.testing.expectEqual(@as(u16, 200), agents.status_code);
+    try std.testing.expect(std.mem.indexOf(u8, agents.body, "10.0.0.77:9090") == null);
 
-    std.debug.print("cluster correctly lost quorum with 3/5 nodes down\n", .{});
+    std.debug.print("cluster rejected a write with 3/5 voters down\n", .{});
+}
+
+fn readCommitIndex(cluster: *cluster_harness.TestCluster, node: *cluster_harness.ClusterNode) !i64 {
+    const status = try cluster.getNodeStatus(node);
+    defer alloc.free(status);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, status, .{});
+    defer parsed.deinit();
+    return parsed.value.object.get("commit_index").?.integer;
 }
 
 fn fileExists(path: []const u8) bool {
