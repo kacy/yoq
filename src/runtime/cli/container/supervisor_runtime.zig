@@ -6,6 +6,7 @@ const store = @import("../../../state/store.zig");
 const cli = @import("../../../lib/cli.zig");
 const net_setup = @import("../../../network/setup.zig");
 const common = @import("common.zig");
+const control = @import("../../local_control.zig");
 const runtime_wait = @import("../../../lib/runtime_wait.zig");
 
 const write = cli.write;
@@ -52,58 +53,81 @@ fn shouldRestart(policy: run_state.RestartPolicy, exit_code: u8) bool {
 }
 
 pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, attach: bool) u8 {
+    const command_lock = control.lock(id, .command, true) catch return 255;
+    control.ensureRegistered(id) catch {
+        command_lock.deinit();
+        return 255;
+    };
+    const generation = control.request(id, true) catch {
+        command_lock.deinit();
+        return 255;
+    };
+    command_lock.deinit();
+    return superviseGeneration(id, cfg, attach, generation);
+}
+
+fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, attach: bool, generation: i64) u8 {
+    const owner = control.lock(id, .owner, false) catch return 255;
+    defer owner.deinit();
+    defer control.finish(id, generation) catch {};
     var backoff_ms: u32 = 1000;
     var first_start = true;
     var last_exit: u8 = 0;
 
     while (true) {
-        store.updateStatus(id, "created", null, null) catch {};
-
         var c = containerFromSaved(id, cfg, attach);
-        c.start() catch |err| {
-            store.recordStartupFailure(id) catch {};
-            writeErr("failed to start container: {}\n", .{err});
-            return 255;
-        };
-
-        if (first_start) {
-            store.setStartupOutcome(id, .succeeded) catch |err| {
-                // Do not leave an unacknowledged detached workload running.
-                c.forceStop() catch {};
-                _ = c.wait() catch 255;
-                store.recordStartupFailure(id) catch {};
-                container.cleanupContainerDirs(id);
-                writeErr("failed to record container startup: {}\n", .{err});
+        {
+            // stop takes this same lock before changing the requested state.
+            // it either cancels this attempt or observes its published pid.
+            const transition = control.lock(id, .transition, true) catch return 255;
+            defer transition.deinit();
+            if (!(control.shouldRun(id, generation) catch return 255)) return last_exit;
+            store.updateStatus(id, "created", null, null) catch return 255;
+            c.start() catch |err| {
+                // startup rollback may have retained resources for cleanup.
+                store.setStartupOutcome(id, .failed) catch {};
+                writeErr("failed to start container: {}\n", .{err});
                 return 255;
             };
-        }
-
-        if (first_start and attach) {
-            write("{s}\n", .{id});
+            if (first_start) {
+                store.setStartupOutcome(id, .succeeded) catch |err| {
+                    c.forceStop() catch {};
+                    _ = c.wait() catch 255;
+                    writeErr("failed to record container startup: {}\n", .{err});
+                    return 255;
+                };
+            }
         }
 
         last_exit = c.wait() catch 255;
-        container.cleanupContainerDirs(id);
-
+        // the writable layer belongs to the container, not this process run.
+        // failed teardown retains its handles and must never be overwritten.
+        if (c.runtime.cgroup != null or c.net_info != null) return last_exit;
         if (!shouldRestart(cfg.restart_policy, last_exit)) break;
-        if (attach) {
-            writeErr("container {s} exited ({d}), restarting in {d}ms...\n", .{ id, last_exit, backoff_ms });
+        if (!(control.shouldRun(id, generation) catch return 255)) break;
+        store.updateStatus(id, "restarting", null, last_exit) catch return 255;
+        var elapsed: u32 = 0;
+        while (elapsed < backoff_ms) : (elapsed += 50) {
+            if (!(control.shouldRun(id, generation) catch return 255)) return last_exit;
+            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container restart backoff")) return last_exit;
         }
-        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(@intCast(backoff_ms)), "container supervisor restart backoff")) break;
-        backoff_ms = @min(std.math.mul(u32, backoff_ms, 2) catch 30_000, 30_000);
+        backoff_ms = @min(backoff_ms * 2, 30_000);
         first_start = false;
     }
-
     return last_exit;
 }
 
 pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
+    control.ensureRegistered(id) catch return ContainerError.ConfigSaveFailed;
+    const generation = control.request(id, true) catch return ContainerError.ConfigSaveFailed;
+    errdefer control.finish(id, generation) catch {};
     const exe_path = readSelfExePathAlloc(io, alloc) catch return ContainerError.OutOfMemory;
     defer alloc.free(exe_path);
-
+    var generation_buf: [32]u8 = undefined;
+    const generation_text = std.fmt.bufPrint(&generation_buf, "{d}", .{generation}) catch unreachable;
     store.setStartupOutcome(id, .pending) catch return ContainerError.ConfigSaveFailed;
     _ = std.process.spawn(io, .{
-        .argv = &.{ exe_path, "__run-supervisor", id },
+        .argv = &.{ exe_path, "__run-supervisor", id, generation_text },
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,
@@ -166,6 +190,8 @@ pub fn installSignalHandlers() void {
 
 pub fn runSupervisor(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const id = requireArg(args, "usage: yoq __run-supervisor <container-id>\n");
+    const generation_text = requireArg(args, "missing supervisor generation\n");
+    const generation = std.fmt.parseInt(i64, generation_text, 10) catch return ContainerError.InvalidArgument;
     var cfg = run_state.loadConfig(alloc, id) catch |err| {
         store.recordStartupFailure(id) catch {};
         writeErr("failed to load container config for {s}: {}\n", .{ id, err });
@@ -173,7 +199,7 @@ pub fn runSupervisor(args: *std.process.Args.Iterator, alloc: std.mem.Allocator)
     };
     defer cfg.deinit(alloc);
 
-    const exit_code = superviseSavedRun(id, &cfg, false);
+    const exit_code = superviseGeneration(id, &cfg, false, generation);
     std.process.exit(exit_code);
 }
 

@@ -161,7 +161,7 @@ pub const Container = struct {
         const result = process.wait(pid, true) catch return;
         const exit_code: u8 = switch (result.status) {
             .exited => |code| code,
-            .signaled => 128,
+            .signaled => |signal| @intCast(@min(128 + signal, 255)),
             .running, .stopped => return,
         };
         self.status = .stopped;
@@ -292,13 +292,13 @@ pub const Container = struct {
             self.pid = null;
             self.state_mutex.unlock(std.Options.debug_io);
             active_pid.store(0, .release);
-            store.updateStatus(self.config.id, "stopped", null, 255) catch {};
+            self.finalize(255);
             return 255;
         };
 
         const exit_code: u8 = switch (wait_result.status) {
             .exited => |code| code,
-            .signaled => 128,
+            .signaled => |signal| @intCast(@min(128 + signal, 255)),
             .running, .stopped => unreachable, // waitForExit only returns terminal states
         };
 

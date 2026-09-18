@@ -67,37 +67,11 @@ pub fn handleGetLogs(alloc: std.mem.Allocator, id: []const u8) Response {
 }
 
 pub fn handleStopContainer(alloc: std.mem.Allocator, id: []const u8) Response {
-    const record = store.load(alloc, id) catch |err| {
-        if (err == store.StoreError.NotFound) return common.notFound();
-        return common.internalError();
+    @import("../../../runtime/local_lifecycle.zig").stop(id, alloc) catch |err| return switch (err) {
+        error.NotFound => common.notFound(),
+        else => common.internalError(),
     };
-    defer record.deinit(alloc);
-
-    if (!std.mem.eql(u8, record.status, "running")) {
-        return common.badRequest("container is not running");
-    }
-
-    const pid = record.pid orelse return common.badRequest("container has no pid");
-
-    const cg = cgroups.Cgroup.open(id) catch {
-        store.updateStatus(id, "stopped", null, null) catch {};
-        return common.badRequest("container is not running");
-    };
-    if (!cg.containsProcess(pid)) {
-        store.updateStatus(id, "stopped", null, null) catch {};
-        return common.badRequest("container is not running");
-    }
-
-    process.terminate(pid) catch return common.internalError();
-
-    if (waitForProcessExit(id, pid)) {
-        store.updateStatus(id, "stopped", null, null) catch |err| {
-            log.warn("failed to update status after stopping {s}: {}", .{ id, err });
-        };
-        return .{ .status = .ok, .body = "{\"status\":\"stopped\"}", .allocated = false };
-    }
-
-    return .{ .status = .ok, .body = "{\"status\":\"stopping\"}", .allocated = false };
+    return .{ .status = .ok, .body = "{\"status\":\"stopped\"}", .allocated = false };
 }
 
 pub fn waitForProcessExit(id: []const u8, pid: i32) bool {
@@ -112,21 +86,11 @@ pub fn waitForProcessExit(id: []const u8, pid: i32) bool {
 }
 
 pub fn handleRemoveContainer(alloc: std.mem.Allocator, id: []const u8) Response {
-    const record = store.load(alloc, id) catch |err| {
-        if (err == store.StoreError.NotFound) return common.notFound();
-        return common.internalError();
+    @import("../../../runtime/local_lifecycle.zig").remove(id, alloc) catch |err| return switch (err) {
+        error.NotFound => common.notFound(),
+        error.ContainerRunning => common.badRequest("cannot remove running container"),
+        else => common.internalError(),
     };
-
-    if (std.mem.eql(u8, record.status, "running")) {
-        record.deinit(alloc);
-        return common.badRequest("cannot remove running container");
-    }
-    record.deinit(alloc);
-
-    store.remove(id) catch return common.internalError();
-    logs.deleteLogFile(id);
-    container.cleanupContainerDirs(id);
-
     return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
 }
 
