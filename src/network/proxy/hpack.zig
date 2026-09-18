@@ -645,3 +645,54 @@ test "hpack independent blocks respect a zero table limit" {
     try std.testing.expectEqual(@as(usize, 0), decoder.table.max_size);
     try std.testing.expectEqualStrings("value", headers.items[0].value);
 }
+
+test "hpack connection decodes consecutive blocks from an independent encoder" {
+    const alloc = std.testing.allocator;
+    // python-hpack 4.2.0 generated these blocks with one encoder: huffman
+    // request, indexed request, indexed trailer, then a table shrink to zero.
+    const Vector = struct { hex: []const u8, fields: []const StaticHeaderField };
+    const vectors = [_]Vector{
+        .{ .hex = "8287418b1d665cbe474d7415749509448360f5174085f2b10649cb83f03b29", .fields = &.{
+            .{ .name = ":method", .value = "GET" },
+            .{ .name = ":scheme", .value = "https" },
+            .{ .name = ":authority", .value = "api.example.test" },
+            .{ .name = ":path", .value = "/one" },
+            .{ .name = "x-cache", .value = "warm" },
+        } },
+        .{ .hex = "8287c04483613e0fbf", .fields = &.{
+            .{ .name = ":method", .value = "GET" },
+            .{ .name = ":scheme", .value = "https" },
+            .{ .name = ":authority", .value = "api.example.test" },
+            .{ .name = ":path", .value = "/two" },
+            .{ .name = "x-cache", .value = "warm" },
+        } },
+        .{ .hex = "4088f2b127293aa2da7f831c6493c0", .fields = &.{
+            .{ .name = "x-checksum", .value = "abcd" },
+            .{ .name = "x-cache", .value = "warm" },
+        } },
+        .{ .hex = "208287418b1d665cbe474d741574950944856133d852ff", .fields = &.{
+            .{ .name = ":method", .value = "GET" },
+            .{ .name = ":scheme", .value = "https" },
+            .{ .name = ":authority", .value = "api.example.test" },
+            .{ .name = ":path", .value = "/three" },
+        } },
+    };
+    var decoder: Decoder = .{};
+    defer decoder.deinit(alloc);
+    for (vectors) |vector| {
+        var bytes: [64]u8 = undefined;
+        const block = try std.fmt.hexToBytes(&bytes, vector.hex);
+        var fields = try decoder.decode(alloc, block);
+        defer {
+            for (fields.items) |field| field.deinit(alloc);
+            fields.deinit(alloc);
+        }
+        try std.testing.expectEqual(vector.fields.len, fields.items.len);
+        for (vector.fields, fields.items) |expected, actual| {
+            try std.testing.expectEqualStrings(expected.name, actual.name);
+            try std.testing.expectEqualStrings(expected.value, actual.value);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), decoder.table.max_size);
+    try std.testing.expectEqual(@as(usize, 0), decoder.table.size);
+}
