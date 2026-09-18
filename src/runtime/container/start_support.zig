@@ -87,15 +87,16 @@ pub fn startLogCapture(config: anytype, runtime: anytype, spawn_result: *namespa
 
 const CaptureThreads = struct {
     fn spawn(_: @This(), args: anytype) !std.Thread {
-        return std.Thread.spawn(.{}, logs.captureStream, args);
+        return std.Thread.spawn(.{}, logs.captureSessionStream, args);
     }
 };
 
 fn startCaptureWorkers(config: anytype, runtime: anytype, child: *namespaces.SpawnResult, threads: anytype) !void {
     const log_file = &runtime.log_file.?;
-    runtime.stdout_thread = try threads.spawn(.{ log_file, child.stdout_fd, "stdout", config.dev_service_name, config.dev_color_idx, runtime.mirror_output });
+    runtime.stdout_thread = try threads.spawn(.{ log_file, child.stdout_fd, "stdout", config.dev_service_name, config.dev_color_idx, runtime.mirror_output, config.session_output });
     child.stdout_fd = -1;
-    runtime.stderr_thread = try threads.spawn(.{ log_file, child.stderr_fd, "stderr", config.dev_service_name, config.dev_color_idx, runtime.mirror_output });
+    if (child.stderr_fd < 0) return;
+    runtime.stderr_thread = try threads.spawn(.{ log_file, child.stderr_fd, "stderr", config.dev_service_name, config.dev_color_idx, runtime.mirror_output, config.session_output });
     child.stderr_fd = -1;
 }
 
@@ -236,7 +237,7 @@ test "startup rollback reaps child and joins partial or complete capture ownersh
         fn spawn(self: *@This(), args: anytype) !std.Thread {
             if (self.started == self.fail_after) return error.InjectedFailure;
             self.started += 1;
-            return std.Thread.spawn(.{}, logs.captureStream, args);
+            return std.Thread.spawn(.{}, logs.captureSessionStream, args);
         }
     };
     for (0..3) |fail_after| {

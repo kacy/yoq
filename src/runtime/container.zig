@@ -9,6 +9,7 @@ const posix = std.posix;
 const linux = std.os.linux;
 
 const namespaces = @import("namespaces.zig");
+const session = @import("session.zig");
 const cgroups = @import("cgroups.zig");
 const filesystem = @import("filesystem.zig");
 const security = @import("security.zig");
@@ -86,6 +87,8 @@ pub const BindMount = exec_runtime.BindMount;
 
 /// configuration for creating a container
 pub const ContainerConfig = struct {
+    session_io: ?*session.ProcessIo = null,
+    session_output: ?session.Output = null,
     /// unique container identifier
     id: []const u8,
     /// path to the rootfs directory
@@ -238,7 +241,7 @@ pub const Container = struct {
             .gid_count = std.math.maxInt(u32),
             .allow_setgroups = true,
         } else null;
-        spawned = namespaces.spawn(config.namespaces, mapping, exec_runtime.childMain, @ptrCast(&child_ctx)) catch return ContainerError.StartFailed;
+        spawned = namespaces.spawnWithIo(config.namespaces, mapping, exec_runtime.childMain, @ptrCast(&child_ctx), config.session_io) catch return ContainerError.StartFailed;
         const child = &spawned.?;
         startup.closeOwned(&channel.child);
         self.pid = child.pid;

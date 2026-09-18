@@ -8,6 +8,7 @@ const net_setup = @import("../../../network/setup.zig");
 const common = @import("common.zig");
 const control = @import("../../local_control.zig");
 const runtime_wait = @import("../../../lib/runtime_wait.zig");
+const session = @import("../../session.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -66,16 +67,46 @@ pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, a
     return superviseGeneration(id, cfg, attach, generation);
 }
 
+fn acquireOwner(id: []const u8, generation: i64) !control.Lock {
+    while (try control.shouldRun(id, generation)) {
+        return control.lock(id, .owner, false) catch |err| switch (err) {
+            error.Busy => {
+                if (!runtime_wait.sleep(.fromMilliseconds(50), "waiting for container owner")) return error.Cancelled;
+                continue;
+            },
+            else => return err,
+        };
+    }
+    return error.StaleGeneration;
+}
+
 fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, attach: bool, generation: i64) u8 {
-    const owner = control.lock(id, .owner, false) catch return 255;
+    const owner = acquireOwner(id, generation) catch return 255;
     defer owner.deinit();
     defer control.finish(id, generation) catch {};
     var backoff_ms: u32 = 1000;
     var first_start = true;
-    var last_exit: u8 = 0;
+    var last_exit: u8 = 255;
+    var server = session.Server.init(id, cfg.interactive, cfg.tty) catch return 255;
+    defer server.deinit();
+    defer server.finish(last_exit);
+    server.start() catch return 255;
+    if (attach) {
+        var attempts: usize = 0;
+        while (!server.ever_attached.load(.acquire)) : (attempts += 1) {
+            if (attempts == 200 or !(control.shouldRun(id, generation) catch return 255)) return 255;
+            if (!runtime_wait.sleep(.fromMilliseconds(50), "waiting for foreground session")) return 255;
+        }
+    }
 
     while (true) {
-        var c = containerFromSaved(id, cfg, attach);
+        var channels = session.ProcessIo.init(cfg.interactive, cfg.tty) catch return 255;
+        defer channels.deinit();
+        var c = containerFromSaved(id, cfg, false);
+        c.config.session_io = &channels;
+        c.config.session_output = .{ .context = &server, .write = session.Server.output };
+        server.prepareChild(&channels);
+        defer server.childStarted();
         {
             // stop takes this same lock before changing the requested state.
             // it either cancels this attempt or observes its published pid.
@@ -89,6 +120,8 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
                 writeErr("failed to start container: {}\n", .{err});
                 return 255;
             };
+            server.childStarted();
+            server.setInput(&channels, c.pid.?);
             if (first_start) {
                 store.setStartupOutcome(id, .succeeded) catch |err| {
                     c.forceStop() catch {};
@@ -100,6 +133,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         }
 
         last_exit = c.wait() catch 255;
+        server.clearInput();
         // the writable layer belongs to the container, not this process run.
         // failed teardown retains its handles and must never be overwritten.
         if (c.runtime.cgroup != null or c.net_info != null) return last_exit;
@@ -118,6 +152,14 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
 }
 
 pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
+    return spawnSupervisorWithAttach(io, alloc, id, false);
+}
+
+pub fn spawnAttachedSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
+    return spawnSupervisorWithAttach(io, alloc, id, true);
+}
+
+fn spawnSupervisorWithAttach(io: std.Io, alloc: std.mem.Allocator, id: []const u8, attach: bool) ContainerError!void {
     control.ensureRegistered(id) catch return ContainerError.ConfigSaveFailed;
     const generation = control.request(id, true) catch return ContainerError.ConfigSaveFailed;
     errdefer control.finish(id, generation) catch {};
@@ -127,7 +169,7 @@ pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) Con
     const generation_text = std.fmt.bufPrint(&generation_buf, "{d}", .{generation}) catch unreachable;
     store.setStartupOutcome(id, .pending) catch return ContainerError.ConfigSaveFailed;
     _ = std.process.spawn(io, .{
-        .argv = &.{ exe_path, "__run-supervisor", id, generation_text },
+        .argv = &.{ exe_path, "__run-supervisor", id, generation_text, if (attach) "attach" else "detached" },
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,
@@ -203,7 +245,8 @@ pub fn runSupervisor(args: *std.process.Args.Iterator, alloc: std.mem.Allocator)
     };
     defer cfg.deinit(alloc);
 
-    const exit_code = superviseGeneration(id, &cfg, false, generation);
+    const mode = args.next() orelse "detached";
+    const exit_code = superviseGeneration(id, &cfg, std.mem.eql(u8, mode, "attach"), generation);
     std.process.exit(exit_code);
 }
 

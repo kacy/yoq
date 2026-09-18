@@ -2,29 +2,46 @@ const std = @import("std");
 const posix = std.posix;
 const log_mux = @import("../../dev/log_mux.zig");
 const Sink = @import("sink.zig").Sink;
+const session = @import("../session.zig");
 
 pub fn writeLogLine(sink: *Sink, stream: []const u8, line: []const u8) void {
     sink.write(stream, line) catch {};
 }
 
 pub fn captureStream(sink: *Sink, pipe_fd: posix.fd_t, stream_label: []const u8, dev_service: ?[]const u8, dev_color: usize, mirror_output: bool) void {
+    captureSessionStream(sink, pipe_fd, stream_label, dev_service, dev_color, mirror_output, null);
+}
+
+pub fn captureSessionStream(sink: *Sink, pipe_fd: posix.fd_t, stream_label: []const u8, dev_service: ?[]const u8, dev_color: usize, mirror_output: bool, output: ?session.Output) void {
     const mirror = if (mirror_output)
         (if (std.mem.eql(u8, stream_label, "stderr")) std.Io.File.stderr() else std.Io.File.stdout())
     else
         null;
-    captureStreamTo(sink, pipe_fd, stream_label, dev_service, dev_color, mirror);
+    captureStreamToOutput(sink, pipe_fd, stream_label, dev_service, dev_color, mirror, output);
 }
 
 fn captureStreamTo(sink: *Sink, pipe_fd: posix.fd_t, stream_label: []const u8, dev_service: ?[]const u8, dev_color: usize, mirror: ?std.Io.File) void {
+    captureStreamToOutput(sink, pipe_fd, stream_label, dev_service, dev_color, mirror, null);
+}
+
+fn captureStreamToOutput(sink: *Sink, pipe_fd: posix.fd_t, stream_label: []const u8, dev_service: ?[]const u8, dev_color: usize, mirror: ?std.Io.File, output: ?session.Output) void {
     defer _ = std.os.linux.close(pipe_fd);
     var buf: [4096]u8 = undefined;
     var pending: [Sink.chunk_size]u8 = undefined;
     var len: usize = 0;
     while (true) {
-        const count = posix.read(pipe_fd, &buf) catch break;
+        const count = posix.read(pipe_fd, &buf) catch |err| {
+            if (err == error.WouldBlock) {
+                var polls = [_]std.os.linux.pollfd{.{ .fd = pipe_fd, .events = std.os.linux.POLL.IN, .revents = 0 }};
+                _ = std.os.linux.poll(&polls, 1, 100);
+                continue;
+            }
+            break;
+        };
         if (count == 0) break;
         // Forward each read immediately, before line-oriented log formatting.
-        if (mirror) |output| writeTerminalBytes(output, buf[0..count]);
+        if (mirror) |file| writeTerminalBytes(file, buf[0..count]);
+        if (output) |target| target.send(stream_label, buf[0..count]);
         for (buf[0..count]) |byte| {
             if (byte == '\n') {
                 emit(sink, stream_label, pending[0..len], false, dev_service, dev_color);

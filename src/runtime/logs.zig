@@ -63,6 +63,18 @@ pub fn captureStream(
     capture.captureStream(log_file, pipe_fd, stream_label, dev_service, dev_color, mirror_output);
 }
 
+pub fn captureSessionStream(
+    log_file: *LogSink,
+    pipe_fd: std.posix.fd_t,
+    stream_label: []const u8,
+    dev_service: ?[]const u8,
+    dev_color: usize,
+    mirror_output: bool,
+    output: ?@import("session.zig").Output,
+) void {
+    capture.captureSessionStream(log_file, pipe_fd, stream_label, dev_service, dev_color, mirror_output, output);
+}
+
 pub fn followLogs(container_id: []const u8, tail_lines: ?usize, pid: ?std.posix.pid_t) LogError!void {
     return followLogsWithIo(std.Options.debug_io, container_id, tail_lines, pid);
 }

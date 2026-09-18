@@ -12,6 +12,7 @@ const linux = std.os.linux;
 const posix = std.posix;
 const syscall_util = @import("../lib/syscall.zig");
 const log = @import("../lib/log.zig");
+const session = @import("session.zig");
 
 pub const NamespaceError = error{
     CloneFailed,
@@ -116,146 +117,65 @@ pub fn spawn(
     child_fn: *const fn (arg: ?*anyopaque) callconv(.c) u8,
     child_arg: ?*anyopaque,
 ) NamespaceError!SpawnResult {
-    // create a pipe for parent-child synchronization.
-    // parent closes the write end after setting up uid/gid maps,
-    // child blocks on read until then.
-    const pipe_fds = linux_platform.posix.pipe() catch return NamespaceError.PipeFailed;
-    const pipe_read = pipe_fds[0];
-    const pipe_write = pipe_fds[1];
+    return spawnWithIo(ns_flags, user_mapping, child_fn, child_arg, null);
+}
 
-    // create stdout and stderr pipes for log capture.
-    // parent gets the read ends, child gets the write ends (dup2'd to fd 1/2).
-    const stdout_pipe = linux_platform.posix.pipe() catch {
-        // cleanup first pipe on failure
-        linux_platform.posix.close(pipe_read);
-        linux_platform.posix.close(pipe_write);
-        return NamespaceError.PipeFailed;
-    };
-    const stderr_pipe = linux_platform.posix.pipe() catch {
-        // cleanup first two pipes on failure
-        linux_platform.posix.close(pipe_read);
-        linux_platform.posix.close(pipe_write);
-        linux_platform.posix.close(stdout_pipe[0]);
-        linux_platform.posix.close(stdout_pipe[1]);
-        return NamespaceError.PipeFailed;
-    };
-
-    var owns_child_ends = true;
+pub fn spawnWithIo(
+    ns_flags: NamespaceFlags,
+    user_mapping: ?UserMapping,
+    child_fn: *const fn (arg: ?*anyopaque) callconv(.c) u8,
+    child_arg: ?*anyopaque,
+    provided_io: ?*session.ProcessIo,
+) NamespaceError!SpawnResult {
+    var local_io = if (provided_io == null) session.ProcessIo.init(false, false) catch return NamespaceError.PipeFailed else session.ProcessIo{};
+    defer local_io.deinit();
+    const channels = provided_io orelse &local_io;
+    errdefer channels.deinit();
+    const ready = linux_platform.posix.pipe() catch return NamespaceError.PipeFailed;
+    var owns_ready_read = true;
     errdefer {
-        linux_platform.posix.close(pipe_write);
-        linux_platform.posix.close(stdout_pipe[0]);
-        linux_platform.posix.close(stderr_pipe[0]);
-        if (owns_child_ends) {
-            linux_platform.posix.close(pipe_read);
-            linux_platform.posix.close(stdout_pipe[1]);
-            linux_platform.posix.close(stderr_pipe[1]);
-        }
+        if (owns_ready_read) linux_platform.posix.close(ready[0]);
+        linux_platform.posix.close(ready[1]);
     }
 
-    // pack child context into a struct on the stack so child_fn can access it.
-    // we pass the pipe read fd and the real child function through a trampoline.
-    const ChildContext = struct {
-        pipe_read_fd: posix.fd_t,
-        stdout_write_fd: posix.fd_t,
-        stderr_write_fd: posix.fd_t,
-        real_fn: *const fn (arg: ?*anyopaque) callconv(.c) u8,
-        real_arg: ?*anyopaque,
-
-        fn trampoline(ctx_ptr: ?*anyopaque) callconv(.c) u8 {
-            const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
-
-            // wait for parent to finish uid/gid mapping
-            var buf: [1]u8 = undefined;
-            _ = posix.read(ctx.pipe_read_fd, &buf) catch {};
-            linux_platform.posix.close(ctx.pipe_read_fd);
-
-            // redirect stdout and stderr to the log pipes
-            // if this fails, the container output would leak to parent - abort
-            linux_platform.posix.dup2(ctx.stdout_write_fd, posix.STDOUT_FILENO) catch {
-                log.err("namespace: failed to redirect stdout - aborting container start", .{});
-                linux_platform.posix.close(ctx.stdout_write_fd);
-                linux_platform.posix.close(ctx.stderr_write_fd);
-                return 1;
-            };
-            linux_platform.posix.dup2(ctx.stderr_write_fd, posix.STDERR_FILENO) catch {
-                log.err("namespace: failed to redirect stderr - aborting container start", .{});
-                linux_platform.posix.close(ctx.stderr_write_fd);
-                return 1;
-            };
-            linux_platform.posix.close(ctx.stdout_write_fd);
-            linux_platform.posix.close(ctx.stderr_write_fd);
-
-            // run the real child function
-            return ctx.real_fn(ctx.real_arg);
-        }
-    };
-
-    var ctx = ChildContext{
-        .pipe_read_fd = pipe_read,
-        .stdout_write_fd = stdout_pipe[1],
-        .stderr_write_fd = stderr_pipe[1],
-        .real_fn = child_fn,
-        .real_arg = child_arg,
-    };
-
-    // This is a fork-style raw syscall: the child resumes inside this function.
-    // Without CLONE_VM it must keep its copied caller stack. Switching to an
-    // empty stack would invalidate compiler locals before the trampoline runs.
     var args = CloneArgs{
         .flags = ns_flags.toCloneFlags(),
         .exit_signal = @intFromEnum(linux.SIG.CHLD),
     };
-
-    const rc = linux.syscall2(
-        .clone3,
-        @intFromPtr(&args),
-        @sizeOf(CloneArgs),
-    );
-
+    const rc = linux.syscall2(.clone3, @intFromPtr(&args), @sizeOf(CloneArgs));
     const pid = syscall_util.unwrap(rc) catch return NamespaceError.CloneFailed;
-
     if (pid == 0) {
-        // child process — run through trampoline.
-        // close parent-side fds before executing.
-        linux_platform.posix.close(pipe_write);
-        linux_platform.posix.close(stdout_pipe[0]);
-        linux_platform.posix.close(stderr_pipe[0]);
-        const exit_code = ChildContext.trampoline(@ptrCast(&ctx));
-        linux.exit_group(exit_code);
+        linux_platform.posix.close(ready[1]);
+        var byte: [1]u8 = undefined;
+        _ = posix.read(ready[0], &byte) catch {};
+        linux_platform.posix.close(ready[0]);
+        channels.applyChild() catch linux.exit_group(1);
+        linux.exit_group(child_fn(child_arg));
     }
-
-    // parent process — close child-side fds
-    linux_platform.posix.close(pipe_read);
-    linux_platform.posix.close(stdout_pipe[1]);
-    linux_platform.posix.close(stderr_pipe[1]);
-
-    owns_child_ends = false;
+    linux_platform.posix.close(ready[0]);
+    owns_ready_read = false;
+    channels.closeChild();
     const child_pid: posix.pid_t = @intCast(pid);
-
-    // set up user namespace mappings if requested
     if (ns_flags.user) {
         const mapping = user_mapping orelse UserMapping{
             .outer_uid = std.os.linux.getuid(),
             .outer_gid = std.os.linux.getgid(),
         };
         writeUserMapping(child_pid, mapping) catch {
-            // child has no uid/gid mappings — must not proceed
             _ = linux.syscall2(.kill, @as(usize, @bitCast(@as(isize, child_pid))), @intFromEnum(linux.SIG.KILL));
             while (linux.errno(linux.syscall4(.wait4, @as(usize, @bitCast(@as(isize, child_pid))), 0, 0, 0)) == .INTR) {}
-            // Remaining parent ends belong to the single errdefer above.
             return NamespaceError.WriteFailed;
         };
     }
-
-    // don't close pipe_write here — return it as ready_fd so the caller
-    // can do additional setup (networking) before signaling the child.
-
-    return SpawnResult{
+    const result: SpawnResult = .{
         .pid = child_pid,
-        .stdout_fd = stdout_pipe[0],
-        .stderr_fd = stderr_pipe[0],
-        .ready_fd = pipe_write,
+        .stdout_fd = channels.stdout,
+        .stderr_fd = channels.stderr,
+        .ready_fd = ready[1],
     };
+    channels.stdout = -1;
+    channels.stderr = -1;
+    return result;
 }
 
 /// write uid_map, gid_map, and setgroups for a child process.
