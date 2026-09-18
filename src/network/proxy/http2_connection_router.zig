@@ -209,6 +209,8 @@ const ConnectionRouter = struct {
     }
 
     fn applyClientSettings(self: *ConnectionRouter, payload: []const u8) !void {
+        // header-table settings constrain our encoder, not the request decoder.
+        // every outbound block declares a zero-sized table, which fits any limit.
         if (try flow.initialSetting(payload)) |next| {
             const delta = next - self.downstream_initial_window;
             for (self.streams.items) |*session| try session.downstream_send.adjust(delta);
@@ -819,6 +821,7 @@ const ConnectionRouter = struct {
     }
 
     fn handleUpstreamSettings(self: *ConnectionRouter, session_idx: usize, frame: http2.FrameHeader) !void {
+        // requests also use a zero-sized table, including queued trailers.
         try flow.validateSettings(frame);
         const payload = self.streams.items[session_idx].upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
         if ((frame.flags & 0x1) == 0) {
