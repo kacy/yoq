@@ -141,6 +141,7 @@ fn noteFaultInjection(operation: BridgeOperation) void {
 }
 
 fn refreshL7ControlPlane() void {
+    @import("published_ports.zig").refreshAll();
     proxy_control_plane.refreshIfEnabled();
 }
 
