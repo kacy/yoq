@@ -19,7 +19,7 @@ sudo -H "$(command -v yoq)" init-server --id 3 --port 9700 --api-port 7700 --pee
 on each agent node:
 
 ```bash
-sudo -H "$(command -v yoq)" join 10.0.0.1:7700 --token "$TOKEN"
+sudo -H "$(command -v yoq)" join 10.0.0.1 --port 7700 --token "$TOKEN"
 ```
 
 ## 3. deploy the manifest
