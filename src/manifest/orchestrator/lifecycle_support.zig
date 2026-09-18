@@ -149,18 +149,11 @@ pub fn startServiceByIndex(
                 var worker_io = std.Io.Threaded.init(self.alloc, .{});
                 defer worker_io.deinit();
 
-                if (!service_runtime.runOneShotWithIo(
-                    worker_io.io(),
-                    self.alloc,
-                    worker.image,
-                    worker.command,
-                    worker.env,
-                    worker.volumes,
-                    worker.working_dir,
-                    dep_name,
-                    self.manifest.volumes,
-                    self.app_name,
-                )) {
+                const succeeded = service_runtime.runWorkerWithIo(worker_io.io(), self.alloc, worker.*, self.manifest.volumes, self.app_name) catch |err| {
+                    writeErr("worker '{s}' cannot run locally: {}\n", .{ dep_name, err });
+                    return OrchestratorError.StartFailed;
+                };
+                if (!succeeded) {
                     writeErr("worker '{s}' failed\n", .{dep_name});
                     return OrchestratorError.StartFailed;
                 }

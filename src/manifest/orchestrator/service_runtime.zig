@@ -266,6 +266,40 @@ pub fn runOneShotWithIo(
     manifest_volumes: []const spec.Volume,
     app_name: []const u8,
 ) bool {
+    return runOneShotWithGpu(io, alloc, image, command, env, volumes, working_dir, hostname, manifest_volumes, app_name, null);
+}
+
+pub fn validateLocalWorker(worker: spec.Worker) !void {
+    if (worker.gpu_mesh != null) return error.UnsupportedLocalWorkerMesh;
+}
+
+pub fn runWorkerWithIo(io: std.Io, alloc: std.mem.Allocator, worker: spec.Worker, manifest_volumes: []const spec.Volume, app_name: []const u8) !bool {
+    try validateLocalWorker(worker);
+    return runOneShotWithGpu(io, alloc, worker.image, worker.command, worker.env, worker.volumes, worker.working_dir, worker.name, manifest_volumes, app_name, worker.gpu);
+}
+
+fn runOneShotWithGpu(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    image: []const u8,
+    command: []const []const u8,
+    env: []const []const u8,
+    volumes: []const spec.VolumeMount,
+    working_dir: ?[]const u8,
+    hostname: []const u8,
+    manifest_volumes: []const spec.Volume,
+    app_name: []const u8,
+    gpu: ?spec.GpuSpec,
+) bool {
+    var gpu_lease = if (gpu) |config|
+        @import("../../gpu/lease.zig").Lease.acquireWithMinimum(config.count, config.model, config.vram_min_mb) catch |err| {
+            writeErr("failed to reserve worker gpus: {}\n", .{err});
+            return false;
+        }
+    else
+        @import("../../gpu/lease.zig").Lease{};
+    defer gpu_lease.deinit();
+
     var img = resolveServiceImageWithIo(io, alloc, image) orelse {
         writeErr("failed to resolve image for worker {s}\n", .{hostname});
         return false;
@@ -279,7 +313,16 @@ pub fn runOneShotWithIo(
     defer resolved.args.deinit(alloc);
 
     var merged_env = mergeServiceEnv(alloc, img.image_env, env);
-    defer merged_env.deinit(alloc);
+    const owned_env_start = merged_env.items.len;
+    defer {
+        for (merged_env.items[owned_env_start..]) |entry| alloc.free(entry);
+        merged_env.deinit(alloc);
+    }
+    if (gpu_lease.count > 0) {
+        var gpu_env: [4096]u8 = undefined;
+        const data = @import("../../gpu/passthrough.zig").generateGpuEnv(gpu_lease.indices[0..gpu_lease.count], &gpu_env) catch return false;
+        @import("../gpu_runtime.zig").appendRequiredEnv(alloc, &merged_env, data) catch return false;
+    }
 
     var wd = img.working_dir;
     if (working_dir) |working_dir_override| wd = working_dir_override;
@@ -305,7 +348,7 @@ pub fn runOneShotWithIo(
         .status = "created",
         .pid = null,
         .exit_code = null,
-        .app_name = null,
+        .app_name = app_name,
         .created_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
     }) catch return false;
 
@@ -321,6 +364,7 @@ pub fn runOneShotWithIo(
             .lower_dirs = img.layer_paths,
             .hostname = hostname,
             .mounts = vols.bind_mounts.items,
+            .gpu_indices = gpu_lease.indices[0..gpu_lease.count],
         },
         .status = .created,
         .pid = null,
@@ -349,4 +393,9 @@ pub fn envKey(env_var: []const u8) []const u8 {
         return env_var[0..eq];
     }
     return env_var;
+}
+
+test "local workers reject unsupported mesh execution" {
+    const worker: spec.Worker = .{ .name = "mesh", .image = "scratch", .command = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{}, .gpu_mesh = .{ .world_size = 2 } };
+    try std.testing.expectError(error.UnsupportedLocalWorkerMesh, validateLocalWorker(worker));
 }
