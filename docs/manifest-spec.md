@@ -67,6 +67,8 @@ services participate in app releases. local `yoq up` and remote `yoq up --server
 
 ### replicas and placement
 
+service discovery uses a shared service-name namespace. active applications must use distinct service names; conflicting ownership is rejected before deployment.
+
 local applies start the requested number of service instances. cluster applies place the whole replica group before activating its rollout target; insufficient capacity rejects the group. required labels filter cluster agents. these settings are preserved in app snapshots and rollback releases. status reports both logical services and desired service instances.
 
 published host ports are shared by the service's instances on each host. new tcp connections go to eligible replicas, and existing connections remain pinned by conntrack. health checks run per instance. removing one container releases only its port claims. a cluster replacement's old and new instances must fit within the 64-backend limit; a larger temporary group is rejected before placement.
@@ -441,7 +443,7 @@ vram_min_mb = 40000
 
 ## GPU mesh configuration
 
-defined under `[service.<name>.gpu_mesh]`. configures distributed GPU communication (NCCL) for multi-rank workloads.
+defined under `[service.<name>.gpu_mesh]`. configures cluster gpu gangs and nccl communication. local service mesh execution is rejected before startup; use a `[training.<name>]` job for local grouped ranks.
 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
@@ -583,7 +585,7 @@ training jobs orchestrate distributed GPU training runs. defined under `[trainin
 | `volumes` | array of strings | no | `[]` | volume mounts |
 | `gpus` | integer | yes | — | total number of GPUs (= number of ranks) |
 | `gpu_type` | string | no | none | GPU model filter (e.g. `"H100"`) |
-| `data` | table | no | none | dataset configuration |
+| `data` | table | no | none | reserved; supplying this table is rejected |
 | `checkpoint` | table | no | none | checkpoint configuration |
 | `resources` | table | no | see below | resource limits per rank |
 | `fault_tolerance` | table | no | see below | fault tolerance settings |
@@ -599,24 +601,11 @@ env = ["EPOCHS=10", "BATCH_SIZE=32"]
 
 ### data configuration
 
-defined under `[training.<name>.data]`.
-
-| field | type | required | default | description |
-|-------|------|----------|---------|-------------|
-| `dataset` | string | yes | — | dataset path or identifier |
-| `sharding` | string | yes | — | sharding strategy (e.g. `"file"`) |
-| `preprocessing` | string | no | none | preprocessing pipeline (e.g. `"tokenize"`) |
-
-```toml
-[training.llm-finetune.data]
-dataset = "/mnt/lustre/pile"
-sharding = "file"
-preprocessing = "tokenize"
-```
+`[training.<name>.data]` is rejected because automatic dataset preparation and sharding are not implemented. mount prepared data through `volumes` and perform any preprocessing in the job command.
 
 ### checkpoint configuration
 
-defined under `[training.<name>.checkpoint]`.
+defined under `[training.<name>.checkpoint]`. the path is inside each container and should be backed by a writable volume. applications write and restore their own framework checkpoints. see [training lifecycle](training-lifecycle.md) for resume behavior and cross-agent storage requirements.
 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
@@ -654,13 +643,13 @@ defined under `[training.<name>.fault_tolerance]`.
 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
-| `spare_ranks` | integer | no | `0` | spare ranks for failover |
-| `auto_restart` | boolean | no | `true` | restart failed ranks automatically |
-| `max_restarts` | integer | no | `10` | maximum restart attempts per rank |
+| `spare_ranks` | integer | no | `0` | must remain zero; spare-rank failover is unsupported |
+| `auto_restart` | boolean | no | `true` | restart a failed rank group automatically |
+| `max_restarts` | integer | no | `10` | maximum group restart attempts |
 
 ```toml
 [training.llm-finetune.fault_tolerance]
-spare_ranks = 1
+spare_ranks = 0
 auto_restart = true
 max_restarts = 5
 ```

@@ -138,6 +138,8 @@ HTTP, TCP, gRPC, or exec probes run at configurable intervals. gRPC probes use t
 
 ### gRPC routing
 
+http/1 responses stream large downloads and server-sent events, and websocket upgrades switch to bidirectional forwarding. request bodies still share a 64 kib buffer. see [proxy streaming](proxy-streaming.md) for deadlines and framing limits.
+
 gRPC services can use the HTTP routing listener through plaintext HTTP/2 passthrough, either with prior-knowledge `h2c` or HTTP/1.1 `Upgrade: h2c`. unary requests and streaming RPC traffic are forwarded end to end, including client `DATA` frames, server `DATA` frames, and trailing `HEADERS`. if the routed host also has a matching `tls.domain`, the TLS terminator can negotiate ALPN `h2` and forward that HTTPS traffic into the same routing path.
 
 HTTP routes can now narrow traffic by method as well as host, path, and exact headers. use `match_methods = ["GET", "POST"]` on `http_proxy` or named `http_routes` entries when you need separate read/write routing policy without splitting the service definition.
@@ -346,6 +348,8 @@ yoq detects InfiniBand HCAs, generates NCCL topology XML for optimal GPU-NIC aff
 NVML exposes gpu temperature, ecc errors, and utilization. these are not additional service webhook thresholds.
 
 ### training jobs
+
+local jobs lease distinct gpus and start all ranks before waiting. pause and stop terminate the owned ranks; resume and scale retain the requested job configuration. dataset preprocessing and nonzero spare ranks are rejected. see [training lifecycle](training-lifecycle.md).
 
 training jobs follow a state machine: pending → scheduling → running → paused → completed/failed/stopped.
 

@@ -255,7 +255,7 @@ distributed training job orchestration.
 
 **lifecycle:** TrainingJobState machine: pending → scheduling → running → paused → completed/failed/stopped. the TrainingController manages transitions and tracks per-rank status.
 
-**multi-rank:** each training job spawns one container per GPU (rank). NCCL environment variables (`MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE`, `RANK`, `LOCAL_RANK`) are injected automatically. gang scheduling ensures all ranks start together.
+**multi-rank:** local training starts every rank before waiting for completion and leases a distinct gpu to each container. nccl environment variables and a shared rendezvous address connect the ranks. cluster placement reserves the complete gang before activation. starting a group does not guarantee that every process begins executing at the same instant.
 
 **checkpoints:** configurable checkpoint interval and retention. the controller persists checkpoint metadata to SQLite for resume-after-failure.
 
@@ -265,7 +265,7 @@ distributed training job orchestration.
 
 S3-compatible object storage and volume management.
 
-**S3 gateway:** a filesystem-backed S3-compatible API. supports bucket CRUD, object HEAD/GET/PUT/DELETE, and multipart uploads. objects are stored under `~/.local/share/yoq/s3/`.
+**storage gateway:** a filesystem-backed s3-style api with yoq bearer authentication, atomic object replacement, etags, paginated listings, and validated multipart completion. objects live under `~/.local/share/yoq/s3/`. see the [supported client contract](storage-api.md).
 
 **volume drivers:** four drivers (local, host, NFS, parallel) provide storage backends for container volumes. see the [manifest spec](manifest-spec.md#volumes) for configuration.
 
@@ -324,6 +324,8 @@ certificate management and TLS termination.
 
 **ACME:** Let's Encrypt-compatible client implementing HTTP-01 and DNS-01 challenge validation. HTTP-01 serves challenge tokens on port 80. DNS-01 computes `_acme-challenge` TXT values, updates records through built-in providers (`cloudflare`, `route53`, `gcloud`) or an exec hook, polls DNS visibility, and then finalizes the order.
 
+**http/1 response streaming:** bounded header parsing and body buffers support large responses, event streams, and websocket tunnels. backpressure and socket deadlines bound forwarding; retries stop after response output begins. request bodies still share a 64 kib input buffer. see [proxy streaming](proxy-streaming.md).
+
 **upstream request policy:** buffered HTTP/1 and HTTP/2 share a single upstream exchange for deadlines, response framing, connection ownership, and service identity verification. Routing owns retries and circuit accounting; the transport never silently replays a failed pooled write. Both buffered protocols use the same method and status retry policy. Mirror tasks use bounded, joined workers and the same exchange.
 
 Streaming HTTP/2 keeps its frame router and applies the shared method retry predicate before forwarding response frames. Its sessions currently own plaintext sockets: a required peer-TLS upstream is rejected before dialing, while permissive `warn` mode logs the plaintext fallback. Verified TLS streaming requires a session transport implementation; buffered HTTP/2 already uses the verified TLS exchange.
@@ -362,7 +364,7 @@ key files:
 
 **pure Raft.** the Raft state machine has no I/O. it takes inputs (ticks, RPCs) and returns actions (send messages, commit entries). the caller handles all networking and persistence. this makes the core algorithm fully testable without mocks.
 
-**eBPF for dataplane.** DNS resolution, load balancing, port mapping, metrics collection, network policy enforcement, and GPU traffic prioritization all run as eBPF programs in kernel space. this replaces kube-proxy, CNI plugins, and service mesh sidecars with a handful of C programs totaling ~500 lines.
+**eBPF for dataplane.** DNS resolution, load balancing, port mapping, metrics collection, network policy enforcement, and GPU traffic prioritization use ebpf programs where supported. shared published service ports use owned iptables chains so replicas can retain independent ownership and health eligibility. host tools and kernel capabilities remain deployment prerequisites.
 
 **bounded network state.** the dns registry holds up to 1,024 entries and bpf maps have explicit capacity limits. health registrations grow dynamically and are checked by a scheduler with up to four workers.
 
