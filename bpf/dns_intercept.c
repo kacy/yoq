@@ -1,32 +1,11 @@
-// dns_intercept — eBPF DNS resolution for container service discovery
-//
-// TC ingress program attached to the yoq0 bridge. intercepts DNS A
-// record queries and resolves known service names directly in the
-// kernel, avoiding the round-trip to the userspace resolver.
-//
-// SECURITY HARDENING:
-//   - All packet accesses validated against data_end
-//   - Minimum packet size checks prevent out-of-bounds reads
-//   - DNS name length validated using bounded fixed-offset checks only
-//   - Integer overflow protection on offset calculations
-//   - All variable-length reads use bpf_skb_load_bytes
-//
-// BPF verifier constraints:
-//   - all packet access uses fixed offsets (IHL forced to 5)
-//   - all stack reads use compile-time constant offsets (no variable offsets)
-//   - no loops with variable bounds for stack access
-//   - uses bpf_skb_load_bytes/bpf_skb_store_bytes for variable offsets
-//   - stays within 512-byte stack limit
-//
-// compile: clang -target bpf -O2 -g -c -o dns_intercept.o dns_intercept.c
+// answer cached service-name queries at tc ingress on the yoq0 bridge.
+// unsupported packets and cache misses continue to the userspace resolver.
+// packet headers use fixed offsets; name reads use unrolled stack accesses.
 
 #include "common.h"
 
-// -- BPF maps --
-
-// service name → IPv4 address
-// key: 64-byte wire-format DNS name (length-prefixed labels, null-padded)
-// value: 4-byte IPv4 address in network byte order
+// keys are wire-format dns names, padded with zeros to 64 bytes.
+// values are ipv4 addresses in network byte order.
 struct bpf_map_def SEC("maps") service_names = {
     .type = BPF_MAP_TYPE_HASH,
     .key_size = 64,
@@ -35,98 +14,58 @@ struct bpf_map_def SEC("maps") service_names = {
     .map_flags = 0,
 };
 
-// -- helpers --
-
 static long (*bpf_skb_load_bytes)(const void *skb, __u32 offset,
-                                   void *to, __u32 len) = (void *)26;
+                                 void *to, __u32 len) = (void *)26;
 static long (*bpf_skb_store_bytes)(void *skb, __u32 offset, const void *from,
-                                    __u32 len, __u64 flags) = (void *)9;
+                                  __u32 len, __u64 flags) = (void *)9;
 static long (*bpf_skb_change_tail)(void *skb, __u32 new_len,
-                                    __u64 flags) = (void *)38;
+                                  __u64 flags) = (void *)38;
 static long (*bpf_redirect)(int ifindex, __u64 flags) = (void *)23;
 
 #define DNS_PORT 53
 #define DNS_HEADER_SIZE 12
+#define DNS_HEADER_OFFSET 42
+#define DNS_QUESTION_FIELDS_SIZE 4
+#define DNS_ANSWER_SIZE 16
 
-// Simple DNS name length finder - returns position of null terminator + 1
-// Uses fully unrolled checks to satisfy BPF verifier
+// return the wire-name length, including the root terminator. zero bytes inside
+// a label are data. compression and extended labels fall back to userspace.
 static __attribute__((always_inline)) __u32
 find_name_length(const char *name, __u32 max_len)
 {
-    // Bounds check for verifier
-    if (max_len < 2 || max_len > 64) return 0;
-    
-    // Check first byte
-    if (name[0] == 0) return 0; // Empty name
-    if (((__u8)name[0] & 0xC0) == 0xC0) return 0; // Compression pointer
-    
-    // Fully unrolled null terminator search
-    // Each check uses a compile-time constant offset
-    if (1 < max_len && name[1] == 0) return 2;
-    if (2 < max_len && name[2] == 0) return 3;
-    if (3 < max_len && name[3] == 0) return 4;
-    if (4 < max_len && name[4] == 0) return 5;
-    if (5 < max_len && name[5] == 0) return 6;
-    if (6 < max_len && name[6] == 0) return 7;
-    if (7 < max_len && name[7] == 0) return 8;
-    if (8 < max_len && name[8] == 0) return 9;
-    if (9 < max_len && name[9] == 0) return 10;
-    if (10 < max_len && name[10] == 0) return 11;
-    if (11 < max_len && name[11] == 0) return 12;
-    if (12 < max_len && name[12] == 0) return 13;
-    if (13 < max_len && name[13] == 0) return 14;
-    if (14 < max_len && name[14] == 0) return 15;
-    if (15 < max_len && name[15] == 0) return 16;
-    if (16 < max_len && name[16] == 0) return 17;
-    if (17 < max_len && name[17] == 0) return 18;
-    if (18 < max_len && name[18] == 0) return 19;
-    if (19 < max_len && name[19] == 0) return 20;
-    if (20 < max_len && name[20] == 0) return 21;
-    if (21 < max_len && name[21] == 0) return 22;
-    if (22 < max_len && name[22] == 0) return 23;
-    if (23 < max_len && name[23] == 0) return 24;
-    if (24 < max_len && name[24] == 0) return 25;
-    if (25 < max_len && name[25] == 0) return 26;
-    if (26 < max_len && name[26] == 0) return 27;
-    if (27 < max_len && name[27] == 0) return 28;
-    if (28 < max_len && name[28] == 0) return 29;
-    if (29 < max_len && name[29] == 0) return 30;
-    if (30 < max_len && name[30] == 0) return 31;
-    if (31 < max_len && name[31] == 0) return 32;
-    if (32 < max_len && name[32] == 0) return 33;
-    if (33 < max_len && name[33] == 0) return 34;
-    if (34 < max_len && name[34] == 0) return 35;
-    if (35 < max_len && name[35] == 0) return 36;
-    if (36 < max_len && name[36] == 0) return 37;
-    if (37 < max_len && name[37] == 0) return 38;
-    if (38 < max_len && name[38] == 0) return 39;
-    if (39 < max_len && name[39] == 0) return 40;
-    if (40 < max_len && name[40] == 0) return 41;
-    if (41 < max_len && name[41] == 0) return 42;
-    if (42 < max_len && name[42] == 0) return 43;
-    if (43 < max_len && name[43] == 0) return 44;
-    if (44 < max_len && name[44] == 0) return 45;
-    if (45 < max_len && name[45] == 0) return 46;
-    if (46 < max_len && name[46] == 0) return 47;
-    if (47 < max_len && name[47] == 0) return 48;
-    if (48 < max_len && name[48] == 0) return 49;
-    if (49 < max_len && name[49] == 0) return 50;
-    if (50 < max_len && name[50] == 0) return 51;
-    if (51 < max_len && name[51] == 0) return 52;
-    if (52 < max_len && name[52] == 0) return 53;
-    if (53 < max_len && name[53] == 0) return 54;
-    if (54 < max_len && name[54] == 0) return 55;
-    if (55 < max_len && name[55] == 0) return 56;
-    if (56 < max_len && name[56] == 0) return 57;
-    if (57 < max_len && name[57] == 0) return 58;
-    if (58 < max_len && name[58] == 0) return 59;
-    if (59 < max_len && name[59] == 0) return 60;
-    if (60 < max_len && name[60] == 0) return 61;
-    if (61 < max_len && name[61] == 0) return 62;
-    if (62 < max_len && name[62] == 0) return 63;
-    if (63 < max_len && name[63] == 0) return 64;
-    
-    return 0; // No null terminator found
+    if (max_len < 2 || max_len > 64)
+        return 0;
+
+    __u32 next_label = 0;
+    // explicit expansion keeps stack offsets constant. clang does not fully
+    // unroll a loop with these early returns.
+#define CHECK_LABEL_AT(offset)                                      \
+    if ((offset) >= max_len) return 0;                               \
+    if ((offset) == next_label) {                                    \
+        __u8 label_len = name[offset];                               \
+        if (label_len == 0) return (offset) == 0 ? 0 : (offset) + 1;  \
+        if (label_len > 63 || label_len >= max_len - (offset))        \
+            return 0;                                               \
+        next_label = (offset) + 1 + label_len;                       \
+    }
+    CHECK_LABEL_AT(0); CHECK_LABEL_AT(1); CHECK_LABEL_AT(2); CHECK_LABEL_AT(3);
+    CHECK_LABEL_AT(4); CHECK_LABEL_AT(5); CHECK_LABEL_AT(6); CHECK_LABEL_AT(7);
+    CHECK_LABEL_AT(8); CHECK_LABEL_AT(9); CHECK_LABEL_AT(10); CHECK_LABEL_AT(11);
+    CHECK_LABEL_AT(12); CHECK_LABEL_AT(13); CHECK_LABEL_AT(14); CHECK_LABEL_AT(15);
+    CHECK_LABEL_AT(16); CHECK_LABEL_AT(17); CHECK_LABEL_AT(18); CHECK_LABEL_AT(19);
+    CHECK_LABEL_AT(20); CHECK_LABEL_AT(21); CHECK_LABEL_AT(22); CHECK_LABEL_AT(23);
+    CHECK_LABEL_AT(24); CHECK_LABEL_AT(25); CHECK_LABEL_AT(26); CHECK_LABEL_AT(27);
+    CHECK_LABEL_AT(28); CHECK_LABEL_AT(29); CHECK_LABEL_AT(30); CHECK_LABEL_AT(31);
+    CHECK_LABEL_AT(32); CHECK_LABEL_AT(33); CHECK_LABEL_AT(34); CHECK_LABEL_AT(35);
+    CHECK_LABEL_AT(36); CHECK_LABEL_AT(37); CHECK_LABEL_AT(38); CHECK_LABEL_AT(39);
+    CHECK_LABEL_AT(40); CHECK_LABEL_AT(41); CHECK_LABEL_AT(42); CHECK_LABEL_AT(43);
+    CHECK_LABEL_AT(44); CHECK_LABEL_AT(45); CHECK_LABEL_AT(46); CHECK_LABEL_AT(47);
+    CHECK_LABEL_AT(48); CHECK_LABEL_AT(49); CHECK_LABEL_AT(50); CHECK_LABEL_AT(51);
+    CHECK_LABEL_AT(52); CHECK_LABEL_AT(53); CHECK_LABEL_AT(54); CHECK_LABEL_AT(55);
+    CHECK_LABEL_AT(56); CHECK_LABEL_AT(57); CHECK_LABEL_AT(58); CHECK_LABEL_AT(59);
+    CHECK_LABEL_AT(60); CHECK_LABEL_AT(61); CHECK_LABEL_AT(62); CHECK_LABEL_AT(63);
+#undef CHECK_LABEL_AT
+    return 0;
 }
 
 SEC("tc_ingress")
@@ -134,144 +73,83 @@ int dns_intercept(struct __sk_buff *skb)
 {
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
-    
-    // SECURITY: Check minimum packet size before any parsing
-    // We need at least: eth(14) + ip(20) + udp(8) + dns(12) = 54 bytes
     if (data + DNS_QUESTION_OFFSET > data_end)
         return TC_ACT_UNSPEC;
 
-    // -- parse ethernet header (offset 0, 14 bytes) --
     struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end)
-        return TC_ACT_UNSPEC;
-
     if (eth->h_proto != htons(ETH_P_IP))
         return TC_ACT_UNSPEC;
 
-    // -- parse IP header (offset 14, 20 bytes) --
     struct iphdr *ip = (void *)(eth + 1);
-    if ((void *)(ip + 1) > data_end)
+    // fixed offsets require ipv4 without options. fragmented datagrams must be
+    // reassembled before their dns question can be interpreted.
+    if (ip->ihl_version != 0x45 || ip->protocol != IPPROTO_UDP ||
+        (ntohs(ip->frag_off) & 0x3fff) != 0 || ip->ttl == 0)
         return TC_ACT_UNSPEC;
 
-    if (ip->protocol != IPPROTO_UDP)
+    __u16 ip_len = ntohs(ip->tot_len);
+    if (ip_len < 20 + 8 + DNS_HEADER_SIZE || ip_len > skb->len - 14)
         return TC_ACT_UNSPEC;
 
-    // require IHL=5 (20 bytes, no options) for fixed offsets
-    if ((ip->ihl_version & 0x0F) != 5)
-        return TC_ACT_UNSPEC;
-    
-    // SECURITY: Validate IP total length makes sense
-    __u16 ip_tot_len = ntohs(ip->tot_len);
-    if (ip_tot_len < 40 || ip_tot_len > 1500) // min: IP(20)+UDP(8)+payload, max: typical MTU
-        return TC_ACT_UNSPEC;
-    
-    // SECURITY: Validate TTL is reasonable (prevent routing loops and suspicious packets)
-    // TTL is an unsigned byte; every nonzero value is valid.
-    if (ip->ttl < 1)
-        return TC_ACT_UNSPEC;
-    
-    // SECURITY: Reject obviously spoofed or invalid source IPs
-    // 0.0.0.0, broadcast, multicast, loopback as source
     __u32 src_ip = ip->saddr;
     __u32 src_host = ntohl(src_ip);
-    if (src_host == 0 || src_host == 0xFFFFFFFF ||          // 0.0.0.0, 255.255.255.255
-        (src_host & 0xF0000000) == 0xE0000000 ||          // 224.0.0.0/4 multicast
-        (src_host & 0xFF000000) == 0x7F000000)           // 127.0.0.0/8 loopback
+    // unspecified, broadcast, multicast, and loopback addresses are not peers.
+    if (src_host == 0 || src_host == 0xffffffff ||
+        (src_host & 0xf0000000) == 0xe0000000 ||
+        (src_host & 0xff000000) == 0x7f000000)
         return TC_ACT_UNSPEC;
 
-    // -- parse UDP header (offset 34, 8 bytes) --
     struct udphdr *udp = (void *)((char *)ip + 20);
-    if ((void *)(udp + 1) > data_end)
-        return TC_ACT_UNSPEC;
-
     if (udp->dest != htons(DNS_PORT))
         return TC_ACT_UNSPEC;
-    
-    // SECURITY: Validate UDP length
+
     __u16 udp_len = ntohs(udp->len);
-    if (udp_len < 8 || udp_len > 512) // min UDP header, max DNS over UDP
+    if (udp_len < 8 + DNS_HEADER_SIZE + 2 + DNS_QUESTION_FIELDS_SIZE ||
+        udp_len > 512 || udp_len != ip_len - 20)
         return TC_ACT_UNSPEC;
 
-    // -- parse DNS header (offset 42, 12 bytes) --
-    __u8 *dns = data + 42;
-    if ((void *)(dns + DNS_HEADER_SIZE) > data_end)
+    __u8 *dns = data + DNS_HEADER_OFFSET;
+    // handle standard queries with one question and no other sections.
+    if ((dns[2] & 0xf8) != 0 || dns[4] != 0 || dns[5] != 1 ||
+        dns[6] != 0 || dns[7] != 0 || dns[8] != 0 || dns[9] != 0 ||
+        dns[10] != 0 || dns[11] != 0)
         return TC_ACT_UNSPEC;
 
-    // QR=0 (query)
-    if (dns[2] & 0x80)
-        return TC_ACT_UNSPEC;
-
-    // QDCOUNT=1 (we only handle single queries)
-    __u16 qdcount = (dns[4] << 8) | dns[5];
-    if (qdcount != 1)
-        return TC_ACT_UNSPEC;
-    
-    // SECURITY: Check for additional sections that could indicate malformed packets
-    __u16 ancount = (dns[6] << 8) | dns[7];
-    __u16 nscount = (dns[8] << 8) | dns[9];
-    __u16 arcount = (dns[10] << 8) | dns[11];
-    if (ancount != 0 || nscount != 0 || arcount != 0)
-        return TC_ACT_UNSPEC; // Only accept pure queries, not responses
-
-    // -- copy question name to stack (offset 54, up to 64 bytes) --
-    // SECURITY: Read only what we need (64 bytes max for key buffer)
-    // The packet might be shorter, bpf_skb_load_bytes will handle it
+    // leave room for qtype and qclass inside the declared udp payload. ethernet
+    // padding and bytes beyond the ip datagram cannot complete the question.
+    __u32 question_len = udp_len - 8 - DNS_HEADER_SIZE;
+    __u32 read_len = question_len - DNS_QUESTION_FIELDS_SIZE;
+    if (read_len > 64)
+        read_len = 64;
     char key_buf[64] = {};
-    
-    // Calculate safe read length - don't exceed packet bounds
-    // Use unsigned arithmetic and explicit bounds for verifier
-    __u32 pkt_len = (long)data_end - (long)data;
-    if (pkt_len > 1500) return TC_ACT_UNSPEC; // Sanity check
-    
-    __u32 read_len = 64;
-    if (DNS_QUESTION_OFFSET + 64 > pkt_len) {
-        read_len = pkt_len - DNS_QUESTION_OFFSET;
-        // Explicitly bound read_len for verifier - ensure it's at least 2
-        if (read_len > 64) read_len = 64;
-        if (read_len > 512) read_len = 64; // Sanity cap
-    }
-    
-    // Final bounds check: must be 2-64 bytes (ensures positive, verifier-safe value)
-    if (read_len < 2 || read_len > 64)
-        return TC_ACT_UNSPEC;
-    
     if (bpf_skb_load_bytes(skb, DNS_QUESTION_OFFSET, key_buf, read_len) != 0)
         return TC_ACT_UNSPEC;
 
-    // -- validate the DNS name is well-formed --
     __u32 wire_len = find_name_length(key_buf, read_len);
-    if (wire_len == 0 || wire_len > 63) // 63 = max we can handle in our 64-byte key
+    if (wire_len == 0 || wire_len > 63 ||
+        wire_len + DNS_QUESTION_FIELDS_SIZE != question_len)
         return TC_ACT_UNSPEC;
 
-    // Stored keys contain only the wire name and zero padding. The initial
-    // bounded read also copied QTYPE/QCLASS; reload just the parsed name.
+    // the first read can include question fields. map keys contain only the
+    // name and zero padding, so reload exactly the validated name.
     __builtin_memset(key_buf, 0, sizeof(key_buf));
     if (bpf_skb_load_bytes(skb, DNS_QUESTION_OFFSET, key_buf, wire_len) != 0)
         return TC_ACT_UNSPEC;
 
-    // -- map lookup --
+    __u8 question_fields[DNS_QUESTION_FIELDS_SIZE] = {};
+    __u32 fields_offset = DNS_QUESTION_OFFSET + wire_len;
+    if (bpf_skb_load_bytes(skb, fields_offset, question_fields,
+                           sizeof(question_fields)) != 0)
+        return TC_ACT_UNSPEC;
+    if (question_fields[0] != 0 || question_fields[1] != 1 ||
+        question_fields[2] != 0 || question_fields[3] != 1)
+        return TC_ACT_UNSPEC; // only a records in the internet class
+
     __u32 *ip_addr = bpf_map_lookup_elem(&service_names, key_buf);
     if (!ip_addr)
-        return TC_ACT_UNSPEC; // miss — pass to userspace
+        return TC_ACT_UNSPEC;
 
-    // save resolved IP before any packet modifications
     __u32 resolved_ip = *ip_addr;
-
-    // -- validate QTYPE=A and QCLASS=IN --
-    __u8 qtqc[4] = {};
-    __u32 qtqc_offset = DNS_QUESTION_OFFSET + wire_len;
-    
-    // SECURITY: Ensure we can read 4 bytes for QTYPE+QCLASS
-    if (qtqc_offset + 4 > pkt_len)
-        return TC_ACT_UNSPEC;
-    
-    if (bpf_skb_load_bytes(skb, qtqc_offset, qtqc, 4) != 0)
-        return TC_ACT_UNSPEC;
-
-    __u16 qtype = (qtqc[0] << 8) | qtqc[1];
-    __u16 qclass = (qtqc[2] << 8) | qtqc[3];
-    if (qtype != 1 || qclass != 1) // A / IN
-        return TC_ACT_UNSPEC;
 
     // -- save header fields before resize --
     __u8 src_mac[6], dst_mac[6];
@@ -286,7 +164,7 @@ int dns_intercept(struct __sk_buff *skb)
 
     // -- compute response layout --
     // SECURITY: Check for integer overflow in offset calculation
-    __u32 answer_offset = qtqc_offset + 4; // past name + qtype + qclass
+    __u32 answer_offset = fields_offset + 4; // past name + qtype + qclass
     __u32 new_pkt_len = answer_offset + 16;  // 16-byte answer RR
     
     // Validate sizes are reasonable
