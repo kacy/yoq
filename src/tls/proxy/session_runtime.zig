@@ -239,6 +239,7 @@ pub fn handleTlsSession(
     var initial_request_forwarded = false;
     const is_h2 = selected_alpn != null and std.mem.eql(u8, selected_alpn.?, "h2");
     var h2_rewrite_state = http2_request.StreamRewriteState{};
+    defer h2_rewrite_state.deinit(std.heap.page_allocator);
 
     var poll_fds = [_]posix.pollfd{
         .{ .fd = client_fd, .events = posix.POLL.IN, .revents = 0 },
