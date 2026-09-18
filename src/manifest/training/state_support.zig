@@ -15,8 +15,9 @@ pub fn generateClusterJobId(self: anytype) !void {
 
 fn generateJobIdWithPrefix(self: anytype, prefix: []const u8) !void {
     var id_buf: [256]u8 = undefined;
-    const ts = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
-    const id_str = std.fmt.bufPrint(&id_buf, "{s}{s}-{s}-{d}", .{ prefix, self.app_name, self.job.name, ts }) catch return error.OutOfMemory;
+    var suffix: [12]u8 = undefined;
+    try @import("../../runtime/container.zig").generateId(&suffix);
+    const id_str = std.fmt.bufPrint(&id_buf, "{s}{s}-{s}-{s}", .{ prefix, self.app_name, self.job.name, suffix }) catch return error.OutOfMemory;
     const owned_id = try self.alloc.dupe(u8, id_str);
     if (self.job_id) |existing| self.alloc.free(existing);
     self.job_id = owned_id;
@@ -27,18 +28,18 @@ pub fn isClusterManaged(self: anytype) bool {
     return std.mem.startsWith(u8, jid, cluster_job_prefix);
 }
 
-pub fn persistState(self: anytype) void {
+pub fn persistState(self: anytype) !void {
     const jid = self.job_id orelse return;
     const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
-    store.updateTrainingJobState(jid, self.state.label(), now) catch {};
+    try store.updateTrainingJobState(jid, self.state.label(), now);
 }
 
-pub fn createPersistentRecord(self: anytype) void {
+pub fn createPersistentRecord(self: anytype) !void {
     const jid = self.job_id orelse return;
     const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     const ckpt = self.job.checkpoint;
 
-    store.saveTrainingJob(.{
+    try store.saveTrainingJob(.{
         .id = jid,
         .name = self.job.name,
         .app_name = self.app_name,
@@ -51,7 +52,7 @@ pub fn createPersistentRecord(self: anytype) void {
         .restart_count = 0,
         .created_at = now,
         .updated_at = now,
-    }) catch {};
+    });
 }
 
 pub fn loadResumeCheckpoint(self: anytype) void {
@@ -71,10 +72,33 @@ pub fn syncCheckpoints(self: anytype) void {
     }
 }
 
-pub fn stopRunningRanks(self: anytype) void {
-    for (self.rank_status) |*rs| {
-        if (rs.* == .running) rs.* = .stopped;
+pub fn stopRunningRanks(self: anytype) !void {
+    const runtime_state = @import("../../runtime/cli/container/state_support.zig");
+    const supervisor = @import("../../runtime/cli/container/supervisor_runtime.zig");
+    if (isClusterManaged(self)) return error.RemoteControlRequired;
+    if (self.job_id != null) {
+        for (0..self.gpu_count) |rank| {
+            var buf: [256]u8 = undefined;
+            const hostname = try std.fmt.bufPrint(&buf, "{s}-rank-{d}", .{ self.job.name, rank });
+            const record = (try store.findAppContainer(self.alloc, self.app_name, hostname)) orelse continue;
+            defer record.deinit(self.alloc);
+            if (runtime_state.currentOwnedRunningPid(&record)) |pid| {
+                try supervisor.stopProcess(pid);
+                if (!runtime_state.waitForStoppedState(self.alloc, record.id)) return error.RanksStillRunning;
+            }
+        }
     }
+    for (self.rank_status) |*status| if (status.* == .running) {
+        status.* = .stopped;
+    };
+}
+
+pub fn refreshControl(self: anytype) !bool {
+    const id = self.job_id orelse return false;
+    const record = try store.getTrainingJob(self.alloc, id);
+    defer record.deinit(self.alloc);
+    if (std.mem.eql(u8, record.state, "paused")) self.state = .paused else if (std.mem.eql(u8, record.state, "stopped")) self.state = .stopped else return false;
+    return true;
 }
 
 pub fn loadFromStore(self: anytype, state_enum: type) bool {

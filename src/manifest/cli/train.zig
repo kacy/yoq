@@ -369,7 +369,7 @@ fn trainStop(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloca
         return TrainError.DeploymentFailed;
     }
 
-    ctx.ctrl.stop();
+    try ctx.ctrl.stop();
     writeErr("training job {s} stopped\n", .{ctx.name});
 }
 
@@ -405,7 +405,7 @@ fn trainPause(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
         return TrainError.DeploymentFailed;
     }
 
-    ctx.ctrl.pause();
+    try ctx.ctrl.pause();
     writeErr("training job {s} paused\n", .{ctx.name});
 }
 
@@ -441,7 +441,7 @@ fn trainResume(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allo
         return TrainError.DeploymentFailed;
     }
 
-    ctx.ctrl.resume_();
+    try ctx.ctrl.resume_();
 
     if (ctx.ctrl.resume_path) |rp| {
         writeErr("resuming training job {s} from checkpoint {s}\n", .{ ctx.name, rp });
@@ -555,7 +555,7 @@ fn trainScale(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
 
     if (ctrl.state == .running) {
         writeErr("pausing {s} for rescaling...\n", .{name});
-        ctrl.pause();
+        try ctrl.pause();
     }
 
     if (ctrl.job_id) |jid| {
@@ -569,7 +569,7 @@ fn trainScale(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
     try ctrl.resizeRanks(gpus);
     writeErr("scaled {s} from {d} to {d} gpus\n", .{ name, old_gpus, gpus });
 
-    ctrl.resume_();
+    try ctrl.resume_();
     writeErr("resuming {s} with {d} GPUs...\n", .{ name, gpus });
 
     if (server_addr) |addr| {

@@ -1,80 +1,33 @@
+// cluster jobs run from the committed app snapshot. the app lifecycle endpoint
+// preserves execution metadata and changes assignments with the job record.
 const std = @import("std");
-
 const cli = @import("../../lib/cli.zig");
+const http_client = @import("../../cluster/http_client.zig");
 const state_support = @import("state_support.zig");
 
-fn buildDeployRequestBody(self: anytype) ![]u8 {
-    const json_helpers = @import("../../lib/json_helpers.zig");
-
-    var body_writer = std.Io.Writer.Allocating.init(self.alloc);
-    defer body_writer.deinit();
-
-    const writer = &body_writer.writer;
-
-    try writer.writeAll("{\"services\":[{\"image\":\"");
-    try json_helpers.writeJsonEscaped(writer, self.job.image);
-    try writer.writeAll("\",\"command\":\"");
-
-    for (self.job.command, 0..) |arg, j| {
-        if (j > 0) try writer.writeByte(' ');
-        try json_helpers.writeJsonEscaped(writer, arg);
-    }
-
-    var resource_buf: [512]u8 = undefined;
-    const resource_str = try std.fmt.bufPrint(
-        &resource_buf,
-        "\",\"cpu_limit\":{d},\"memory_limit_mb\":{d},\"gpu_limit\":{d},\"gang_world_size\":{d},\"gpus_per_rank\":1",
-        .{
-            self.job.resources.cpu,
-            self.job.resources.memory_mb,
-            self.job.gpus,
-            self.job.gpus,
-        },
-    );
-    try writer.writeAll(resource_str);
-
-    if (self.job.gpu_type) |gpu_type| {
-        try writer.writeAll(",\"gpu_model\":\"");
-        try json_helpers.writeJsonEscaped(writer, gpu_type);
-        try writer.writeByte('"');
-    }
-
-    try writer.writeAll("}]}");
-    return body_writer.toOwnedSlice();
-}
-
 pub fn startCluster(self: anytype, server_ip: [4]u8, server_port: u16) !void {
-    self.state = .scheduling;
-    state_support.generateClusterJobId(self) catch {};
-    state_support.createPersistentRecord(self);
-    state_support.persistState(self);
-
-    const http_client = @import("../../cluster/http_client.zig");
+    const path = try std.fmt.allocPrint(self.alloc, "/apps/{s}/training/{s}/start", .{ self.app_name, self.job.name });
+    defer self.alloc.free(path);
     var token_buf: [64]u8 = undefined;
     const token = cli.readApiToken(&token_buf);
-
-    const request_body = buildDeployRequestBody(self) catch {
-        self.state = .failed;
-        state_support.persistState(self);
-        return error.OutOfMemory;
-    };
-    defer self.alloc.free(request_body);
-
-    var resp = http_client.postWithAuth(self.alloc, server_ip, server_port, "/deploy", request_body, token) catch {
-        self.state = .failed;
-        state_support.persistState(self);
-        return error.ConnectionFailed;
-    };
-    defer resp.deinit(self.alloc);
-
-    if (resp.status_code == 200) {
-        self.state = .running;
-        state_support.persistState(self);
-        cli.write("{s}\n", .{resp.body});
-    } else {
-        self.state = .failed;
-        state_support.persistState(self);
-        cli.writeErr("deploy failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
+    var response = try http_client.postWithAuth(self.alloc, server_ip, server_port, path, "{}", token);
+    defer response.deinit(self.alloc);
+    if (response.status_code != 200) {
+        cli.writeErr("training start failed (status {d}): {s}\n", .{ response.status_code, response.body });
         return error.DeployFailed;
     }
+    const Result = struct { job_id: []const u8, state: []const u8, gpus: u32 };
+    const result = try std.json.parseFromSlice(Result, self.alloc, response.body, .{ .ignore_unknown_fields = true });
+    defer result.deinit();
+    const state = @TypeOf(self.state).fromLabel(result.value.state) orelse return error.InvalidResponse;
+    const id = try self.alloc.dupe(u8, result.value.job_id);
+    self.resizeRanks(result.value.gpus) catch |err| {
+        self.alloc.free(id);
+        return err;
+    };
+    if (self.job_id) |old| self.alloc.free(old);
+    self.job_id = id;
+    self.state = state;
+    try state_support.createPersistentRecord(self);
+    cli.write("{s}\n", .{response.body});
 }

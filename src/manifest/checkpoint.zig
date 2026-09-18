@@ -166,43 +166,16 @@ pub fn buildCheckpointEnv(
     ckpt: spec.CheckpointSpec,
     resume_path: ?[]const u8,
 ) !void {
-    // YOQ_CHECKPOINT_DIR=/path/to/checkpoints
-    var dir_buf: [600]u8 = undefined;
-    const dir_env = std.fmt.bufPrint(&dir_buf, "YOQ_CHECKPOINT_DIR={s}", .{ckpt.path}) catch return;
-    const dir_duped = try alloc.dupe(u8, dir_env);
-    env.append(alloc, dir_duped) catch {
-        alloc.free(dir_duped);
-        return;
-    };
+    try appendEnv(alloc, env, "YOQ_CHECKPOINT_DIR={s}", .{ckpt.path});
+    try appendEnv(alloc, env, "YOQ_CHECKPOINT_INTERVAL={d}", .{ckpt.interval_secs});
+    try appendEnv(alloc, env, "YOQ_CHECKPOINT_KEEP={d}", .{ckpt.keep});
+    if (resume_path) |path| try appendEnv(alloc, env, "YOQ_RESUME_FROM={s}", .{path});
+}
 
-    // YOQ_CHECKPOINT_INTERVAL=1800
-    var interval_buf: [64]u8 = undefined;
-    const interval_env = std.fmt.bufPrint(&interval_buf, "YOQ_CHECKPOINT_INTERVAL={d}", .{ckpt.interval_secs}) catch return;
-    const interval_duped = try alloc.dupe(u8, interval_env);
-    env.append(alloc, interval_duped) catch {
-        alloc.free(interval_duped);
-        return;
-    };
-
-    // YOQ_CHECKPOINT_KEEP=5
-    var keep_buf: [64]u8 = undefined;
-    const keep_env = std.fmt.bufPrint(&keep_buf, "YOQ_CHECKPOINT_KEEP={d}", .{ckpt.keep}) catch return;
-    const keep_duped = try alloc.dupe(u8, keep_env);
-    env.append(alloc, keep_duped) catch {
-        alloc.free(keep_duped);
-        return;
-    };
-
-    // YOQ_RESUME_FROM=/path/to/checkpoint/step_1000 (only if resuming)
-    if (resume_path) |rp| {
-        var resume_buf: [600]u8 = undefined;
-        const resume_env = std.fmt.bufPrint(&resume_buf, "YOQ_RESUME_FROM={s}", .{rp}) catch return;
-        const resume_duped = try alloc.dupe(u8, resume_env);
-        env.append(alloc, resume_duped) catch {
-            alloc.free(resume_duped);
-            return;
-        };
-    }
+fn appendEnv(alloc: std.mem.Allocator, env: *std.ArrayListUnmanaged([]const u8), comptime format: []const u8, args: anytype) !void {
+    const entry = try std.fmt.allocPrint(alloc, format, args);
+    errdefer alloc.free(entry);
+    try env.append(alloc, entry);
 }
 
 // -- tests --

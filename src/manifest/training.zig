@@ -90,13 +90,13 @@ pub const TrainingController = struct {
     }
 
     /// persist job state to database.
-    fn persistState(self: *TrainingController) void {
-        state_support.persistState(self);
+    fn persistState(self: *TrainingController) !void {
+        try state_support.persistState(self);
     }
 
     /// create initial persistent record for this training job.
-    fn createPersistentRecord(self: *TrainingController) void {
-        state_support.createPersistentRecord(self);
+    fn createPersistentRecord(self: *TrainingController) !void {
+        try state_support.createPersistentRecord(self);
     }
 
     /// load resume path from the latest checkpoint if one exists.
@@ -128,42 +128,28 @@ pub const TrainingController = struct {
         return cluster_runner.startCluster(self, server_ip, server_port);
     }
 
-    pub fn stop(self: *TrainingController) void {
-        // sync any final checkpoints
-        if (self.job.checkpoint) |ckpt| {
-            if (self.job_id) |jid| {
-                _ = checkpoint_mgr.syncCheckpoints(self.alloc, jid, ckpt.path, ckpt.keep) catch 0;
-            }
-        }
-
-        state_support.stopRunningRanks(self);
+    pub fn stop(self: *TrainingController) !void {
+        if (self.isClusterManaged()) return error.RemoteControlRequired;
         self.state = .stopped;
-        self.persistState();
+        try self.persistState();
+        try state_support.stopRunningRanks(self);
+        state_support.syncCheckpoints(self);
     }
 
-    pub fn pause(self: *TrainingController) void {
-        if (self.state != .running) return;
-
-        // sync checkpoints before pausing so we capture the latest
-        if (self.job.checkpoint) |ckpt| {
-            if (self.job_id) |jid| {
-                _ = checkpoint_mgr.syncCheckpoints(self.alloc, jid, ckpt.path, ckpt.keep) catch 0;
-            }
-        }
-
-        state_support.stopRunningRanks(self);
+    pub fn pause(self: *TrainingController) !void {
+        if (self.state != .running and self.state != .scheduling) return;
+        if (self.isClusterManaged()) return error.RemoteControlRequired;
         self.state = .paused;
-        self.persistState();
+        try self.persistState();
+        try state_support.stopRunningRanks(self);
+        state_support.syncCheckpoints(self);
     }
 
-    pub fn resume_(self: *TrainingController) void {
+    pub fn resume_(self: *TrainingController) !void {
         if (self.state != .paused) return;
-
-        // load latest checkpoint for resume
         self.loadResumeCheckpoint();
-
         self.state = .pending;
-        self.persistState();
+        try self.persistState();
     }
 
     pub fn printStatus(self: *const TrainingController) void {
@@ -226,7 +212,7 @@ test "training controller state transitions" {
     }
 
     // stop from pending
-    ctrl.stop();
+    try ctrl.stop();
     try std.testing.expectEqual(TrainingJobState.stopped, ctrl.state);
 }
 
@@ -251,12 +237,12 @@ test "training controller pause/resume" {
     ctrl.rank_status[0] = .running;
     ctrl.rank_status[1] = .running;
 
-    ctrl.pause();
+    try ctrl.pause();
     try std.testing.expectEqual(TrainingJobState.paused, ctrl.state);
     try std.testing.expectEqual(RankStatus.stopped, ctrl.rank_status[0]);
     try std.testing.expectEqual(RankStatus.stopped, ctrl.rank_status[1]);
 
-    ctrl.resume_();
+    try ctrl.resume_();
     try std.testing.expectEqual(TrainingJobState.pending, ctrl.state);
 }
 
@@ -276,7 +262,7 @@ test "training controller pause ignored when not running" {
     var ctrl = try TrainingController.init(alloc, &tj, "test-app");
     defer ctrl.deinit();
 
-    ctrl.pause();
+    try ctrl.pause();
     try std.testing.expectEqual(TrainingJobState.pending, ctrl.state);
 }
 
@@ -296,7 +282,7 @@ test "training controller resume ignored when not paused" {
     var ctrl = try TrainingController.init(alloc, &tj, "test-app");
     defer ctrl.deinit();
 
-    ctrl.resume_();
+    try ctrl.resume_();
     try std.testing.expectEqual(TrainingJobState.pending, ctrl.state);
 }
 
@@ -362,7 +348,7 @@ test "training controller owns the app name and restores the persisted rank coun
     @memset(&app_name, 'x');
     try std.testing.expectEqualStrings("demo", ctrl.app_name);
     try ctrl.generateJobId();
-    ctrl.createPersistentRecord();
+    try ctrl.createPersistentRecord();
     try store.updateTrainingJobGpus(ctrl.job_id.?, 3, 2);
     try store.updateTrainingJobState(ctrl.job_id.?, "paused", 2);
     try std.testing.expect(ctrl.loadFromStore());
