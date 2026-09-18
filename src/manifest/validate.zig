@@ -416,3 +416,25 @@ test "volume used by worker and cron is validated" {
     }
     try std.testing.expect(result.hasErrors());
 }
+
+test "volume validation covers training and workloads beyond the former collection limit" {
+    const alloc = std.testing.allocator;
+    var services: [129]spec.Service = undefined;
+    for (&services) |*service| service.* = .{
+        .name = "service",
+        .image = "scratch",
+        .command = &.{},
+        .ports = &.{},
+        .env = &.{},
+        .depends_on = &.{},
+        .working_dir = null,
+        .volumes = &.{.{ .source = "missing", .target = "/data", .kind = .named }},
+    };
+    const jobs = [_]spec.TrainingJob{.{ .name = "train", .image = "scratch", .command = &.{}, .env = &.{}, .working_dir = null, .volumes = &.{.{ .source = "missing", .target = "/data", .kind = .named }}, .gpus = 1 }};
+    const manifest: spec.Manifest = .{ .alloc = alloc, .services = &services, .workers = &.{}, .crons = &.{}, .training_jobs = &jobs, .volumes = &.{} };
+    var result = try check(alloc, &manifest);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 130), result.diagnostics.len);
+    for (result.diagnostics) |diagnostic| try std.testing.expectEqual(Severity.@"error", diagnostic.severity);
+    try std.testing.expect(std.mem.startsWith(u8, result.diagnostics[129].message, "training.train.volumes"));
+}
