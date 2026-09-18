@@ -40,10 +40,10 @@ pub fn parseUpgradeRequest(alloc: std.mem.Allocator, raw_request: []const u8) Pa
         return null;
     }
 
+    if (!isHttp11Request(raw_request)) return error.InvalidUpgrade;
     if (upgrade_value) |value| {
         if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, value, " \t"), "websocket") and settings_value == null) return null;
     }
-    if (!isHttp11Request(raw_request)) return error.InvalidUpgrade;
     if (upgrade_value == null or !tokenListContains(upgrade_value, "h2c")) {
         return error.InvalidUpgrade;
     }

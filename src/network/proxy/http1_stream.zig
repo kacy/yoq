@@ -52,7 +52,7 @@ pub const Downstream = struct {
     pub fn writeAll(self: *Downstream, bytes: []const u8) !void {
         if (bytes.len == 0) return;
         self.started.* = true;
-        try (transport.Stream{ .fd = self.fd, .deadline = transport.Deadline.afterMilliseconds(self.timeout_ms) }).writeAll(bytes);
+        (transport.Stream{ .fd = self.fd, .deadline = transport.Deadline.afterMilliseconds(self.timeout_ms) }).writeAll(bytes) catch return error.ClientClosed;
     }
 };
 
@@ -95,6 +95,16 @@ fn waitReadable(connection: *exchange.StreamingConnection, client_fd: posix.fd_t
 
 // ordinary responses close after one request; upgrades retain their handshake.
 pub fn writeHead(writer: anytype, head: *const Head, http10: bool) !void {
+    if (http10 and head.framing == .chunked) {
+        // removing chunk framing cannot also remove another transfer coding.
+        // reject before the first downstream byte rather than corrupt the body.
+        var headers = std.mem.splitSequence(u8, head.bytes[0..head.end], "\r\n");
+        while (headers.next()) |line| {
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+            if (!std.ascii.eqlIgnoreCase(line[0..colon], "Transfer-Encoding")) continue;
+            if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[colon + 1 ..], " \t"), "chunked")) return error.InvalidResponse;
+        }
+    }
     var lines = std.mem.splitSequence(u8, head.bytes[0..head.end], "\r\n");
     const status_line = lines.next() orelse return error.InvalidResponse;
     if (http10 and std.mem.startsWith(u8, status_line, "HTTP/1.1")) {
@@ -209,7 +219,7 @@ pub fn tunnel(connection: *exchange.StreamingConnection, downstream: *Downstream
         const ready = try posix.poll(&fds, if (pending) 0 else @intCast(@min(connection.timeout_ms, std.math.maxInt(i32))));
         if (ready == 0 and !pending) return error.TimedOut;
         if (fds[1].revents != 0) {
-            const count = try (transport.Stream{ .fd = downstream.fd, .deadline = transport.Deadline.afterMilliseconds(connection.timeout_ms) }).read(&buffer);
+            const count = (transport.Stream{ .fd = downstream.fd, .deadline = transport.Deadline.afterMilliseconds(connection.timeout_ms) }).read(&buffer) catch return error.ClientClosed;
             if (count == 0) return;
             try connection.writeAll(buffer[0..count]);
         }
@@ -380,4 +390,14 @@ test "http1 event stream reaches the client before the terminating chunk" {
     worker.join();
     joined = true;
     try std.testing.expect(!fixture.failed);
+}
+
+test "http1.0 streaming refuses stacked transfer codings before writing response bytes" {
+    const bytes = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+    var head: Head = .{ .end = bytes.len, .used = bytes.len, .status = 200, .framing = .chunked };
+    @memcpy(head.bytes[0..bytes.len], bytes);
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try std.testing.expectError(error.InvalidResponse, writeHead(&output.writer, &head, true));
+    try std.testing.expectEqual(@as(usize, 0), output.written().len);
 }
