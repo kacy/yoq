@@ -546,7 +546,7 @@ pub const ReverseProxy = struct {
 
             if (line.len == 0) continue;
             if (isForwardSkippedHeader(line)) continue;
-            if (spec.stream_body and (startsWithHeaderName(line, "Transfer-Encoding") or startsWithHeaderName(line, "Expect"))) continue;
+            if (spec.stream_body and skipStreamingHeader(line, parsed.headers_raw)) continue;
 
             try writer.writeAll(line);
             try writer.writeAll("\r\n");
@@ -844,6 +844,22 @@ const forward_skip_headers = [_][]const u8{
 fn isForwardSkippedHeader(line: []const u8) bool {
     for (forward_skip_headers) |name| {
         if (startsWithHeaderName(line, name)) return true;
+    }
+    return false;
+}
+
+fn skipStreamingHeader(line: []const u8, headers: []const u8) bool {
+    for ([_][]const u8{ "Transfer-Encoding", "Expect", "Keep-Alive", "Proxy-Connection", "Proxy-Authorization", "TE" }) |name|
+        if (startsWithHeaderName(line, name)) return true;
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    while (lines.next()) |header| {
+        if (!startsWithHeaderName(header, "Connection")) continue;
+        var names = std.mem.splitScalar(u8, header["Connection:".len..], ',');
+        while (names.next()) |name| {
+            const trimmed = std.mem.trim(u8, name, " \t");
+            if (std.ascii.eqlIgnoreCase(trimmed, "Upgrade")) continue;
+            if (startsWithHeaderName(line, trimmed)) return true;
+        }
     }
     return false;
 }
@@ -1158,8 +1174,9 @@ const ReadRequestError = error{
 
 fn readRequestBytes(fd: linux_platform.posix.socket_t, buf: []u8) ReadRequestError![]const u8 {
     var total: usize = 0;
+    const wire = transport.Stream{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(5000) };
     while (total < buf.len) {
-        const bytes_read = posix.read(fd, buf[total..]) catch break;
+        const bytes_read = wire.read(buf[total..]) catch break;
         if (bytes_read == 0) break;
         total += bytes_read;
 

@@ -61,7 +61,7 @@ pub const Body = struct {
                         self.line_used = 0;
                     }
                 },
-                .done => unreachable,
+                .done => return used,
             }
         }
         return used;

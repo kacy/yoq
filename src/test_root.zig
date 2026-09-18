@@ -121,6 +121,8 @@ comptime {
     _ = @import("network/proxy/upstream_pool.zig");
     _ = @import("network/proxy/socket_helpers.zig");
     _ = @import("network/proxy/reverse_proxy.zig");
+    _ = @import("network/proxy/http1_upload.zig");
+    _ = @import("network/proxy/http1_stream.zig");
     _ = @import("build/dockerfile.zig");
     _ = @import("build/context.zig");
     _ = @import("build/engine.zig");
