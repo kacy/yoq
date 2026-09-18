@@ -28,6 +28,7 @@ pub fn nowNs() u64 {
 // a completed logical request contributes once, including time spent retrying.
 // the newest 256 observations expire after a minute; idle traffic is unknown.
 pub fn record(service: []const u8, started_ns: u64, failed: bool) void {
+    if (started_ns == 0) return;
     const now = nowNs();
     recordAt(service, now -| started_ns, failed, now);
 }

@@ -52,3 +52,37 @@ test "alert webhook refuses credentials fragments and unsupported schemes before
         try std.testing.expectEqualStrings("InvalidUrl", result.failure.?);
     }
 }
+
+test "alert webhook reports success non-success redirects malformed responses and deadlines" {
+    const Server = @import("../../image/registry/test_support.zig").Server;
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const cases = [_]struct { reply: Server.Reply, failure: ?[]const u8, status: ?u16, timeout: u64 = 2000 }{
+        .{ .reply = .{ .status = "204 No Content" }, .failure = null, .status = 204 },
+        .{ .reply = .{ .status = "503 Service Unavailable" }, .failure = "UnexpectedStatus", .status = 503 },
+        .{ .reply = .{ .status = "302 Found", .headers = "Location: http://127.0.0.1:1/private\r\n" }, .failure = "UnexpectedStatus", .status = 302 },
+        .{ .reply = .{ .status = "invalid" }, .failure = "HttpHeadersInvalid", .status = null },
+        .{ .reply = .{ .delay_ms = 250 }, .failure = "Timeout", .status = null, .timeout = 40 },
+    };
+    for (cases) |case| {
+        var server = try Server.init(&.{case.reply});
+        defer server.deinit();
+        try server.start();
+        var host_buffer: [64]u8 = undefined;
+        var url_buffer: [128]u8 = undefined;
+        const url = try std.fmt.bufPrint(&url_buffer, "http://{s}/hook", .{try server.host(&host_buffer)});
+        const result = sendWithTimeout(std.testing.allocator, threaded.io(), url, "{\"state\":\"firing\"}", case.timeout);
+        if (case.failure) |failure| {
+            // parser error names are implementation details; malformed heads
+            // must fail before a status is accepted.
+            if (case.status == null and case.timeout == 2000) {
+                try std.testing.expect(result.failure != null);
+            } else try std.testing.expectEqualStrings(failure, result.failure.?);
+        } else try std.testing.expect(result.failure == null);
+        try std.testing.expectEqual(case.status, result.status);
+        server.worker.?.join();
+        server.worker = null;
+        try std.testing.expectEqual(@as(usize, 1), server.requests);
+        try std.testing.expect(std.mem.startsWith(u8, server.last_request[0..server.last_request_length], "POST /hook HTTP/1.1\r\n"));
+    }
+}
