@@ -137,7 +137,7 @@ jobs:
             YOQ_SKIP_SLOW_TESTS=1 \
             ZIG_GLOBAL_CACHE_DIR="$zig_global_cache" \
             ZIG_LOCAL_CACHE_DIR="$zig_local_cache" \
-            "$zig_bin" build -Doptimize=ReleaseSafe -Drun-privileged-tests=true "${{ matrix.command }}" 2>&1 \
+            "$zig_bin" build -j1 -Doptimize=ReleaseSafe -Drun-privileged-tests=true "${{ matrix.command }}" 2>&1 \
             | tee "$RUNNER_TEMP/runtime-logs/${{ matrix.command }}.log"
           status=${PIPESTATUS[0]}
           set -e
