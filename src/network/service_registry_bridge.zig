@@ -58,7 +58,7 @@ pub fn registerContainerService(service_name: []const u8, container_id: []const 
         .none, .skip_legacy_apply => service_reconciler.noteContainerRegisteredFrom(.container_runtime, service_name, container_id, container_ip),
         .skip_shadow_record => noteFaultInjection(operation),
     }
-    refreshL7ControlPlane(service_name, null);
+    refreshL7ControlPlane(container_id);
 }
 
 pub fn unregisterContainerService(container_id: []const u8) void {
@@ -76,7 +76,7 @@ pub fn unregisterContainerService(container_id: []const u8) void {
         .none, .skip_legacy_apply => service_reconciler.noteContainerUnregisteredFrom(.container_runtime, container_id),
         .skip_shadow_record => noteFaultInjection(operation),
     }
-    refreshL7ControlPlane(null, container_id);
+    refreshL7ControlPlane(container_id);
 }
 
 pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
@@ -86,7 +86,7 @@ pub fn markEndpointHealthy(service_name: []const u8, container_id: []const u8, c
         .none, .skip_legacy_apply => service_reconciler.noteEndpointHealthyFrom(.health_checker, service_name, container_id, container_ip),
         .skip_shadow_record => noteFaultInjection(operation),
     }
-    refreshL7ControlPlane(service_name, null);
+    refreshL7ControlPlane(container_id);
 }
 
 pub fn markEndpointUnhealthy(service_name: []const u8, container_id: []const u8, container_ip: [4]u8) void {
@@ -96,7 +96,7 @@ pub fn markEndpointUnhealthy(service_name: []const u8, container_id: []const u8,
         .none, .skip_legacy_apply => service_reconciler.noteEndpointUnhealthyFrom(.health_checker, service_name, container_id, container_ip),
         .skip_shadow_record => noteFaultInjection(operation),
     }
-    refreshL7ControlPlane(service_name, null);
+    refreshL7ControlPlane(container_id);
 }
 
 pub fn faultInjectionCount(operation: BridgeOperation) u64 {
@@ -140,9 +140,8 @@ fn noteFaultInjection(operation: BridgeOperation) void {
     });
 }
 
-fn refreshL7ControlPlane(service_name: ?[]const u8, container_id: ?[]const u8) void {
-    if (service_name) |name| @import("published_ports.zig").refreshService(name);
-    if (container_id) |id| @import("published_ports.zig").refreshContainer(id);
+fn refreshL7ControlPlane(container_id: []const u8) void {
+    @import("published_ports.zig").refreshContainer(container_id);
     proxy_control_plane.refreshIfEnabled();
 }
 

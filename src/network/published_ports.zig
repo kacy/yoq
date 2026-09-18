@@ -29,6 +29,7 @@ const Claim = struct {
 const Claims = std.ArrayList(Claim);
 const Apply = *const fn (Allocator, []const Claim) anyerror!void;
 var mutex: std.Io.Mutex = .init;
+var last_apply_seconds: i64 = 0;
 
 pub fn publishInstance(alloc: Allocator, app_name: ?[]const u8, service_name: []const u8, container_id: []const u8, ports: []const spec.PortMapping) !void {
     return publishInstanceWithBootstrap(alloc, app_name, service_name, container_id, ports, null);
@@ -132,6 +133,11 @@ fn change(alloc: Allocator, operation: Change, apply: Apply) !void {
         .refresh => |selector| if (selector) |selected| try resolveBackends(alloc, next.items, selected),
         .remove => {},
     }
+    const now = std.Io.Clock.awake.now(io).toSeconds();
+    // steady health probes should not spawn firewall tools or rewrite sqlite.
+    // a periodic refresh still repairs rules removed outside the runtime.
+    if (operation == .refresh and sameClaims(previous.items, next.items) and
+        last_apply_seconds != 0 and now - last_apply_seconds < 30) return;
     // a failed database commit or partial table update restores the prior
     // dataplane. the durable claims remain the source for the next retry.
     apply(alloc, next.items) catch |err| {
@@ -142,6 +148,20 @@ fn change(alloc: Allocator, operation: Change, apply: Apply) !void {
         apply(alloc, previous.items) catch |restore_err| log.err("published ports: rollback failed: {}", .{restore_err});
         return err;
     };
+    last_apply_seconds = now;
+}
+
+fn sameClaims(a: []const Claim, b: []const Claim) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |old, current| {
+        if (old.host_port != current.host_port or old.target_port != current.target_port or
+            old.eligible != current.eligible or old.bootstrap != current.bootstrap or
+            !std.mem.eql(u8, &old.address, &current.address) or
+            !std.mem.eql(u8, old.app, current.app) or
+            !std.mem.eql(u8, old.service, current.service) or
+            !std.mem.eql(u8, old.container, current.container)) return false;
+    }
+    return true;
 }
 
 fn appendClaim(alloc: Allocator, claims: *Claims, claim: Claim) !void {
