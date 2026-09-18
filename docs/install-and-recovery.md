@@ -35,7 +35,11 @@ scheduled `[backup]` jobs keep seven backups by default. `keep_count`, `max_age`
 
 ## upgrade and restore locally
 
-record `yoq version`, save a database backup and the current executable, and stop the application supervisors and api server using the mechanism that started them. install the verified replacement release, then run `sudo -H "$(command -v yoq)" doctor` and the application's normal startup command. inspect `sudo -H "$(command -v yoq)" status --app <name>`, health checks, and the application's actual request path.
+record `yoq version`, save a database backup and the current executable, and stop the application supervisors and api server using the mechanism that started them. finish or stop every older apply and training command before installing the verified replacement release. then run `sudo -H "$(command -v yoq)" doctor` and the application's normal startup command. inspect `sudo -H "$(command -v yoq)" status --app <name>`, health checks, and the application's actual request path.
+
+the ownership, image reference, and drain changes described here are in current source; check that the replacement release or build includes them. the local owner lock protocol has changed; old and new commands must not overlap during this upgrade. follow the [training lifecycle guide](training-lifecycle.md) for retained lock files and downgrade steps. after migration, local jobs whose app names begin with `cluster-` remain local when reloaded.
+
+older image records have no stored registry origin. pull or build their names again after upgrading; see [local image references and pruning](image-layers.md#local-image-references-and-pruning). database restore does not restore image blobs or running-container layers.
 
 if recovery is needed, stop every process using the local database before restoring:
 
@@ -50,7 +54,9 @@ restart with a binary compatible with the restored database, then repeat the sta
 
 `yoq backup` covers the local `yoq.db`; it is not a coordinated backup of the raft log, replicated `cluster/state.db`, agent state, or application volumes. do not restore that archive over cluster state or copy one live sqlite file while omitting its wal.
 
-run `sudo -H "$(command -v yoq)" upgrade preflight --server <server-ip>:7700` before maintenance. keep the original fixed voter set. for an ordinary compatible upgrade, drain agents and replace servers while retaining quorum. the replicated-command validation and assignment-generation changes require a coordinated upgrade: pause writes and rescheduling, then upgrade every voter and agent before resuming. follow [replicated command recovery](cluster-guide.md#upgrading-replicated-command-validation), including its checks for unsupported historical commands. do not assume that an old snapshot is consistent merely because it opens successfully.
+run `sudo -H "$(command -v yoq)" upgrade preflight --server <server-ip>:7700` before maintenance and keep the original fixed voter set. the replicated-command validation, assignment-generation, drain handoff, and training execution mode changes require a coordinated upgrade: pause writes and rescheduling, then upgrade every voter and agent before resuming. follow [replicated command recovery](cluster-guide.md#upgrading-replicated-command-validation), including its checks for unsupported historical commands, and the [rolling upgrade procedure](cluster-guide.md#rolling-upgrades). an old snapshot opening successfully is not enough to establish recovery compatibility.
+
+once every server supports the new transitions, drain one service host at a time. wait for `drained` and no running containers before stopping its agent. `drain_pending` and `drain_blocked` require the agent to remain online; node-local volumes need an operator to move their data, and jobs or training ranks must finish or be stopped explicitly. see [draining a node](cluster-guide.md#draining-a-node) for capacity and readiness requirements. validate the upgrade with application requests as well as cluster status.
 
 ## offline cluster recovery
 

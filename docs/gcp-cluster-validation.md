@@ -65,6 +65,8 @@ infra/gcp/install.sh
 so the remote host chooses the right architecture automatically.
 node setup installs github cli from its official apt repository. the token is sent over ssh stdin to the root installer and is not persisted on the vm. gcloud's normal host verification remains enabled. unset `GH_TOKEN` when installation finishes.
 
+record the version and executable hash for each of the five nodes and the local cli. the installer uses published releases; it does not deploy the current checkout. `YOQ_BINARY_PATH` selects the local cli used by validation and does not replace the remote binaries. testing unreleased changes requires installing that revision on every participating node before bootstrap.
+
 Bootstrap the 3-server cluster and join the agents:
 
 ```bash
@@ -83,9 +85,9 @@ Tear everything down:
 infra/gcp/down.sh
 ```
 
-## what `validate.sh` proves
+## automated checks
 
-It performs eight classes of checks:
+`validate.sh` runs eight groups of checks:
 
 1. cluster readiness
    - leader elected
@@ -148,6 +150,18 @@ default automated cluster smoke does not depend on it yet.
 5. restore connectivity and start the stopped server with its original data directory and fixed peer list. confirm convergence before tearing down the rig.
 
 save server and agent logs, assignment generations, and api responses with the rig artifacts. a reachable api or a successful graceful handoff alone does not establish durable result delivery. these checks are not part of the automated eight-class cloud smoke suite above. ci separately runs [the process recovery fixture](../scripts/agent-recovery-smoke.sh) with three server processes and a joined agent in isolated network namespaces. it kills the leader, interrupts result delivery, and restarts the agent; it does not replace validation on the cloud rig.
+
+## additional reliability acceptance
+
+these are manual acceptance checks beyond `validate.sh`. use a disposable rig running the revision under review, follow the [upgrade requirements](install-and-recovery.md#cluster-upgrades), and retain application responses and assignment transitions with the run artifacts.
+
+1. deploy a stateless service with a readiness check and record which worker serves it. with no eligible replacement capacity, request a drain and verify `drain_blocked`, fresh source-agent heartbeats, and successful requests to the original service.
+2. make replacement capacity available. verify that the original keeps serving until its replacement reports ready, then wait for `drained` and no running containers on the source before stopping it. drain one service host at a time.
+3. repeat the handoff while restarting the current leader, preserving a voting quorum. verify that the new leader resumes the saved handoff and that the replacement becomes ready before the original stops. retain the source and replacement assignment ids.
+4. verify that a service with a host or local volume blocks automatic migration. drain does not move its data. active jobs and training ranks must finish in place or be stopped explicitly; follow the [training lifecycle guide](training-lifecycle.md) when exercising those controls.
+5. stop one follower while quorum remains available, submit a backlog with individual commands larger than 8 kib but within the [raft proposal limits](cluster-guide.md#raft-proposal-sizes), and restart it. compare applied indexes and resulting replicated state, then verify another small mutation commits and reaches the recovered follower. the [local process drill](development.md#cluster-process-drills) provides the 65-command reference case.
+
+`validate.sh` does not currently automate drain handoffs or large-command catch-up. a cloud run should report which additional checks ran, which were blocked, and which were skipped. the default gpu smoke also leaves concurrent framework communication and checkpoint recovery to the [physical gpu acceptance procedure](gpu-validation.md).
 
 ## cost and stability defaults
 
