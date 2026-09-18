@@ -88,6 +88,7 @@ pub const Request = struct {
     body: []const u8,
     /// parsed Content-Length value
     content_length: usize,
+    chunked: bool = false,
 };
 
 /// try to parse an HTTP request from a buffer.
@@ -105,6 +106,14 @@ pub fn parseRequest(buf: []const u8) HttpError!?Request {
 
 /// Parse bounded headers without waiting for, or allocating, the declared body.
 pub fn parseRequestHead(buf: []const u8) HttpError!?Request {
+    return parseRequestHeadWithOptions(buf, .{});
+}
+
+pub const HeadOptions = struct { allow_chunked: bool = false };
+
+// streaming proxy callers validate and forward chunk framing separately. the
+// api's buffered parser retains its content-length-only contract.
+pub fn parseRequestHeadWithOptions(buf: []const u8, options: HeadOptions) HttpError!?Request {
     const header_end = findHeaderEnd(buf) orelse {
         if (buf.len > max_header_bytes + 4) return HttpError.HeadersTooLarge;
         return null;
@@ -115,10 +124,31 @@ pub fn parseRequestHead(buf: []const u8) HttpError!?Request {
     if (line.headers_start > header_end) return HttpError.BadRequest;
     const headers_raw = buf[line.headers_start..header_end];
     var headers = std.mem.splitSequence(u8, headers_raw, "\r\n");
+    var chunked = false;
+    var has_length = false;
     while (headers.next()) |header| {
         const colon = std.mem.indexOfScalar(u8, header, ':') orelse return HttpError.BadRequest;
-        if (std.ascii.eqlIgnoreCase(header[0..colon], "transfer-encoding")) return HttpError.BadRequest;
+        const name = header[0..colon];
+        const value = std.mem.trim(u8, header[colon + 1 ..], " \t");
+        if (options.allow_chunked) {
+            if (name.len == 0) return HttpError.BadRequest;
+            for (name) |byte| if (!isHeaderNameByte(byte)) return HttpError.BadRequest;
+            for (value) |byte| if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return HttpError.BadRequest;
+        }
+        if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
+            if (!options.allow_chunked or chunked or !std.ascii.eqlIgnoreCase(value, "chunked")) return HttpError.BadRequest;
+            chunked = true;
+        }
+        if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+            has_length = true;
+            if (options.allow_chunked) {
+                if (value.len == 0) return HttpError.BadRequest;
+                for (value) |byte| if (!std.ascii.isDigit(byte)) return HttpError.BadRequest;
+            }
+        }
     }
+    if (chunked and has_length) return HttpError.BadRequest;
+    if (chunked and !std.mem.endsWith(u8, buf[0 .. line.headers_start - 2], " HTTP/1.1")) return HttpError.BadRequest;
     const content_length = try findContentLength(headers_raw);
     if (content_length > max_body_bytes) return HttpError.BodyTooLarge;
     return .{
@@ -129,6 +159,14 @@ pub fn parseRequestHead(buf: []const u8) HttpError!?Request {
         .headers_raw = headers_raw,
         .body = "",
         .content_length = content_length,
+        .chunked = chunked,
+    };
+}
+
+pub fn isHeaderNameByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or switch (byte) {
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
+        else => false,
     };
 }
 
@@ -551,4 +589,26 @@ test "parse request ignores bytes beyond declared body length" {
     const raw = "POST /data HTTP/1.1\r\nContent-Length: 4\r\n\r\nbodyEXTRA";
     const req = (try parseRequest(raw)).?;
     try std.testing.expectEqualStrings("body", req.body);
+}
+
+test "proxy upload head parsing accepts bounded chunked requests without changing buffered api parsing" {
+    const bytes = "POST /upload HTTP/1.1\r\nHost: app.test\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const request = (try parseRequestHeadWithOptions(bytes, .{ .allow_chunked = true })).?;
+    try std.testing.expect(request.chunked);
+    try std.testing.expectEqualStrings("/upload", request.path);
+    try std.testing.expectError(error.BadRequest, parseRequestHead(bytes));
+    for ([_][]const u8{
+        "Transfer-Encoding: chunked\r\nContent-Length: 0",
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked",
+        "Transfer-Encoding: gzip, chunked",
+        "Content-Length: +10",
+        "Content-Length: 10\r\nContent-Length: 10",
+        "Content-Length : 10",
+        " Invalid: value",
+    }) |headers| {
+        var buffer: [512]u8 = undefined;
+        const raw = try std.fmt.bufPrint(&buffer, "POST / HTTP/1.1\r\nHost: app.test\r\n{s}\r\n\r\n", .{headers});
+        try std.testing.expectError(error.BadRequest, parseRequestHeadWithOptions(raw, .{ .allow_chunked = true }));
+    }
+    try std.testing.expectError(error.BadRequest, parseRequestHeadWithOptions("POST / HTTP/1.0\r\nHost: app.test\r\nTransfer-Encoding: chunked\r\n\r\n", .{ .allow_chunked = true }));
 }

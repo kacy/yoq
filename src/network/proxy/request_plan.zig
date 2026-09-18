@@ -38,11 +38,17 @@ pub fn planRequest(alloc: std.mem.Allocator, routes: []const router.Route, raw_r
     if (http2.startsWithClientPreface(raw_request)) {
         return try planHttp2Request(alloc, routes, raw_request);
     }
-    return try planHttp1Request(alloc, routes, raw_request);
+    return try planHttp1Request(alloc, routes, raw_request, false);
 }
 
-fn planHttp1Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_request: []const u8) PlanError!RequestPlan {
-    const parsed = (http.parseRequest(raw_request) catch return error.InvalidHttp1Request) orelse return error.IncompleteHttp1Request;
+pub fn planRequestHead(alloc: std.mem.Allocator, routes: []const router.Route, raw_request: []const u8) PlanError!RequestPlan {
+    if (http2.startsWithClientPreface(raw_request)) return planHttp2Request(alloc, routes, raw_request);
+    return planHttp1Request(alloc, routes, raw_request, true);
+}
+
+fn planHttp1Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_request: []const u8, head_only: bool) PlanError!RequestPlan {
+    const result = if (head_only) http.parseRequestHeadWithOptions(raw_request, .{ .allow_chunked = true }) else http.parseRequest(raw_request);
+    const parsed = (result catch return error.InvalidHttp1Request) orelse return error.IncompleteHttp1Request;
     const host_header = http.findHeaderValue(parsed.headers_raw, "Host") orelse return error.MissingHostHeader;
     const host = proxy_helpers.normalizeHost(host_header);
     const request_headers = try router.collectHttp1Headers(alloc, parsed.headers_raw);
