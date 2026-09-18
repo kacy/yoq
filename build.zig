@@ -751,6 +751,7 @@ pub fn build(b: *std.Build) void {
         "metrics",
         "port_map",
         "storage_metrics",
+        "gpu_prio",
     };
 
     for (bpf_programs) |prog| {
