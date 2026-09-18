@@ -32,7 +32,7 @@ pub fn pullForPlatform(io: std.Io, alloc: std.mem.Allocator, image_ref: spec.Ima
     var repo_buf: [256]u8 = undefined;
     const repository = common.resolveRepository(image_ref, &repo_buf);
 
-    const token = auth.authenticate(alloc, &client, image_ref.host, repository, "pull") catch |e|
+    const token = auth.authenticateReference(alloc, &client, image_ref.host, repository, "pull", image_ref.reference) catch |e|
         return switch (e) {
             error.AuthFailed => RegistryError.AuthFailed,
             error.NetworkError => RegistryError.NetworkError,
@@ -200,7 +200,7 @@ pub fn push(
     var repo_buf: [256]u8 = undefined;
     const repository = common.resolveRepository(image_ref, &repo_buf);
 
-    const token = auth.authenticate(alloc, &client, image_ref.host, repository, "push,pull") catch |e|
+    const token = auth.authenticateReference(alloc, &client, image_ref.host, repository, "push,pull", image_ref.reference) catch |e|
         return switch (e) {
             error.AuthFailed => RegistryError.AuthFailed,
             error.NetworkError => RegistryError.NetworkError,

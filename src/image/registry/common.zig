@@ -34,6 +34,11 @@ pub const ManifestError = error{
     OutOfMemory,
 };
 
+pub const manifest_accept = spec.media_type.oci_index ++ ", " ++
+    spec.media_type.oci_manifest ++ ", " ++
+    spec.media_type.manifest_list ++ ", " ++
+    spec.media_type.manifest_v2;
+
 pub const max_manifest_size: usize = 10 * 1024 * 1024;
 pub const max_auth_response_size: usize = 64 * 1024;
 pub const max_config_size: usize = 4 * 1024 * 1024;
@@ -43,6 +48,7 @@ pub const registry_timeout_sec = 30;
 
 pub const Token = struct {
     value: []const u8,
+    kind: enum { bearer, basic } = .bearer,
 };
 
 pub const AuthChallenge = struct {
@@ -117,5 +123,5 @@ pub fn summarizeUrl(url: []const u8, buf: *[256]u8) []const u8 {
 
 pub fn authHeaderValue(token: Token, buf: *[8192]u8) []const u8 {
     if (token.value.len == 0) return "";
-    return std.fmt.bufPrint(buf, "Bearer {s}", .{token.value}) catch "";
+    return std.fmt.bufPrint(buf, "{s} {s}", .{ if (token.kind == .bearer) "Bearer" else "Basic", token.value }) catch "";
 }

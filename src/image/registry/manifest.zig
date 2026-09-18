@@ -138,10 +138,7 @@ fn fetchSingle(alloc: std.mem.Allocator, client: *std.http.Client, host: []const
 
     const accept_header = std.http.Header{
         .name = "Accept",
-        .value = spec.media_type.oci_index ++ ", " ++
-            spec.media_type.oci_manifest ++ ", " ++
-            spec.media_type.manifest_list ++ ", " ++
-            spec.media_type.manifest_v2,
+        .value = common.manifest_accept,
     };
 
     var auth_buf: [8192]u8 = undefined;
