@@ -5016,3 +5016,36 @@ test "first upstream attempt preserves required tls and cleans up partial copies
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Fixture.copy, .{});
 }
+
+test "proxy upload reads headers before a large body arrives" {
+    var sockets: [2]posix.fd_t = undefined;
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &sockets) != 0) return error.SkipZigTest;
+    defer linux_platform.posix.close(sockets[0]);
+    defer linux_platform.posix.close(sockets[1]);
+    const headers = "POST /upload HTTP/1.1\r\nHost: app.test\r\nContent-Length: 2097152\r\n\r\n";
+    try socket_helpers.writeAll(sockets[1], headers);
+    var buffer: [64 * 1024]u8 = undefined;
+    try std.testing.expectEqualStrings(headers, try readRequestBytes(sockets[0], &buffer));
+}
+
+test "proxy upload forwarding retains framing and strips handled expectations and connection headers" {
+    for ([_][]const u8{ "Content-Length: 2097152", "Transfer-Encoding: chunked" }) |framing| {
+        const raw = try std.fmt.allocPrint(std.testing.allocator, "POST /upload HTTP/1.1\r\nHost: app.test\r\n{s}\r\nExpect: 100-continue\r\nConnection: x-private\r\nX-Private: removed\r\n\r\n", .{framing});
+        defer std.testing.allocator.free(raw);
+        const forwarded = try ReverseProxy.buildHttp1ForwardRequestBytes(std.testing.allocator, raw, .{
+            .stream_body = true,
+            .protocol = .http1,
+            .method = .POST,
+            .path = "/upload",
+            .outbound_path = "/files",
+            .host = "app.test",
+            .outbound_host = "backend",
+        }, null);
+        defer std.testing.allocator.free(forwarded);
+        try std.testing.expect(std.mem.startsWith(u8, forwarded, "POST /files HTTP/1.1\r\nHost: backend\r\n"));
+        try std.testing.expect(std.mem.indexOf(u8, forwarded, framing) != null);
+        try std.testing.expect(std.mem.indexOf(u8, forwarded, "Expect:") == null);
+        try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Private:") == null);
+        if (std.mem.startsWith(u8, framing, "Transfer-Encoding")) try std.testing.expect(std.mem.indexOf(u8, forwarded, "Content-Length:") == null);
+    }
+}

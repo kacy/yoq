@@ -202,3 +202,175 @@ test "http1 upload rejects ambiguous framing malformed chunks and oversized deco
     var line: Body = .{ .state = .size_line };
     try std.testing.expectError(error.MalformedRequestBody, line.consume(&([_]u8{'f'} ** (max_chunk_line + 1))));
 }
+
+const UploadFixture = struct {
+    const upload_size = 2 * 1024 * 1024;
+    const Sha256 = std.crypto.hash.sha2.Sha256;
+    observed_body: std.atomic.Value(bool) = .init(false),
+    chunked: bool,
+    expect_continue: bool,
+    producer_error: ?anyerror = null,
+    upstream_error: ?anyerror = null,
+    sent_digest: [32]u8 = undefined,
+    received_digest: [32]u8 = undefined,
+
+    fn pair() ![2]posix.fd_t {
+        var sockets: [2]posix.fd_t = undefined;
+        if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &sockets) != 0) return error.SkipZigTest;
+        return sockets;
+    }
+
+    fn wire(fd: posix.fd_t) transport.Stream {
+        return .{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(3000) };
+    }
+
+    fn produce(self: *UploadFixture, fd: posix.fd_t) void {
+        self.produceBody(fd) catch |err| {
+            self.producer_error = err;
+            _ = std.os.linux.shutdown(fd, 2);
+        };
+    }
+
+    fn produceBody(self: *UploadFixture, fd: posix.fd_t) !void {
+        const socket = wire(fd);
+        if (self.expect_continue) {
+            var interim: [25]u8 = undefined;
+            var used: usize = 0;
+            while (used < interim.len) {
+                const count = try socket.read(interim[used..]);
+                if (count == 0) return error.UnexpectedEof;
+                used += count;
+            }
+            try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", &interim);
+        }
+        var hash: Sha256 = .init(.{});
+        const block = [_]u8{'x'} ** buffer_size;
+        for (0..upload_size / block.len) |index| {
+            if (self.chunked) try writeHashed(socket, &hash, "4000\r\n");
+            try writeHashed(socket, &hash, &block);
+            if (self.chunked) try writeHashed(socket, &hash, "\r\n");
+            if (index == 0) {
+                // a buffering proxy would deadlock here: the remaining body is
+                // sent only after the backend has received the first chunk.
+                while (!self.observed_body.load(.acquire)) {
+                    _ = try socket.deadline.?.remaining();
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+                }
+            }
+        }
+        if (self.chunked) try writeHashed(socket, &hash, "0\r\nX-Checksum: fixture\r\n\r\n");
+        self.sent_digest = hash.finalResult();
+    }
+
+    fn writeHashed(socket: transport.Stream, hash: *Sha256, bytes: []const u8) !void {
+        try socket.writeAll(bytes);
+        hash.update(bytes);
+    }
+
+    fn serve(self: *UploadFixture, fd: posix.fd_t) void {
+        self.receiveBody(fd) catch |err| {
+            self.upstream_error = err;
+            _ = std.os.linux.shutdown(fd, 2);
+        };
+    }
+
+    fn receiveBody(self: *UploadFixture, fd: posix.fd_t) !void {
+        const socket = wire(fd);
+        var buffer: [buffer_size]u8 = undefined;
+        var used: usize = 0;
+        while (std.mem.indexOf(u8, buffer[0..used], "\r\n\r\n") == null) {
+            const count = try socket.read(buffer[used..]);
+            if (count == 0) return error.UnexpectedEof;
+            used += count;
+        }
+        const head_end = std.mem.indexOf(u8, buffer[0..used], "\r\n\r\n").? + 4;
+        const request = (try http.parseRequestHeadWithOptions(buffer[0..head_end], .{ .allow_chunked = true })).?;
+        var body = Body.init(request);
+        var input = buffer[head_end..used];
+        var hash: Sha256 = .init(.{});
+        var received_total: usize = 0;
+        while (body.state != .done) {
+            if (input.len == 0) {
+                const count = try socket.read(&buffer);
+                if (count == 0) return error.UnexpectedEof;
+                input = buffer[0..count];
+            }
+            const count = try body.consume(input);
+            hash.update(input[0..count]);
+            input = input[count..];
+            received_total += count;
+            if (received_total >= buffer_size) self.observed_body.store(true, .release);
+        }
+        self.received_digest = hash.finalResult();
+        try socket.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    }
+};
+
+test "http1 upload forwards large length and chunked bodies before the client finishes" {
+    for ([_]bool{ false, true }) |chunked| {
+        const client = try UploadFixture.pair();
+        defer for (client) |fd| platform.posix.close(fd);
+        const upstream = try UploadFixture.pair();
+        defer for (upstream) |fd| platform.posix.close(fd);
+        var fixture: UploadFixture = .{ .chunked = chunked, .expect_continue = true };
+        const producer = try std.Thread.spawn(.{}, UploadFixture.produce, .{ &fixture, client[1] });
+        var producer_joined = false;
+        defer if (!producer_joined) producer.join();
+        const server = try std.Thread.spawn(.{}, UploadFixture.serve, .{ &fixture, upstream[1] });
+        var server_joined = false;
+        defer if (!server_joined) server.join();
+        var connection: exchange.StreamingConnection = .{ .connection = .{ .bare = upstream[0] }, .timeout_ms = 3000 };
+        var started = false;
+        var downstream: response.Downstream = .{ .fd = client[0], .timeout_ms = 3000, .started = &started };
+        const headers = if (chunked)
+            "POST /upload HTTP/1.1\r\nHost: app.test\r\nTransfer-Encoding: chunked\r\n\r\n"
+        else
+            "POST /upload HTTP/1.1\r\nHost: app.test\r\nContent-Length: 2097152\r\n\r\n";
+        var parsed = (try http.parseRequestHeadWithOptions(headers, .{ .allow_chunked = true })).?;
+        // the proxy strips Expect from the forwarded head after handling it.
+        parsed.headers_raw = "Expect: 100-continue";
+        const head = try sendAndReadHead(&connection, &downstream, headers, "", parsed);
+        try std.testing.expectEqual(@as(u16, 200), head.status);
+        try std.testing.expect(!started);
+        // the backend sends its final response only after consuming all bytes;
+        // joins synchronize the digests and any fixture errors before inspection.
+        server.join();
+        server_joined = true;
+        producer.join();
+        producer_joined = true;
+        if (fixture.producer_error) |err| return err;
+        if (fixture.upstream_error) |err| return err;
+        try std.testing.expectEqualSlices(u8, &fixture.sent_digest, &fixture.received_digest);
+    }
+}
+
+test "http1 upload accepts early rejection without waiting for a stalled client body" {
+    const client = try UploadFixture.pair();
+    defer for (client) |fd| platform.posix.close(fd);
+    const upstream = try UploadFixture.pair();
+    defer for (upstream) |fd| platform.posix.close(fd);
+    var connection: exchange.StreamingConnection = .{ .connection = .{ .bare = upstream[0] }, .timeout_ms = 100 };
+    var started = false;
+    var downstream: response.Downstream = .{ .fd = client[0], .timeout_ms = 100, .started = &started };
+    const headers = "POST /upload HTTP/1.1\r\nHost: app.test\r\nContent-Length: 2097152\r\n\r\n";
+    const parsed = (try http.parseRequestHead(headers)).?;
+    try UploadFixture.wire(upstream[1]).writeAll("HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\n\r\n");
+    const head = try sendAndReadHead(&connection, &downstream, headers, "", parsed);
+    try std.testing.expectEqual(@as(u16, 413), head.status);
+    try std.testing.expect(!started);
+}
+
+test "http1 upload cancellation and stalled bodies return within the operation deadline" {
+    const client = try UploadFixture.pair();
+    defer for (client) |fd| platform.posix.close(fd);
+    const upstream = try UploadFixture.pair();
+    defer for (upstream) |fd| platform.posix.close(fd);
+    var connection: exchange.StreamingConnection = .{ .connection = .{ .bare = upstream[0] }, .timeout_ms = 20 };
+    var started = false;
+    var downstream: response.Downstream = .{ .fd = client[0], .timeout_ms = 20, .started = &started };
+    const headers = "POST /upload HTTP/1.1\r\nHost: app.test\r\nContent-Length: 8\r\n\r\n";
+    const parsed = (try http.parseRequestHead(headers)).?;
+    try std.testing.expectError(error.TimedOut, sendAndReadHead(&connection, &downstream, headers, "", parsed));
+    _ = std.os.linux.shutdown(client[1], 1);
+    try std.testing.expectError(error.IncompleteRequestBody, sendAndReadHead(&connection, &downstream, headers, "", parsed));
+}
