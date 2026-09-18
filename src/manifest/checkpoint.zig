@@ -148,10 +148,7 @@ fn syncCheckpointsWithDelete(alloc: std.mem.Allocator, job_id: []const u8, check
 }
 
 fn deleteCheckpointDirectory(path: []const u8) !void {
-    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, path) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
+    try std.Io.Dir.cwd().deleteTree(std.Options.debug_io, path);
 }
 
 /// get the path to the latest checkpoint for a job.
