@@ -367,7 +367,7 @@ const Work = struct { service: *Service, index: usize, event: evaluator.Event, t
 fn workIsCurrent(work: Work) bool {
     mutex.lockUncancelable(debug_io);
     defer mutex.unlock(debug_io);
-    return work.activation_revision == work.service.activation_revision and work.service.isCurrent();
+    return work.service.references != 0 and work.activation_revision == work.service.activation_revision and work.service.isCurrent();
 }
 
 fn selectDelivery(cursor: *usize) ?Work {
@@ -587,4 +587,19 @@ test "cluster alert fallback discards delivery selected before retirement" {
     try std.testing.expect(!old.rules[0].?.rule.in_flight);
     try std.testing.expectEqualStrings("idle", old.rules[0].?.delivery);
     try std.testing.expect(old.rules[0].?.delivered_at == null);
+}
+
+test "released local alert registration cancels selected delivery before supervisor ownership is released" {
+    const store = @import("../../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    defer shutdown();
+    try local_ownership.claim("app", "web", "owner");
+    const service = try registerLocked("app", "web", .{ .cpu_percent = 80, .webhook = "https://example.com/hook" }, true, "owner", null);
+    for (0..evaluator.consecutive_samples) |_| service.rules[0].?.rule.observe(90);
+    var cursor: usize = 0;
+    const selected = selectDelivery(&cursor).?;
+    (Registration{ .service = service }).release();
+    try std.testing.expect(service.isCurrent());
+    try std.testing.expect(!workIsCurrent(selected));
 }
