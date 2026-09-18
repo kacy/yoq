@@ -730,7 +730,7 @@ test "cluster placement reserves service names across apps" {
     defer reused.deinit(alloc);
 }
 
-test "replicated gang groups reserve distinct rendezvous ports" {
+test "training and service gangs reserve distinct rendezvous ports" {
     const alloc = std.testing.allocator;
     var node = try testNode();
     defer node.deinit();
