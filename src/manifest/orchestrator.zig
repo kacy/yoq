@@ -45,6 +45,7 @@ pub const ServiceState = struct {
     container_id: [12]u8,
     identity_mutex: std.Io.Mutex = .init,
     ownership_claimed: bool = false,
+    alert_registration: ?alert_runtime.Registration = null,
     thread: ?std.Thread,
     status: Status,
     health_status: ?health.HealthStatus = null,
@@ -93,7 +94,6 @@ pub const Orchestrator = struct {
     tls_resources: ?startup_runtime.TlsResources = null,
     cron_sched: ?*cron_scheduler.CronScheduler = null,
     backup_sched: ?*backup_scheduler.BackupScheduler = null,
-    alert_registrations: std.ArrayList(alert_runtime.Registration) = .empty,
     /// when set, only start these services (+ transitive deps).
     /// null means start everything.
     service_filter: ?[]const []const u8 = null,
@@ -156,24 +156,23 @@ pub const Orchestrator = struct {
         }
     }
 
-    pub fn startAlerts(self: *Orchestrator) !void {
-        if (self.alert_registrations.items.len != 0) return;
-        errdefer self.stopAlerts();
-        for (self.manifest.services) |service| {
-            if (!self.shouldStart(service.name)) continue;
-            const config = service.alerts orelse continue;
-            const registration = try alert_runtime.register(self.app_name, service.name, config, true);
-            self.alert_registrations.append(self.alloc, registration) catch |err| {
-                registration.release();
-                return err;
-            };
-        }
+    pub fn startServiceAlerts(self: *Orchestrator, index: usize) !void {
+        if (self.states[index].alert_registration != null) return;
+        const service = self.manifest.services[index];
+        // ownership has already been claimed, including for an incremental apply.
+        // clear stale rows when the replacement removes its alert configuration.
+        try @import("../state/store/alerts.zig").clearForOwner(self.app_name, service.name, &self.supervisor_token);
+        const config = service.alerts orelse return;
+        self.states[index].alert_registration = try alert_runtime.registerOwned(self.app_name, service.name, config, &self.supervisor_token);
+    }
+
+    pub fn stopServiceAlerts(self: *Orchestrator, index: usize) void {
+        if (self.states[index].alert_registration) |registration| registration.release();
+        self.states[index].alert_registration = null;
     }
 
     pub fn stopAlerts(self: *Orchestrator) void {
-        for (self.alert_registrations.items) |registration| registration.release();
-        self.alert_registrations.deinit(self.alloc);
-        self.alert_registrations = .empty;
+        for (0..@min(self.manifest.services.len, self.states.len)) |index| self.stopServiceAlerts(index);
         alert_runtime.shutdownIfUnused();
     }
 

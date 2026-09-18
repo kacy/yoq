@@ -19,10 +19,26 @@ pub const Status = struct {
 };
 
 pub fn save(alloc: std.mem.Allocator, status: Status) !void {
+    return saveForOwner(alloc, status, null);
+}
+
+pub fn saveForOwner(alloc: std.mem.Allocator, status: Status, token: ?[]const u8) !void {
     const json = try std.json.Stringify.valueAlloc(alloc, status, .{});
     defer alloc.free(json);
     var lease = try common.leaseDb();
     defer lease.deinit();
+    if (token) |owner| {
+        // the ownership test and update share one statement. a late result from
+        // an old supervisor cannot overwrite the replacement's status.
+        try lease.db.exec(
+            "INSERT INTO alert_status (app, service, metric, status_json) SELECT ?, ?, ?, ? " ++
+                "WHERE EXISTS (SELECT 1 FROM local_service_owners WHERE app = ? AND service = ? AND token = ?) " ++
+                "ON CONFLICT(app, service, metric) DO UPDATE SET status_json = excluded.status_json;",
+            .{},
+            .{ status.app, status.service, status.metric, json, status.app, status.service, owner },
+        );
+        return;
+    }
     try lease.db.exec(
         "INSERT INTO alert_status (app, service, metric, status_json) VALUES (?, ?, ?, ?) " ++
             "ON CONFLICT(app, service, metric) DO UPDATE SET status_json = excluded.status_json;",
@@ -32,9 +48,15 @@ pub fn save(alloc: std.mem.Allocator, status: Status) !void {
 }
 
 pub fn clearService(app: []const u8, service: []const u8) !void {
+    return clearForOwner(app, service, null);
+}
+
+pub fn clearForOwner(app: []const u8, service: []const u8, token: ?[]const u8) !void {
     var lease = try common.leaseDb();
     defer lease.deinit();
-    try lease.db.exec("DELETE FROM alert_status WHERE app = ? AND service = ?;", .{}, .{ app, service });
+    if (token) |owner| {
+        try lease.db.exec("DELETE FROM alert_status WHERE app = ? AND service = ? AND EXISTS (SELECT 1 FROM local_service_owners WHERE app = ? AND service = ? AND token = ?);", .{}, .{ app, service, app, service, owner });
+    } else try lease.db.exec("DELETE FROM alert_status WHERE app = ? AND service = ?;", .{}, .{ app, service });
 }
 
 // rows remain after a supervisor exits. sampled_at lets callers identify stale

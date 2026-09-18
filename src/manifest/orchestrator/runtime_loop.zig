@@ -225,7 +225,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             orch.states[idx].setStatus(.failed);
             return;
         };
-        if (started_once) @import("../alerts/runtime.zig").recordRestart(orch.app_name, svc.name);
+        if (started_once) @import("../alerts/runtime.zig").recordRestart(orch.app_name, svc.name, &orch.supervisor_token);
         started_once = true;
         orch.states[idx].setStatus(.running);
 

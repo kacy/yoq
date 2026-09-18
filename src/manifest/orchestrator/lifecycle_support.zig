@@ -61,7 +61,6 @@ pub fn startAll(self: anytype, comptime OrchestratorError: type, serviceThreadFn
     if (services.len == 0) return OrchestratorError.ManifestEmpty;
 
     try self.computeStartSet();
-    self.startAlerts() catch return OrchestratorError.StartFailed;
     errdefer self.stopAlerts();
 
     var pull_io = std.Io.Threaded.init(self.alloc, .{});
@@ -142,7 +141,6 @@ pub fn startServiceByIndex(
     serviceThreadFn: anytype,
 ) OrchestratorError!void {
     const svc = self.manifest.services[idx];
-    self.startAlerts() catch return OrchestratorError.StartFailed;
 
     for (svc.depends_on) |dep_name| {
         if (self.manifest.workerByName(dep_name)) |worker| {
@@ -180,6 +178,7 @@ pub fn startServiceByIndex(
     }
 
     errdefer stopServiceByIndex(self, idx);
+    self.startServiceAlerts(idx) catch return OrchestratorError.StartFailed;
     for (0..svc.replicas) |replica| {
         const instance = instances.instanceIndex(self.manifest.services, idx, replica);
         self.states[instance].stop_requested.store(false, .release);
@@ -238,6 +237,7 @@ pub fn stopAll(self: anytype) void {
 }
 
 pub fn stopServiceByIndex(self: anytype, idx: usize) void {
+    self.stopServiceAlerts(idx);
     stopServiceInstances(self, idx);
     if (self.states[idx].ownership_claimed) {
         ownership.release(self.app_name, self.manifest.services[idx].name, &self.supervisor_token) catch |err| {
