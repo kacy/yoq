@@ -35,7 +35,7 @@ fn routeRequest(method: http.Method, path: []const u8, body: []const u8) !common
 }
 
 fn freeResponse(resp: common.Response) void {
-    if (resp.allocated) std.testing.allocator.free(resp.body);
+    resp.deinit(std.testing.allocator);
 }
 
 fn expectXmlTag(body: []const u8, tag: []const u8) ![]const u8 {

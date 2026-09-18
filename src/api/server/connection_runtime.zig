@@ -119,7 +119,7 @@ pub fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
     defer log.clearTraceId();
 
     const response = routes.dispatch(owned_request.request, alloc);
-    defer if (response.allocated) alloc.free(response.body);
+    defer response.deinit(alloc);
 
     const wire = transport.Stream{ .fd = client_fd, .deadline = transport.Deadline.afterMilliseconds(5000) };
     writeRouteResponseTo(wire, response, owned_request.request.method == .HEAD) catch {};
@@ -244,7 +244,19 @@ fn writeRouteResponseTo(writer: anytype, response: @import("../routes/common.zig
         try writer.writeAll(try std.fmt.bufPrint(&etag_buf, "ETag: \"{s}\"\r\n", .{etag}));
     }
     try writer.writeAll("\r\n");
-    if (!omit_body) try writer.writeAll(response.body);
+    if (omit_body) return;
+    if (response.file_body) |file| {
+        var buffer: [16 * 1024]u8 = undefined;
+        const length = response.content_length orelse return error.ResponseFormattingFailed;
+        var offset: u64 = 0;
+        while (offset < length) {
+            const count = @min(buffer.len, length - offset);
+            const n = try file.readPositional(std.Options.debug_io, &.{buffer[0..count]}, offset);
+            if (n == 0) return error.UnexpectedEof;
+            try writer.writeAll(buffer[0..n]);
+            offset += n;
+        }
+    } else try writer.writeAll(response.body);
 }
 
 const TestFile = struct {
@@ -495,4 +507,81 @@ test "api request authorization enforces join tokens and named scopes before upl
         try std.testing.expectError(case.expected, readRequestFrom(std.testing.allocator, receive, receive));
         try std.testing.expectEqual(@as(usize, 0), request_bytes.load(.acquire));
     }
+}
+
+test "storage transfer streams beyond the former response limit with bounded writes" {
+    const s3 = @import("../../storage/s3.zig");
+    const paths = @import("../../lib/paths.zig");
+    const bucket = "transfer-large-response";
+    var path_buf: [paths.max_path]u8 = undefined;
+    const path = try paths.dataPathFmt(&path_buf, "s3/{s}", .{bucket});
+    std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    try s3.createBucket(bucket);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var object_buf: [paths.max_path]u8 = undefined;
+    const object_path = try paths.dataPathFmt(&object_buf, "s3/{s}/object", .{bucket});
+    const length = 256 * 1024 * 1024 + 1;
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, object_path, .{});
+        defer file.close(std.testing.io);
+        try file.setLength(std.testing.io, length);
+    }
+    // successful get needs no heap allocation, even beyond the old size limit.
+    var memory: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&memory);
+    const response = @import("../routes/s3_gateway.zig").route(.{
+        .method = .GET,
+        .path = "/s3/transfer-large-response/object",
+        .path_only = "/s3/transfer-large-response/object",
+        .query = "",
+        .headers_raw = "",
+        .body = "",
+        .content_length = 0,
+    }, fixed.allocator()).?;
+    defer response.deinit(fixed.allocator());
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+    try std.testing.expectEqual(@as(?usize, length), response.content_length);
+    try std.testing.expect(response.file_body != null);
+    const Counter = struct {
+        bytes: usize = 0,
+        body_started: bool = false,
+        fn writeAll(self: *@This(), data: []const u8) !void {
+            if (!self.body_started) {
+                if (std.mem.eql(u8, data, "\r\n")) self.body_started = true;
+                return;
+            }
+            try std.testing.expect(data.len <= 16 * 1024);
+            self.bytes += data.len;
+        }
+    };
+    var counter = Counter{};
+    try writeRouteResponseTo(&counter, response, false);
+    try std.testing.expectEqual(@as(usize, length), counter.bytes);
+    counter = .{};
+    try writeRouteResponseTo(&counter, response, true);
+    try std.testing.expectEqual(@as(usize, 0), counter.bytes);
+}
+
+test "storage transfer stops file reads when the response writer fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "object", .{ .read = true });
+    try file.setLength(std.testing.io, 128 * 1024);
+    const response = @import("../routes/common.zig").Response{
+        .status = .ok,
+        .body = "",
+        .allocated = false,
+        .file_body = file,
+        .content_length = 128 * 1024,
+    };
+    defer response.deinit(std.testing.allocator);
+    const FailingWriter = struct {
+        body_started: bool = false,
+        fn writeAll(self: *@This(), data: []const u8) !void {
+            if (self.body_started) return error.PeerClosed;
+            if (std.mem.eql(u8, data, "\r\n")) self.body_started = true;
+        }
+    };
+    var writer = FailingWriter{};
+    try std.testing.expectError(error.PeerClosed, writeRouteResponseTo(&writer, response, false));
 }

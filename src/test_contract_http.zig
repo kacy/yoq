@@ -347,3 +347,25 @@ test "contract: HEAD omits body bytes but preserves content length" {
     try std.testing.expect(std.mem.indexOf(u8, response, content_length_header) != null);
     try std.testing.expectEqual(@as(usize, 0), (try responseBody(response)).len);
 }
+
+test "contract: s3 download streams exact bytes and metadata over a socket" {
+    try support.lockContractTests();
+    defer support.unlockContractTests();
+    try support.cleanupS3TestState();
+    defer support.cleanupS3TestState() catch {};
+    try s3.createBucket("stream-contract-bucket");
+    var body: [8193]u8 = undefined;
+    for (&body, 0..) |*byte, index| byte.* = @truncate(index);
+    const etag = try s3.putObject("stream-contract-bucket", "object", &body);
+    const response = try runHandleConnectionRaw(
+        std.testing.allocator,
+        "GET /s3/stream-contract-bucket/object HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    defer std.testing.allocator.free(response);
+    try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, response, "Content-Length: 8193\r\n") != null);
+    var etag_buf: [48]u8 = undefined;
+    const header = try std.fmt.bufPrint(&etag_buf, "ETag: \"{s}\"\r\n", .{etag});
+    try std.testing.expect(std.mem.indexOf(u8, response, header) != null);
+    try std.testing.expectEqualSlices(u8, &body, try responseBody(response));
+}
