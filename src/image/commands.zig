@@ -43,3 +43,7 @@ pub fn inspect(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 pub fn prune(alloc: std.mem.Allocator) !void {
     return prune_command.prune(alloc);
 }
+
+pub fn tag(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    return @import("cli/tag_command.zig").tag(args, ctx.alloc);
+}
