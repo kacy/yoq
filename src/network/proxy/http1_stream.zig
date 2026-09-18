@@ -15,31 +15,38 @@ pub const Head = struct {
     status: u16 = 0,
     framing: exchange.BodyFraming = .empty,
 
+    informational: u8 = 0,
+
     pub fn read(connection: *exchange.StreamingConnection, client_fd: posix.fd_t, head_request: bool) !Head {
         const previous_deadline = connection.operation_deadline;
         connection.operation_deadline = transport.Deadline.afterMilliseconds(connection.timeout_ms);
         defer connection.operation_deadline = previous_deadline;
         var result: Head = .{};
-        var informational: usize = 0;
+        while (!try result.readAvailable(connection, head_request)) try waitReadable(connection, client_fd);
+        return result;
+    }
+
+    // preserve a partial response head while an upload continues in the other
+    // direction. informational responses are bounded and never become final.
+    pub fn readAvailable(self: *Head, connection: *exchange.StreamingConnection, head_request: bool) !bool {
         while (true) {
-            if (std.mem.indexOf(u8, result.bytes[0..result.used], "\r\n\r\n")) |index| {
-                result.end = index + 4;
-                result.status = try exchange.parseResponseStatusLine(result.bytes[0..result.end]);
-                if (result.status >= 100 and result.status < 200 and result.status != 101) {
-                    informational += 1;
-                    if (informational > 16) return error.InvalidResponse;
-                    std.mem.copyForwards(u8, &result.bytes, result.bytes[result.end..result.used]);
-                    result.used -= result.end;
+            if (std.mem.indexOf(u8, self.bytes[0..self.used], "\r\n\r\n")) |index| {
+                self.end = index + 4;
+                self.status = try exchange.parseResponseStatusLine(self.bytes[0..self.end]);
+                if (self.status >= 100 and self.status < 200 and self.status != 101) {
+                    self.informational += 1;
+                    if (self.informational > 16) return error.InvalidResponse;
+                    std.mem.copyForwards(u8, &self.bytes, self.bytes[self.end..self.used]);
+                    self.used -= self.end;
                     continue;
                 }
-                result.framing = try exchange.responseBodyFraming(result.bytes[0..result.end], result.status, head_request);
-                return result;
+                self.framing = try exchange.responseBodyFraming(self.bytes[0..self.end], self.status, head_request);
+                return true;
             }
-            if (result.used == result.bytes.len) return error.ResponseTooLarge;
-            try waitReadable(connection, client_fd);
-            const count = try connection.read(result.bytes[result.used..]);
+            if (self.used == self.bytes.len) return error.ResponseTooLarge;
+            const count = (try connection.readAvailable(self.bytes[self.used..])) orelse return false;
             if (count == 0) return error.InvalidResponse;
-            result.used += count;
+            self.used += count;
         }
     }
 };

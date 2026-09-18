@@ -17,7 +17,7 @@ const proxy_credentials = @import("../../tls/proxy_credentials.zig");
 const http2_passthrough = @import("http2_passthrough.zig");
 
 pub const Protocol = enum { http1, http2 };
-pub const Options = struct { connect_timeout_ms: u32, request_timeout_ms: u32, head: bool = false, protocol: Protocol = .http1 };
+pub const Options = struct { connect_timeout_ms: u32, request_timeout_ms: u32, head: bool = false, protocol: Protocol = .http1, deadline: ?transport.Deadline = null };
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
@@ -65,7 +65,7 @@ pub const Client = struct {
         const ca_rec = ca_rec_opt orelse {
             if (upstream.peer_mode == .require) return error.ClusterCaMissing;
             log.warn("mtls upstream {s}: cluster CA not seeded, downgrading to plain dial", .{upstream.address});
-            return .{ .bare = try socket_helpers.connectToUpstream(timeouts.connect_timeout_ms, timeouts.request_timeout_ms, upstream) };
+            return .{ .bare = try socket_helpers.connectToUpstreamUntil(timeouts.connect_timeout_ms, timeouts.deadline orelse transport.Deadline.afterMilliseconds(timeouts.request_timeout_ms), upstream) };
         };
         defer ca_rec.deinit(self.allocator);
 
@@ -94,6 +94,7 @@ pub const Client = struct {
             .port = upstream.port,
             .connect_timeout_ms = timeouts.connect_timeout_ms,
             .request_timeout_ms = timeouts.request_timeout_ms,
+            .deadline = timeouts.deadline,
             .ca_cert_pem = ca_rec.cert_pem,
             .server_name = upstream.service,
             .expected_server_identity = expected_identity,
@@ -105,10 +106,10 @@ pub const Client = struct {
 
     pub fn openStream(self: *const Client, options: Options, upstream: *const upstream_mod.Upstream) !StreamingConnection {
         const connection: client_dial.Outcome = if (upstream.peer_mode == .off)
-            .{ .bare = try socket_helpers.connectToUpstream(options.connect_timeout_ms, options.request_timeout_ms, upstream) }
+            .{ .bare = try socket_helpers.connectToUpstreamUntil(options.connect_timeout_ms, options.deadline orelse transport.Deadline.afterMilliseconds(options.request_timeout_ms), upstream) }
         else
             try self.dialTls(options, upstream);
-        return .{ .connection = connection, .timeout_ms = options.request_timeout_ms };
+        return .{ .connection = connection, .timeout_ms = options.request_timeout_ms, .operation_deadline = options.deadline };
     }
 
     /// Primary, mirror, and permissive fallback traffic share one plaintext
@@ -181,6 +182,55 @@ pub const StreamingConnection = struct {
             .session => |*session| blk: {
                 session.deadline = deadline;
                 break :blk session.read(bytes) catch |err| return if (err == error.PeerClosed) 0 else err;
+            },
+        };
+    }
+
+    /// read only currently available input. incomplete TLS records stay owned
+    /// by the session until its socket is readable again.
+    pub fn readAvailable(self: *StreamingConnection, bytes: []u8) !?usize {
+        const deadline = self.operation_deadline orelse transport.Deadline.afterMilliseconds(self.timeout_ms);
+        _ = try deadline.remaining();
+        return switch (self.connection) {
+            .bare => |socket| linux_platform.posix.recv(socket, bytes, posix.MSG.DONTWAIT) catch |err| switch (err) {
+                error.WouldBlock => null,
+                else => return err,
+            },
+            .session => |*session| blk: {
+                session.deadline = deadline;
+                break :blk session.readAvailable(bytes) catch |err| return if (err == error.PeerClosed) 0 else err;
+            },
+        };
+    }
+
+    pub fn pendingWrite(self: *const StreamingConnection) bool {
+        return switch (self.connection) {
+            .bare => false,
+            .session => |session| session.pendingWrite(),
+        };
+    }
+
+    pub fn writeAvailable(self: *StreamingConnection, bytes: []const u8) !usize {
+        const deadline = self.operation_deadline orelse transport.Deadline.afterMilliseconds(self.timeout_ms);
+        _ = try deadline.remaining();
+        return switch (self.connection) {
+            .bare => |socket| linux_platform.posix.send(socket, bytes, posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL) catch |err| switch (err) {
+                error.WouldBlock => 0,
+                else => return err,
+            },
+            .session => |*session| blk: {
+                session.deadline = deadline;
+                break :blk try session.writeAvailable(bytes);
+            },
+        };
+    }
+
+    pub fn flushAvailable(self: *StreamingConnection) !bool {
+        return switch (self.connection) {
+            .bare => true,
+            .session => |*session| blk: {
+                session.deadline = self.operation_deadline orelse transport.Deadline.afterMilliseconds(self.timeout_ms);
+                break :blk try session.flushAvailable();
             },
         };
     }

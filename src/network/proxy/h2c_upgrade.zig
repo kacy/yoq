@@ -30,7 +30,7 @@ pub const ParsedUpgrade = struct {
 };
 
 pub fn parseUpgradeRequest(alloc: std.mem.Allocator, raw_request: []const u8) ParseError!?ParsedUpgrade {
-    const request = (http.parseRequest(raw_request) catch return null) orelse return null;
+    const request = (http.parseRequestHeadWithOptions(raw_request, .{ .allow_chunked = true }) catch return null) orelse return null;
 
     const upgrade_value = http.findHeaderValue(request.headers_raw, "Upgrade");
     const connection_value = http.findHeaderValue(request.headers_raw, "Connection");
@@ -48,7 +48,7 @@ pub fn parseUpgradeRequest(alloc: std.mem.Allocator, raw_request: []const u8) Pa
         return error.InvalidUpgrade;
     }
 
-    if (request.content_length != 0 or request.body.len != 0) {
+    if (request.content_length != 0 or request.chunked) {
         return error.UnsupportedBody;
     }
 

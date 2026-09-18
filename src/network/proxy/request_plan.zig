@@ -38,23 +38,34 @@ pub fn planRequest(alloc: std.mem.Allocator, routes: []const router.Route, raw_r
     if (http2.startsWithClientPreface(raw_request)) {
         return try planHttp2Request(alloc, routes, raw_request);
     }
-    return try planHttp1Request(alloc, routes, raw_request);
+    return try planHttp1Request(alloc, routes, raw_request, false);
 }
 
-fn planHttp1Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_request: []const u8) PlanError!RequestPlan {
-    const parsed = (http.parseRequest(raw_request) catch return error.InvalidHttp1Request) orelse return error.IncompleteHttp1Request;
+pub fn planRequestHead(alloc: std.mem.Allocator, routes: []const router.Route, raw_request: []const u8) PlanError!RequestPlan {
+    if (http2.startsWithClientPreface(raw_request)) return planHttp2Request(alloc, routes, raw_request);
+    return planHttp1Request(alloc, routes, raw_request, true);
+}
+
+fn planHttp1Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_request: []const u8, head_only: bool) PlanError!RequestPlan {
+    const result = if (head_only) http.parseRequestHeadWithOptions(raw_request, .{ .allow_chunked = true }) else http.parseRequest(raw_request);
+    const parsed = (result catch return error.InvalidHttp1Request) orelse return error.IncompleteHttp1Request;
     const host_header = http.findHeaderValue(parsed.headers_raw, "Host") orelse return error.MissingHostHeader;
     const host = proxy_helpers.normalizeHost(host_header);
     const request_headers = try router.collectHttp1Headers(alloc, parsed.headers_raw);
     defer alloc.free(request_headers);
     const route = router.matchRoute(routes, proxy_helpers.methodString(parsed.method), host, parsed.path_only, request_headers) orelse return error.RouteNotFound;
 
+    const owned_method = try alloc.dupe(u8, proxy_helpers.methodString(parsed.method));
+    errdefer alloc.free(owned_method);
+    const owned_host = try alloc.dupe(u8, host);
+    errdefer alloc.free(owned_host);
+    const owned_path = try alloc.dupe(u8, parsed.path);
     return .{
         .protocol = .http1,
         .method_enum = parsed.method,
-        .method = try alloc.dupe(u8, proxy_helpers.methodString(parsed.method)),
-        .host = try alloc.dupe(u8, host),
-        .path = try alloc.dupe(u8, parsed.path),
+        .method = owned_method,
+        .host = owned_host,
+        .path = owned_path,
         .route = route,
     };
 }
@@ -388,4 +399,22 @@ test "planRequest preserves unsupported HTTP/2 method as null method_enum" {
     try std.testing.expectEqual(.http2, plan.protocol);
     try std.testing.expectEqual(@as(?http.Method, null), plan.method_enum);
     try std.testing.expectEqualStrings("PATCH", plan.method);
+}
+
+test "proxy upload head planning does not wait for the body and releases partial allocations" {
+    const Probe = struct {
+        fn plan(alloc: std.mem.Allocator) !void {
+            const routes = [_]router.Route{.{
+                .name = "uploads",
+                .service = "files",
+                .vip_address = "10.43.0.2",
+                .match = .{ .host = "files.test", .path_prefix = "/upload" },
+            }};
+            const result = try planRequestHead(alloc, &routes, "POST /upload/data HTTP/1.1\r\nHost: files.test\r\nContent-Length: 2097152\r\n\r\n");
+            defer result.deinit(alloc);
+            try std.testing.expectEqualStrings("files", result.route.service);
+            try std.testing.expectEqualStrings("/upload/data", result.path);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.plan, .{});
 }

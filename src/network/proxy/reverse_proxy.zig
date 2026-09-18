@@ -8,6 +8,7 @@ const socket_helpers = @import("socket_helpers.zig");
 const ip = @import("../ip.zig");
 const observations = @import("observations.zig");
 const http1_stream = @import("http1_stream.zig");
+const http1_upload = @import("http1_upload.zig");
 const h2c_upgrade = @import("h2c_upgrade.zig");
 const http2 = @import("http2.zig");
 const http2_connection_router = @import("http2_connection_router.zig");
@@ -147,13 +148,18 @@ pub const ReverseProxy = struct {
     }
 
     pub fn handleRequest(self: *const ReverseProxy, raw_request: []const u8) !HandleResult {
+        return self.handleRequestWithHead(raw_request, false);
+    }
+
+    fn handleRequestWithHead(self: *const ReverseProxy, raw_request: []const u8, head_only: bool) !HandleResult {
         if (!http2.startsWithClientPreface(raw_request)) {
             if (try http1LoopResponse(self, raw_request)) |response| {
                 return .{ .response = response };
             }
         }
 
-        const planned = request_plan.planRequest(self.allocator, self.routes, raw_request) catch |err| {
+        const result = if (head_only) request_plan.planRequestHead(self.allocator, self.routes, raw_request) else request_plan.planRequest(self.allocator, self.routes, raw_request);
+        const planned = result catch |err| {
             return .{ .response = responseForPlanError(self, raw_request, err) };
         };
         defer planned.deinit(self.allocator);
@@ -301,7 +307,7 @@ pub const ReverseProxy = struct {
             return;
         }
 
-        const handled = self.handleRequest(request) catch {
+        const handled = self.handleRequestWithHead(request, true) catch {
             proxy_runtime.recordResponse(.internal_server_error);
             const internal = formatProxyResponse(self.allocator, .{
                 .status = .internal_server_error,
@@ -349,7 +355,8 @@ pub const ReverseProxy = struct {
                 }
 
                 proxy_runtime.recordRouteRequestStart(plan.route.name, plan.route.service, plan.backend_service);
-                self.startMirrorRequest(request, &plan, client_ip);
+                const head = (http.parseRequestHeadWithOptions(request, .{ .allow_chunked = true }) catch return) orelse return;
+                if (!http1_upload.hasBody(head)) self.startMirrorRequest(request, &plan, client_ip);
                 self.forwardStream(request, &plan, client_ip, client_fd) catch |err| {
                     log.warn("l7 stream ended: {}", .{err});
                 };
@@ -373,20 +380,21 @@ pub const ReverseProxy = struct {
 
     fn forwardStreamAttempts(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan, client_ip: ?[4]u8, downstream: *http1_stream.Downstream) !void {
         const started_ns = observations.nowNs();
-        const policy = proxy_policy.RequestPolicy{ .retries = plan.route.retries, .retry_on_5xx = plan.route.retry_on_5xx };
+        const parsed = (try http.parseRequestHeadWithOptions(raw_request, .{ .allow_chunked = true })) orelse return error.BadRequest;
+        // streamed bodies are not retained for replay, even on idempotent methods.
+        const policy = proxy_policy.RequestPolicy{ .retries = if (http1_upload.hasBody(parsed)) 0 else plan.route.retries, .retry_on_5xx = plan.route.retry_on_5xx };
         const circuit = proxy_policy.CircuitBreakerPolicy{ .failure_threshold = plan.route.circuit_breaker_threshold, .open_timeout_ms = plan.route.circuit_breaker_timeout_ms };
-        const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
+        const request = try self.buildForwardRequestForMode(raw_request, plan, client_ip, true);
         defer self.allocator.free(request);
-        const parsed = (try http.parseRequest(raw_request)) orelse return error.BadRequest;
         const websocket = http1_stream.isWebSocket(parsed.headers_raw);
         const http10 = std.mem.indexOf(u8, raw_request[0..(std.mem.indexOf(u8, raw_request, "\r\n") orelse raw_request.len)], "HTTP/1.0") != null;
         var attempt: u16 = 0;
         while (true) : (attempt += 1) {
             var upstream = try resolveAttemptUpstream(self.allocator, plan, @intCast(attempt), circuit);
             defer upstream.deinit(self.allocator);
-            const status = self.streamAttempt(request, plan, &upstream, downstream, websocket, raw_request[requestEndOffset(raw_request, parsed)..], http10, proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), @intCast(attempt), 503, false)) catch |err| {
+            const status = self.streamAttempt(request, plan, &upstream, downstream, websocket, raw_request[std.mem.indexOf(u8, raw_request, "\r\n\r\n").? + 4 ..], parsed, http10, proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), @intCast(attempt), 503, false)) catch |err| {
                 // downstream cancellation does not describe upstream health.
-                if (err == error.OutOfMemory or err == error.ClientClosed) return err;
+                if (err == error.OutOfMemory or err == error.ClientClosed or err == error.MalformedRequestBody or err == error.IncompleteRequestBody or err == error.RequestBodyTimedOut or err == error.BodyTooLarge) return err;
                 recordUpstreamError(upstream.endpoint_id, circuit, mapUpstreamFailure(err), plan.route.name, plan.route.service, upstream.service);
                 if (!downstream.started.* and proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), @intCast(attempt), null, true)) {
                     proxy_runtime.recordRetry();
@@ -411,11 +419,10 @@ pub const ReverseProxy = struct {
         }
     }
 
-    fn streamAttempt(self: *const ReverseProxy, request: []const u8, plan: *const ForwardPlan, upstream: *upstream_mod.Upstream, downstream: *http1_stream.Downstream, websocket: bool, client_prefetched: []const u8, http10: bool, retry_server_error: bool) !u16 {
+    fn streamAttempt(self: *const ReverseProxy, request: []const u8, plan: *const ForwardPlan, upstream: *upstream_mod.Upstream, downstream: *http1_stream.Downstream, websocket: bool, client_prefetched: []const u8, parsed: http.Request, http10: bool, retry_server_error: bool) !u16 {
         var connection = try self.upstreamClient().openStream(.{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms }, upstream);
         defer connection.deinit();
-        try connection.writeAll(request);
-        const head = try http1_stream.Head.read(&connection, downstream.fd, plan.method == .HEAD);
+        const head = try http1_upload.sendAndReadHead(&connection, downstream, request, client_prefetched, parsed);
         if (retry_server_error and head.status >= 500 and head.status <= 599) return head.status;
         if (head.framing == .upgrade and (!websocket or !http1_stream.isWebSocket(head.bytes[0..head.end]))) return error.UnsupportedUpgrade;
         try http1_stream.writeHead(downstream, &head, http10);
@@ -439,7 +446,12 @@ pub const ReverseProxy = struct {
         plan: *const ForwardPlan,
         client_ip: ?[4]u8,
     ) ![]u8 {
+        return self.buildForwardRequestForMode(raw_request, plan, client_ip, false);
+    }
+
+    fn buildForwardRequestForMode(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan, client_ip: ?[4]u8, stream_body: bool) ![]u8 {
         return buildForwardRequestBytes(self.allocator, raw_request, .{
+            .stream_body = stream_body,
             .protocol = plan.protocol,
             .method = plan.method,
             .path = plan.path,
@@ -471,6 +483,7 @@ pub const ReverseProxy = struct {
     }
 
     const ForwardRequestSpec = struct {
+        stream_body: bool = false,
         protocol: Protocol,
         method: http.Method,
         path: []const u8,
@@ -506,7 +519,8 @@ pub const ReverseProxy = struct {
         spec: ForwardRequestSpec,
         client_ip: ?[4]u8,
     ) ![]u8 {
-        const parsed = (http.parseRequest(raw_request) catch return error.BadRequest) orelse return error.BadRequest;
+        const result = if (spec.stream_body) http.parseRequestHeadWithOptions(raw_request, .{ .allow_chunked = true }) else http.parseRequest(raw_request);
+        const parsed = (result catch return error.BadRequest) orelse return error.BadRequest;
         const inbound_host = http.findHeaderValue(parsed.headers_raw, "Host") orelse spec.host;
         const prior_forwarded_for = http.findHeaderValue(parsed.headers_raw, x_forwarded_for_header);
         const inbound_traceparent = http.findHeaderValue(parsed.headers_raw, traceparent_header);
@@ -532,6 +546,7 @@ pub const ReverseProxy = struct {
 
             if (line.len == 0) continue;
             if (isForwardSkippedHeader(line)) continue;
+            if (spec.stream_body and skipStreamingHeader(line, parsed.headers_raw)) continue;
 
             try writer.writeAll(line);
             try writer.writeAll("\r\n");
@@ -549,7 +564,9 @@ pub const ReverseProxy = struct {
         try writer.print("{s}: {s}\r\n", .{ x_forwarded_host_header, inbound_host });
         try writer.print("{s}: {s}\r\n", .{ x_forwarded_proto_header, forwarded_proto });
         try writeTraceHeaders(writer, inbound_traceparent, inbound_tracestate);
-        try writer.print("Content-Length: {d}\r\n", .{parsed.body.len});
+        if (spec.stream_body and parsed.chunked) {
+            try writer.writeAll("Transfer-Encoding: chunked\r\n");
+        } else try writer.print("Content-Length: {d}\r\n", .{if (spec.stream_body) parsed.content_length else parsed.body.len});
         try writer.writeAll(proxy_loop_header ++ ": 1\r\n");
         if (http1_stream.isWebSocket(parsed.headers_raw)) {
             try writer.writeAll("Connection: Upgrade\r\n\r\n");
@@ -831,6 +848,22 @@ fn isForwardSkippedHeader(line: []const u8) bool {
     return false;
 }
 
+fn skipStreamingHeader(line: []const u8, headers: []const u8) bool {
+    for ([_][]const u8{ "Transfer-Encoding", "Expect", "Keep-Alive", "Proxy-Connection", "Proxy-Authorization", "TE" }) |name|
+        if (startsWithHeaderName(line, name)) return true;
+    var lines = std.mem.splitSequence(u8, headers, "\r\n");
+    while (lines.next()) |header| {
+        if (!startsWithHeaderName(header, "Connection")) continue;
+        var names = std.mem.splitScalar(u8, header["Connection:".len..], ',');
+        while (names.next()) |name| {
+            const trimmed = std.mem.trim(u8, name, " \t");
+            if (std.ascii.eqlIgnoreCase(trimmed, "Upgrade")) continue;
+            if (startsWithHeaderName(line, trimmed)) return true;
+        }
+    }
+    return false;
+}
+
 fn startsWithHeaderName(line: []const u8, name: []const u8) bool {
     if (line.len <= name.len or line[name.len] != ':') return false;
     for (line[0..name.len], name) |a, b| {
@@ -993,7 +1026,7 @@ fn resolvePlannedRequest(self: *const ReverseProxy, planned: *const request_plan
 }
 
 fn http1LoopResponse(self: *const ReverseProxy, raw_request: []const u8) !?ProxyResponse {
-    const request = (http.parseRequest(raw_request) catch return null) orelse return null;
+    const request = (http.parseRequestHeadWithOptions(raw_request, .{ .allow_chunked = true }) catch return null) orelse return null;
     if (http.findHeaderValue(request.headers_raw, proxy_loop_header) == null) return null;
 
     const host_header = http.findHeaderValue(request.headers_raw, "Host") orelse "";
@@ -1028,6 +1061,14 @@ fn peekHttp2StreamId(raw_request: []const u8) ?u32 {
 
 fn proxyFailureResponse(err: anyerror) ProxyResponse {
     return switch (err) {
+        error.MalformedRequestBody, error.IncompleteRequestBody, error.RequestBodyTimedOut => .{
+            .status = .bad_request,
+            .body = "{\"error\":\"invalid request body\"}",
+        },
+        error.BodyTooLarge => .{
+            .status = .content_too_large,
+            .body = "{\"error\":\"request body too large\"}",
+        },
         error.NoHealthyUpstream => .{
             .status = .service_unavailable,
             .body = "{\"error\":\"no eligible upstream\"}",
@@ -1133,8 +1174,9 @@ const ReadRequestError = error{
 
 fn readRequestBytes(fd: linux_platform.posix.socket_t, buf: []u8) ReadRequestError![]const u8 {
     var total: usize = 0;
+    const wire = transport.Stream{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(5000) };
     while (total < buf.len) {
-        const bytes_read = posix.read(fd, buf[total..]) catch break;
+        const bytes_read = wire.read(buf[total..]) catch break;
         if (bytes_read == 0) break;
         total += bytes_read;
 
@@ -1155,15 +1197,16 @@ fn readRequestBytes(fd: linux_platform.posix.socket_t, buf: []u8) ReadRequestErr
             return error.HeadersTooLarge;
         }
 
-        const parsed = http.parseRequest(buf[0..total]) catch |err| return switch (err) {
+        const parsed = http.parseRequestHeadWithOptions(buf[0..total], .{ .allow_chunked = true }) catch |err| return switch (err) {
             error.UriTooLong => error.UriTooLong,
             error.HeadersTooLarge => error.HeadersTooLarge,
             error.BodyTooLarge => error.BodyTooLarge,
             else => error.MalformedRequest,
         };
         if (parsed) |request| {
-            if (http1_stream.isWebSocket(request.headers_raw)) return buf[0..total];
-            return buf[0..requestEndOffset(buf[0..total], request)];
+            _ = http1_upload.expectsContinue(request) catch return error.MalformedRequest;
+            if (http1_stream.isWebSocket(request.headers_raw) and http1_upload.hasBody(request)) return error.MalformedRequest;
+            return buf[0..total];
         }
     }
 
@@ -4972,4 +5015,86 @@ test "first upstream attempt preserves required tls and cleans up partial copies
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Fixture.copy, .{});
+}
+
+test "proxy upload reads headers before a large body arrives" {
+    var sockets: [2]posix.fd_t = undefined;
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &sockets) != 0) return error.SkipZigTest;
+    defer linux_platform.posix.close(sockets[0]);
+    defer linux_platform.posix.close(sockets[1]);
+    const headers = "POST /upload HTTP/1.1\r\nHost: app.test\r\nContent-Length: 2097152\r\n\r\n";
+    try socket_helpers.writeAll(sockets[1], headers);
+    var buffer: [64 * 1024]u8 = undefined;
+    try std.testing.expectEqualStrings(headers, try readRequestBytes(sockets[0], &buffer));
+}
+
+test "proxy upload forwarding retains framing and strips handled expectations and connection headers" {
+    for ([_][]const u8{ "Content-Length: 2097152", "Transfer-Encoding: chunked" }) |framing| {
+        const raw = try std.fmt.allocPrint(std.testing.allocator, "POST /upload HTTP/1.1\r\nHost: app.test\r\n{s}\r\nExpect: 100-continue\r\nConnection: x-private\r\nX-Private: removed\r\n\r\n", .{framing});
+        defer std.testing.allocator.free(raw);
+        const forwarded = try ReverseProxy.buildHttp1ForwardRequestBytes(std.testing.allocator, raw, .{
+            .stream_body = true,
+            .protocol = .http1,
+            .method = .POST,
+            .path = "/upload",
+            .outbound_path = "/files",
+            .host = "app.test",
+            .outbound_host = "backend",
+        }, null);
+        defer std.testing.allocator.free(forwarded);
+        try std.testing.expect(std.mem.startsWith(u8, forwarded, "POST /files HTTP/1.1\r\nHost: backend\r\n"));
+        try std.testing.expect(std.mem.indexOf(u8, forwarded, framing) != null);
+        try std.testing.expect(std.mem.indexOf(u8, forwarded, "Expect:") == null);
+        try std.testing.expect(std.mem.indexOf(u8, forwarded, "X-Private:") == null);
+        if (std.mem.startsWith(u8, framing, "Transfer-Encoding")) try std.testing.expect(std.mem.indexOf(u8, forwarded, "Content-Length:") == null);
+    }
+}
+
+test "proxy upload never replays a consumed body after a server error or disconnect" {
+    for ([_]bool{ false, true }) |disconnect| {
+        proxy_runtime.resetForTest();
+        defer proxy_runtime.resetForTest();
+        const action: TestUpstreamAction = if (disconnect) .close else .{ .respond = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\n\r\nonce" };
+        var backend = try TestUpstreamServer.init(&.{action});
+        defer backend.deinit();
+        try backend.start();
+        var proxy = ReverseProxy.init(std.testing.allocator, &.{});
+        defer proxy.deinit();
+        const plan: ForwardPlan = .{
+            .method = .GET,
+            .path = "/upload",
+            .outbound_path = "/upload",
+            .host = "app.test",
+            .outbound_host = "api",
+            .backend_service = "api",
+            .selection_key = 0,
+            .route = try cloneRouteSnapshot(std.testing.allocator, .{
+                .name = "uploads",
+                .service = "api",
+                .vip_address = "10.43.0.2",
+                .match = .{ .host = "app.test", .path_prefix = "/upload" },
+                .retries = 3,
+            }),
+            .upstream = .{ .service = "api", .endpoint_id = "api-1", .address = "127.0.0.1", .port = backend.port },
+        };
+        defer plan.route.deinit(std.testing.allocator);
+        var sockets: [2]posix.fd_t = undefined;
+        if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &sockets) != 0) return error.SkipZigTest;
+        defer for (sockets) |fd| linux_platform.posix.close(fd);
+        try proxy.forwardStream("GET /upload HTTP/1.1\r\nHost: app.test\r\nContent-Length: 4\r\n\r\nbody", &plan, null, sockets[0]);
+        _ = std.os.linux.shutdown(sockets[0], 1);
+        var bytes: [2048]u8 = undefined;
+        const received = bytes[0..readSocketBytes(sockets[1], &bytes)];
+        if (disconnect) {
+            try std.testing.expect(std.mem.startsWith(u8, received, "HTTP/1.1 502 "));
+        } else {
+            try std.testing.expect(std.mem.startsWith(u8, received, "HTTP/1.1 503 "));
+            try std.testing.expect(std.mem.endsWith(u8, received, "\r\n\r\nonce"));
+        }
+        try std.testing.expect(std.mem.endsWith(u8, backend.request(0), "\r\n\r\nbody"));
+        try std.testing.expectEqual(@as(usize, 1), backend.accepted);
+        var snapshot = try proxy_runtime.snapshot(std.testing.allocator);
+        defer snapshot.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u64, 0), snapshot.retries_total);
+    }
 }
