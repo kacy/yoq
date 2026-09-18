@@ -328,6 +328,25 @@ pub fn initStorageTables(db: *sqlite.Db) SchemaError!void {
 
 pub fn initTrainingTables(db: *sqlite.Db) SchemaError!void {
     try exec(db,
+        \\CREATE TABLE IF NOT EXISTS local_training_ranks (
+        \\    container_id TEXT PRIMARY KEY,
+        \\    app_name TEXT NOT NULL,
+        \\    job_name TEXT NOT NULL,
+        \\    job_id TEXT NOT NULL,
+        \\    rank INTEGER NOT NULL CHECK (rank >= 0),
+        \\    FOREIGN KEY (container_id) REFERENCES containers(id) ON DELETE CASCADE
+        \\);
+    );
+    // local connections do not enable foreign_keys; keep ownership cleanup
+    // atomic with container deletion without changing other table policies.
+    try exec(db,
+        \\CREATE TRIGGER IF NOT EXISTS delete_local_training_rank
+        \\AFTER DELETE ON containers BEGIN
+        \\    DELETE FROM local_training_ranks WHERE container_id = OLD.id;
+        \\END;
+    );
+
+    try exec(db,
         \\CREATE TABLE IF NOT EXISTS training_jobs (
         \\    id TEXT PRIMARY KEY,
         \\    name TEXT NOT NULL,

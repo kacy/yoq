@@ -19,7 +19,7 @@ fn startOwned(self: anytype) !void {
         try state_support.createPersistentRecord(self);
     }
     // clear ranks left behind by a prior owner before reusing their names.
-    try state_support.stopRunningRanks(self);
+    try state_support.stopPriorRanks(self);
     orchestrator.shutdown_requested.store(false, .release);
     orchestrator.installSignalHandlers();
     errdefer {
