@@ -4,12 +4,15 @@ const store = @import("../../state/store.zig");
 const state_support = @import("state_support.zig");
 const rank_group = @import("rank_group.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
-const apply_lock = @import("../apply_lock.zig");
 
 pub fn startLocal(self: anytype) !void {
-    const key = try std.fmt.allocPrint(self.alloc, "training:{s}:{s}", .{ self.app_name, self.job.name });
-    defer self.alloc.free(key);
-    var lock = try apply_lock.acquire(self.alloc, key);
+    startOwned(self) catch |err| {
+        if (err != error.TrainingCanceled) return err;
+    };
+}
+
+fn startOwned(self: anytype) !void {
+    var lock = try state_support.acquireOwner(self);
     defer lock.release();
     if (self.job_id == null) {
         try state_support.generateJobId(self);
@@ -22,12 +25,12 @@ pub fn startLocal(self: anytype) !void {
     errdefer {
         if (!(state_support.refreshControl(self) catch false)) {
             self.state = .failed;
-            state_support.persistState(self) catch {};
+            state_support.persistRunnerState(self) catch {};
         }
     }
     while (true) {
         self.state = .scheduling;
-        try state_support.persistState(self);
+        try state_support.persistRunnerState(self);
         if (!orchestrator.ensureImageAvailable(self.alloc, self.job.image)) return error.ImagePullFailed;
         var group = try rank_group.Group.init(self);
         defer group.deinit();
@@ -36,12 +39,12 @@ pub fn startLocal(self: anytype) !void {
         if (self.state == .paused or self.state == .stopped) return;
         if (succeeded) {
             self.state = .completed;
-            try state_support.persistState(self);
+            try state_support.persistRunnerState(self);
             return;
         }
         if (!self.job.fault_tolerance.auto_restart or self.restart_count >= self.job.fault_tolerance.max_restarts) {
             self.state = .failed;
-            try state_support.persistState(self);
+            try state_support.persistRunnerState(self);
             return error.RankFailed;
         }
         self.restart_count += 1;
@@ -66,7 +69,7 @@ pub fn runRanks(self: anytype, group: anytype) !bool {
         status.* = .running;
     }
     self.state = .running;
-    try state_support.persistState(self);
+    try state_support.persistRunnerState(self);
     while (true) {
         if (try cancelled(self)) return false;
         var running: usize = 0;

@@ -119,7 +119,7 @@ pub const TrainingController = struct {
         return local_runner.startLocal(self);
     }
 
-    /// start training job in cluster mode by POSTing to /deploy with gang scheduling.
+    /// schedule the committed job through its app training endpoint.
     pub fn startCluster(self: *TrainingController, server_ip: [4]u8, server_port: u16) !void {
         return cluster_runner.startCluster(self, server_ip, server_port);
     }
@@ -143,6 +143,15 @@ pub const TrainingController = struct {
 
     pub fn resume_(self: *TrainingController) !void {
         if (self.state != .paused) return;
+        // the previous runner must observe pause and release its owner lease
+        // before a resume request can clear the persisted cancellation.
+        var owner: ?@import("apply_lock.zig").ApplyLock = if (self.job_id != null) try state_support.waitForOwner(self) else null;
+        defer if (owner) |*lock| lock.release();
+        if (self.job_id) |id| {
+            const record = try store.getTrainingJob(self.alloc, id);
+            defer record.deinit(self.alloc);
+            if (!std.mem.eql(u8, record.state, "paused")) return error.InvalidTrainingState;
+        }
         self.loadResumeCheckpoint();
         self.state = .pending;
         try self.persistState();
@@ -351,4 +360,37 @@ test "training controller owns the app name and restores the persisted rank coun
     try std.testing.expectEqual(@as(u32, 3), ctrl.gpu_count);
     try std.testing.expectEqual(@as(usize, 3), ctrl.rank_status.len);
     try std.testing.expectEqual(TrainingJobState.paused, ctrl.state);
+}
+
+test "training pause survives late runner updates until the previous owner exits" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const job = spec.TrainingJob{ .name = "train", .image = "scratch", .command = &.{}, .env = &.{}, .working_dir = null, .volumes = &.{}, .gpus = 1 };
+    var ctrl = try TrainingController.init(alloc, &job, "training-owner-handoff");
+    defer ctrl.deinit();
+    try ctrl.generateJobId();
+    try ctrl.createPersistentRecord();
+    try store.updateTrainingJobState(ctrl.job_id.?, "paused", 2);
+    ctrl.state = .completed;
+    try std.testing.expectError(error.TrainingCanceled, state_support.persistRunnerState(&ctrl));
+    try std.testing.expectEqual(TrainingJobState.paused, ctrl.state);
+    var owner = try state_support.acquireOwner(&ctrl);
+    defer owner.release();
+    const PreviousRunner = struct {
+        fn finish(lock: *@import("apply_lock.zig").ApplyLock) void {
+            _ = @import("../lib/runtime_wait.zig").sleep(.fromMilliseconds(50), "training owner test");
+            lock.release();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, PreviousRunner.finish, .{&owner});
+    defer thread.join();
+    try ctrl.resume_();
+    try std.testing.expectEqual(TrainingJobState.pending, ctrl.state);
+    const record = try store.getTrainingJob(alloc, ctrl.job_id.?);
+    defer record.deinit(alloc);
+    try std.testing.expectEqualStrings("pending", record.state);
+    // a second caller that loaded the old paused state cannot resume it again.
+    ctrl.state = .paused;
+    try std.testing.expectError(error.InvalidTrainingState, ctrl.resume_());
 }

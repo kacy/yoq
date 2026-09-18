@@ -400,7 +400,7 @@ fn trainPause(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
         return TrainError.DeploymentFailed;
     }
 
-    if (ctx.ctrl.state != .running) {
+    if (ctx.ctrl.state != .running and ctx.ctrl.state != .scheduling) {
         writeErr("training job {s} is not running (state: {s})\n", .{ ctx.name, ctx.ctrl.state.label() });
         return TrainError.DeploymentFailed;
     }

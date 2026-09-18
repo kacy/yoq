@@ -34,6 +34,32 @@ pub fn persistState(self: anytype) !void {
     try store.updateTrainingJobState(jid, self.state.label(), now);
 }
 
+pub fn persistRunnerState(self: anytype) !void {
+    const id = self.job_id orelse return;
+    if (!try store.updateTrainingRunnerState(id, self.state.label(), std.Io.Clock.real.now(std.Options.debug_io).toSeconds())) {
+        if (try refreshControl(self)) return error.TrainingCanceled;
+        return error.JobMissing;
+    }
+}
+
+pub fn acquireOwner(self: anytype) !@import("../apply_lock.zig").ApplyLock {
+    const key = try std.fmt.allocPrint(self.alloc, "training:{s}:{s}", .{ self.app_name, self.job.name });
+    defer self.alloc.free(key);
+    return @import("../apply_lock.zig").acquire(self.alloc, key);
+}
+
+pub fn waitForOwner(self: anytype) !@import("../apply_lock.zig").ApplyLock {
+    const deadline = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds() + 10 * std.time.ns_per_s;
+    while (true) {
+        return acquireOwner(self) catch |err| {
+            if (err != error.AlreadyLocked) return err;
+            if (std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds() >= deadline) return error.ControllerStillRunning;
+            if (!@import("../../lib/runtime_wait.zig").sleep(.fromMilliseconds(50), "training controller shutdown")) return error.ControllerStillRunning;
+            continue;
+        };
+    }
+}
+
 pub fn createPersistentRecord(self: anytype) !void {
     const jid = self.job_id orelse return;
     const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
