@@ -53,21 +53,21 @@ csum_fold(__u32 csum)
     return (__u16)~csum;
 }
 
-static __attribute__((always_inline)) void
-update_csum(__u16 *csum, __u32 old_val, __u32 new_val)
+static __attribute__((always_inline)) __u16
+update_csum(__u16 csum, __u32 old_val, __u32 new_val)
 {
-    __u32 s = (~((__u32)*csum) & 0xFFFF);
+    __u32 s = (~((__u32)csum) & 0xFFFF);
     s += (~old_val & 0xFFFF) + (new_val & 0xFFFF);
     s += (~(old_val >> 16) & 0xFFFF) + (new_val >> 16);
-    *csum = csum_fold(s);
+    return csum_fold(s);
 }
 
-static __attribute__((always_inline)) void
-update_csum16(__u16 *csum, __u16 old_val, __u16 new_val)
+static __attribute__((always_inline)) __u16
+update_csum16(__u16 csum, __u16 old_val, __u16 new_val)
 {
-    __u32 s = (~((__u32)*csum) & 0xFFFF);
+    __u32 s = (~((__u32)csum) & 0xFFFF);
     s += (~((__u32)old_val) & 0xFFFF) + ((__u32)new_val);
-    *csum = csum_fold(s);
+    return csum_fold(s);
 }
 
 SEC("xdp")
@@ -147,8 +147,8 @@ int xdp_port_map(struct xdp_md *ctx)
             return XDP_PASS;
         __u16 old_port = tcp->dest;
         tcp->dest = new_port;
-        update_csum(&tcp->check, old_daddr, new_daddr);
-        update_csum16(&tcp->check, old_port, new_port);
+        __u16 checksum = update_csum(tcp->check, old_daddr, new_daddr);
+        tcp->check = update_csum16(checksum, old_port, new_port);
     } else {
         struct udphdr *udp = (void *)((char *)ip + sizeof(*ip));
         if ((void *)(udp + 1) > data_end)
@@ -158,15 +158,14 @@ int xdp_port_map(struct xdp_md *ctx)
         // a zero ipv4 udp checksum means disabled. preserve that choice;
         // a calculated zero checksum is transmitted as all ones instead.
         if (udp->check != 0) {
-            update_csum(&udp->check, old_daddr, new_daddr);
-            update_csum16(&udp->check, old_port, new_port);
-            if (udp->check == 0)
-                udp->check = 0xffff;
+            __u16 checksum = update_csum(udp->check, old_daddr, new_daddr);
+            checksum = update_csum16(checksum, old_port, new_port);
+            udp->check = checksum == 0 ? 0xffff : checksum;
         }
     }
 
     ip->daddr = new_daddr;
-    update_csum(&ip->check, old_daddr, new_daddr);
+    ip->check = update_csum(ip->check, old_daddr, new_daddr);
     return XDP_PASS;
 }
 
