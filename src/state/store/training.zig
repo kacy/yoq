@@ -303,7 +303,7 @@ pub fn getLatestCheckpoint(alloc: Allocator, job_id: []const u8) StoreError!?Che
     const row = (lease.db.oneAlloc(
         CheckpointRow,
         alloc,
-        "SELECT id, job_id, step, path, size_bytes, created_at FROM training_checkpoints WHERE job_id = ? ORDER BY created_at DESC LIMIT 1;",
+        "SELECT id, job_id, step, path, size_bytes, created_at FROM training_checkpoints WHERE job_id = ? ORDER BY step DESC, created_at DESC, id DESC LIMIT 1;",
         .{},
         .{job_id},
     ) catch return StoreError.ReadFailed) orelse return null;
@@ -316,7 +316,7 @@ pub fn listCheckpoints(alloc: Allocator, job_id: []const u8) StoreError!std.Arra
 
     var records: std.ArrayList(CheckpointRecord) = .empty;
     var stmt = lease.db.prepare(
-        "SELECT id, job_id, step, path, size_bytes, created_at FROM training_checkpoints WHERE job_id = ? ORDER BY created_at DESC;",
+        "SELECT id, job_id, step, path, size_bytes, created_at FROM training_checkpoints WHERE job_id = ? ORDER BY step DESC, created_at DESC, id DESC;",
     ) catch return StoreError.ReadFailed;
     defer stmt.deinit();
     var iter = stmt.iterator(CheckpointRow, .{job_id}) catch return StoreError.ReadFailed;

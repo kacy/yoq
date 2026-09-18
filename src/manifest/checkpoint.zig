@@ -94,6 +94,10 @@ fn parseStepFromName(name: []const u8) ?i64 {
 /// record newly discovered checkpoints in the database and enforce
 /// keep-N retention. returns the number of new checkpoints recorded.
 pub fn syncCheckpoints(alloc: std.mem.Allocator, job_id: []const u8, checkpoint_path: []const u8, keep: u32) !u32 {
+    return syncCheckpointsWithDelete(alloc, job_id, checkpoint_path, keep, deleteCheckpointDirectory);
+}
+
+fn syncCheckpointsWithDelete(alloc: std.mem.Allocator, job_id: []const u8, checkpoint_path: []const u8, keep: u32, comptime delete_directory: anytype) !u32 {
     // scan filesystem
     var entries: [64]CheckpointEntry = undefined;
     const count = scanCheckpointDir(&entries, checkpoint_path);
@@ -119,30 +123,35 @@ pub fn syncCheckpoints(alloc: std.mem.Allocator, job_id: []const u8, checkpoint_
             }
         }
         if (!found) {
-            store.saveCheckpoint(job_id, entry.step, entry.pathSlice(), 0, now) catch continue;
+            store.saveCheckpoint(job_id, entry.step, entry.pathSlice(), 0, now) catch return error.StoreFailed;
             new_count += 1;
         }
     }
 
-    // enforce keep-N using total count (existing + newly added)
+    // include this scan's inserts before selecting the oldest steps. a newly
+    // discovered directory may be older than every recorded checkpoint.
     if (keep > 0) {
-        const total = existing.items.len + new_count;
-        if (total > keep) {
-            // existing list is newest-first; old checkpoints are at the tail.
-            // we need to delete (total - keep) oldest entries. the oldest are
-            // in the existing list starting from index (keep - new_count) if
-            // new_count < keep, otherwise all existing entries are old.
-            const delete_from = if (new_count >= keep) 0 else keep - new_count;
-            if (delete_from < existing.items.len) {
-                for (existing.items[delete_from..]) |old| {
-                    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, old.path) catch {};
-                    store.deleteCheckpoint(old.id) catch {};
-                }
-            }
+        var current = store.listCheckpoints(alloc, job_id) catch return error.StoreFailed;
+        defer {
+            for (current.items) |record| record.deinit(alloc);
+            current.deinit(alloc);
+        }
+        const retained = @min(@as(usize, keep), current.items.len);
+        for (current.items[retained..]) |old| {
+            // retain the record when deletion fails so the next scan can retry.
+            try delete_directory(old.path);
+            store.deleteCheckpoint(old.id) catch return error.StoreFailed;
         }
     }
 
     return new_count;
+}
+
+fn deleteCheckpointDirectory(path: []const u8) !void {
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
 }
 
 /// get the path to the latest checkpoint for a job.
@@ -437,4 +446,107 @@ test "training checkpoint resume maps the most specific mount into container pat
     try std.testing.expectEqualStrings("/data/checkpoints/step_20", latest);
     try std.testing.expect((try mountedDirectory(alloc, "/database", &mounts)) == null);
     try std.testing.expectError(error.InvalidCheckpointPath, mountedDirectory(alloc, "/data/../etc", &mounts));
+}
+
+fn seedRetentionJob() !void {
+    try store.saveTrainingJob(.{
+        .id = "retention-job",
+        .name = "train",
+        .app_name = "retention",
+        .state = "running",
+        .image = "scratch",
+        .gpus = 1,
+        .checkpoint_path = null,
+        .checkpoint_interval = null,
+        .checkpoint_keep = null,
+        .restart_count = 0,
+        .created_at = 1,
+        .updated_at = 1,
+    });
+}
+
+fn expectRetainedSteps(expected: []const i64) !void {
+    const alloc = std.testing.allocator;
+    var records = try store.listCheckpoints(alloc, "retention-job");
+    defer {
+        for (records.items) |record| record.deinit(alloc);
+        records.deinit(alloc);
+    }
+    try std.testing.expectEqual(expected.len, records.items.len);
+    for (expected, records.items) |step, record| try std.testing.expectEqual(step, record.step);
+}
+
+test "training checkpoint retention prunes the first discovered batch" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try seedRetentionJob();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(std.Options.debug_io, ".", alloc);
+    defer alloc.free(path);
+    for ([_][]const u8{ "step_100", "step_200", "step_300", "step_400" }) |name|
+        try tmp.dir.createDir(std.Options.debug_io, name, .default_dir);
+    try std.testing.expectEqual(@as(u32, 4), try syncCheckpoints(alloc, "retention-job", path, 2));
+    try expectRetainedSteps(&.{ 400, 300 });
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_100", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_200", .{}));
+    try tmp.dir.access(std.Options.debug_io, "step_300", .{});
+    try tmp.dir.access(std.Options.debug_io, "step_400", .{});
+    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "retention-job", path, 2));
+}
+
+test "training checkpoint retention keeps newer steps when older directories arrive late" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try seedRetentionJob();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(std.Options.debug_io, ".", alloc);
+    defer alloc.free(path);
+    for ([_][]const u8{ "step_300", "step_400" }, [_]i64{ 300, 400 }) |name, step| {
+        try tmp.dir.createDir(std.Options.debug_io, name, .default_dir);
+        const full_path = try std.fs.path.join(alloc, &.{ path, name });
+        defer alloc.free(full_path);
+        try store.saveCheckpoint("retention-job", step, full_path, 0, 1);
+    }
+    try tmp.dir.createDir(std.Options.debug_io, "step_100", .default_dir);
+    try tmp.dir.createDir(std.Options.debug_io, "step_200", .default_dir);
+    try std.testing.expectEqual(@as(u32, 2), try syncCheckpoints(alloc, "retention-job", path, 0));
+    const latest = (try store.getLatestCheckpoint(alloc, "retention-job")).?;
+    defer latest.deinit(alloc);
+    try std.testing.expectEqual(@as(i64, 400), latest.step);
+    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "retention-job", path, 2));
+    try expectRetainedSteps(&.{ 400, 300 });
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_100", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_200", .{}));
+    try tmp.dir.access(std.Options.debug_io, "step_300", .{});
+    try tmp.dir.access(std.Options.debug_io, "step_400", .{});
+}
+
+test "training checkpoint retention preserves failed deletions and retries them" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try seedRetentionJob();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(std.Options.debug_io, ".", alloc);
+    defer alloc.free(path);
+    for ([_][]const u8{ "step_10", "step_20", "step_30" }) |name|
+        try tmp.dir.createDir(std.Options.debug_io, name, .default_dir);
+    const Failure = struct {
+        fn delete(_: []const u8) !void {
+            return error.AccessDenied;
+        }
+    };
+    try std.testing.expectError(error.AccessDenied, syncCheckpointsWithDelete(alloc, "retention-job", path, 1, Failure.delete));
+    try expectRetainedSteps(&.{ 30, 20, 10 });
+    try tmp.dir.access(std.Options.debug_io, "step_20", .{});
+    try tmp.dir.access(std.Options.debug_io, "step_10", .{});
+    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "retention-job", path, 1));
+    try expectRetainedSteps(&.{30});
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_20", .{}));
+    try tmp.dir.access(std.Options.debug_io, "step_30", .{});
 }
