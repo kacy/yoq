@@ -11,6 +11,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
+const certificate_db = @import("certificate_db.zig");
 const schema = @import("../schema.zig");
 
 const Allocator = std.mem.Allocator;
@@ -71,7 +72,7 @@ pub fn buildKey(alloc: Allocator, service_name: []const u8) StoreError![]u8 {
 /// read the mtls cert row for a service, or null when one hasn't been
 /// issued yet. caller owns the returned record.
 pub fn get(alloc: Allocator, service_name: []const u8) StoreError!?Record {
-    var lease = try common.leaseDb();
+    var lease = try certificate_db.leaseDb();
     defer lease.deinit();
     return getInDb(lease.db, alloc, service_name);
 }
@@ -97,7 +98,7 @@ fn getByDomain(db: *sqlite.Db, alloc: Allocator, key: []const u8) StoreError!?Re
 
 /// Reserved outside the service namespace, so manifests cannot claim it.
 pub fn getProxy(alloc: Allocator) StoreError!?Record {
-    var lease = try common.leaseDb();
+    var lease = try certificate_db.leaseDb();
     defer lease.deinit();
     return getByDomain(lease.db, alloc, "proxy:ingress");
 }

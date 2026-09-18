@@ -1,6 +1,7 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 const common = @import("common.zig");
+const certificate_db = @import("certificate_db.zig");
 const schema = @import("../schema.zig");
 
 const Allocator = std.mem.Allocator;
@@ -47,7 +48,7 @@ fn rowToRecord(row: ClusterCaRow) ClusterCaRecord {
 /// read the cluster CA row, or null if it has not been bootstrapped yet.
 /// caller owns the returned record.
 pub fn getClusterCa(alloc: Allocator) StoreError!?ClusterCaRecord {
-    var lease = try common.leaseDb();
+    var lease = try certificate_db.leaseDb();
     defer lease.deinit();
     return getClusterCaInDb(lease.db, alloc);
 }
