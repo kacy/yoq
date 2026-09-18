@@ -128,7 +128,12 @@ fn tick(ctx: *Ctx) !void {
 fn tickAt(ctx: *Ctx, now: i64) !void {
     if (!rollout.current().service_mtls) return;
     if (!ctx.node.isLeader()) return;
-    if (!store.clusterCaExistsInDb(ctx.node.stateMachineDb())) return;
+    const ca_exists = exists: {
+        ctx.node.mu.lockUncancelable(std.Options.debug_io);
+        defer ctx.node.mu.unlock(std.Options.debug_io);
+        break :exists store.clusterCaExistsInDb(ctx.node.stateMachineDb());
+    };
+    if (!ca_exists) return;
 
     var services = service_registry_runtime.snapshotServices(ctx.alloc) catch |err| {
         log.warn("cert issuer: failed to snapshot services: {}", .{err});

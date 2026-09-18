@@ -255,3 +255,23 @@ test "applied snapshot cluster status exposes and clears the committed apply bac
     try std.testing.expectEqual(@as(i64, 0), recovered_json.value.object.get("apply_backlog").?.integer);
     try std.testing.expect(recovered_json.value.object.get("apply_healthy").?.bool);
 }
+
+test "cluster ca route reads the node database while the local store is empty" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    var node = try cluster_node.Node.initForTests(alloc, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/tmp" });
+    defer node.deinit();
+    const nonce = [_]u8{0} ** 12;
+    const tag = [_]u8{0} ** 16;
+    const sql = try store.buildClusterCaInsertSql(alloc, "replicated public certificate", "encrypted private key", &nonce, &tag, 1, 100);
+    defer alloc.free(sql);
+    try node.stateMachineDb().execDynamic(sql, .{}, .{});
+    try std.testing.expect((try store.getClusterCa(alloc)) == null);
+
+    const response = handleClusterCa(alloc, .{ .cluster = &node, .join_token = null });
+    defer if (response.allocated) alloc.free(response.body);
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "replicated public certificate") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "encrypted private key") == null);
+}
