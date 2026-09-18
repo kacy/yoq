@@ -5,6 +5,7 @@
 // runtime. Shutdown cancels and joins those threads before releasing agent state.
 
 const std = @import("std");
+const api_endpoints = @import("api_endpoints.zig");
 const enrollment_identity = @import("agent/enrollment_identity.zig");
 const http_client = @import("http_client.zig");
 const agent_types = @import("agent_types.zig");
@@ -50,6 +51,8 @@ pub const ContainerState = enum {
 /// the worker sets done after releasing its inputs and completing its last
 /// cache access.
 pub const LocalAssignment = struct {
+    generation: i64 = 0,
+    pending_result: ?struct { state: ContainerState, reason: [64]u8 = undefined, reason_len: usize = 0 } = null,
     state: ContainerState = .starting,
     canceled: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
@@ -63,7 +66,8 @@ pub const Agent = struct {
     id: [12]u8,
     server_addr: [4]u8,
     server_port: u16,
-    enrollment_target: ?struct { address: [4]u8, port: u16 } = null,
+    enrollment_target: ?api_endpoints.Endpoint = null,
+    api_endpoints: api_endpoints.Set = .{},
     token: []const u8,
     owned_token: ?[]u8 = null,
     /// Server-issued operational credential, owned independently of enrollment.
@@ -137,6 +141,7 @@ pub const Agent = struct {
         };
         defer identity.deinit();
         const pub_key = &identity.keypair.public_key;
+        if (self.api_endpoints.len == 0) self.api_endpoints = api_endpoints.load(self.alloc, target, self.token) catch return AgentError.RegisterFailed;
 
         // detect our local IP for the wireguard endpoint
         var local_ip_buf: [16]u8 = undefined;
@@ -146,38 +151,10 @@ pub const Agent = struct {
             return AgentError.RegisterFailed;
         defer self.alloc.free(body);
 
-        var resp = http_client.postWithAuth(
-            self.alloc,
-            self.server_addr,
-            self.server_port,
-            "/agents/register",
-            body,
-            self.token,
-        ) catch return AgentError.RegisterFailed;
-
-        // follow leader hint on not-leader error and retry once
+        var resp = api_endpoints.request(self, .post, "/agents/register", body, self.token) catch return AgentError.RegisterFailed;
         if (resp.status_code != 200) {
-            if (extractJsonString(resp.body, "leader")) |leader_str| {
-                if (request_support.parseHostPort(leader_str)) |hp| {
-                    log.info("registration redirected to leader at {s}", .{leader_str});
-                    self.server_addr = hp.addr;
-                    self.server_port = hp.port;
-                    resp.deinit(self.alloc);
-                    resp = http_client.postWithAuth(
-                        self.alloc,
-                        self.server_addr,
-                        self.server_port,
-                        "/agents/register",
-                        body,
-                        self.token,
-                    ) catch return AgentError.RegisterFailed;
-                }
-            }
-            if (resp.status_code != 200) {
-                writeErr("registration failed (status {d}): {s}\n", .{ resp.status_code, resp.body });
-                resp.deinit(self.alloc);
-                return AgentError.RegisterFailed;
-            }
+            resp.deinit(self.alloc);
+            return AgentError.RegisterFailed;
         }
         defer resp.deinit(self.alloc);
 
@@ -231,7 +208,7 @@ pub const Agent = struct {
         gossip_support.initGossip(self);
 
         // initialize the local assignment cache for offline resilience
-        gossip_support.initCache(self);
+        gossip_support.initCache(self) catch return AgentError.RegisterFailed;
 
         if (self.node_id) |nid| {
             log.info("registered as agent {s} (node_id={d}, role={s})", .{ &self.id, nid, self.role.toString() });
@@ -306,9 +283,9 @@ pub const Agent = struct {
     }
 
     /// initialize the local assignment cache database.
-    /// non-fatal — agent continues without cache on failure.
-    fn initCache(self: *Agent) void {
-        gossip_support.initCache(self);
+    /// durable result storage must be available before accepting assignments.
+    fn initCache(self: *Agent) !void {
+        try gossip_support.initCache(self);
     }
 
     /// tick gossip state machine and process outgoing actions.

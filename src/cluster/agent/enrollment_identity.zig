@@ -33,7 +33,7 @@ pub fn loadOrCreate(address: [4]u8, port: u16, token: []const u8) !Identity {
     return loadOrCreateAt(dir, address, port, token);
 }
 
-fn scopeName(address: [4]u8, port: u16, token: []const u8) [64]u8 {
+pub fn scopeName(address: [4]u8, port: u16, token: []const u8) [64]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update("yoq-enrollment-v1");
     hash.update(&address);

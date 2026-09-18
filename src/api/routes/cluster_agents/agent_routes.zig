@@ -23,7 +23,7 @@ fn nowRealSeconds() i64 {
 }
 
 pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: RouteContext) Response {
-    const resp = handleAgentRegisterImpl(alloc, request, ctx);
+    const resp = @import("api_discovery.zig").attach(alloc, ctx, handleAgentRegisterImpl(alloc, request, ctx));
     if (!resp.status.isError()) {
         const address = extractJsonString(request.body, "address") orelse "";
         audit.record(.agent_register, address, .ok);
@@ -229,6 +229,10 @@ fn writeRegistrationJson(alloc: std.mem.Allocator, writer: *std.Io.Writer, node:
 }
 
 pub fn handleAgentHeartbeat(alloc: std.mem.Allocator, request: http.Request, id: []const u8, ctx: RouteContext) Response {
+    return @import("api_discovery.zig").attach(alloc, ctx, handleAgentHeartbeatImpl(alloc, request, id, ctx));
+}
+
+fn handleAgentHeartbeatImpl(alloc: std.mem.Allocator, request: http.Request, id: []const u8, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     if (request.body.len == 0) return common.badRequest("missing request body");
 
@@ -354,6 +358,13 @@ pub fn handleWireguardPeers(alloc: std.mem.Allocator, request: http.Request, ctx
 
 pub fn handleAgentAssignments(alloc: std.mem.Allocator, agent_id: []const u8, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+    const session = mutation.Session.begin(node) catch return common.notLeader(alloc, node);
+    // an empty or terminal snapshot can retire durable local results. establish
+    // a quorum boundary before letting an agent act on this read.
+    session.synchronize() catch |err| return deploy_routes.mutationFailure(alloc, node, err);
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
+    session.checkLocked() catch return common.internalError();
 
     const db = node.stateMachineDb();
     const assignments = agent_registry.getAssignments(alloc, db, agent_id) catch return common.internalError();
@@ -716,7 +727,7 @@ test "agent recovery status acknowledgments fence attempts and preserve terminal
         "{\"status\":\"running\",\"generation\":2}",
     };
     for (requests, 0..) |body, i| {
-        const response = handleAssignmentStatusUpdate(alloc, statusTestRequest(body), "worker", "assignment", .{ .cluster = &node });
+        const response = handleAssignmentStatusUpdate(alloc, statusTestRequest(body), "worker", "assignment", .{ .cluster = &node, .join_token = null });
         defer if (response.allocated) alloc.free(response.body);
         try std.testing.expectEqual(http.StatusCode.ok, response.status);
         try std.testing.expect(std.mem.indexOf(u8, response.body, "\"committed\":true") != null);
@@ -746,7 +757,7 @@ test "agent recovery mutations reject success without a quorum" {
     node.raft.persistent_state.current_term = 1;
     node.raft.role = .leader;
     try node.stateMachineDb().exec("INSERT INTO assignments (id, agent_id, image, status, created_at) VALUES ('assignment', 'worker', 'unused', 'running', 1);", .{}, .{});
-    const ctx: RouteContext = .{ .cluster = &node };
+    const ctx: RouteContext = .{ .cluster = &node, .join_token = null };
     const responses = [_]Response{
         handleAssignmentStatusUpdate(alloc, statusTestRequest("{\"status\":\"failed\"}"), "worker", "assignment", ctx),
         handleAgentDrain(alloc, "worker", ctx),
