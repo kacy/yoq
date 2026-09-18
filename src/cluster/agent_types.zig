@@ -109,6 +109,7 @@ pub const AgentRecord = struct {
 /// a container assignment from the server to an agent.
 /// all slices are allocated — caller must call deinit.
 pub const Assignment = struct {
+    generation: i64 = 0,
     id: []const u8,
     agent_id: []const u8,
     image: []const u8,

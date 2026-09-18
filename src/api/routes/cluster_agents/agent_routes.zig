@@ -380,11 +380,13 @@ pub fn handleAgentAssignments(alloc: std.mem.Allocator, agent_id: []const u8, ct
 
 pub fn handleAssignmentStatusUpdate(alloc: std.mem.Allocator, request: http.Request, agent_id: []const u8, assignment_id: []const u8, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
-    if (!(credentials.ownsAssignment(node.stateMachineDb(), agent_id, assignment_id) catch false)) return common.forbidden();
     if (request.body.len == 0) return common.badRequest("missing request body");
 
     const status = extractJsonString(request.body, "status") orelse return common.badRequest("missing status field");
     const reason = extractJsonString(request.body, "reason");
+    const parsed = numbers.parse(alloc, request.body) catch return common.badRequest("invalid status update");
+    defer parsed.deinit();
+    const generation = numbers.field(i64, parsed.value, "generation", 0, std.math.maxInt(i64), 0) catch return common.badRequest("invalid generation");
 
     const valid_statuses = [_][]const u8{ "running", "stopped", "failed" };
     var valid = false;
@@ -398,18 +400,17 @@ pub fn handleAssignmentStatusUpdate(alloc: std.mem.Allocator, request: http.Requ
 
     var sql_buf: [256]u8 = undefined;
     const sql = agent_registry.updateAssignmentStatusSql(&sql_buf, assignment_id, status, reason) catch return common.internalError();
-    // Retain ownership at apply time too: an assignment can move between
-    // authorization and this replicated mutation being committed.
+    // fence delayed reports from an earlier attempt, including reassignment
+    // back to the same agent. terminal states never return to running.
     var owner_buf: [64]u8 = undefined;
     const escaped = @import("../../../lib/sql.zig").escapeSqlString(&owner_buf, agent_id) catch return common.internalError();
     var bound_buf: [512]u8 = undefined;
-    const bound = std.fmt.bufPrint(&bound_buf, "{s} AND agent_id = '{s}' AND status IN ('pending', 'running');", .{ sql[0 .. sql.len - 1], escaped }) catch return common.internalError();
+    const bound = std.fmt.bufPrint(&bound_buf, "{s} AND agent_id = '{s}' AND generation = {d} AND status IN ('pending', 'running');", .{ sql[0 .. sql.len - 1], escaped, generation }) catch return common.internalError();
 
-    _ = node.propose(bound) catch {
-        return common.notLeader(alloc, node);
-    };
+    const session = mutation.Session.begin(node) catch return common.notLeader(alloc, node);
+    session.commit(bound) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
 
-    const body = std.fmt.allocPrint(alloc, "{{\"ok\":true,\"status\":\"{s}\"}}", .{status}) catch return common.internalError();
+    const body = std.fmt.allocPrint(alloc, "{{\"ok\":true,\"committed\":true,\"status\":\"{s}\",\"generation\":{d}}}", .{ status, generation }) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
 
@@ -419,9 +420,10 @@ pub fn handleAgentDrain(alloc: std.mem.Allocator, id: []const u8, ctx: RouteCont
     var sql_buf: [256]u8 = undefined;
     const sql = agent_registry.drainSql(&sql_buf, id) catch return common.internalError();
 
-    _ = node.propose(sql) catch {
+    const session = mutation.Session.begin(node) catch return common.notLeader(alloc, node);
+    session.commit(sql) catch |err| {
         audit.record(.agent_drain, id, .failed);
-        return common.notLeader(alloc, node);
+        return deploy_routes.mutationFailure(alloc, node, err);
     };
 
     audit.record(.agent_drain, id, .ok);
@@ -437,9 +439,8 @@ pub fn handleUpdateLabels(alloc: std.mem.Allocator, request: http.Request, id: [
     var sql_buf: [1024]u8 = undefined;
     const sql = agent_registry.updateLabelsSql(&sql_buf, id, labels) catch return common.internalError();
 
-    _ = node.propose(sql) catch {
-        return common.notLeader(alloc, node);
-    };
+    const session = mutation.Session.begin(node) catch return common.notLeader(alloc, node);
+    session.commit(sql) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
 
     return .{ .status = .ok, .body = "{\"ok\":true}", .allocated = false };
 }
@@ -450,7 +451,8 @@ pub fn handleRevokeCredential(alloc: std.mem.Allocator, agent_id: []const u8, ct
     const id = @import("../../../lib/sql.zig").escapeSqlString(&escaped_buf, agent_id) catch return common.internalError();
     var sql_buf: [192]u8 = undefined;
     const sql = std.fmt.bufPrint(&sql_buf, "UPDATE agents SET credential_hash = NULL WHERE id = '{s}';", .{id}) catch return common.internalError();
-    _ = node.propose(sql) catch return common.notLeader(alloc, node);
+    const session = mutation.Session.begin(node) catch return common.notLeader(alloc, node);
+    session.commit(sql) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
     return .{ .status = .ok, .body = "{\"revoked\":true}", .allocated = false };
 }
 
@@ -697,4 +699,64 @@ test "registration bootstrap preserves responses without peer data" {
     var short_buffer: [8]u8 = undefined;
     var short_writer = std.Io.Writer.fixed(&short_buffer);
     try std.testing.expectError(error.WriteFailed, writeRegistrationJson(alloc, &short_writer, &node, response));
+}
+
+test "agent recovery status acknowledgments fence attempts and preserve terminal states" {
+    const alloc = std.testing.allocator;
+    var node = try Node.initForTests(alloc, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/unused" });
+    defer node.deinit();
+    node.fixPointers();
+    node.raft.role = .leader;
+    try node.stateMachineDb().exec("INSERT INTO assignments (id, agent_id, image, status, generation, created_at) VALUES ('assignment', 'worker', 'unused', 'running', 2, 1);", .{}, .{});
+    const requests = [_][]const u8{
+        "{\"status\":\"failed\",\"generation\":1}",
+        "{\"status\":\"failed\"}",
+        "{\"status\":\"stopped\",\"generation\":2}",
+        "{\"status\":\"stopped\",\"generation\":2}",
+        "{\"status\":\"running\",\"generation\":2}",
+    };
+    for (requests, 0..) |body, i| {
+        const response = handleAssignmentStatusUpdate(alloc, statusTestRequest(body), "worker", "assignment", .{ .cluster = &node });
+        defer if (response.allocated) alloc.free(response.body);
+        try std.testing.expectEqual(http.StatusCode.ok, response.status);
+        try std.testing.expect(std.mem.indexOf(u8, response.body, "\"committed\":true") != null);
+        try std.testing.expectEqual(node.log.lastIndex(), node.state_machine.last_applied);
+        const expected = if (i < 2) "running" else "stopped";
+        const row = (try node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignments WHERE status = ?;", .{}, .{expected})).?;
+        try std.testing.expectEqual(@as(i64, 1), row.count);
+    }
+}
+
+fn statusTestRequest(body: []const u8) http.Request {
+    return .{ .method = .POST, .path = "/agents/worker/assignments/assignment/status", .path_only = "/agents/worker/assignments/assignment/status", .query = "", .content_length = body.len, .body = body, .headers_raw = "" };
+}
+
+test "agent recovery mutations reject success without a quorum" {
+    const alloc = std.testing.allocator;
+    var node = try Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{.{ .id = 2, .addr = .{ 127, 0, 0, 1 }, .port = 29702 }},
+        .shared_key = [_]u8{7} ** 32,
+        .data_dir = "/unused",
+    });
+    defer node.deinit();
+    node.fixPointers();
+    try std.testing.expect(node.log.setCurrentTerm(1));
+    node.raft.persistent_state.current_term = 1;
+    node.raft.role = .leader;
+    try node.stateMachineDb().exec("INSERT INTO assignments (id, agent_id, image, status, created_at) VALUES ('assignment', 'worker', 'unused', 'running', 1);", .{}, .{});
+    const ctx: RouteContext = .{ .cluster = &node };
+    const responses = [_]Response{
+        handleAssignmentStatusUpdate(alloc, statusTestRequest("{\"status\":\"failed\"}"), "worker", "assignment", ctx),
+        handleAgentDrain(alloc, "worker", ctx),
+        handleUpdateLabels(alloc, statusTestRequest("{\"labels\":\"zone=a\"}"), "worker", ctx),
+        handleRevokeCredential(alloc, "worker", ctx),
+    };
+    for (responses) |response| {
+        defer if (response.allocated) alloc.free(response.body);
+        try std.testing.expectEqual(http.StatusCode.service_unavailable, response.status);
+    }
+    try std.testing.expectEqual(@as(u64, 0), node.raft.commit_index);
+    try std.testing.expectEqual(@as(u64, 0), node.state_machine.last_applied);
 }

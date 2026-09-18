@@ -218,6 +218,7 @@ fn migrateTokens(db: *sqlite.Db) SchemaError!void {
 }
 
 fn migrateAssignments(db: *sqlite.Db) SchemaError!void {
+    try addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;");
     try addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN status_reason TEXT;");
     try addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN app_name TEXT;");
     try addColumnIfMissing(db, "ALTER TABLE assignments ADD COLUMN workload_kind TEXT;");
