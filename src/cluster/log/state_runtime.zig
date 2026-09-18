@@ -87,9 +87,9 @@ pub fn getVotedFor(db: *sqlite.Db) LogError!?NodeId {
 
 pub fn setVotedFor(db: *sqlite.Db, id: ?NodeId) LogError!void {
     const val: ?i64 = if (id) |v| @intCast(v) else null;
-    db.exec(
+    common.execStatement(
+        db,
         "UPDATE raft_state SET voted_for = ? WHERE id = 1;",
-        .{},
         .{val},
     ) catch return LogError.WriteFailed;
 }
