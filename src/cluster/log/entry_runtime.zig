@@ -28,6 +28,8 @@ pub fn getEntry(db: *sqlite.Db, alloc: std.mem.Allocator, index: LogIndex) LogEr
         .{},
         .{@as(i64, @intCast(index))},
     ) catch return LogError.ReadFailed) orelse return null;
+    errdefer alloc.free(row.data.data);
+
     return LogEntry{
         .index = common.safeU64(row.log_index) catch return LogError.ReadFailed,
         .term = common.safeU64(row.term) catch return LogError.ReadFailed,
@@ -45,6 +47,10 @@ pub fn truncateFrom(db: *sqlite.Db, index: LogIndex) LogError!void {
 
 pub fn getEntries(db: *sqlite.Db, alloc: std.mem.Allocator, from: LogIndex, to: LogIndex) LogError![]LogEntry {
     var entries: std.ArrayList(LogEntry) = .empty;
+    errdefer {
+        for (entries.items) |entry| alloc.free(entry.data);
+        entries.deinit(alloc);
+    }
 
     const Row = struct { log_index: i64, term: i64, data: sqlite.Text };
     var stmt = db.prepare(
@@ -58,6 +64,8 @@ pub fn getEntries(db: *sqlite.Db, alloc: std.mem.Allocator, from: LogIndex, to: 
     }) catch return LogError.ReadFailed;
 
     while (iter.nextAlloc(alloc, .{}) catch return LogError.ReadFailed) |row| {
+        // the row owns its data until the entry is added to the list.
+        errdefer alloc.free(row.data.data);
         entries.append(alloc, LogEntry{
             .index = common.safeU64(row.log_index) catch return LogError.ReadFailed,
             .term = common.safeU64(row.term) catch return LogError.ReadFailed,
