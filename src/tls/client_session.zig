@@ -202,8 +202,7 @@ pub const ClientSession = struct {
                 else => return error.ReadFailed,
             };
             if (count == 0) {
-                if (self.rx_wire.items.len != 0) return error.UnexpectedEof;
-                return 0;
+                return error.UnexpectedEof;
             }
             self.rx_wire.items.len += count;
         }
@@ -219,7 +218,10 @@ pub const ClientSession = struct {
                 if (count < decrypted.plaintext.len) self.rx_pending.appendSlice(self.alloc, decrypted.plaintext[count..]) catch return error.AllocFailed;
                 return count;
             },
-            .alert => return error.PeerClosed,
+            .alert => {
+                if (decrypted.plaintext.len == 2 and decrypted.plaintext[1] == 0) return error.PeerClosed;
+                return error.ReadFailed;
+            },
             .handshake => return null,
             else => return error.DecryptFailed,
         }
@@ -1001,4 +1003,30 @@ test "TLS queued writes preserve sequence and allow reads while the socket is fu
     try std.testing.expectEqual(body.len, received);
     try std.testing.expectEqual(@as(u64, 1), sender.client_seq);
     try std.testing.expectEqual(@as(u64, 1), receiver.server_seq);
+}
+
+test "TLS incremental reads require authenticated close notify at record boundaries" {
+    const keys = handshake.deriveTrafficKeys([_]u8{11} ** hash_len);
+    for ([_]u8{ 0, 1, 2 }) |ending| {
+        const fds = try deadlineTestPair();
+        defer linux_platform.posix.close(fds[0]);
+        defer linux_platform.posix.close(fds[1]);
+        var session = ClientSession{ .fd = fds[0], .alloc = std.testing.allocator, .client_app = keys, .server_app = keys };
+        defer session.deinit();
+        var sequence: u64 = 0;
+        const wire = transport.Stream{ .fd = fds[1] };
+        try record_transport.write(wire, keys, &sequence, .application_data, "body");
+        if (ending != 0) try record_transport.write(wire, keys, &sequence, .alert, if (ending == 1) &.{ 1, 0 } else &.{ 2, 40 });
+        _ = std.os.linux.shutdown(fds[1], 1);
+        var output: [16]u8 = undefined;
+        try std.testing.expectEqual(@as(?usize, 4), try session.readAvailable(&output));
+        if (ending == 0) {
+            try std.testing.expectError(error.UnexpectedEof, session.readAvailable(&output));
+        } else if (ending == 1) {
+            try std.testing.expectError(error.PeerClosed, session.readAvailable(&output));
+        } else {
+            try std.testing.expectError(error.ReadFailed, session.readAvailable(&output));
+        }
+        try std.testing.expectError(error.SessionFailed, session.readAvailable(&output));
+    }
 }
