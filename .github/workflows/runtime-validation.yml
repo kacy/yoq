@@ -172,8 +172,18 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          sudo env YOQ_BIN="$PWD/zig-out/bin/yoq" YOQ_SMOKE_DIR="$RUNNER_TEMP/runtime-logs/agent-drain" \
+          sudo env YOQ_BIN="$PWD/zig-out/bin/yoq" YOQ_SMOKE_DIR="$RUNNER_TEMP/agent-drain-fixture" \
             bash scripts/agent-drain-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/agent-drain.log"
+
+      - name: retain agent drain process logs
+        if: always() && matrix.lane == 'cluster'
+        shell: bash
+        run: |
+          sudo install -d -m 0755 "$RUNNER_TEMP/runtime-logs/agent-drain"
+          if [ -d "$RUNNER_TEMP/agent-drain-fixture" ]; then
+            sudo find "$RUNNER_TEMP/agent-drain-fixture" -maxdepth 1 -type f \( -name '*.log' -o -name drain-result.json \) \
+              -exec install -m 0644 -t "$RUNNER_TEMP/runtime-logs/agent-drain" {} +
+          fi
 
       - name: upload privileged runtime logs
         if: always()
