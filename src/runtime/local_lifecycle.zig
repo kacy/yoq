@@ -118,11 +118,16 @@ pub fn restart(io: std.Io, alloc: std.mem.Allocator, id: []const u8) !void {
 }
 
 pub fn remove(id: []const u8, alloc: std.mem.Allocator) !void {
+    return removeWithVolumes(id, alloc, false);
+}
+
+pub fn removeWithVolumes(id: []const u8, alloc: std.mem.Allocator, remove_anonymous: bool) !void {
     const command_lock = try control.lock(id, .command, true);
     defer command_lock.deinit();
     const record = try store.load(alloc, id);
     defer record.deinit(alloc);
     if (record.pid != null or std.mem.eql(u8, record.status, "running")) return error.ContainerRunning;
     try stopLocked(id, alloc);
+    try @import("local_volumes.zig").releaseContainer(id, remove_anonymous);
     cleanupStoppedContainer(id, record.ip_address, record.veth_host);
 }

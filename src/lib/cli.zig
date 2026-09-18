@@ -177,7 +177,8 @@ pub fn parseVolumeMount(str: []const u8) ?VolumeMountSpec {
         }
     }
 
-    return .{ .source = source, .target = target, .read_only = read_only };
+    const is_bind = std.mem.startsWith(u8, source, "/") or std.mem.startsWith(u8, source, "./") or std.mem.startsWith(u8, source, "../");
+    return .{ .kind = if (is_bind) .bind else .volume, .source = source, .target = target, .read_only = if (!is_bind and mode == null) false else read_only };
 }
 
 /// structured bind mounts are writable by default. legacy -v keeps its

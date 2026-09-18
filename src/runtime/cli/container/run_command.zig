@@ -273,7 +273,7 @@ fn mergeEnv(alloc: std.mem.Allocator, base_env: []const []const u8, override_env
     return dupStringList(alloc, merged.items);
 }
 
-fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSpec) ContainerError![]container.BindMount {
+fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSpec, id: ?[]const u8) ContainerError![]container.BindMount {
     if (volume_specs.len == 0) {
         return alloc.alloc(container.BindMount, 0) catch return ContainerError.OutOfMemory;
     }
@@ -295,6 +295,14 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
     }
 
     for (volume_specs) |spec| {
+        if (spec.kind == .volume) {
+            mounts[idx] = @import("../../local_volumes.zig").resolveMount(alloc, id orelse return ContainerError.InvalidArgument, spec) catch |err| {
+                writeErr("cannot attach volume: {}\n", .{err});
+                return ContainerError.ConfigSaveFailed;
+            };
+            idx += 1;
+            continue;
+        }
         const is_host_path = std.mem.startsWith(u8, spec.source, "/") or
             std.mem.startsWith(u8, spec.source, "./") or
             std.mem.startsWith(u8, spec.source, "../");
@@ -313,10 +321,12 @@ fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSp
             std.fs.path.resolve(alloc, &.{ cwd, spec.source }) catch return error.OutOfMemory;
         defer alloc.free(source_input);
 
-        const source = std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, source_input, alloc) catch {
+        const canonical_source = std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, source_input, alloc) catch {
             writeErr("volume source must exist and be canonicalizable: {s}\n", .{spec.source});
             return ContainerError.InvalidArgument;
         };
+        defer alloc.free(canonical_source);
+        const source = alloc.dupe(u8, canonical_source) catch return error.OutOfMemory;
         errdefer alloc.free(source);
 
         const target = alloc.dupe(u8, spec.target) catch return error.OutOfMemory;
@@ -344,6 +354,7 @@ fn buildSavedRunConfig(
     flags: *const RunFlags,
     img: *const image_cmds.ImageResolution,
     resolved: *const oci.ResolvedCommand,
+    id: ?[]const u8,
 ) ContainerError!run_state.SavedRunConfig {
     const merged_env = mergeEnv(alloc, img.image_env, flags.env.items) catch |e| return e;
     errdefer freeOwnedStringList(alloc, merged_env);
@@ -370,7 +381,7 @@ fn buildSavedRunConfig(
     const lower_dirs = dupStringList(alloc, img.layer_paths) catch |e| return e;
     errdefer freeOwnedStringList(alloc, lower_dirs);
 
-    const mounts = buildMounts(alloc, flags.volume_specs.items) catch |e| return e;
+    const mounts = buildMounts(alloc, flags.volume_specs.items, id) catch |e| return e;
     errdefer freeOwnedMounts(alloc, mounts);
 
     const port_maps = alloc.dupe(net_setup.PortMap, flags.port_maps.items) catch return ContainerError.OutOfMemory;
@@ -458,7 +469,29 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
     var resolved = try resolveRunCommand(alloc, &flags, &img);
     defer resolved.args.deinit(alloc);
 
-    var saved = buildSavedRunConfig(alloc, &flags, &img, &resolved) catch |e| return e;
+    var id_buf: [12]u8 = undefined;
+    container.generateId(&id_buf) catch {
+        writeErr("failed to generate unique container ID\n", .{});
+        return error.IdGenerationFailed;
+    };
+    const id = id_buf[0..];
+
+    var created = false;
+    errdefer if (!created) @import("../../local_volumes.zig").releaseContainer(id, true) catch {};
+    if (img.volumes) |volumes| {
+        if (volumes == .object) {
+            var it = volumes.object.iterator();
+            while (it.next()) |entry| {
+                var overridden = false;
+                for (flags.volume_specs.items) |mount| {
+                    if (std.mem.eql(u8, mount.target, entry.key_ptr.*)) overridden = true;
+                }
+                if (!overridden) try flags.volume_specs.append(alloc, .{ .kind = .volume, .source = "", .target = entry.key_ptr.*, .read_only = false });
+            }
+        }
+    }
+
+    var saved = buildSavedRunConfig(alloc, &flags, &img, &resolved, id) catch |e| return e;
     defer saved.deinit(alloc);
     saved.auto_remove = flags.auto_remove;
     saved.interactive = flags.interactive;
@@ -475,13 +508,6 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
         return ContainerError.InvalidLimits;
     };
 
-    var id_buf: [12]u8 = undefined;
-    container.generateId(&id_buf) catch {
-        writeErr("failed to generate unique container ID\n", .{});
-        return error.IdGenerationFailed;
-    };
-    const id = id_buf[0..];
-
     {
         const control = @import("../../local_control.zig");
         control.register(id, flags.container_name) catch |err| {
@@ -497,6 +523,7 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
         };
     }
 
+    created = true;
     if (create_only) {
         write("{s}\n", .{id});
         return;
@@ -528,7 +555,7 @@ test "buildMounts rejects disallowed canonical source without leaking" {
         .{ .source = "/etc", .target = "/data", .read_only = true },
     };
 
-    try std.testing.expectError(ContainerError.InvalidArgument, buildMounts(alloc, &specs));
+    try std.testing.expectError(ContainerError.InvalidArgument, buildMounts(alloc, &specs, null));
 }
 
 const TestArgs = struct {
@@ -558,7 +585,7 @@ test "run options keep process overrides separate from container names" {
     var resolved = try resolveRunCommand(std.testing.allocator, &flags, &img);
     defer resolved.args.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("/bin/sh", resolved.command);
-    var saved = try buildSavedRunConfig(std.testing.allocator, &flags, &img, &resolved);
+    var saved = try buildSavedRunConfig(std.testing.allocator, &flags, &img, &resolved, null);
     defer saved.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("1000:1000", saved.user.?);
     try std.testing.expectEqualStrings("/app", saved.working_dir);
@@ -651,7 +678,7 @@ test "saved run configuration inherits the image user and working directory" {
     const img: image_cmds.ImageResolution = .{ .rootfs = "/rootfs", .user = "app:staff", .working_dir = "/work", .default_cmd = &.{ "echo", "hello" } };
     var resolved = try resolveRunCommand(alloc, &flags, &img);
     defer resolved.args.deinit(alloc);
-    const saved = try buildSavedRunConfig(alloc, &flags, &img, &resolved);
+    const saved = try buildSavedRunConfig(alloc, &flags, &img, &resolved, null);
     defer saved.deinit(alloc);
     try std.testing.expectEqualStrings("app:staff", saved.user.?);
     try std.testing.expectEqualStrings("/work", saved.working_dir);

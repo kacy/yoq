@@ -41,6 +41,10 @@ pub const CommandSpec = struct {
 };
 
 pub const command_specs = [_]CommandSpec{
+    .{ .name = "save", .group = .image, .usage = "save [-o PATH] <image>...", .description = "write an oci image archive", .handler = image_cmds.save },
+    .{ .name = "load", .group = .image, .usage = "load [-i PATH]", .description = "load an oci image archive", .handler = image_cmds.load },
+    .{ .name = "volume", .group = .runtime, .usage = "volume <create|ls|inspect|rm>", .description = "manage local container volumes", .handler = @import("../runtime/cli/volume_command.zig").volume },
+    .{ .name = "__init-volumes", .group = .runtime, .usage = "__init-volumes", .description = "internal volume initializer", .handler = @import("../runtime/container/volume_init.zig").initVolumes, .hidden = true },
     .{ .name = "container", .group = .runtime, .usage = "container <command>", .description = "manage or inspect local containers", .handler = container_manage.containerCommand },
     .{ .name = "create", .group = .runtime, .usage = "create [opts] <image|rootfs> [cmd]", .description = "create a stopped container", .handler = @import("../runtime/cli/container/run_command.zig").create },
     .{ .name = "start", .group = .runtime, .usage = "start <id|name>", .description = "start an existing container", .handler = container_manage.start },
