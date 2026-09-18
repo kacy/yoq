@@ -88,12 +88,12 @@ pub const PullResult = struct {
     total_size: u64,
     /// descriptors borrow the retained manifest and remain valid until deinit.
     layers: []const spec.Descriptor = &.{},
-    parsed_manifest: ?std.json.Parsed(spec.Manifest) = null,
+    parsed_manifest: ?spec.ParseResult(spec.Manifest) = null,
 
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *PullResult) void {
-        if (self.parsed_manifest) |parsed| parsed.deinit();
+        if (self.parsed_manifest) |*parsed| parsed.deinit();
         self.alloc.free(self.manifest_bytes);
         self.alloc.free(self.config_bytes);
         for (self.layer_digests) |digest| self.alloc.free(digest);
@@ -152,4 +152,31 @@ pub fn summarizeUrl(url: []const u8, buf: *[256]u8) []const u8 {
 pub fn authHeaderValue(token: Token, buf: *[8192]u8) []const u8 {
     if (token.value.len == 0) return "";
     return std.fmt.bufPrint(buf, "{s} {s}", .{ if (token.kind == .bearer) "Bearer" else "Basic", token.value }) catch "";
+}
+
+test "registry pull result owns layer descriptors until deinit" {
+    const alloc = std.testing.allocator;
+    var result = result: {
+        const bytes = try alloc.dupe(u8,
+            \\{"schemaVersion":2,"config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:config","size":2},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+zstd","digest":"sha256:layer","size":4096}]}
+        );
+        errdefer alloc.free(bytes);
+        var parsed = try spec.parseManifest(alloc, bytes);
+        errdefer parsed.deinit();
+        const config = try alloc.dupe(u8, "{}");
+        break :result PullResult{
+            .manifest_digest = "",
+            .manifest_bytes = bytes,
+            .config_bytes = config,
+            .layer_digests = &.{},
+            .total_size = 4096,
+            .layers = parsed.value.layers,
+            .parsed_manifest = parsed,
+            .alloc = alloc,
+        };
+    };
+    defer result.deinit();
+    try std.testing.expectEqualStrings(spec.media_type.oci_layer_zstd, result.layers[0].mediaType);
+    try std.testing.expectEqualStrings("sha256:layer", result.layers[0].digest);
+    try std.testing.expectEqual(@as(u64, 4096), result.layers[0].size);
 }

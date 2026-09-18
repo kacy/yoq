@@ -88,9 +88,13 @@ fn authenticateReferenceInner(alloc: std.mem.Allocator, client: *std.http.Client
 
 fn buildTokenUrl(buffer: []u8, challenge: common.AuthChallenge, repository: []const u8, scope: []const u8) common.AuthError![]const u8 {
     var writer = std.Io.Writer.fixed(buffer);
-    writer.print("{s}{s}service=", .{ challenge.realm, if (std.mem.indexOfScalar(u8, challenge.realm, '?') != null) "&" else "?" }) catch return error.AuthFailed;
-    std.Uri.Component.percentEncode(&writer, challenge.service, queryByte) catch return error.AuthFailed;
-    writer.writeAll("&scope=repository%3A") catch return error.AuthFailed;
+    writer.print("{s}{s}", .{ challenge.realm, if (std.mem.indexOfScalar(u8, challenge.realm, '?') != null) "&" else "?" }) catch return error.AuthFailed;
+    if (challenge.service.len > 0) {
+        writer.writeAll("service=") catch return error.AuthFailed;
+        std.Uri.Component.percentEncode(&writer, challenge.service, queryByte) catch return error.AuthFailed;
+        writer.writeByte('&') catch return error.AuthFailed;
+    }
+    writer.writeAll("scope=repository%3A") catch return error.AuthFailed;
     std.Uri.Component.percentEncode(&writer, repository, queryByte) catch return error.AuthFailed;
     writer.writeAll("%3A") catch return error.AuthFailed;
     std.Uri.Component.percentEncode(&writer, scope, queryByte) catch return error.AuthFailed;
@@ -230,6 +234,8 @@ test "registry token query preserves realm parameters and escapes repository sco
     var buffer: [512]u8 = undefined;
     const url = try buildTokenUrl(&buffer, .{ .realm = "https://auth.example/token?existing=1", .service = "registry&other=bad" }, "team/image", "push,pull");
     try std.testing.expectEqualStrings("https://auth.example/token?existing=1&service=registry%26other%3Dbad&scope=repository%3Ateam%2Fimage%3Apush%2Cpull", url);
+    const no_service = try buildTokenUrl(&buffer, .{ .realm = "https://auth.example/token", .service = "" }, "team/image", "pull");
+    try std.testing.expectEqualStrings("https://auth.example/token?scope=repository%3Ateam%2Fimage%3Apull", no_service);
 }
 
 test "registry authentication deadline cancels a stalled token response" {
@@ -266,6 +272,8 @@ test "registry token exchange sends scoped basic credentials" {
     try std.testing.expect(std.mem.startsWith(u8, request, "GET /token?scope=repository%3Aprivate%3Apull HTTP/1.1\r\n"));
     const auth_value = @import("../../api/http.zig").findHeaderValue(request, "Authorization") orelse return error.MissingAuthorization;
     try std.testing.expectEqualStrings("Basic dXNlcjpwYXNz", auth_value);
+    const encoding = @import("../../api/http.zig").findHeaderValue(request, "Accept-Encoding") orelse return error.MissingEncoding;
+    try std.testing.expectEqualStrings("identity", encoding);
 }
 
 test "registry token redirect never forwards credentials to its target" {

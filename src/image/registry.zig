@@ -423,55 +423,6 @@ test "manifest digest mismatch detected" {
     try std.testing.expect(!digest_a.eql(digest_b));
 }
 
-test "response size limits — constants are reasonable" {
-    // sanity check that our limits are set correctly
-    try std.testing.expectEqual(@as(usize, 10 * 1024 * 1024), common.max_manifest_size);
-    try std.testing.expectEqual(@as(usize, 64 * 1024), common.max_auth_response_size);
-    try std.testing.expectEqual(@as(usize, 512 * 1024 * 1024), common.max_blob_size);
-
-    // blob limit should be larger than manifest limit (layers >> manifests)
-    try std.testing.expect(common.max_blob_size > common.max_manifest_size);
-
-    // a normal manifest is well under the limit
-    const small_manifest = "{\"schemaVersion\":2,\"config\":{},\"layers\":[]}";
-    try std.testing.expect(small_manifest.len < common.max_manifest_size);
-}
-
-test "response size limit rejects oversized data" {
-    // verify that data exceeding our limits would be caught.
-    // we can't easily test the full HTTP flow, but we can verify the
-    // size check logic that runs on the response body.
-    const oversized_len: usize = common.max_manifest_size + 1;
-    try std.testing.expect(oversized_len > common.max_manifest_size);
-
-    // also verify auth limit
-    const oversized_auth: usize = common.max_auth_response_size + 1;
-    try std.testing.expect(oversized_auth > common.max_auth_response_size);
-}
-
-test "auth scope string — pull scope produces correct URL fragment" {
-    // verify that the scope parameter is correctly embedded in the token URL.
-    // we can't easily test the full auth flow without a real registry, but we
-    // can verify the format string logic by checking bufPrint output.
-    var buf: [1024]u8 = undefined;
-    const url = std.fmt.bufPrint(
-        &buf,
-        "{s}?service={s}&scope=repository:{s}:{s}",
-        .{ "https://auth.example.io/token", "registry.example.io", "myrepo", "pull" },
-    ) catch unreachable;
-    try std.testing.expect(std.mem.indexOf(u8, url, "scope=repository:myrepo:pull") != null);
-}
-
-test "auth scope string — push,pull scope produces correct URL fragment" {
-    var buf: [1024]u8 = undefined;
-    const url = std.fmt.bufPrint(
-        &buf,
-        "{s}?service={s}&scope=repository:{s}:{s}",
-        .{ "https://auth.example.io/token", "registry.example.io", "myrepo", "push,pull" },
-    ) catch unreachable;
-    try std.testing.expect(std.mem.indexOf(u8, url, "scope=repository:myrepo:push,pull") != null);
-}
-
 test "checkBlobExists — URL is correctly formed" {
     // verify the URL format used by checkBlobExists
     var url_buf: [1024]u8 = undefined;

@@ -44,7 +44,7 @@ test "layer compression preserves contents and modes across raw gzip and zstd" {
         var buffer: [64]u8 = undefined;
         try std.testing.expectEqualStrings("hello layer\n", try directory.readFile(std.testing.io, "hello.txt", &buffer));
         const stat = try directory.statFile(std.testing.io, "hello.txt", .{});
-        try std.testing.expectEqual(@as(u32, 0o640), stat.permissions.toMode());
+        try std.testing.expectEqual(@as(u32, 0o640), stat.permissions.toMode() & 0o7777);
         const length = try directory.readLink(std.testing.io, "hello.link", &buffer);
         try std.testing.expectEqualStrings("hello.txt", buffer[0..length]);
         const cached = try layer.extractLayer(alloc, descriptor.digest);

@@ -15,8 +15,9 @@ pub const Credentials = struct {
 // a separate token service must be explicitly trusted by its registry entry.
 pub fn load(alloc: std.mem.Allocator, host: []const u8) error{ AuthFailed, OutOfMemory }!?Credentials {
     var path_buffer: [4096]u8 = undefined;
-    const path = if (std.c.getenv("DOCKER_CONFIG")) |directory|
-        std.fmt.bufPrint(&path_buffer, "{s}/config.json", .{std.mem.span(directory)}) catch return error.AuthFailed
+    const docker_config = if (std.c.getenv("DOCKER_CONFIG")) |value| std.mem.span(value) else "";
+    const path = if (docker_config.len > 0)
+        std.fmt.bufPrint(&path_buffer, "{s}/config.json", .{docker_config}) catch return error.AuthFailed
     else if (std.c.getenv("HOME")) |home|
         std.fmt.bufPrint(&path_buffer, "{s}/.docker/config.json", .{std.mem.span(home)}) catch return error.AuthFailed
     else
@@ -34,7 +35,10 @@ pub fn load(alloc: std.mem.Allocator, host: []const u8) error{ AuthFailed, OutOf
 }
 
 fn parse(alloc: std.mem.Allocator, bytes: []const u8, host: []const u8) error{ AuthFailed, OutOfMemory }!?Credentials {
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, bytes, .{}) catch return error.AuthFailed;
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, bytes, .{}) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.AuthFailed,
+    };
     defer parsed.deinit();
     if (parsed.value != .object) return error.AuthFailed;
     const auths = parsed.value.object.get("auths") orelse return null;
@@ -110,4 +114,16 @@ test "registry credentials reject invalid encodings and recognize the docker log
     defer credentials.deinit(alloc);
     try std.testing.expect(permitsTokenUrl("registry-1.docker.io", credentials, try std.Uri.parse("https://auth.docker.io/token")));
     try std.testing.expect(!permitsTokenUrl("registry-1.docker.io", credentials, try std.Uri.parse("https://auth.docker.io.evil/token")));
+}
+
+test "registry credentials release partial allocations" {
+    const Fixture = struct {
+        fn load(alloc: std.mem.Allocator) !void {
+            const credentials = (try parse(alloc, "{\"auths\":{\"registry.example\":{\"auth\":\"dXNlcjpwYXNz\",\"yoq_token_origin\":\"https://auth.example\"}}}", "registry.example")) orelse return error.MissingCredentials;
+            defer credentials.deinit(alloc);
+            try std.testing.expectEqualStrings("dXNlcjpwYXNz", credentials.encoded_auth);
+            try std.testing.expectEqualStrings("https://auth.example", credentials.token_origin.?);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Fixture.load, .{});
 }
