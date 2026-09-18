@@ -18,13 +18,13 @@ pub const CaptureOptions = struct {
 
 pub fn capture(alloc: std.mem.Allocator, options: CaptureOptions) !databases.Boundary {
     try manifest.validateSetId(options.set_id);
-    var root = try files.openDir(options.data_dir);
+    const root = try files.openDir(options.data_dir);
     defer root.close(io);
     const cluster_path = try std.fs.path.join(alloc, &.{ options.data_dir, "cluster" });
     defer alloc.free(cluster_path);
-    var cluster = try files.openDir(cluster_path);
+    const cluster = try files.openDir(cluster_path);
     defer cluster.close(io);
-    var ownership = try DataLock.acquireAt(cluster);
+    const ownership = try DataLock.acquireAt(cluster);
     defer ownership.release();
     var raft = try databases.open(alloc, cluster, "raft.db", true);
     defer raft.deinit();
@@ -52,7 +52,7 @@ pub fn capture(alloc: std.mem.Allocator, options: CaptureOptions) !databases.Bou
     if (files.copy(root, "secrets.key", stage.dir, "secrets.key", true, 32)) |digest| {
         add(&entries, &digests, &count, "secrets.key", digest);
     } else |err| if (err != error.FileNotFound) return err;
-    var token_dir = try files.openDir(std.fs.path.dirname(options.join_token_file) orelse ".");
+    const token_dir = try files.openDir(std.fs.path.dirname(options.join_token_file) orelse ".");
     defer token_dir.close(io);
     add(&entries, &digests, &count, "join_token", try files.copy(token_dir, std.fs.path.basename(options.join_token_file), stage.dir, "join_token", true, 4096));
     if (boundary.snapshot_index > 0) {
@@ -69,7 +69,15 @@ pub fn capture(alloc: std.mem.Allocator, options: CaptureOptions) !databases.Bou
         std.crypto.secureZero(u8, token);
         alloc.free(token);
     }
-    const fingerprint = manifest.fingerprint(boundary.voters, token);
+    const identity = if (boundary.last_applied < boundary.snapshot_index) blk: {
+        const data = try files.readSmall(alloc, stage.dir, "snapshot.dat", snapshot.max_snapshot_file_size);
+        defer alloc.free(data);
+        var selected = try snapshot.PreparedSnapshot.init(data);
+        defer selected.deinit();
+        var db = sqlite.Db{ .db = selected.db.? };
+        break :blk try validateJoinKey(alloc, &db, token);
+    } else try validateJoinKey(alloc, &state, token);
+    const fingerprint = manifest.fingerprint(boundary.voters, token, &identity);
     const description = manifest.Manifest.fromBoundary(boundary, entries[0..count], options.set_id, &fingerprint);
     // validation may migrate its input. use a second private copy so the
     // published hashes still describe the exact captured database bytes.
@@ -89,7 +97,7 @@ fn add(entries: *[7]manifest.Entry, digests: *[7]files.Digest, count: *usize, na
 }
 
 pub fn verify(alloc: std.mem.Allocator, source: []const u8) !databases.Boundary {
-    var input = try files.openDir(source);
+    const input = try files.openDir(source);
     defer input.close(io);
     const description = try manifest.read(alloc, input);
     defer description.deinit();
@@ -109,7 +117,7 @@ pub const RestoreOptions = struct {
 };
 
 pub fn restore(alloc: std.mem.Allocator, options: RestoreOptions) !databases.Boundary {
-    var input = try files.openDir(options.source);
+    const input = try files.openDir(options.source);
     defer input.close(io);
     const description = try manifest.read(alloc, input);
     defer description.deinit();
@@ -118,7 +126,7 @@ pub fn restore(alloc: std.mem.Allocator, options: RestoreOptions) !databases.Bou
     var stage = try files.Stage.init(options.destination);
     defer stage.deinit();
     try stage.dir.createDir(io, "cluster", .fromMode(0o700));
-    var cluster = try stage.dir.openDir(io, "cluster", .{ .iterate = true });
+    const cluster = try stage.dir.openDir(io, "cluster", .{ .iterate = true });
     defer cluster.close(io);
     // first validate a flat private copy. restoring relocates only allowlisted
     // files after all hashes, credentials, schemas and boundaries agree.
@@ -161,13 +169,34 @@ fn validateContents(alloc: std.mem.Allocator, dir: std.Io.Dir, description: mani
     var state = try databases.open(alloc, dir, "state.db", true);
     defer state.deinit();
     try databases.validateState(&state);
-    const boundary = try databases.readBoundary(alloc, &raft, &state);
+    var boundary = try databases.readBoundary(alloc, &raft, &state);
     errdefer boundary.deinit(alloc);
     if (!description.matches(boundary)) return error.BoundaryMismatch;
     var validator = try @import("../state_machine/command.zig").Validator.init();
     defer validator.deinit();
     var machine = @import("../state_machine.zig").StateMachine{ .db = state, .last_applied = boundary.last_applied, .validator = validator };
     var log = @import("../log.zig").Log{ .db = raft };
+    if (description.contains("snapshot.dat")) {
+        const bytes = try files.readSmall(alloc, dir, "snapshot.dat", snapshot.max_snapshot_file_size);
+        defer alloc.free(bytes);
+        _ = try snapshot.parseSnapshotMeta(bytes);
+        try files.write(dir, "snapshot-check.db", bytes[snapshot.snapshot_header_size..]);
+        defer dir.deleteFile(io, "snapshot-check.db") catch {};
+        {
+            var snapshot_db = try databases.open(alloc, dir, "snapshot-check.db", false);
+            defer snapshot_db.deinit();
+            try @import("../../state/backup_schema.zig").validateExistingTriggers(snapshot_db.db);
+        }
+        var prepared = try snapshot.PreparedSnapshot.init(bytes);
+        defer prepared.deinit();
+        if (prepared.meta.last_included_index != boundary.snapshot_index or prepared.meta.last_included_term != boundary.snapshot_term or
+            (boundary.snapshot_size != 0 and prepared.meta.data_len != boundary.snapshot_size)) return error.BoundaryMismatch;
+        try @import("../../state/backup_schema.zig").validate(prepared.db.?);
+        if (boundary.last_applied < boundary.snapshot_index) {
+            try prepared.restore(&machine);
+            boundary.last_applied = machine.last_applied;
+        }
+    }
     try machine.validateAppliedHistory(&log, alloc);
     try validateSecrets(alloc, dir, description, &state);
     // schema.init enables wal; collapse every candidate database before the
@@ -192,26 +221,9 @@ fn validateContents(alloc: std.mem.Allocator, dir: std.Io.Dir, description: mani
         std.crypto.secureZero(u8, join);
         alloc.free(join);
     }
-    const fingerprint = manifest.fingerprint(boundary.voters, join);
+    const identity = try validateJoinKey(alloc, &state, join);
+    const fingerprint = manifest.fingerprint(boundary.voters, join, &identity);
     if (!std.mem.eql(u8, description.cluster_fingerprint, &fingerprint)) return error.ClusterFingerprintMismatch;
-    try validateJoinKey(alloc, &state, join);
-    if (description.contains("snapshot.dat")) {
-        const bytes = try files.readSmall(alloc, dir, "snapshot.dat", snapshot.max_snapshot_file_size);
-        defer alloc.free(bytes);
-        _ = try snapshot.parseSnapshotMeta(bytes);
-        try files.write(dir, "snapshot-check.db", bytes[snapshot.snapshot_header_size..]);
-        defer dir.deleteFile(io, "snapshot-check.db") catch {};
-        {
-            var snapshot_db = try databases.open(alloc, dir, "snapshot-check.db", false);
-            defer snapshot_db.deinit();
-            try @import("../../state/backup_schema.zig").validateExistingTriggers(snapshot_db.db);
-        }
-        var prepared = try snapshot.PreparedSnapshot.init(bytes);
-        defer prepared.deinit();
-        if (prepared.meta.last_included_index != boundary.snapshot_index or prepared.meta.last_included_term != boundary.snapshot_term or
-            (boundary.snapshot_size != 0 and prepared.meta.data_len != boundary.snapshot_size)) return error.BoundaryMismatch;
-        try @import("../../state/backup_schema.zig").validate(prepared.db.?);
-    }
     return boundary;
 }
 
@@ -254,8 +266,8 @@ pub fn readJoinToken(alloc: std.mem.Allocator, dir: std.Io.Dir, name: []const u8
     return alloc.dupe(u8, token);
 }
 
-fn validateJoinKey(alloc: std.mem.Allocator, db: *sqlite.Db, token: []const u8) !void {
-    const record = (try @import("../../state/store/cluster_ca.zig").getClusterCaInDb(db, alloc)) orelse return;
+fn validateJoinKey(alloc: std.mem.Allocator, db: *sqlite.Db, token: []const u8) ![32]u8 {
+    const record = (try @import("../../state/store/cluster_ca.zig").getClusterCaInDb(db, alloc)) orelse return error.ClusterIdentityUnavailable;
     defer record.deinit(alloc);
     const secrets = @import("../../state/secrets.zig");
     if (record.key_nonce.len != secrets.nonce_length or record.key_tag.len != secrets.tag_length) return error.InvalidJoinToken;
@@ -268,6 +280,23 @@ fn validateJoinKey(alloc: std.mem.Allocator, db: *sqlite.Db, token: []const u8) 
         alloc.free(plaintext);
     }
     if (plaintext.len != 32) return error.InvalidJoinToken;
+    const P256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+    var secret = P256.SecretKey.fromBytes(plaintext[0..32].*) catch return error.InvalidClusterCa;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&secret));
+    var pair = P256.KeyPair.fromSecretKey(secret) catch return error.InvalidClusterCa;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&pair.secret_key));
+    const der = @import("../../tls/pem.zig").parseCertDer(alloc, record.cert_pem) catch return error.InvalidClusterCa;
+    defer alloc.free(der);
+    const x509 = @import("../../tls/x509_verify.zig");
+    var sans: [x509.max_san_uris][]const u8 = undefined;
+    const parsed = x509.parseDer(der, &sans) catch return error.InvalidClusterCa;
+    if (!std.mem.eql(u8, parsed.public_key_point, &pair.public_key.toUncompressedSec1())) return error.InvalidClusterCa;
+    // authenticate the self-signed identity without rejecting an old backup
+    // solely because its CA expired since capture. expiry remains operational.
+    x509.verifyLeafAgainstCa(alloc, record.cert_pem, record.cert_pem, null, parsed.not_before) catch return error.InvalidClusterCa;
+    var identity: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(der, &identity, .{});
+    return identity;
 }
 
 /// verify every fixed voter once before any node is restored. the set id records
@@ -280,7 +309,7 @@ pub fn verifySet(alloc: std.mem.Allocator, sources: []const []const u8, set_id: 
     var expected_fingerprint: [64]u8 = undefined;
     var members: [64]u64 = undefined;
     for (sources, 0..) |source, i| {
-        var dir = try files.openDir(source);
+        const dir = try files.openDir(source);
         defer dir.close(io);
         const description = try manifest.read(alloc, dir);
         defer description.deinit();

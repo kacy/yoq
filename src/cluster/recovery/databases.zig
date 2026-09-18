@@ -33,12 +33,12 @@ pub fn lock(db: *sqlite.Db) !void {
 }
 
 pub fn open(alloc: std.mem.Allocator, dir: std.Io.Dir, name: []const u8, write: bool) !sqlite.Db {
-    var file = try files.openRegular(dir, name, false);
+    const file = try files.openRegular(dir, name, false);
     defer file.close(io);
     for ([_][]const u8{ "-wal", "-shm", "-journal" }) |suffix| {
         var sidecar_buf: [256]u8 = undefined;
         const sidecar = try std.fmt.bufPrint(&sidecar_buf, "{s}{s}", .{ name, suffix });
-        var existing = files.openRegular(dir, sidecar, false) catch |err| switch (err) {
+        const existing = files.openRegular(dir, sidecar, false) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
@@ -57,7 +57,7 @@ pub fn copy(alloc: std.mem.Allocator, source: *sqlite.Db, destination: std.Io.Di
     const pages = (try source.one(struct { count: i64 }, "PRAGMA page_count;", .{}, .{})).?.count;
     const page_size = (try source.one(struct { size: i64 }, "PRAGMA page_size;", .{}, .{})).?.size;
     if (pages < 0 or page_size <= 0 or @as(u64, @intCast(pages)) > files.max_database_size / @as(u64, @intCast(page_size))) return error.FileTooLarge;
-    var file = try files.create(destination, name);
+    const file = try files.create(destination, name);
     file.close(io);
     errdefer destination.deleteFile(io, name) catch {};
     {
@@ -71,7 +71,7 @@ pub fn copy(alloc: std.mem.Allocator, source: *sqlite.Db, destination: std.Io.Di
         try target.exec("PRAGMA journal_mode=DELETE;", .{}, .{});
         try integrity(&target);
     }
-    var output = try files.openRegular(destination, name, true);
+    const output = try files.openRegular(destination, name, true);
     defer output.close(io);
     try output.sync(io);
     return files.digest(destination, name, files.max_database_size);
@@ -151,7 +151,7 @@ pub fn readBoundary(alloc: std.mem.Allocator, raft: *sqlite.Db, state: *sqlite.D
         if (snapshot.index == std.math.maxInt(i64) or suffix.min.? != snapshot.index + 1 or suffix.max.? - suffix.min.? + 1 != suffix.count or suffix.invalid != 0) return error.InvalidLogBoundary;
         last_log_index = std.math.cast(u64, suffix.max.?) orelse return error.InvalidLogBoundary;
     }
-    if (last_applied < snapshot_index or last_applied > last_log_index) return error.InvalidStateBoundary;
+    if (last_applied > last_log_index) return error.InvalidStateBoundary;
     return .{ .node_id = node_id, .voters = membership.voters, .current_term = term, .last_applied = last_applied, .last_log_index = last_log_index, .snapshot_index = snapshot_index, .snapshot_term = snapshot_term, .snapshot_size = snapshot_size };
 }
 

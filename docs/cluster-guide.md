@@ -469,7 +469,7 @@ for a shorter end-to-end checklist, see [golden-path.md](golden-path.md).
 
 ### offline cluster backup and restore
 
-`yoq cluster backup` captures one stopped voter. stop **every voter and agent before the first capture**, and keep them stopped until every bundle is complete. use a new set ID for each coordinated stop. the command cannot prove that another host has stopped; taking bundles while any voter is running is unsupported.
+`yoq cluster backup` captures one stopped voter. stop **every voter and agent before the first capture**, and keep them stopped until every bundle is complete. wait for every voter to apply the cluster CA bootstrap before stopping them; a voter without that persisted identity cannot be captured. use a new set ID for each coordinated stop. the command cannot prove that another host has stopped; taking bundles while any voter is running is unsupported.
 
 on each voter, use the same set ID and a different destination. the join-token file must contain the existing cluster join token and have owner-only permissions:
 
@@ -492,7 +492,7 @@ sudo -H "$(command -v yoq)" cluster verify-set --set maintenance-2026 \
   /srv/backups/maintenance-2026-voter-3
 ```
 
-verification checks file sizes and hashes, database integrity and schema compatibility, decryption of stored secrets, retained command history, snapshot boundaries, and one bundle for each fixed voter. the set ID and a fingerprint derived from the join token and voter IDs must agree. `cluster verify <bundle>` checks a single voter but does not establish that the complete set is available. neither command authenticates an untrusted backup; use bundles from storage you control.
+verification checks file sizes and hashes, database integrity and schema compatibility, decryption of stored secrets, retained command history, snapshot boundaries, and one bundle for each fixed voter. the set ID and a fingerprint derived from the join token, voter IDs, and replicated CA identity must agree. `cluster verify <bundle>` checks a single voter but does not establish that the complete set is available. neither command authenticates an untrusted backup; use bundles from storage you control.
 
 restore each bundle to its original voter ID and a fresh data root. supply the fingerprint printed by `verify-set`, the same set ID, and the full voter list in ascending order:
 
@@ -503,7 +503,7 @@ sudo -H "$(command -v yoq)" cluster restore /srv/backups/maintenance-2026-voter-
   --cluster <verified-fingerprint>
 ```
 
-create the destination's parent directory first. restore refuses an existing destination, including a symlink. it keeps the original term, vote, log, snapshot, and applied boundary; it never resets a voter to force an election. do not mix restored voters with live voters or reuse an old set ID for a later capture.
+create the destination's parent directory first. restore refuses an existing destination, including a symlink. it keeps the original term, vote, log, and snapshot. if a crash selected a snapshot before restoring state, verification completes that restore only in a private copy; it never resets a voter to force an election. do not mix restored voters with live voters or reuse an old set ID for a later capture.
 
 start every restored voter with the original IDs and membership. the server uses `$HOME/.local/share/yoq`; set `HOME` if the restored root is elsewhere. peer addresses may change, but the voter IDs must stay fixed. `--token-file` reads the recovered private token without putting its contents in the command line:
 

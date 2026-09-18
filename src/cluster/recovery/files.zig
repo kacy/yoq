@@ -48,9 +48,9 @@ pub fn create(dir: std.Io.Dir, name: []const u8) !std.Io.File {
 }
 
 pub fn copy(source: std.Io.Dir, name: []const u8, destination: std.Io.Dir, destination_name: []const u8, private_source: bool, limit: u64) !Digest {
-    var input = try openRegular(source, name, private_source);
+    const input = try openRegular(source, name, private_source);
     defer input.close(io);
-    var output = try create(destination, destination_name);
+    const output = try create(destination, destination_name);
     defer output.close(io);
     errdefer destination.deleteFile(io, destination_name) catch {};
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
@@ -71,7 +71,7 @@ pub fn copy(source: std.Io.Dir, name: []const u8, destination: std.Io.Dir, desti
 }
 
 pub fn digest(dir: std.Io.Dir, name: []const u8, limit: u64) !Digest {
-    var input = try openRegular(dir, name, true);
+    const input = try openRegular(dir, name, true);
     defer input.close(io);
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     var size: u64 = 0;
@@ -89,14 +89,14 @@ pub fn digest(dir: std.Io.Dir, name: []const u8, limit: u64) !Digest {
 }
 
 pub fn readSmall(alloc: std.mem.Allocator, dir: std.Io.Dir, name: []const u8, limit: usize) ![]u8 {
-    var input = try openRegular(dir, name, true);
+    const input = try openRegular(dir, name, true);
     defer input.close(io);
     var reader = input.reader(io, &.{});
     return reader.interface.allocRemaining(alloc, .limited(limit));
 }
 
 pub fn write(dir: std.Io.Dir, name: []const u8, data: []const u8) !void {
-    var file = try create(dir, name);
+    const file = try create(dir, name);
     defer file.close(io);
     try file.writeStreamingAll(io, data);
     try file.sync(io);
@@ -117,7 +117,7 @@ pub const Stage = struct {
     pub fn init(destination: []const u8) !Stage {
         const name = std.fs.path.basename(destination);
         if (name.len == 0 or name.len >= 256 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidDestination;
-        var parent = try openDir(std.fs.path.dirname(destination) orelse ".");
+        const parent = try openDir(std.fs.path.dirname(destination) orelse ".");
         errdefer parent.close(io);
         var random: [16]u8 = undefined;
         platform.randomBytes(&random);
@@ -125,7 +125,7 @@ pub const Stage = struct {
         const staging_name = try std.fmt.bufPrint(temporary[0..47], ".yoq-recovery-{s}", .{std.fmt.bytesToHex(random, .lower)});
         try parent.createDir(io, staging_name, .fromMode(0o700));
         errdefer parent.deleteTree(io, staging_name) catch {};
-        var dir = try parent.openDir(io, staging_name, .{ .iterate = true });
+        const dir = try parent.openDir(io, staging_name, .{ .iterate = true });
         errdefer dir.close(io);
         var stage = Stage{ .parent = parent, .dir = dir, .temporary = temporary, .final_name = undefined, .final_len = name.len };
         @memcpy(stage.final_name[0..name.len], name);

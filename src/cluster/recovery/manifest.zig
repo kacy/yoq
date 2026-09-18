@@ -88,10 +88,11 @@ pub fn validateSetId(id: []const u8) !void {
     for (id) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidSetId;
 }
 
-pub fn fingerprint(voters: []const u8, token: []const u8) [64]u8 {
+pub fn fingerprint(voters: []const u8, token: []const u8, ca_identity: *const [32]u8) [64]u8 {
     var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(token);
     hmac.update("yoq-offline-cluster-v1:");
     hmac.update(voters);
+    hmac.update(ca_identity);
     var hash: [32]u8 = undefined;
     hmac.final(&hash);
     return std.fmt.bytesToHex(hash, .lower);

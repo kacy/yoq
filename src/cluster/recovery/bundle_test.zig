@@ -17,9 +17,35 @@ fn joinPath(root: []const u8, name: []const u8) ![:0]u8 {
     return std.fmt.allocPrintSentinel(alloc, "{s}/{s}", .{ root, name }, 0);
 }
 
-fn fixture(root: []const u8, node_id: u64, selected_snapshot: bool) !void {
+const Ca = struct {
+    sql: []u8,
+    identity: [32]u8,
+
+    fn init() !Ca {
+        const minted = try @import("../../tls/x509_gen.zig").generateCa(io, alloc, "recovery-test-ca", 1700000000, 2000000000);
+        defer alloc.free(minted.cert_pem);
+        var raw = minted.key_pair.secret_key.toBytes();
+        defer std.crypto.secureZero(u8, &raw);
+        var key: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(join_token, &key, .{});
+        const encrypted = try @import("../../state/secrets.zig").encrypt(alloc, &raw, key);
+        defer alloc.free(encrypted.ciphertext);
+        const sql = try @import("../../state/store/cluster_ca.zig").buildInsertSql(alloc, minted.cert_pem, encrypted.ciphertext, &encrypted.nonce, &encrypted.tag, 1700000000, 2000000000);
+        const der = try @import("../../tls/pem.zig").parseCertDer(alloc, minted.cert_pem);
+        defer alloc.free(der);
+        var identity: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(der, &identity, .{});
+        return .{ .sql = sql, .identity = identity };
+    }
+
+    fn deinit(self: Ca) void {
+        alloc.free(self.sql);
+    }
+};
+
+fn fixture(root: []const u8, node_id: u64, selected_snapshot: bool, ca: Ca) !void {
     try std.Io.Dir.cwd().createDir(io, root, .fromMode(0o700));
-    var dir = try files.openDir(root);
+    const dir = try files.openDir(root);
     defer dir.close(io);
     try dir.createDir(io, "cluster", .fromMode(0o700));
     try files.write(dir, "api_token", "a" ** 64);
@@ -42,7 +68,9 @@ fn fixture(root: []const u8, node_id: u64, selected_snapshot: bool) !void {
     defer alloc.free(state_path);
     var state = try StateMachine.init(state_path);
     defer state.deinit();
-    const entry = @import("../raft_types.zig").LogEntry{ .index = 1, .term = 3, .data = "INSERT INTO agents (id,address,status,last_heartbeat,registered_at) VALUES ('joined-worker','127.0.0.1','active',1,1);" };
+    const command = try std.fmt.allocPrint(alloc, "{s}INSERT INTO agents (id,address,status,last_heartbeat,registered_at) VALUES ('joined-worker','127.0.0.1','active',1,1);", .{ca.sql});
+    defer alloc.free(command);
+    const entry = @import("../raft_types.zig").LogEntry{ .index = 1, .term = 3, .data = command };
     try log.append(entry);
     state.apply(entry);
     try std.testing.expectEqual(@as(u64, 1), state.last_applied);
@@ -79,6 +107,8 @@ fn restoreOptions(source: []const u8, destination: []const u8, node_id: u64, fin
 test "cluster bundle restores three fixed voters and elects a leader with existing state" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
+    const ca = try Ca.init();
+    defer ca.deinit();
     const base = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(base);
     var roots: [3][:0]u8 = undefined;
@@ -95,11 +125,11 @@ test "cluster bundle restores three fixed voters and elects a leader with existi
         bundles[i] = try std.fmt.allocPrint(alloc, "{s}/bundle-{d}", .{ base, i + 1 });
         restored[i] = try std.fmt.allocPrintSentinel(alloc, "{s}/restored-{d}", .{ base, i + 1 }, 0);
         initialized += 1;
-        try fixture(roots[i], i + 1, true);
+        try fixture(roots[i], i + 1, true, ca);
         try capture(roots[i], bundles[i]);
     }
     const fingerprint = try bundle.verifySet(alloc, &bundles, set_id);
-    try std.testing.expectEqualSlices(u8, &manifest.fingerprint(voters, join_token), &fingerprint);
+    try std.testing.expectEqualSlices(u8, &manifest.fingerprint(voters, join_token, &ca.identity), &fingerprint);
     var logs: [3]Log = undefined;
     var log_count: usize = 0;
     defer for (logs[0..log_count]) |*log| log.deinit();
@@ -154,13 +184,15 @@ test "cluster bundle restores three fixed voters and elects a leader with existi
 test "cluster bundle rejects active sources changed membership and existing destinations" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
+    const ca = try Ca.init();
+    defer ca.deinit();
     const base = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(base);
     const root = try joinPath(base, "source");
     defer alloc.free(root);
     const destination = try joinPath(base, "bundle");
     defer alloc.free(destination);
-    try fixture(root, 1, false);
+    try fixture(root, 1, false, ca);
     const cluster_path = try joinPath(root, "cluster");
     defer alloc.free(cluster_path);
     const lock = try @import("../data_lock.zig").Lock.acquire(cluster_path);
@@ -181,7 +213,7 @@ test "cluster bundle rejects active sources changed membership and existing dest
     try std.testing.expectError(error.DestinationExists, capture(root, destination));
     const target = try joinPath(base, "restored");
     defer alloc.free(target);
-    const fingerprint = manifest.fingerprint(voters, join_token);
+    const fingerprint = manifest.fingerprint(voters, join_token, &ca.identity);
     try std.testing.expectError(error.MembershipMismatch, bundle.restore(alloc, restoreOptions(destination, target, 2, &fingerprint)));
     var wrong_set = restoreOptions(destination, target, 1, &fingerprint);
     wrong_set.set_id = "older-backup";
@@ -196,15 +228,17 @@ test "cluster bundle rejects active sources changed membership and existing dest
 test "cluster bundle rejects corruption unsafe entries and incompatible database schemas" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
+    const ca = try Ca.init();
+    defer ca.deinit();
     const base = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(base);
     const root = try joinPath(base, "source");
     defer alloc.free(root);
     const destination = try joinPath(base, "bundle");
     defer alloc.free(destination);
-    try fixture(root, 1, false);
+    try fixture(root, 1, false, ca);
     try capture(root, destination);
-    var dir = try files.openDir(destination);
+    const dir = try files.openDir(destination);
     defer dir.close(io);
     const description = try manifest.read(alloc, dir);
     defer description.deinit();
@@ -218,7 +252,7 @@ test "cluster bundle rejects corruption unsafe entries and incompatible database
     try dir.deleteFile(io, "state.db");
     // even an updated digest cannot make an unrelated sqlite database a valid
     // cluster state database or silently manufacture its missing applied row.
-    var empty_file = try files.create(dir, "state.db");
+    const empty_file = try files.create(dir, "state.db");
     empty_file.close(io);
     {
         var empty = try databases.open(alloc, dir, "state.db", true);
@@ -226,7 +260,7 @@ test "cluster bundle rejects corruption unsafe entries and incompatible database
         try empty.exec("CREATE TABLE unrelated (id INTEGER);", .{}, .{});
     }
     const digest = try files.digest(dir, "state.db", files.max_database_size);
-    var entries = try alloc.dupe(manifest.Entry, description.value.files);
+    const entries = try alloc.dupe(manifest.Entry, description.value.files);
     defer alloc.free(entries);
     for (entries) |*entry| if (std.mem.eql(u8, entry.name, "state.db")) {
         entry.size = digest.size;
@@ -237,4 +271,100 @@ test "cluster bundle rejects corruption unsafe entries and incompatible database
     try dir.deleteFile(io, "manifest.json");
     try manifest.write(alloc, dir, modified);
     try std.testing.expectError(error.InvalidStateSchema, bundle.verify(alloc, destination));
+}
+
+test "cluster bundle finishes selected snapshot recovery only in its private copy" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const ca = try Ca.init();
+    defer ca.deinit();
+    const base = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(base);
+    const root = try joinPath(base, "source");
+    defer alloc.free(root);
+    const destination = try joinPath(base, "bundle");
+    defer alloc.free(destination);
+    try fixture(root, 1, true, ca);
+    const state_path = try joinPath(root, "cluster/state.db");
+    defer alloc.free(state_path);
+    {
+        var state = try StateMachine.init(state_path);
+        defer state.deinit();
+        try state.db.exec("DELETE FROM agents; DELETE FROM cluster_ca; UPDATE state_machine_meta SET last_applied=0;", .{}, .{});
+    }
+    const token = try joinPath(root, "join_token");
+    defer alloc.free(token);
+    const captured = try bundle.capture(alloc, .{ .data_dir = root, .destination = destination, .join_token_file = token, .set_id = set_id });
+    defer captured.deinit(alloc);
+    try std.testing.expectEqual(@as(u64, 0), captured.last_applied);
+    const verified = try bundle.verify(alloc, destination);
+    defer verified.deinit(alloc);
+    try std.testing.expectEqual(@as(u64, 1), verified.last_applied);
+    const target = try joinPath(base, "restored");
+    defer alloc.free(target);
+    const fingerprint = manifest.fingerprint(voters, join_token, &ca.identity);
+    const restored = try bundle.restore(alloc, restoreOptions(destination, target, 1, &fingerprint));
+    restored.deinit(alloc);
+    const restored_path = try joinPath(target, "cluster/state.db");
+    defer alloc.free(restored_path);
+    var state = try StateMachine.init(restored_path);
+    defer state.deinit();
+    try std.testing.expectEqual(@as(u64, 1), state.last_applied);
+    try std.testing.expectEqual(@as(i64, 1), (try state.db.one(struct { count: i64 }, "SELECT COUNT(*) FROM agents;", .{}, .{})).?.count);
+    var source = try StateMachine.init(state_path);
+    defer source.deinit();
+    try std.testing.expectEqual(@as(u64, 0), source.last_applied);
+    try std.testing.expectEqual(@as(i64, 0), (try source.db.one(struct { count: i64 }, "SELECT COUNT(*) FROM agents;", .{}, .{})).?.count);
+}
+
+test "cluster bundle rejects wrong secret keys invalid ca keys and reused token cluster identities" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const ca = try Ca.init();
+    defer ca.deinit();
+    const other_ca = try Ca.init();
+    defer other_ca.deinit();
+    const base = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(base);
+    const root = try joinPath(base, "source");
+    defer alloc.free(root);
+    const destination = try joinPath(base, "bundle");
+    defer alloc.free(destination);
+    try fixture(root, 1, false, ca);
+    const dir = try files.openDir(root);
+    defer dir.close(io);
+    try dir.deleteFile(io, "secrets.key");
+    try files.write(dir, "secrets.key", "w" ** 32);
+    try std.testing.expectError(error.InvalidSecretsKey, capture(root, destination));
+    try dir.deleteFile(io, "secrets.key");
+    try files.write(dir, "secrets.key", "k" ** 32);
+    try capture(root, destination);
+    const other_root = try joinPath(base, "other-source");
+    defer alloc.free(other_root);
+    const other_bundle = try joinPath(base, "other-bundle");
+    defer alloc.free(other_bundle);
+    try fixture(other_root, 2, false, other_ca);
+    try capture(other_root, other_bundle);
+    try std.testing.expectError(error.BackupSetMismatch, bundle.verifySet(alloc, &.{ destination, other_bundle }, set_id));
+    const state_path = try joinPath(root, "cluster/state.db");
+    defer alloc.free(state_path);
+    var derived: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(join_token, &derived, .{});
+    const encrypted = try @import("../../state/secrets.zig").encrypt(alloc, &(@as([32]u8, @splat(0))), derived);
+    defer alloc.free(encrypted.ciphertext);
+    {
+        var state = try StateMachine.init(state_path);
+        defer state.deinit();
+        const Blob = @import("sqlite").Blob;
+        try state.db.exec("UPDATE cluster_ca SET encrypted_key=?,key_nonce=?,key_tag=?;", .{}, .{ Blob{ .data = encrypted.ciphertext }, Blob{ .data = &encrypted.nonce }, Blob{ .data = &encrypted.tag } });
+    }
+    const invalid = try joinPath(base, "invalid-ca");
+    defer alloc.free(invalid);
+    try std.testing.expectError(error.InvalidClusterCa, capture(root, invalid));
+    {
+        var state = try StateMachine.init(state_path);
+        defer state.deinit();
+        try state.db.exec("DELETE FROM cluster_ca;", .{}, .{});
+    }
+    try std.testing.expectError(error.ClusterIdentityUnavailable, capture(root, invalid));
 }
