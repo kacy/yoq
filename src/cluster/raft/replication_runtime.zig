@@ -283,3 +283,78 @@ test "append entries preserves missing log reads and the batch limit" {
     try std.testing.expectEqual(@as(types.LogIndex, 3), request.entries[1].index);
     try std.testing.expectEqual(@as(types.LogIndex, 65), request.entries[63].index);
 }
+
+test "append entries retries commit notification after queue allocation failure" {
+    const Raft = @import("../raft.zig").Raft;
+    const alloc = std.testing.allocator;
+    var log = try @import("../log.zig").Log.initMemory();
+    defer log.deinit();
+    try std.testing.expect(log.setCurrentTerm(1));
+    try log.append(.{ .index = 1, .term = 1, .data = "existing" });
+    var raft = try Raft.init(alloc, 2, &.{1}, &log);
+    defer raft.deinit();
+    const request: AppendEntriesArgs = .{
+        .term = 1,
+        .leader_id = 1,
+        .prev_log_index = 1,
+        .prev_log_term = 1,
+        .entries = &.{.{ .index = 2, .term = 1, .data = "new" }},
+        .leader_commit = 2,
+    };
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    raft.alloc = failing.allocator();
+    const rejected = raft.handleAppendEntries(request);
+    raft.alloc = alloc;
+    try std.testing.expect(!rejected.success);
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(types.LogIndex, 2), log.lastIndex());
+    try std.testing.expectEqual(@as(types.LogIndex, 0), raft.commit_index);
+    try std.testing.expectEqual(@as(usize, 0), raft.actions.items.len);
+
+    const accepted = raft.handleAppendEntries(request);
+    try std.testing.expect(accepted.success);
+    try std.testing.expectEqual(@as(types.LogIndex, 2), accepted.match_index);
+    try std.testing.expectEqual(@as(types.LogIndex, 2), raft.commit_index);
+    const actions = try raft.drainActions();
+    defer alloc.free(actions);
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqual(@as(types.LogIndex, 2), actions[0].commit_entries.up_to);
+}
+
+test "leader retries commit notification without another follower acknowledgement" {
+    const Raft = @import("../raft.zig").Raft;
+    const alloc = std.testing.allocator;
+    var log = try @import("../log.zig").Log.initMemory();
+    defer log.deinit();
+    try std.testing.expect(log.setCurrentTerm(2));
+    try log.append(.{ .index = 1, .term = 1, .data = "previous term" });
+    try log.append(.{ .index = 2, .term = 2, .data = "current term" });
+    var raft = try Raft.init(alloc, 1, &.{2}, &log);
+    defer raft.deinit();
+    raft.role = .leader;
+    raft.match_index[0] = 2;
+
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    raft.alloc = failing.allocator();
+    advanceCommitIndex(&raft);
+    raft.alloc = alloc;
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(types.LogIndex, 0), raft.commit_index);
+    try std.testing.expectEqual(@as(usize, 0), raft.actions.items.len);
+
+    advanceCommitIndex(&raft);
+    try std.testing.expectEqual(@as(types.LogIndex, 2), raft.commit_index);
+    const actions = try raft.drainActions();
+    defer alloc.free(actions);
+    try std.testing.expectEqual(@as(usize, 1), actions.len);
+    try std.testing.expectEqual(@as(types.LogIndex, 2), actions[0].commit_entries.up_to);
+}
+
+test "verified prefix rejects an index that wraps around" {
+    const last_index = std.math.maxInt(types.LogIndex);
+    try std.testing.expectEqual(last_index, verifiedPrefix(last_index, &.{}).?);
+    try std.testing.expectEqual(null, verifiedPrefix(last_index, &.{
+        .{ .index = 0, .term = 1, .data = "wrapped" },
+    }));
+}
