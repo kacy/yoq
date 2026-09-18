@@ -469,6 +469,7 @@ test "tar image hard links share the target mode without applying link metadata"
     try expectSameInode(tmp.dir, "dest/target", "dest/alias");
     const target = try tmp.dir.statFile(io, "dest/target", .{});
     const alias = try tmp.dir.statFile(io, "dest/alias", .{});
-    try std.testing.expectEqual(@as(u32, 0o755), @as(u32, target.permissions.toMode()));
+    try std.testing.expectEqual(std.Io.File.Kind.file, target.kind);
+    try std.testing.expectEqual(@as(u32, 0o755), @as(u32, target.permissions.toMode()) & 0o7777);
     try std.testing.expectEqual(target.permissions, alias.permissions);
 }
