@@ -53,7 +53,7 @@ yoq supervises the container process, captures stdout/stderr through pipes for `
 
 ### OCI distribution
 
-yoq speaks the OCI distribution protocol. `yoq pull` downloads images from any compliant registry. `yoq push` uploads them. bearer token auth, multi-arch manifests (resolves to linux/amd64), and both Docker and OCI media types are supported.
+yoq speaks the OCI distribution protocol. `yoq pull` downloads images from any compliant registry. `yoq push` uploads them. bearer token auth, multi-arch manifests (selects the target linux architecture), and both Docker and OCI media types are supported.
 
 ### content-addressable store
 
@@ -65,7 +65,7 @@ size limits prevent memory exhaustion: 10MB for manifests, 512MB for individual 
 
 the build engine supports Dockerfile and a TOML alternative. all major Dockerfile directives are implemented, including multi-stage builds.
 
-the key difference from Docker's build cache: yoq caches by content hash, not instruction order. reordering Dockerfile instructions doesn't invalidate the cache.
+cache keys include content, ordered parent layers, and execution context such as working directory, user, shell, and environment. changing or reordering an earlier instruction can invalidate later steps.
 
 ---
 
@@ -77,13 +77,13 @@ yoq creates a `yoq0` bridge on first use. each container gets a veth pair: one e
 
 ### DNS
 
-a userspace DNS resolver listens on `10.42.0.1:53`. it answers A record queries for service names from an in-memory registry (256 entries, no heap allocation). unknown names are forwarded upstream.
+a userspace DNS resolver listens on `10.42.0.1:53`. it answers A record queries for service names from an in-memory registry (1,024 entries). unknown names are forwarded upstream.
 
 an eBPF TC program intercepts DNS queries on the bridge for fast-path resolution — cache hits are answered entirely in kernel space, misses fall through to userspace.
 
 ### load balancing
 
-an eBPF program on the bridge implements FNV-1a consistent hashing for load balancing. a conntrack map (5-tuple → selected backend) ensures existing connections stick to the same backend. reverse SNAT on egress handles return traffic.
+an eBPF program on the bridge implements FNV-1a hashing with modulo backend selection for load balancing. a conntrack map (5-tuple → selected backend) ensures existing connections stick to the same backend. reverse SNAT on egress handles return traffic.
 
 ### network policy
 
@@ -98,7 +98,7 @@ for multi-node clusters, WireGuard tunnels provide encrypted cross-node connecti
 - **servers are hubs** — they enable IP forwarding and include all container subnets in their WireGuard allowed-ips
 - **agents are spokes** — they connect only to servers, not to each other
 
-this avoids O(n²) peer configurations. agent join/leave is a single-peer operation on the server side. the overlay uses `10.40.0.0/24`, with each node's containers in `10.42.{node_id}.0/24`.
+this avoids O(n²) peer configurations. agent join/leave is a single-peer operation on the server side. the overlay uses `10.40.0.0/16`, with each node's containers in `10.42.{node_id}.0/24`.
 
 key exchange happens during the `yoq join` handshake. service discovery works transparently across nodes.
 
@@ -108,7 +108,7 @@ key exchange happens during the `yoq join` handshake. service discovery works tr
 
 | program | function |
 |---------|----------|
-| `lb.c` | load balancing with FNV-1a consistent hashing and conntrack |
+| `lb.c` | load balancing with FNV-1a hashing with modulo backend selection and conntrack |
 | `dns_intercept.c` | kernel-space DNS resolution |
 | `policy.c` | network policy enforcement |
 | `metrics.c` | per-service packet counting |
@@ -134,7 +134,7 @@ services start in dependency order (topological sort). `yoq validate` checks for
 
 ### health checks
 
-HTTP, TCP, gRPC, or exec probes run at configurable intervals. gRPC probes use the standard `grpc.health.v1.Health/Check` RPC over HTTP/2 and require a `SERVING` response on the configured port. health state is stored in a fixed-size registry (64 services, mutex-protected). the orchestrator and DNS resolver read health state to gate traffic.
+HTTP, TCP, gRPC, or exec probes run at configurable intervals. gRPC probes use the standard `grpc.health.v1.Health/Check` RPC over HTTP/2 and require a `SERVING` response on the configured port. health state is stored in a dynamically sized, mutex-protected registry. the orchestrator and DNS resolver read health state to gate traffic.
 
 ### gRPC routing
 
@@ -269,8 +269,8 @@ the consensus group stays small while the agent pool scales independently.
 
 a pure state machine implementation — no I/O in the core algorithm. all side effects are described as `Action` values that the caller executes. this makes the algorithm fully testable without mocks.
 
-- election timeout: 1.5-3s (randomized)
-- heartbeat: 1s
+- election timeout: 3–6 seconds (randomized)
+- heartbeat: 600 ms
 - log persistence: SQLite WAL mode
 - snapshot: InstallSnapshot RPC for lagging followers
 
@@ -286,7 +286,7 @@ bin-packing placement: scores agents by free CPU + memory, assigns containers to
 
 ### agents
 
-agents register via HTTP, then heartbeat every 5s reporting capacity. they pull assignments, download images, and start containers locally. WireGuard tunnels are set up on join.
+agents register via HTTP, then report capacity on an adaptive heartbeat interval that starts at five seconds. they pull assignments, download images, and start containers locally. WireGuard tunnels are set up on join.
 
 if the leader changes, agents follow automatically — heartbeat responses include leader hints.
 
@@ -444,7 +444,7 @@ threshold-based alerts on CPU, memory, restart count, p99 latency, and error rat
 
 ### doctor
 
-`yoq doctor` runs 7 pre-flight checks: kernel version (≥6.1), cgroup-v2, eBPF, GPU, WireGuard, InfiniBand, and disk space. each check reports pass/warn/fail. GPU, WireGuard, and InfiniBand return `warn` when hardware is absent since these are optional.
+`yoq doctor` runs ten pre-flight checks: kernel version (≥6.1), cgroup-v2, ebpf, gpu, wireguard, infiniband, disk space, io_uring, bpf jit, and mtu. each check reports pass/warn/fail. GPU, WireGuard, and InfiniBand return `warn` when hardware is absent since these are optional.
 
 `yoq doctor -f manifest.toml` adds app-specific checks before deploy. it loads the manifest, runs semantic validation, checks ACME DNS-01 provider settings and referenced secrets, warns about TLS route/domain mismatches, and warns when HTTP-01 needs port 80 but the port is not available locally. with `--json`, system and manifest checks are grouped separately.
 

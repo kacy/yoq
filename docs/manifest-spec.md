@@ -546,12 +546,17 @@ a single top-level `[backup]` block schedules recurring snapshots of the yoq sta
 | `every` | string | yes | — | interval (`"30m"`, `"6h"`, `"24h"`) |
 | `output_dir` | string | yes | — | directory the artifacts are written to (created if missing) |
 | `encrypt` | bool | no | `true` | encrypt + checksum the artifact; `false` writes a raw SQLite copy |
+| `keep_count` | integer | no | `7` | maximum number of retained backups; must be at least one |
+| `max_age` | string | no | none | prune backups older than this duration |
+| `max_bytes` | integer | no | `0` | total retained byte limit; zero disables this limit |
 
 ```toml
 [backup]
 every = "24h"
 output_dir = "/var/lib/yoq/backups"
 ```
+
+after a successful backup, retention removes older artifacts that exceed the configured limits. the newest successful backup is always retained, even if it exceeds an age or size limit.
 
 encrypted artifacts carry a SHA256 of the database and can be checked with `yoq restore --verify <path>` before applying. only metadata is backed up — volume data is not included.
 
@@ -763,4 +768,5 @@ this is intended for local development, not production.
 | `yoq down` | stop all services |
 | `yoq run-worker <name>` | run a one-shot worker |
 | `yoq history <service>` | show deployment history |
-| `yoq rollback <service>` | rollback to previous deployment |
+| `yoq rollback <service>` | print saved service configuration for manual redeployment |
+| `yoq rollback --app <app>` | deploy the previous successful app release |

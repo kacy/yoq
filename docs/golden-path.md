@@ -10,29 +10,34 @@ the path has three stages:
 
 if a stage fails, stop there and fix that layer before moving on.
 
-Before running the manual path, `make test-golden-path` checks the same local assumptions that are cheap to automate: CLI startup, example manifest validation, example app shape, and shell-script syntax.
+before running the manual path, `make test-golden-path` checks the same local assumptions that are cheap to automate: CLI startup, example manifest validation, example app shape, and shell-script syntax.
 
 ## 1. local runtime and manifests
 
 start with the built-in checks:
 
 ```bash
-yoq doctor
-yoq doctor -f examples/web-app/manifest.toml
-yoq doctor -f examples/http-routing/manifest.toml
-yoq validate -f examples/redis/manifest.toml
-yoq validate -f examples/web-app/manifest.toml
-yoq validate -f examples/http-routing/manifest.toml
+sudo -H yoq doctor
+sudo -H yoq doctor -f examples/web-app/manifest.toml
+sudo -H yoq doctor -f examples/http-routing/manifest.toml
+sudo -H yoq validate -f examples/redis/manifest.toml
+sudo -H yoq validate -f examples/web-app/manifest.toml
+sudo -H yoq validate -f examples/http-routing/manifest.toml
 ```
 
-then run a local multi-service app:
+these commands use root-owned state under `/root/.local/share/yoq`. run the local app in one terminal; `up` stays in the foreground:
 
 ```bash
-yoq up -f examples/web-app/manifest.toml
-yoq apps
-yoq status --app web-app
-yoq history --app web-app
-yoq metrics
+sudo -H yoq up -f examples/web-app/manifest.toml
+```
+
+in another terminal, inspect the app using the same root-owned state:
+
+```bash
+sudo -H yoq apps
+sudo -H yoq status --app web-app
+sudo -H yoq history --app web-app
+sudo -H yoq metrics
 ```
 
 what to verify:
@@ -47,11 +52,16 @@ what to verify:
 start the API server and HTTP routing listener:
 
 ```bash
-yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
-yoq up -f examples/http-routing/manifest.toml
+sudo -H yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
 ```
 
-send traffic through the built-in router:
+keep the server running and start the app in another terminal:
+
+```bash
+sudo -H yoq up -f examples/http-routing/manifest.toml
+```
+
+from a third terminal, send traffic through the built-in router:
 
 ```bash
 curl -H 'Host: demo.local' http://127.0.0.1:17080/
@@ -67,8 +77,10 @@ or run the whole local routing drill, including listener restart and recovery:
 inspect the routing state:
 
 ```bash
-curl http://127.0.0.1:7700/v1/status?mode=service_discovery
-curl http://127.0.0.1:7700/v1/metrics?format=prometheus
+curl -H "Authorization: Bearer $(sudo cat /root/.local/share/yoq/api_token)" \
+  http://127.0.0.1:7700/v1/status?mode=service_discovery
+curl -H "Authorization: Bearer $(sudo cat /root/.local/share/yoq/api_token)" \
+  http://127.0.0.1:7700/v1/metrics?format=prometheus
 ```
 
 what to verify:
@@ -92,34 +104,34 @@ generate a shared token:
 TOKEN=$(openssl rand -hex 32)
 ```
 
-start three servers:
+run each server command on its matching host, using the same token on all hosts. every server must start with the complete fixed voter set; a peerless server creates a different, single-voter cluster:
 
 ```bash
-yoq init-server --id 1 --port 9700 --api-port 7700 --token "$TOKEN"
-yoq init-server --id 2 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700 --token "$TOKEN"
-yoq init-server --id 3 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,2@10.0.0.2:9700 --token "$TOKEN"
+sudo -H yoq init-server --id 1 --port 9700 --api-port 7700 --peers 2@10.0.0.2:9700,3@10.0.0.3:9700 --token "$TOKEN"
+sudo -H yoq init-server --id 2 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,3@10.0.0.3:9700 --token "$TOKEN"
+sudo -H yoq init-server --id 3 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,2@10.0.0.2:9700 --token "$TOKEN"
 ```
 
 join agents:
 
 ```bash
-yoq join 10.0.0.1:7700 --token "$TOKEN"
+sudo -H yoq join 10.0.0.1:7700 --token "$TOKEN"
 ```
 
 deploy the cluster example:
 
 ```bash
-DB_PASSWORD=supersecret yoq up --server 10.0.0.1:7700 -f examples/cluster/manifest.toml
+sudo -H env DB_PASSWORD=supersecret yoq up --server 10.0.0.1:7700 -f examples/cluster/manifest.toml
 ```
 
 verify cluster state:
 
 ```bash
-yoq nodes --server 10.0.0.1:7700
-yoq apps --server 10.0.0.1:7700
-yoq status --app cluster --server 10.0.0.1:7700
-yoq history --app cluster --server 10.0.0.1:7700
-yoq metrics --server 10.0.0.1:7700
+sudo -H yoq nodes --server 10.0.0.1:7700
+sudo -H yoq apps --server 10.0.0.1:7700
+sudo -H yoq status --app cluster --server 10.0.0.1:7700
+sudo -H yoq history --app cluster --server 10.0.0.1:7700
+sudo -H yoq metrics --server 10.0.0.1:7700
 ```
 
 what to verify:
@@ -140,7 +152,7 @@ force the current leader to step down:
 
 ```bash
 curl -X POST http://10.0.0.1:7700/cluster/step-down \
-  -H "Authorization: Bearer $(cat ~/.local/share/yoq/api_token)"
+  -H "Authorization: Bearer $(sudo cat /root/.local/share/yoq/api_token)"
 ```
 
 what to verify:
@@ -164,9 +176,9 @@ what to verify:
 for a readiness-gated service release:
 
 ```bash
-yoq rollout pause --app cluster --server 10.0.0.1:7700
-yoq status --app cluster --server 10.0.0.1:7700
-yoq rollout resume --app cluster --server 10.0.0.1:7700
+sudo -H yoq rollout pause --app cluster --server 10.0.0.1:7700
+sudo -H yoq status --app cluster --server 10.0.0.1:7700
+sudo -H yoq rollout resume --app cluster --server 10.0.0.1:7700
 ```
 
 what to verify:

@@ -27,6 +27,7 @@ This keeps Raft stable while still keeping GPU costs low.
 - a GCP project with quota for 5 small CPU VMs; GPU quota is only needed if `USE_GPU_AGENTS=true`
 - local tools: `bash`, `jq`, `curl`, `openssl`, `ssh`, `scp`, `zig`
 - local `yoq` repo checkout
+- `GH_TOKEN` set to a github token that can verify public release attestations; an authenticated local `gh` can supply it with `export GH_TOKEN="$(gh auth token)"`
 
 Copy the example config first:
 
@@ -62,6 +63,7 @@ infra/gcp/install.sh
 
 `install.sh` fetches the node binary from the release installer URL on each VM,
 so the remote host chooses the right architecture automatically.
+node setup installs github cli from its official apt repository. the token is sent over ssh stdin to the root installer and is not persisted on the vm. gcloud's normal host verification remains enabled. unset `GH_TOKEN` when installation finishes.
 
 Bootstrap the 3-server cluster and join the agents:
 
