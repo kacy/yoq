@@ -81,7 +81,7 @@ pub fn resolveImage(io: std.Io, alloc: std.mem.Allocator, target: []const u8, po
         }
     }
 
-    result.layer_paths = layer.assembleRootfsDescriptors(alloc, result.pull_result.?.layers) catch |err| {
+    result.layer_paths = assembleLayers(alloc, result.pull_result.?.layers) catch |err| {
         writeErr("failed to extract image layers: {}\n", .{err});
         return common.ImageCommandsError.PullFailed;
     };
@@ -92,6 +92,21 @@ pub fn resolveImage(io: std.Io, alloc: std.mem.Allocator, target: []const u8, po
     }
 
     return result;
+}
+
+// Overlay mounts need a lower directory even for an image with no layers.
+// Use a complete empty tar so its extraction shares the ordinary cache lifetime.
+fn assembleLayers(alloc: std.mem.Allocator, descriptors: []const spec.Descriptor) ![]const []const u8 {
+    if (descriptors.len > 0) return layer.assembleRootfsDescriptors(alloc, descriptors);
+    const empty_tar = [_]u8{0} ** 1024;
+    const digest = try blob_store.putBlob(&empty_tar);
+    var digest_buf: [71]u8 = undefined;
+    const empty_layer = spec.Descriptor{
+        .mediaType = spec.media_type.oci_layer_tar,
+        .digest = digest.string(&digest_buf),
+        .size = empty_tar.len,
+    };
+    return layer.assembleRootfsDescriptors(alloc, &.{empty_layer});
 }
 
 // Keep the same owned blob and parsed-manifest lifetime for cached and pulled
@@ -142,6 +157,8 @@ test "local image resolution uses cached tags and rejects missing images without
         var result = try resolveImage(std.Options.debug_io, alloc, "local-resolution-test", policy);
         defer result.deinit();
         try std.testing.expectEqualStrings("cached", result.default_cmd[1]);
+        try std.testing.expectEqual(@as(usize, 1), result.layer_paths.len);
+        try std.testing.expect(std.mem.startsWith(u8, result.rootfs, "/"));
         try std.testing.expectEqualStrings(digest.string(&digest_buf), result.manifest_digest);
         try std.testing.expectEqualStrings("SIGTERM", result.stop_signal.?);
     }
