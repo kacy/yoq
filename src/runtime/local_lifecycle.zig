@@ -61,7 +61,9 @@ fn stopLocked(id: []const u8, alloc: std.mem.Allocator) !void {
         _ = try control.request(id, false);
         if (record.pid != null) {
             const pid = state_support.currentOwnedRunningPid(&record) orelse return error.StateUnknown;
-            try supervisor.stopProcess(pid);
+            const cfg = run_state.loadConfig(alloc, id) catch null;
+            defer if (cfg) |value| value.deinit(alloc);
+            try supervisor.stopProcessWithOptions(pid, if (cfg) |value| value.stop_signal else 15, if (cfg) |value| value.stop_timeout_seconds else 5);
         }
     }
     try waitForOwner(id);

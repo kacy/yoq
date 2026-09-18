@@ -14,12 +14,14 @@ pub const RestartPolicy = enum {
     no,
     always,
     on_failure,
+    unless_stopped,
 
     pub fn label(self: RestartPolicy) []const u8 {
         return switch (self) {
             .no => "no",
             .always => "always",
             .on_failure => "on-failure",
+            .unless_stopped => "unless-stopped",
         };
     }
 
@@ -27,6 +29,7 @@ pub const RestartPolicy = enum {
         if (std.mem.eql(u8, value, "no")) return .no;
         if (std.mem.eql(u8, value, "always")) return .always;
         if (std.mem.eql(u8, value, "on-failure")) return .on_failure;
+        if (std.mem.eql(u8, value, "unless-stopped")) return .unless_stopped;
         return null;
     }
 };
@@ -37,6 +40,10 @@ pub const SavedRunConfig = struct {
     hostname: []const u8,
     working_dir: []const u8,
     user: ?[]const u8 = null,
+    image_reference: ?[]const u8 = null,
+    stop_signal: u8 = 15,
+    stop_timeout_seconds: u32 = 10,
+    auto_remove: bool = false,
     args: [][]const u8,
     env: [][]const u8,
     lower_dirs: [][]const u8,
@@ -52,6 +59,7 @@ pub const SavedRunConfig = struct {
         alloc.free(self.hostname);
         alloc.free(self.working_dir);
         if (self.user) |user| alloc.free(user);
+        if (self.image_reference) |value| alloc.free(value);
         freeStringList(alloc, self.args);
         freeStringList(alloc, self.env);
         freeStringList(alloc, self.lower_dirs);
@@ -75,7 +83,7 @@ pub const RunStateError = error{
 };
 
 const configs_subdir = "run_configs";
-const format_version: u32 = 2;
+const format_version: u32 = 3;
 const max_serialized_string_bytes: u32 = 64 * 1024;
 const max_serialized_list_items: u32 = 1024;
 const max_serialized_mounts: u32 = 256;
@@ -120,6 +128,10 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     writeLimits(out, cfg.limits) catch return RunStateError.WriteFailed;
     out.writeByte(@intFromEnum(cfg.restart_policy)) catch return RunStateError.WriteFailed;
     writeString(out, cfg.user orelse "") catch return RunStateError.WriteFailed;
+    writeString(out, cfg.image_reference orelse "") catch return RunStateError.WriteFailed;
+    out.writeByte(cfg.stop_signal) catch return RunStateError.WriteFailed;
+    writeInt(out, u32, cfg.stop_timeout_seconds) catch return RunStateError.WriteFailed;
+    out.writeByte(@intFromBool(cfg.auto_remove)) catch return RunStateError.WriteFailed;
     out.flush() catch return RunStateError.WriteFailed;
     file.sync(std.Options.debug_io) catch return RunStateError.WriteFailed;
     cwd().rename(tmp_path, cwd(), path, std.Options.debug_io) catch return RunStateError.WriteFailed;
@@ -143,7 +155,7 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     const input = &reader.interface;
 
     const version = readInt(input, u32) catch return RunStateError.ReadFailed;
-    if (version != 1 and version != format_version) return RunStateError.InvalidFormat;
+    if (version < 1 or version > format_version) return RunStateError.InvalidFormat;
 
     const rootfs = readString(alloc, input) catch |err| return mapReadError(err);
     errdefer alloc.free(rootfs);
@@ -181,8 +193,24 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
         break :blk null;
     } else null;
 
+    errdefer if (user) |value| alloc.free(value);
+    const image_text = if (version >= 3) readString(alloc, input) catch |err| return mapReadError(err) else null;
+    const image_reference = if (image_text) |value| if (value.len > 0) value else blk: {
+        alloc.free(value);
+        break :blk null;
+    } else null;
+    errdefer if (image_reference) |value| alloc.free(value);
+    const stop_signal = if (version >= 3) readByte(input) catch return RunStateError.ReadFailed else 15;
+    const stop_timeout_seconds = if (version >= 3) readInt(input, u32) catch return RunStateError.ReadFailed else 5;
+    const auto_remove = if (version >= 3) (readByte(input) catch return RunStateError.ReadFailed) != 0 else false;
+    if (stop_signal == 0 or stop_signal > 64) return RunStateError.InvalidFormat;
+
     return .{
         .user = user,
+        .image_reference = image_reference,
+        .stop_signal = stop_signal,
+        .stop_timeout_seconds = stop_timeout_seconds,
+        .auto_remove = auto_remove,
         .rootfs = rootfs,
         .command = command,
         .hostname = hostname,

@@ -47,7 +47,7 @@ fn containerFromSaved(id: []const u8, cfg: *const run_state.SavedRunConfig, mirr
 fn shouldRestart(policy: run_state.RestartPolicy, exit_code: u8) bool {
     return switch (policy) {
         .no => false,
-        .always => true,
+        .always, .unless_stopped => true,
         .on_failure => exit_code != 0,
     };
 }
@@ -138,13 +138,17 @@ pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) Con
 }
 
 pub fn stopProcess(pid: i32) ContainerError!void {
-    process.terminate(pid) catch |err| {
+    return stopProcessWithOptions(pid, 15, 5);
+}
+
+pub fn stopProcessWithOptions(pid: i32, signal: u8, timeout_seconds: u32) ContainerError!void {
+    process.sendSignal(pid, signal) catch |err| {
         writeErr("failed to stop container process: {}\n", .{err});
         return ContainerError.ProcessNotFound;
     };
 
     var attempts: usize = 0;
-    while (attempts < 100) : (attempts += 1) {
+    while (attempts < @as(u64, timeout_seconds) * 20) : (attempts += 1) {
         if (process.sendSignal(pid, 0)) |_| {
             if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container process terminate wait")) break;
         } else |_| {
