@@ -14,6 +14,58 @@ pub fn sameBoundary(a: SnapshotMeta, b: SnapshotMeta) bool {
     return a.last_included_index == b.last_included_index and a.last_included_term == b.last_included_term;
 }
 
+/// retain the selected recovery source and one older generation. callers hold
+/// the node lock and invoke this only after selection and restore complete.
+/// snapshot sends read their bytes before handing them to the transport, so
+/// removing an older pathname cannot invalidate an in-flight transfer.
+pub fn pruneSuperseded(data_dir: []const u8, selected: SnapshotMeta) !void {
+    const io = std.Options.debug_io;
+    var path_buffer: [512]u8 = undefined;
+    const selected_path = try generationPath(&path_buffer, data_dir, selected);
+    const actual = try artifact.readSnapshotMeta(selected_path);
+    if (!sameBoundary(actual, selected) or (selected.data_len != 0 and actual.data_len != selected.data_len))
+        return error.SnapshotMismatch;
+
+    var directory = try std.Io.Dir.cwd().openDir(io, data_dir, .{ .iterate = true });
+    defer directory.close(io);
+    var previous: ?SnapshotMeta = null;
+    var entries = directory.iterate();
+    while (try entries.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        const meta = parseGenerationName(entry.name) orelse continue;
+        if (meta.last_included_index >= selected.last_included_index) continue;
+        if (previous == null or newer(meta, previous.?)) previous = meta;
+    }
+    entries = directory.iterate();
+    var removed = false;
+    while (try entries.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        const meta = parseGenerationName(entry.name) orelse continue;
+        if (sameBoundary(meta, selected)) continue;
+        if (previous) |keep| if (sameBoundary(meta, keep)) continue;
+        try directory.deleteFile(io, entry.name);
+        removed = true;
+    }
+    if (removed) try (@import("linux_platform").File{ .handle = directory.handle }).sync();
+}
+
+fn newer(left: SnapshotMeta, right: SnapshotMeta) bool {
+    return left.last_included_index > right.last_included_index or
+        (left.last_included_index == right.last_included_index and left.last_included_term > right.last_included_term);
+}
+
+fn parseGenerationName(name: []const u8) ?SnapshotMeta {
+    if (!std.mem.startsWith(u8, name, "snapshot-") or !std.mem.endsWith(u8, name, ".dat")) return null;
+    const boundary = name["snapshot-".len .. name.len - ".dat".len];
+    const separator = std.mem.indexOfScalar(u8, boundary, '-') orelse return null;
+    const index = std.fmt.parseInt(u64, boundary[0..separator], 10) catch return null;
+    const term = std.fmt.parseInt(u64, boundary[separator + 1 ..], 10) catch return null;
+    var expected: [64]u8 = undefined;
+    const canonical = std.fmt.bufPrint(&expected, "snapshot-{d}-{d}.dat", .{ index, term }) catch return null;
+    if (!std.mem.eql(u8, name, canonical)) return null;
+    return .{ .last_included_index = index, .last_included_term = term, .data_len = 0 };
+}
+
 /// Read the selected generation, not the newest file in the directory. An
 /// unselected generation can be left behind by a crash before activation.
 pub fn readSelected(alloc: std.mem.Allocator, data_dir: []const u8, selected: SnapshotMeta) ![]u8 {
@@ -87,3 +139,36 @@ pub const Generation = struct {
         try self.restore(state_machine);
     }
 };
+
+test "snapshot retention keeps the selected generation across cleanup and restart" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_buffer: [512]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &directory_buffer);
+    const directory = directory_buffer[0..length];
+    // retention only needs the durable header and boundary; full snapshot
+    // validation belongs to capture, selection and restart recovery.
+    for ([_]u64{ 1, 2, 3, 4 }) |index| {
+        var header: [artifact.snapshot_header_size]u8 = @splat(0);
+        std.mem.writeInt(u64, header[0..8], index, .little);
+        std.mem.writeInt(u64, header[8..16], 1, .little);
+        var path_buffer: [512]u8 = undefined;
+        try artifact.publishBytes(try generationPath(&path_buffer, directory, .{
+            .last_included_index = index,
+            .last_included_term = 1,
+            .data_len = 0,
+        }), &header);
+    }
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "unrelated.dat", .data = "keep" });
+    const selected: SnapshotMeta = .{ .last_included_index = 3, .last_included_term = 1, .data_len = 0 };
+    try pruneSuperseded(directory, selected);
+    try tmp.dir.access(std.testing.io, "snapshot-3-1.dat", .{});
+    try tmp.dir.access(std.testing.io, "snapshot-2-1.dat", .{});
+    try tmp.dir.access(std.testing.io, "unrelated.dat", .{});
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "snapshot-1-1.dat", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "snapshot-4-1.dat", .{}));
+    try pruneSuperseded(directory, selected);
+    try tmp.dir.deleteFile(std.testing.io, "snapshot-3-1.dat");
+    try std.testing.expectError(error.IoError, pruneSuperseded(directory, selected));
+    try tmp.dir.access(std.testing.io, "snapshot-2-1.dat", .{});
+}

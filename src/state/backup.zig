@@ -146,7 +146,8 @@ fn restoreWithOptions(alloc: std.mem.Allocator, input_path: [:0]const u8, option
         }
         writeFileBytes(staging.path(), plaintext) catch return error.IoFailed;
     }
-    if (options.verify_only) return validateDbFile(staging.path());
+    try prepareRestoreCandidate(staging.path());
+    if (options.verify_only) return;
     return restoreDbFrom(staging.path(), options.destination);
 }
 
@@ -262,15 +263,20 @@ fn restoreDbFrom(input_path: [:0]const u8, destination: ?[:0]const u8) BackupErr
     if (finish_rc != c.SQLITE_OK) return BackupError.RestoreFailed;
 }
 
-/// open a SQLite file read-only and validate its schema without restoring.
-fn validateDbFile(path: [:0]const u8) BackupError!void {
-    var db: ?*c.sqlite3 = null;
-    if (c.sqlite3_open_v2(path.ptr, &db, c.SQLITE_OPEN_READONLY, null) != c.SQLITE_OK or db == null) {
-        if (db) |handle| _ = c.sqlite3_close(handle);
-        return BackupError.RestoreFailed;
-    }
-    defer _ = c.sqlite3_close(db);
-    try validateBackupSchema(db.?);
+/// migrate only the private copy. verification exercises the same schema
+/// checks as restore, without changing the artifact or the live database.
+fn prepareRestoreCandidate(path: [:0]const u8) BackupError!void {
+    var db = sqlite.Db.init(.{ .mode = .{ .File = path }, .open_flags = .{ .write = true } }) catch return error.RestoreFailed;
+    defer db.deinit();
+    try validateBackupIdentity(db.db);
+    const Version = struct { user_version: i64 };
+    const version = (db.one(Version, "PRAGMA user_version;", .{}, .{}) catch return error.SchemaValidationFailed) orelse return error.SchemaValidationFailed;
+    // existing yoq schemas use version zero and additive migrations. a future
+    // numbered format needs an explicit compatibility path before restore.
+    if (version.user_version != 0) return error.SchemaValidationFailed;
+    try @import("backup_schema.zig").validateExistingTriggers(db.db);
+    schema.init(&db) catch return error.SchemaValidationFailed;
+    try validateBackupSchema(db.db);
 }
 
 fn lockForRestore(db: *c.sqlite3) BackupError!void {
@@ -295,6 +301,11 @@ fn lockForRestore(db: *c.sqlite3) BackupError!void {
 }
 
 fn validateBackupSchema(db: *c.sqlite3) BackupError!void {
+    try validateBackupIdentity(db);
+    try @import("backup_schema.zig").validate(db);
+}
+
+fn validateBackupIdentity(db: *c.sqlite3) BackupError!void {
     const required_tables_sql =
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN (" ++
         "'containers','images','ip_allocations','build_cache','service_names','services','service_endpoints'," ++
@@ -341,6 +352,62 @@ fn writeFileBytes(path: [:0]const u8, bytes: []const u8) !void {
 test "backup error types compile" {
     try std.testing.expect(@TypeOf(backup) == fn (std.mem.Allocator, [:0]const u8, bool) BackupError!void);
     try std.testing.expect(@TypeOf(restore) == fn (std.mem.Allocator, [:0]const u8, bool) BackupError!void);
+}
+
+test "restore schema rejects incompatible candidates without replacing live state" {
+    const changes = [_][:0]const u8{
+        "ALTER TABLE containers RENAME COLUMN rootfs TO missing_rootfs;",
+        "PRAGMA user_version=9999;",
+        "DROP TABLE secrets; CREATE TABLE secrets (name TEXT, encrypted_value BLOB NOT NULL, nonce BLOB NOT NULL, tag BLOB NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);",
+        "DROP TABLE cluster_ca; CREATE TABLE cluster_ca (id INTEGER PRIMARY KEY, cert_pem BLOB NOT NULL, encrypted_key BLOB NOT NULL, key_nonce BLOB NOT NULL, key_tag BLOB NOT NULL, created_at INTEGER NOT NULL, not_after INTEGER NOT NULL);",
+        "CREATE TRIGGER unexpected_delete AFTER DELETE ON containers BEGIN DELETE FROM images; END;",
+        "DROP TRIGGER delete_local_training_rank; CREATE TRIGGER delete_local_training_rank AFTER DELETE ON containers BEGIN DELETE FROM images; END;",
+    };
+    for (changes) |change| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const source = try restoreTestPath(tmp, "source.db");
+        defer std.testing.allocator.free(source);
+        const destination = try restoreTestPath(tmp, "live.db");
+        defer std.testing.allocator.free(destination);
+        try createRestoreTestDb(source, "backup");
+        try createRestoreTestDb(destination, "live");
+        {
+            var db = try sqlite.Db.init(.{ .mode = .{ .File = source }, .open_flags = .{ .write = true } });
+            defer db.deinit();
+            try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_exec(db.db, change, null, null, null));
+        }
+        for ([_]bool{ true, false }) |verify| {
+            try std.testing.expectError(error.SchemaValidationFailed, restoreWithOptions(std.testing.allocator, source, .{ .verify_only = verify, .destination = destination }));
+            try expectReopenedRestoreContents(destination, "live");
+        }
+    }
+}
+
+test "restore schema migrates a private legacy candidate and preserves the artifact" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source = try restoreTestPath(tmp, "source.db");
+    defer std.testing.allocator.free(source);
+    const destination = try restoreTestPath(tmp, "live.db");
+    defer std.testing.allocator.free(destination);
+    try createRestoreTestDb(source, "backup");
+    try createRestoreTestDb(destination, "live");
+    {
+        var db = try sqlite.Db.init(.{ .mode = .{ .File = source }, .open_flags = .{ .write = true } });
+        defer db.deinit();
+        try db.exec("ALTER TABLE containers DROP COLUMN startup_outcome;", .{}, .{});
+        try db.exec("DROP TRIGGER delete_local_training_rank;", .{}, .{});
+    }
+    const original = try readWholeFile(std.testing.allocator, source);
+    defer std.testing.allocator.free(original);
+    try restoreWithOptions(std.testing.allocator, source, .{ .verify_only = true, .destination = destination });
+    try expectReopenedRestoreContents(destination, "live");
+    try restoreWithOptions(std.testing.allocator, source, .{ .destination = destination });
+    try expectReopenedRestoreContents(destination, "backup");
+    const after = try readWholeFile(std.testing.allocator, source);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, original, after);
 }
 
 test "validateBackupSchema rejects incomplete database" {

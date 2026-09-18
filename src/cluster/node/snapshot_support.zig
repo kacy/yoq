@@ -17,6 +17,9 @@ pub fn recover(alloc: std.mem.Allocator, data_dir: []const u8, log: anytype, sta
     var generation = (try lifecycle.Generation.recoverSelected(alloc, data_dir, log)) orelse return;
     defer generation.deinit();
     try generation.finish(log, state_machine);
+    lifecycle.pruneSuperseded(data_dir, generation.prepared.meta) catch |err| {
+        logger.warn("snapshot: failed to prune recovered generations: {}", .{err});
+    };
 }
 
 pub fn maybeSnapshot(self: anytype) void {
@@ -74,6 +77,9 @@ fn finish(self: anytype, generation: *lifecycle.Generation) !void {
     self.raft.commit_index = @max(self.raft.commit_index, meta.last_included_index);
     self.raft.last_applied = @max(self.raft.last_applied, meta.last_included_index);
     self.last_snapshot_index = meta.last_included_index;
+    lifecycle.pruneSuperseded(self.config.data_dir, meta) catch |err| {
+        logger.warn("snapshot: failed to prune superseded generations: {}", .{err});
+    };
 }
 
 pub fn sendSnapshot(self: anytype, target: NodeId, args: types.InstallSnapshotArgs) void {
@@ -502,4 +508,36 @@ test "snapshot lifecycle survives process death at every local and received tran
             }
         }
     }
+}
+
+test "snapshot retention bounds successful generations and recovers the selected boundary" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(path);
+    var node = try TestNode.init(path);
+    defer node.deinit();
+    for (1..4) |index| {
+        const entry: @import("../raft_types.zig").LogEntry = .{
+            .index = index,
+            .term = 1,
+            .data = "",
+        };
+        try node.log.append(entry);
+        node.state_machine.apply(entry);
+        takeSnapshot(&node, index, 1);
+        try std.testing.expectEqual(index, node.last_snapshot_index);
+    }
+    try std.testing.expectEqual(@as(u64, 3), (try node.log.readSnapshotMeta()).?.last_included_index);
+    var directory = try std.Io.Dir.cwd().openDir(std.testing.io, path, .{ .iterate = true });
+    defer directory.close(std.testing.io);
+    var iterator = directory.iterate();
+    var generations: usize = 0;
+    while (try iterator.next(std.testing.io)) |entry| {
+        if (std.mem.startsWith(u8, entry.name, "snapshot-") and std.mem.endsWith(u8, entry.name, ".dat")) generations += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), generations);
+    try recover(alloc, path, &node.log, &node.state_machine);
+    try std.testing.expectEqual(@as(u64, 3), node.state_machine.last_applied);
 }
