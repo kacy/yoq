@@ -121,6 +121,12 @@ fn requirePortAvailable(port: u16) !void {
     };
     defer posix.close(fd);
 
+    // match the server listeners so a closed connection in time-wait does not
+    // prevent the next test from checking an otherwise available tcp port.
+    const reuse: c_int = 1;
+    posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, std.mem.asBytes(&reuse)) catch |err| {
+        return skip("cannot configure port preflight: {s}", .{@errorName(err)});
+    };
     posix.bind(fd, &addr.any, addr.getOsSockLen()) catch |err| {
         return skip("required localhost port {d} is not available: {s}", .{ port, @errorName(err) });
     };
@@ -133,4 +139,22 @@ fn skip(comptime fmt: []const u8, args: anytype) error{ SkipZigTest, MissingRunt
     }
     std.debug.print("skipping privileged runtime test: " ++ fmt ++ "\n", args);
     return error.SkipZigTest;
+}
+
+test "runtime preflight detects active tcp listeners and accepts closed ports" {
+    var listener: ?std.posix.fd_t = try posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+    defer if (listener) |fd| posix.close(fd);
+    const reuse: c_int = 1;
+    try posix.setsockopt(listener.?, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, std.mem.asBytes(&reuse));
+    var address = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    try posix.bind(listener.?, &address.any, address.getOsSockLen());
+    try posix.listen(listener.?, 1);
+    var length = address.getOsSockLen();
+    try posix.getsockname(listener.?, &address.any, &length);
+    const port = std.mem.bigToNative(u16, address.in.port);
+    const unavailable = if (build_options.run_privileged_tests) error.MissingRuntimePrerequisite else error.SkipZigTest;
+    try std.testing.expectError(unavailable, requirePortAvailable(port));
+    posix.close(listener.?);
+    listener = null;
+    try requirePortAvailable(port);
 }

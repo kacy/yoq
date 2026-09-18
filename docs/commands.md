@@ -57,6 +57,7 @@ yoq history --app [name] --server host:port [--json]
                                      show remote app release history
 yoq status [--verbose]               show service status and resources
 yoq status --app [name]              show local app release status
+yoq status --alerts [--app name]      show persisted host alerts as json
 yoq status --app [name] --server host:port
                                      show remote app release status
 yoq apps [--json] [--status s|--failed|--in-progress]
@@ -119,13 +120,16 @@ yoq serve [--port PORT] [--http-proxy-bind ADDR] [--http-proxy-port PORT]
                                      start the api server
 yoq init-server [--id N] [--port P]  start a cluster server node
     [--api-port P] [--peers ...]
-    [--token TOKEN] [--http-proxy-bind ADDR]
+    --token TOKEN [--api-token TOKEN]
+    [--http-proxy-bind ADDR]
     [--http-proxy-port PORT]
 yoq join <host> --token <token>      join as an agent node
 yoq cluster status                   show cluster health
 yoq nodes [--server host:port]       list agent nodes
 yoq drain <id> [--server host:port]  drain an agent node
 ```
+
+`init-server` needs a join token and an api token. omit `--api-token` only when the matching token file already exists. see [cluster credential setup](cluster-guide.md#step-1-prepare-credentials).
 
 ## gpu
 

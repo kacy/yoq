@@ -2,6 +2,15 @@ name: runtime-validation
 
 on:
   workflow_dispatch:
+    inputs:
+      scope:
+        description: runtime checks to run
+        type: choice
+        default: all
+        options:
+          - all
+          - cluster
+          - bpf
   schedule:
     - cron: "0 15 * * 1"
 
@@ -14,6 +23,7 @@ concurrency:
 
 jobs:
   container-runtime-smoke:
+    if: github.event_name == 'schedule' || inputs.scope == 'all'
     name: container-runtime-smoke
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -43,6 +53,7 @@ jobs:
           ./zig-out/bin/yoq validate -f examples/cluster/manifest.toml
 
   linux-feature-probe:
+    if: github.event_name == 'schedule' || inputs.scope == 'all'
     name: linux-feature-probe
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -84,19 +95,14 @@ jobs:
           retention-days: 7
 
   privileged-runtime:
+    if: github.event_name == 'schedule' || inputs.scope == 'all' || inputs.scope == 'cluster'
     name: privileged-runtime-${{ matrix.lane }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - lane: core
-            command: test-runtime-core
-          - lane: network
-            command: test-runtime-network
-          - lane: cluster
-            command: test-runtime-cluster
+        include: ${{ fromJSON(inputs.scope == 'cluster' && '[{"lane":"cluster","command":"test-runtime-cluster"}]' || '[{"lane":"core","command":"test-runtime-core"},{"lane":"network","command":"test-runtime-network"},{"lane":"cluster","command":"test-runtime-cluster"}]') }}
     steps:
       - name: check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -131,7 +137,7 @@ jobs:
             YOQ_SKIP_SLOW_TESTS=1 \
             ZIG_GLOBAL_CACHE_DIR="$zig_global_cache" \
             ZIG_LOCAL_CACHE_DIR="$zig_local_cache" \
-            "$zig_bin" build -Doptimize=ReleaseSafe -Drun-privileged-tests=true "${{ matrix.command }}" 2>&1 \
+            "$zig_bin" build -j1 -Doptimize=ReleaseSafe -Drun-privileged-tests=true "${{ matrix.command }}" 2>&1 \
             | tee "$RUNNER_TEMP/runtime-logs/${{ matrix.command }}.log"
           status=${PIPESTATUS[0]}
           set -e
@@ -170,6 +176,7 @@ jobs:
           retention-days: 7
 
   manual-bpf-runtime-check:
+    if: github.event_name == 'schedule' || inputs.scope == 'all' || inputs.scope == 'bpf'
     name: manual-bpf-runtime-check
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -182,11 +189,14 @@ jobs:
         with:
           cache-prefix: zig-runtime-bpf
 
-      - name: install clang
+      - name: install clang-19
         shell: bash
         run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/llvm.asc > /dev/null
+          echo "deb https://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" | sudo tee /etc/apt/sources.list.d/llvm-19.list
           sudo apt-get update
-          sudo apt-get install --yes clang llvm
+          sudo apt-get install --yes clang-19
+          clang-19 --version
 
       - name: compile bpf assets
         shell: bash

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set +x
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
@@ -7,12 +8,14 @@ require_state
 ensure_dirs
 
 YOQ_INSTALL_URL="${YOQ_INSTALL_URL:-https://yoq.dev/install}"
+[ -n "${GH_TOKEN:-}" ] || die "set GH_TOKEN for release attestation verification before installing nodes"
 
 for instance in \
   "${SERVER_1_NAME}" "${SERVER_2_NAME}" "${SERVER_3_NAME}" \
   "${AGENT_1_NAME}" "${AGENT_2_NAME}"; do
   log "copying helpers to ${instance}"
   gcloud_scp_to "${GCP_DIR}/remote/install-node.sh" "${instance}" "/tmp/install-node.sh"
+  gcloud_scp_to "${GCP_DIR}/remote/install-yoq.sh" "${instance}" "/tmp/install-yoq.sh"
   gcloud_scp_to "${GCP_DIR}/remote/start-node.sh" "${instance}" "/tmp/start-node.sh"
   gcloud_scp_to "${GCP_DIR}/train/smoke.py" "${instance}" "/tmp/smoke.py"
 done
@@ -35,8 +38,15 @@ install_remote "${AGENT_2_NAME}" "${agent_role}"
 
 install_yoq_remote() {
   local instance="$1"
+  local installer_url_arg
+  printf -v installer_url_arg '%q' "${YOQ_INSTALL_URL}"
   log "installing yoq release on ${instance}"
-  gcloud_ssh "${instance}" "sudo bash -lc 'curl -fsSL ${YOQ_INSTALL_URL} | bash'"
+  # prevent shell tracing from exposing the token if the caller enabled it.
+  (
+    set +x
+    printf '%s\n' "${GH_TOKEN}" |
+      gcloud_ssh "${instance}" "sudo -n bash /tmp/install-yoq.sh ${installer_url_arg}"
+  )
 }
 
 install_yoq_remote "${SERVER_1_NAME}"

@@ -231,10 +231,6 @@ gcloud_ssh() {
   gcloud compute ssh "${instance}" \
     --project="${PROJECT_ID}" \
     --zone="${ZONE}" \
-    --ssh-flag='-o' \
-    --ssh-flag='StrictHostKeyChecking=no' \
-    --ssh-flag='-o' \
-    --ssh-flag='UserKnownHostsFile=/dev/null' \
     --command "$*"
 }
 
@@ -244,11 +240,7 @@ gcloud_scp_to() {
   local dst="$3"
   gcloud compute scp "${src}" "${instance}:${dst}" \
     --project="${PROJECT_ID}" \
-    --zone="${ZONE}" \
-    --scp-flag='-o' \
-    --scp-flag='StrictHostKeyChecking=no' \
-    --scp-flag='-o' \
-    --scp-flag='UserKnownHostsFile=/dev/null'
+    --zone="${ZONE}"
 }
 
 instance_ip() {

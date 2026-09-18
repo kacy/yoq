@@ -444,6 +444,7 @@ pub fn build(b: *std.Build) void {
 
     for (privileged_lanes) |lane| {
         lane.step.dependOn(b.getInstallStep());
+        var previous_run: ?*std.Build.Step = null;
 
         for (lane.tests) |test_file| {
             const priv_mod = b.addTest(.{
@@ -532,6 +533,9 @@ pub fn build(b: *std.Build) void {
                 run_priv.step.dependOn(&install_test_http_server.step);
                 run_priv.step.dependOn(&install_test_net_probe.step);
             }
+            // tests in a lane share host resources, including listener ports.
+            if (previous_run) |previous| run_priv.step.dependOn(previous);
+            previous_run = &run_priv.step;
             lane.step.dependOn(&run_priv.step);
         }
     }

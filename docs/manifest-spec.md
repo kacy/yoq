@@ -1,6 +1,6 @@
 # manifest.toml reference
 
-the manifest file defines applications. it describes services, workers, cron jobs, training jobs, and volumes in a single TOML file.
+the manifest file defines applications. it describes services, workers, cron jobs, training jobs, and volumes in a single TOML file. unknown keys, misplaced tables, and values of the wrong type are errors; validation reports the field path. run `yoq validate -f manifest.toml` before applying changes.
 
 ## quick example
 
@@ -46,6 +46,8 @@ services are long-running processes. defined under `[service.<name>]`.
 |-------|------|----------|---------|-------------|
 | `image` | string | yes | — | OCI image reference (e.g. `nginx:latest`) |
 | `command` | array of strings | no | image default | container entrypoint |
+| `replicas` | integer | no | `1` | desired service instances, from 1 to 64 |
+| `required_labels` | string | no | `""` | comma-separated `key=value` placement requirements |
 | `ports` | array of strings | no | `[]` | port mappings (`"host:container"`) |
 | `env` | array of strings | no | `[]` | environment variables (`KEY=VALUE`) |
 | `depends_on` | array of strings | no | `[]` | services to start first |
@@ -62,6 +64,16 @@ services are long-running processes. defined under `[service.<name>]`.
 | `alerts` | table | no | none | alert threshold configuration |
 
 services participate in app releases. local `yoq up` and remote `yoq up --server` both normalize the manifest into one app snapshot, store that snapshot in release history, and then execute the service portion of the release. services are the workload kind that roll out automatically on apply.
+
+### replicas and placement
+
+service discovery uses a shared service-name namespace. active applications must use distinct service names; conflicting ownership is rejected before deployment.
+
+local applies start the requested number of service instances. cluster applies place the whole replica group before activating its rollout target; insufficient capacity rejects the group. required labels filter cluster agents. these settings are preserved in app snapshots and rollback releases. status reports both logical services and desired service instances.
+
+one yoq data directory owns published-port rules in each network namespace. processes using another data directory are rejected; use the same user and state directory for runtime commands. the owner marker under `/run/yoq` lasts until reboot.
+
+published host ports are shared by the service's instances on each host. new tcp connections go to eligible replicas, and existing connections remain pinned by conntrack. health checks run per instance. removing one container releases only its port claims. a cluster replacement's old and new instances must fit within the 64-backend limit; a larger temporary group is rejected before placement.
 
 ### ports
 
@@ -249,7 +261,8 @@ override them with:
 
 ```text
 yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
-yoq init-server --http-proxy-bind 0.0.0.0 --http-proxy-port 17080
+# add these listener options to the complete cluster command:
+# --http-proxy-bind 0.0.0.0 --http-proxy-port 17080
 ```
 
 use `GET /v1/status?mode=service_discovery`, `GET /v1/services/<name>/proxy-routes`, and `GET /v1/metrics?format=prometheus` to inspect listener, route, steering, weighted-backend traffic, and mirror traffic state. `mode=service_rollout` remains accepted as a compatibility alias.
@@ -433,7 +446,7 @@ vram_min_mb = 40000
 
 ## GPU mesh configuration
 
-defined under `[service.<name>.gpu_mesh]`. configures distributed GPU communication (NCCL) for multi-rank workloads.
+defined under `[service.<name>.gpu_mesh]`. configures cluster gpu gangs and nccl communication. local service mesh execution is rejected before startup; use a `[training.<name>]` job for local grouped ranks.
 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
@@ -452,7 +465,7 @@ master_port = 29500
 
 ## alerts
 
-defined under `[service.<name>.alerts]`. threshold-based monitoring with webhook notifications. when a metric exceeds its threshold for consecutive checks, the webhook is fired.
+defined under `[service.<name>.alerts]`. the local supervisor or hosting agent samples every five seconds. three consecutive values above a threshold fire an alert; three at or below it resolve the alert. missing data reports an unavailable metric. see [service alerts](alerts.md) for metric definitions, delivery retries, and status fields. cluster restart counts are unavailable.
 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
@@ -469,7 +482,7 @@ cpu_percent = 90
 memory_percent = 85
 restart_count = 5
 latency_p99_ms = 500
-webhook = "https://hooks.slack.com/services/T.../B.../xxx"
+webhook = "https://monitoring.example.com/events"
 ```
 
 ---
@@ -487,7 +500,7 @@ workers are one-shot tasks that run to completion. defined under `[worker.<name>
 | `working_dir` | string | no | image default | working directory |
 | `volumes` | array of strings | no | `[]` | volume mounts |
 | `gpu` | table | no | none | GPU passthrough (same fields as service GPU) |
-| `gpu_mesh` | table | no | none | GPU mesh (same fields as service GPU mesh) |
+| `gpu_mesh` | table | no | none | cluster gpu mesh; rejected for local workers |
 
 ```toml
 [worker.migrate]
@@ -546,12 +559,17 @@ a single top-level `[backup]` block schedules recurring snapshots of the yoq sta
 | `every` | string | yes | — | interval (`"30m"`, `"6h"`, `"24h"`) |
 | `output_dir` | string | yes | — | directory the artifacts are written to (created if missing) |
 | `encrypt` | bool | no | `true` | encrypt + checksum the artifact; `false` writes a raw SQLite copy |
+| `keep_count` | integer | no | `7` | maximum number of retained backups; must be at least one |
+| `max_age` | string | no | none | prune backups older than this duration |
+| `max_bytes` | integer | no | `0` | total retained byte limit; zero disables this limit |
 
 ```toml
 [backup]
 every = "24h"
 output_dir = "/var/lib/yoq/backups"
 ```
+
+after a successful backup, retention removes older artifacts that exceed the configured limits. the newest successful backup is always retained, even if it exceeds an age or size limit.
 
 encrypted artifacts carry a SHA256 of the database and can be checked with `yoq restore --verify <path>` before applying. only metadata is backed up — volume data is not included.
 
@@ -568,9 +586,9 @@ training jobs orchestrate distributed GPU training runs. defined under `[trainin
 | `env` | array of strings | no | `[]` | environment variables |
 | `working_dir` | string | no | image default | working directory |
 | `volumes` | array of strings | no | `[]` | volume mounts |
-| `gpus` | integer | yes | — | total number of GPUs (= number of ranks) |
+| `gpus` | integer | yes | — | total gpu count and number of ranks, from 1 to 4,096 |
 | `gpu_type` | string | no | none | GPU model filter (e.g. `"H100"`) |
-| `data` | table | no | none | dataset configuration |
+| `data` | table | no | none | reserved; supplying this table is rejected |
 | `checkpoint` | table | no | none | checkpoint configuration |
 | `resources` | table | no | see below | resource limits per rank |
 | `fault_tolerance` | table | no | see below | fault tolerance settings |
@@ -586,30 +604,17 @@ env = ["EPOCHS=10", "BATCH_SIZE=32"]
 
 ### data configuration
 
-defined under `[training.<name>.data]`.
-
-| field | type | required | default | description |
-|-------|------|----------|---------|-------------|
-| `dataset` | string | yes | — | dataset path or identifier |
-| `sharding` | string | yes | — | sharding strategy (e.g. `"file"`) |
-| `preprocessing` | string | no | none | preprocessing pipeline (e.g. `"tokenize"`) |
-
-```toml
-[training.llm-finetune.data]
-dataset = "/mnt/lustre/pile"
-sharding = "file"
-preprocessing = "tokenize"
-```
+`[training.<name>.data]` is rejected because automatic dataset preparation and sharding are not implemented. mount prepared data through `volumes` and perform any preprocessing in the job command.
 
 ### checkpoint configuration
 
-defined under `[training.<name>.checkpoint]`.
+defined under `[training.<name>.checkpoint]`. the path is inside each container and should be backed by a writable volume. applications write and restore their own framework checkpoints. see [training lifecycle](training-lifecycle.md) for resume behavior and cross-agent storage requirements.
 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
 | `path` | string | yes | — | checkpoint storage path |
-| `interval_secs` | integer | no | `1800` | seconds between checkpoints |
-| `keep` | integer | no | `5` | number of checkpoints to retain |
+| `interval_secs` | integer | no | `1800` | requested interval passed as `YOQ_CHECKPOINT_INTERVAL`; the application controls writes |
+| `keep` | integer | no | `5` | checkpoints retained during local synchronization; cluster storage needs its own retention policy |
 
 ```toml
 [training.llm-finetune.checkpoint]
@@ -641,13 +646,13 @@ defined under `[training.<name>.fault_tolerance]`.
 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
-| `spare_ranks` | integer | no | `0` | spare ranks for failover |
-| `auto_restart` | boolean | no | `true` | restart failed ranks automatically |
-| `max_restarts` | integer | no | `10` | maximum restart attempts per rank |
+| `spare_ranks` | integer | no | `0` | must remain zero; spare-rank failover is unsupported |
+| `auto_restart` | boolean | no | `true` | restart a failed rank group automatically |
+| `max_restarts` | integer | no | `10` | maximum group restart attempts |
 
 ```toml
 [training.llm-finetune.fault_tolerance]
-spare_ranks = 1
+spare_ranks = 0
 auto_restart = true
 max_restarts = 5
 ```
@@ -763,4 +768,5 @@ this is intended for local development, not production.
 | `yoq down` | stop all services |
 | `yoq run-worker <name>` | run a one-shot worker |
 | `yoq history <service>` | show deployment history |
-| `yoq rollback <service>` | rollback to previous deployment |
+| `yoq rollback <service>` | print saved service configuration for manual redeployment |
+| `yoq rollback --app <app>` | deploy the previous successful app release |

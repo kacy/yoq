@@ -105,11 +105,11 @@ use `yoq up --server <server-ip>:<port>` to deploy an app to an existing cluster
 
 gpu support targets nvidia linux hosts. it includes device discovery, container passthrough, cluster gang scheduling, and nccl configuration using detected gpu and infiniband topology.
 
-training controls include job status, logs, pause, resume, and checkpoint tracking. applications write and restore their own checkpoints. local distributed training is incomplete; use the [gpu validation guide](docs/gpu-validation.md) to evaluate the paths and hardware you need.
+training controls include job status, logs, pause, resume, and checkpoint tracking. applications write and restore their own checkpoints. local runs start assigned ranks concurrently; remote controls use the committed app definition. see [training lifecycle](docs/training-lifecycle.md) for supported behavior and the [gpu validation guide](docs/gpu-validation.md) for hardware checks.
 
 ### storage and backups
 
-volumes support local directories, host paths, nfs mounts, and existing parallel filesystem mounts. the local object store implements a subset of the s3 api and uses yoq bearer-token authentication.
+volumes support local directories, host paths, nfs mounts, and existing parallel filesystem mounts. the local object store implements a [documented s3-style subset](docs/storage-api.md) with yoq bearer-token authentication.
 
 `yoq backup` creates an encrypted backup of yoq's database by default. application volumes and object data need separate backups.
 
@@ -133,7 +133,7 @@ yoq help                           show command help
 
 local runtime commands need the privileges and state directory used to start the app. the quickstart shows the sudo form. app rollback requires an earlier successful release; `--print` lets you inspect it before applying it. service-level `yoq rollback <service>` prints a saved configuration for manual redeployment.
 
-see the [command reference](docs/commands.md) for image, build, policy, certificate, cluster, and training commands, and the [rollout guide](docs/rollouts.md) for deployment and recovery behavior.
+see the [installation and recovery guide](docs/install-and-recovery.md) for fresh hosts, backups, and upgrades. see the [command reference](docs/commands.md) for image, build, policy, certificate, cluster, and training commands, and the [rollout guide](docs/rollouts.md) for deployment and recovery behavior.
 
 ## examples and documentation
 

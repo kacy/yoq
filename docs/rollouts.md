@@ -201,6 +201,12 @@ for local operation, use the same commands without `--server`.
 
 training start, resume and scale commit job metadata and the complete replacement assignment group together. a capacity failure or rejected metadata write preserves the previous job and assignments. pause and stop commit the job state and assignment removal together. these operations retain their original leadership term, so an old executor cannot resume writes after re-election.
 
-resume keeps the last requested GPU count. training groups share the scheduler's 4096-rank bound; invalid requests are rejected before removing any assignment. the `running` job state records successful scheduling, while assignment status reports execution on the workers.
+resume keeps the last requested GPU count. training groups share the scheduler's 4096-rank bound; invalid requests are rejected before removing any assignment. a job remains `scheduling` until its assignments report running. the leader reconciles assignment results into completed, failed, or bounded restart transitions, including after elections.
 
 running ranks still consume the resources reported by worker heartbeats. replacing a running job requires enough free capacity for its replacement; removing an assignment claim does not make those resources immediately available. on a full cluster, pause the job, wait for workers to report the released resources, then resume or scale. a premature resume leaves the job paused.
+
+### replica ownership
+
+service replicas are one rollout target. cluster placement reserves the complete group before activation; a failed replacement restores the prior group. the old and replacement instances together must fit the 64-backend service limit. each local supervisor holds a durable app/service generation, and an older supervisor cannot restart or stop containers owned by its replacement.
+
+published ports retain one claim per container. stopping an old instance leaves sibling and replacement claims intact. ordinary ports follow endpoint health; a gang's rendezvous port remains available during initialization so readiness can complete.

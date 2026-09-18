@@ -2,23 +2,35 @@
 
 this example is the canonical local routing walkthrough.
 
-it starts three echo services behind the built-in router:
+it starts five echo services behind the built-in router:
 
 - `demo.local/` -> `gateway`
 - `demo.local/api/*` with `x-env: canary` -> weighted split across `api` and `api-canary`
 - `demo.local/api/*` with `x-env: canary` -> mirrored best-effort to `api-shadow`
 - `docs.demo.local/` -> `docs`
 
-start it manually:
+start the server in one terminal. the commands below use root-owned state under `/root/.local/share/yoq`:
 
 ```bash
-yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
-yoq up -f examples/http-routing/manifest.toml
+sudo -H yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
+```
+
+in a second terminal, keep the app running:
+
+```bash
+sudo -H yoq up -f examples/http-routing/manifest.toml
+```
+
+from a third terminal, exercise the routes and authenticated status endpoints:
+
+```bash
 curl -H 'Host: demo.local' http://127.0.0.1:17080/
 curl -H 'Host: demo.local' -H 'x-env: canary' http://127.0.0.1:17080/api/get
 curl -H 'Host: docs.demo.local' http://127.0.0.1:17080/
-curl http://127.0.0.1:7700/v1/status?mode=service_discovery
-curl http://127.0.0.1:7700/v1/metrics?format=prometheus | rg 'yoq_service_l7_proxy_route_'
+curl -H "Authorization: Bearer $(sudo cat /root/.local/share/yoq/api_token)" \
+  http://127.0.0.1:7700/v1/status?mode=service_discovery
+curl -H "Authorization: Bearer $(sudo cat /root/.local/share/yoq/api_token)" \
+  http://127.0.0.1:7700/v1/metrics?format=prometheus | rg 'yoq_service_l7_proxy_route_'
 ```
 
 the `api` route also rewrites `/api/*` to `/*` before forwarding upstream. route selection prefers the longest matching path, then exact header matches, then narrower method filters. when the request method and `x-env: canary` header both match, the route selects from the configured weighted backend list, sends a best-effort mirror copy to `api-shadow`, and exposes both primary and mirror traffic counters in service/status JSON as well as Prometheus output.

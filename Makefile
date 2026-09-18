@@ -42,16 +42,16 @@ panic-audit:
 	bash tools/panic_audit.sh
 
 test-runtime-core: build
-	sudo env YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-runtime-core
+	sudo env YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -j1 -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-runtime-core
 
 test-runtime-network: build
-	sudo env YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-runtime-network
+	sudo env YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -j1 -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-runtime-network
 
 test-runtime-cluster: build
-	sudo env YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-runtime-cluster
+	sudo env YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -j1 -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-runtime-cluster
 
 test-privileged: build
-	sudo env YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-privileged
+	sudo env YOQ_SKIP_SLOW_TESTS=1 $(ZIG) build -j1 -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-privileged
 
 clean:
 	rm -rf zig-out .zig-cache

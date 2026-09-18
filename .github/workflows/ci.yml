@@ -36,6 +36,7 @@ jobs:
               - 'scripts/**'
               - 'bpf/**'
               - 'examples/**'
+              - 'infra/**'
               - 'build.zig'
               - 'build.zig.zon'
               - 'Dockerfile'
@@ -200,6 +201,18 @@ jobs:
       timeout-minutes: 10
       failure-artifact-name: standard-devices-log
 
+  installer-contracts:
+    name: installer-contracts
+    needs: changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: verify remote installer credentials and cleanup
+        run: python3 -m unittest discover -s tests/operator -p 'test_*.py'
+      - name: check installer shell syntax
+        run: bash -n infra/gcp/install.sh infra/gcp/lib.sh infra/gcp/remote/install-node.sh infra/gcp/remote/install-yoq.sh
+
   operator-smoke:
     name: operator-smoke
     needs:
@@ -340,6 +353,9 @@ jobs:
             ./zig-out/bin/yoq validate -f "$manifest"
           done
 
+      - name: exercise backup verification and recovery commands
+        run: python3 scripts/backup-restore-smoke.py ./zig-out/bin/yoq
+
   registry-tls:
     name: registry-tls
     runs-on: ubuntu-latest
@@ -372,4 +388,3 @@ jobs:
           sudo apt-get install --no-install-recommends -y wireguard-tools
       - name: verify native wireguard configuration
         run: bash scripts/wireguard-kernel-smoke.sh
-

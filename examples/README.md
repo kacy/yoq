@@ -32,7 +32,7 @@ yoq up -f examples/cron/manifest.toml
 
 ## http-routing
 
-four services behind the built-in HTTP router. requests for `demo.local/api` with `x-env: canary` use the weighted `api` / `api-canary` backend list, `docs.demo.local` goes to the docs service, and everything else for `demo.local` goes to the gateway service.
+five services behind the built-in HTTP router. requests for `demo.local/api` with `x-env: canary` use the weighted `api` / `api-canary` backend list, `docs.demo.local` goes to the docs service, and everything else for `demo.local` goes to the gateway service.
 
 ```bash
 yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080

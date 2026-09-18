@@ -70,3 +70,11 @@ Good first targets:
 
 Only add MIG or multi-node InfiniBand validation after the single-node lane is
 stable.
+
+## lifecycle acceptance
+
+unit tests exercise concurrent rank startup, cancellation, lease ownership, restart limits, and placement rollback without physical gpus. they do not establish driver passthrough or nccl communication on a real host.
+
+on a host with at least two gpus, run a two-rank `[training.<name>]` job that prints its rank and visible device and performs a collective operation. verify that each container sees a distinct assigned device, both ranks reach the shared rendezvous, and one rank's failure stops its peers before a bounded retry. pause and resume the job with a mounted checkpoint directory, then stop it and verify that containers and gpu leases are released. repeat on two agents with storage shared between them to exercise remote checkpoint recovery.
+
+local `[service.<name>.gpu_mesh]` execution is rejected. use training jobs for local groups; cluster service gangs use the cluster scheduler. dataset preparation and spare-rank failover are not implemented. see [training lifecycle](training-lifecycle.md) for the supported contract.

@@ -64,9 +64,9 @@ OCI image management — pull from any registry, content-addressable storage, la
 
 **store:** blobs live at `~/.local/share/yoq/blobs/sha256/<hex>`. writes are atomic (temp file, then rename). same content always maps to the same path, giving automatic deduplication across images.
 
-**registry client:** speaks the OCI distribution protocol over HTTPS. handles bearer token auth, multi-arch manifests (resolves to linux/amd64), and both Docker and OCI media types. size limits prevent memory exhaustion (10MB manifests, 512MB blobs).
+**registry client:** speaks the OCI distribution protocol over HTTPS. handles bearer token auth, multi-arch manifests (selects the target linux architecture), and both Docker and OCI media types. manifests are bounded at 10 mb. layers default to a 512 mib limit; `YOQ_MAX_LAYER_BYTES` sets an explicit positive byte limit. see [registry authentication](registry-auth.md).
 
-**layers:** tar.gz extraction with automatic format detection (gzip, bzip2, xz, zstd). layers are cached by digest — shared across images that use the same base.
+**layers:** manifest descriptors select gzip, uncompressed tar, or zstd extraction. unsupported media types fail explicitly. layers are cached by digest — shared across images that use the same base.
 
 key files:
 - `spec.zig` — OCI types (Manifest, ImageConfig, Descriptor)
@@ -81,16 +81,16 @@ container networking with eBPF for service discovery and load balancing.
 
 **bridge:** a `yoq0` bridge is created on first use. each container gets a veth pair: one end on the bridge, one moved into the container namespace as `eth0`. IPs are allocated from `10.42.0.0/16` and tracked in SQLite.
 
-**DNS:** a userspace DNS resolver listens on `10.42.0.1:53`. it answers A record queries for service names from an in-memory registry (256 entries, no heap allocation). unknown names are forwarded to the upstream resolver. an eBPF TC program intercepts DNS queries on the bridge for fast-path resolution — cache hits are answered entirely in kernel space, misses fall through to userspace.
+**DNS:** a userspace DNS resolver listens on `10.42.0.1:53`. it answers A record queries for service names from an in-memory registry (1,024 entries). unknown names are forwarded to the upstream resolver. an eBPF TC program intercepts DNS queries on the bridge for fast-path resolution — cache hits are answered entirely in kernel space, misses fall through to userspace.
 
-**load balancing:** an eBPF program on the bridge implements FNV-1a consistent hashing for load balancing with connection affinity. a conntrack map (5-tuple → selected backend) ensures existing connections stick to the same backend. reverse SNAT on egress handles return traffic.
+**load balancing:** an eBPF program on the bridge implements FNV-1a hashing with modulo backend selection for load balancing with connection affinity. a conntrack map (5-tuple → selected backend) ensures existing connections stick to the same backend. reverse SNAT on egress handles return traffic.
 
 **network policy:** eBPF-based allow/deny rules between services. policies are stored in SQLite. the active service reconciler checks for policy-only changes on its 30-second audit pass, including changes made by a separate CLI process. it reads policy definitions and endpoint identities in one database snapshot, populates bounded replacement maps before attaching them, and retains existing enforcement when preparation fails. unchanged rules are reused only while their filter is still current; another process replacing that filter triggers reconciliation. before releasing a new workload, configured policies must be installed successfully and include its registered endpoint identity. invalid policy data, excessive map capacity, or failed required attachment rejects startup and removes its registration; policy-free workloads keep BPF acceleration optional.
 
-**cross-node:** WireGuard hub-and-spoke tunnels are set up automatically when nodes join a cluster. server nodes act as hubs — they enable IP forwarding and include all container subnets in their WireGuard allowed-ips. agent nodes are spokes — they connect only to servers, not to each other. this avoids O(n²) peer configurations: agent join/leave is a single-peer operation on the server side. key exchange happens during the join handshake. the overlay uses `10.40.0.0/24`, with each node's containers in `10.42.{node_id}.0/24`. service discovery works transparently across nodes.
+**cross-node:** WireGuard hub-and-spoke tunnels are set up automatically when nodes join a cluster. server nodes act as hubs — they enable IP forwarding and include all container subnets in their WireGuard allowed-ips. agent nodes are spokes — they connect only to servers, not to each other. this avoids O(n²) peer configurations: agent join/leave is a single-peer operation on the server side. key exchange happens during the join handshake. the overlay uses `10.40.0.0/16`, with each node's containers in `10.42.{node_id}.0/24`. service discovery works transparently across nodes.
 
 **eBPF programs:** 7 BPF programs in `bpf/`:
-- `lb.c` — load balancing with FNV-1a consistent hashing and conntrack
+- `lb.c` — load balancing with FNV-1a hashing with modulo backend selection and conntrack
 - `dns_intercept.c` — kernel-space DNS resolution
 - `policy.c` — network policy enforcement
 - `metrics.c` — per-service packet counting
@@ -111,7 +111,7 @@ image building with content-hash caching.
 
 **Dockerfile parser:** supports FROM, RUN, COPY, ADD, ENV, EXPOSE, ENTRYPOINT, CMD, WORKDIR, ARG, LABEL, VOLUME, SHELL, HEALTHCHECK, STOPSIGNAL, ONBUILD. handles line continuations and multi-stage builds (COPY --from).
 
-**build engine:** each step produces a layer cached by content hash — not by layer order. this means reordering instructions doesn't invalidate the cache (unlike Docker). RUN steps mount an overlay and execute in a container. COPY steps create a new layer from the build context. ONBUILD triggers stored in image config are executed when the image is used as a base.
+**build engine:** each step caches a layer using its content, ordered parent layers, and execution context. changing an earlier instruction can invalidate later steps. RUN steps mount an overlay and execute in a container. COPY steps create a new layer from the build context. ONBUILD triggers stored in image config are executed when the image is used as a base.
 
 **declarative format:** a TOML-based build manifest as an alternative to Dockerfile, with automatic stage dependency resolution.
 
@@ -132,7 +132,7 @@ application management — the compose/orchestrator/control-plane layer.
 
 **orchestrator:** starts and stops services respecting dependency order. reconciles running state against desired state. handles restart policies (none, always, on_failure).
 
-**health checks:** a single checker thread polls HTTP, TCP, gRPC, or exec probes at configurable intervals. health state is stored in a fixed-size registry (64 services, mutex-protected) that the orchestrator and DNS resolver read to gate traffic.
+**health checks:** a scheduler and up to four workers run HTTP, TCP, gRPC, or exec probes at configurable intervals. health state is stored in a dynamically sized, mutex-protected registry that the orchestrator and DNS resolver read to gate traffic.
 
 **release model:** app release rows in SQLite store the canonical config snapshot, manifest hash, trigger metadata, rollout state, rollout control state, progress counts, failure details, per-target rollout state, and rollout checkpoint data. local and remote app status/history/rollback all project from that same release data.
 
@@ -148,7 +148,7 @@ application management — the compose/orchestrator/control-plane layer.
 
 **cron scheduling:** periodic tasks run at configurable intervals (e.g., `every = "1h"`), with the active cron set derived from the current app release.
 
-**alerting:** services can define alert thresholds (CPU, memory, restart count, p99 latency, error rate) with webhook notifications. when a metric exceeds its threshold for consecutive checks, the configured webhook is fired.
+**alerting:** local supervisors and cluster agents sample configured service thresholds. a separate worker delivers bounded webhook requests, while sample and delivery status persist in the host database. resource measurements use the highest replica value on the host; request metrics use a bounded proxy history. cluster restart accounting is unavailable. see [service alerts](alerts.md).
 
 key files:
 - `spec.zig` — Service, Worker, Cron, Volume, TrainingJob, AlertSpec types
@@ -170,7 +170,7 @@ multi-node orchestration via Raft consensus and SWIM gossip.
 
 **role separation:** the cluster has two node types. server nodes run Raft consensus, the API server, and the scheduler. agent nodes run only the gossip protocol and container workloads. this keeps the consensus group small while allowing the agent pool to scale independently.
 
-**Raft:** a pure state machine implementation with no I/O. all side effects are described as `Action` values (send vote request, append entries, commit, etc.) that the caller executes. this makes the core algorithm testable without mocking. election timeout is 1.5-3s (randomized), heartbeat at 1s.
+**Raft:** a pure state machine implementation with no I/O. all side effects are described as `Action` values (send vote request, append entries, commit, etc.) that the caller executes. this makes the core algorithm testable without mocking. election timeout is 3–6 seconds (randomized), with a 600-ms heartbeat.
 
 **gossip:** SWIM (Scalable Weakly-consistent Infection-style Membership) protocol for failure detection. nodes probe each other directly (ping) and indirectly (ping-req through a third node) to detect failures without centralized health checking. protocol updates (joins, leaves, state changes) are piggybacked on protocol messages for efficient dissemination without extra round trips. gossip runs over UDP for protocol simplicity and lower overhead. the implementation is a pure state machine like raft — `tick()`, `handleMessage()`, `drainActions()`.
 
@@ -178,11 +178,11 @@ multi-node orchestration via Raft consensus and SWIM gossip.
 
 **scheduler:** bin-packing placement as a pure function: given resource requests and agent capacities, it scores agents by free resources (CPU + memory) and assigns containers. draining and offline agents are skipped.
 
-**replicated commands:** API writes, membership changes, and heartbeat batches pass through `Node.proposeLocked` and the same structural guard used during replay. A command is an unmodified SQL batch; no envelope or wire version is added, so existing single statements and batches replay unchanged. Every statement and its applied index commit in one transaction. Invalid structure is rejected before proposal; SQL syntax, schema, and constraint errors during apply roll back the batch and leave the applied index unchanged. Apply stops at that entry and retries on later ticks; it never skips a failed command. Storage errors remain distinct from leadership errors.
+**replicated commands:** admission and replay prepare generated sql against an empty canonical schema. only replicated tables, deterministic functions, and documented query forms are accepted. valid mutations and their applied index commit together. permanently invalid committed commands receive a durable rejection so later entries can apply; storage failures and unexpected live schema differences stop replay. all voters must use the same validation rules. see [upgrade and recovery requirements](cluster-guide.md#upgrading-replicated-command-validation).
 
 This preserves the current command format, not arbitrary schema compatibility. During a rolling upgrade, producers must use SQL understood by every member. New tables, columns, or statement forms require compatible schema rollout before producers emit them. A future typed command format needs explicit version negotiation rather than guessing a version from SQL bytes.
 
-**agents:** worker nodes register with the server via HTTP, then heartbeat every 5s reporting capacity. they pull assignments, download images, and start containers using the local runtime. WireGuard tunnels are set up on join for encrypted cross-node networking.
+**agents:** worker nodes register with the server via HTTP, then report capacity on an adaptive heartbeat interval that starts at five seconds. they pull assignments, download images, and start containers using the local runtime. WireGuard tunnels are set up on join for encrypted cross-node networking.
 
 **app-first control plane:** the canonical cluster write path is `POST /apps/apply`. cluster routes parse app snapshots into the same release model used locally, then execute through the cluster scheduling backend. app-scoped reads (`/apps`, `/apps/{name}/status`, `/apps/{name}/history`) and writes (`/apps/{name}/rollback`, rollout control, worker run, training control) all project from that same release/store layer.
 
@@ -208,7 +208,7 @@ key files:
 
 persistent storage for all yoq state.
 
-**SQLite:** the database at `~/.local/share/yoq/yoq.db` stores containers, images, service names, secrets, network policies, app releases, rollout progress, rollout checkpoints, training runtime state, and deployment history. schema migrations run on startup. in cluster mode, the database is replicated via Raft.
+**SQLite:** `~/.local/share/yoq/yoq.db` holds local runtime and application state. cluster servers keep the raft log and replicated state in separate databases under the cluster directory. certificate readers use the owning replicated database in cluster mode. schema initialization propagates migration failures instead of starting with a partial schema.
 
 **secrets:** encrypted at rest with XChaCha20-Poly1305. can be mounted as files or injected as environment variables. rotation doesn't require container restart.
 
@@ -235,7 +235,7 @@ GPU detection, passthrough, scheduling, and distributed training support.
 
 **InfiniBand/NCCL:** detects InfiniBand HCAs, generates NCCL topology XML for optimal GPU-NIC affinity, and injects NCCL environment variables into training containers.
 
-**health monitoring:** periodic checks of GPU temperature, ECC errors, and utilization via NVML. feeds into the alerting system.
+**health monitoring:** NVML provides gpu temperature, ecc errors, and utilization. service webhook thresholds cover the metrics listed in the [alert guide](alerts.md); gpu measurements are not additional webhook thresholds.
 
 **CLI:** `yoq gpu topo` shows GPU topology (PCIe, NVLink, InfiniBand). `yoq gpu bench` runs GPU-to-GPU bandwidth benchmarks.
 
@@ -255,17 +255,17 @@ distributed training job orchestration.
 
 **lifecycle:** TrainingJobState machine: pending → scheduling → running → paused → completed/failed/stopped. the TrainingController manages transitions and tracks per-rank status.
 
-**multi-rank:** each training job spawns one container per GPU (rank). NCCL environment variables (`MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE`, `RANK`, `LOCAL_RANK`) are injected automatically. gang scheduling ensures all ranks start together.
+**multi-rank:** local training starts every rank before waiting for completion and leases a distinct gpu to each container. nccl environment variables and a shared rendezvous address connect the ranks. cluster placement reserves the complete gang before activation. starting a group does not guarantee that every process begins executing at the same instant.
 
 **checkpoints:** configurable checkpoint interval and retention. the controller persists checkpoint metadata to SQLite for resume-after-failure.
 
-**fault tolerance:** spare ranks can be held in reserve. failed ranks auto-restart up to a configurable limit. the job resumes from the latest checkpoint.
+**fault tolerance:** failed jobs can restart within the configured limit. applications write and restore their checkpoints. spare-rank configuration does not provide automatic spare-rank failover.
 
 ### storage (`src/storage/`)
 
 S3-compatible object storage and volume management.
 
-**S3 gateway:** a filesystem-backed S3-compatible API. supports bucket CRUD, object HEAD/GET/PUT/DELETE, and multipart uploads. objects are stored under `~/.local/share/yoq/s3/`.
+**storage gateway:** a filesystem-backed s3-style api with yoq bearer authentication, atomic object replacement, etags, paginated listings, and validated multipart completion. objects live under `~/.local/share/yoq/s3/`. see the [supported client contract](storage-api.md).
 
 **volume drivers:** four drivers (local, host, NFS, parallel) provide storage backends for container volumes. see the [manifest spec](manifest-spec.md#volumes) for configuration.
 
@@ -276,15 +276,20 @@ key files:
 
 ### doctor (`src/lib/doctor.zig`)
 
-pre-flight system readiness checks. `yoq doctor` runs 7 checks and reports pass/warn/fail for each:
+pre-flight system readiness checks. `yoq doctor` runs ten checks and reports pass/warn/fail for each:
 
 1. **kernel** — Linux kernel ≥ 6.1
-2. **cgroup-v2** — cgroups v2 mounted and writable
-3. **ebpf** — BPF program loading support
+2. **cgroup-v2** — cgroups v2 filesystem present
+3. **ebpf** — bpf filesystem present
 4. **gpu** — NVIDIA GPU and driver availability
 5. **wireguard** — WireGuard kernel module
 6. **infiniband** — InfiniBand HCA detection
 7. **disk-space** — sufficient free disk space
+8. **io_uring** — kernel support
+9. **bpf-jit** — jit setting
+10. **mtu** — interface mtu checks
+
+filesystem checks do not prove cgroup write access or successful bpf program loading; the privileged runtime checks exercise those operations.
 
 GPU, WireGuard, and InfiniBand checks return `warn` (not `fail`) when hardware is absent, since these are optional features.
 
@@ -318,6 +323,8 @@ key files:
 certificate management and TLS termination.
 
 **ACME:** Let's Encrypt-compatible client implementing HTTP-01 and DNS-01 challenge validation. HTTP-01 serves challenge tokens on port 80. DNS-01 computes `_acme-challenge` TXT values, updates records through built-in providers (`cloudflare`, `route53`, `gcloud`) or an exec hook, polls DNS visibility, and then finalizes the order.
+
+**http/1 response streaming:** bounded header parsing and body buffers support large responses, event streams, and websocket tunnels. backpressure and socket deadlines bound forwarding; retries stop after response output begins. request bodies still share a 64 kib input buffer. see [proxy streaming](proxy-streaming.md).
 
 **upstream request policy:** buffered HTTP/1 and HTTP/2 share a single upstream exchange for deadlines, response framing, connection ownership, and service identity verification. Routing owns retries and circuit accounting; the transport never silently replays a failed pooled write. Both buffered protocols use the same method and status retry policy. Mirror tasks use bounded, joined workers and the same exchange.
 
@@ -353,15 +360,15 @@ key files:
 
 **explicit allocators.** every subsystem receives its allocator explicitly. arena allocators per container ensure predictable cleanup on container removal — no garbage, no leaks.
 
-**zero external dependencies.** HTTP server, JSON/TOML parsing, Raft consensus, TLS, ACME — all implemented in Zig. the only runtime dependency is the Linux kernel (6.1+). the binary is statically linked.
+**dependencies.** the build bundles sqlite and its zig wrapper. containers require linux 6.1+, cgroups v2, and root access. networking also invokes host tools such as iptables; gpu features require the matching drivers and optional vendor libraries. see the installation requirements before provisioning a host.
 
 **pure Raft.** the Raft state machine has no I/O. it takes inputs (ticks, RPCs) and returns actions (send messages, commit entries). the caller handles all networking and persistence. this makes the core algorithm fully testable without mocks.
 
-**eBPF for dataplane.** DNS resolution, load balancing, port mapping, metrics collection, network policy enforcement, and GPU traffic prioritization all run as eBPF programs in kernel space. this replaces kube-proxy, CNI plugins, and service mesh sidecars with a handful of C programs totaling ~500 lines.
+**eBPF for dataplane.** DNS resolution, load balancing, port mapping, metrics collection, network policy enforcement, and GPU traffic prioritization use ebpf programs where supported. shared published service ports use owned iptables chains so replicas can retain independent ownership and health eligibility. host tools and kernel capabilities remain deployment prerequisites.
 
-**fixed-size registries.** the DNS service registry (256 entries), health check registry (64 services), and BPF maps use fixed-size data structures. no heap allocation on the hot path — just array indexing.
+**bounded network state.** the dns registry holds up to 1,024 entries and bpf maps have explicit capacity limits. health registrations grow dynamically and are checked by a scheduler with up to four workers.
 
-**content-hash build cache.** build layer caching is keyed by content hash, not by instruction order. reordering Dockerfile instructions doesn't invalidate the cache (unlike Docker).
+**build cache identity.** cache keys include content, ordered parent layers, and execution context. earlier changes can invalidate later layers.
 
 **SQLite for everything.** container state, image metadata, service names, secrets, network policies, deployment history, and Raft log all live in SQLite. in cluster mode, the database is replicated via Raft. no etcd, no separate state store.
 

@@ -38,3 +38,5 @@ sudo zig build -Doptimize=ReleaseSafe -Drun-privileged-tests=true test-runtime-c
 ```
 
 see the [operator evaluation guide](golden-path.md) for manual application checks and the [gcp validation guide](gcp-cluster-validation.md) for a temporary cluster with gpu hosts.
+
+the `runtime-validation` workflow runs every lane on its schedule. manual runs can select `cluster` or `bpf` for a focused rerun; `all` includes the core and network lanes. normal pull request ci also checks the installer contract and runs real backup, verification, corruption-rejection, and restore commands against disposable state.
