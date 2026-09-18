@@ -89,7 +89,8 @@ int xdp_port_map(struct xdp_md *ctx)
         return XDP_PASS;
 
     __u16 ip_len = ntohs(ip->tot_len);
-    if (ip_len < sizeof(*ip) || (void *)((char *)ip + ip_len) > data_end)
+    __u32 available_ip_len = (char *)data_end - (char *)ip;
+    if (ip_len < sizeof(*ip) || ip_len > available_ip_len)
         return XDP_PASS;
 
     if (ip->ttl == 0)
