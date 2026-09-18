@@ -120,6 +120,10 @@ pub fn parseRequestHeadWithOptions(buf: []const u8, options: HeadOptions) HttpEr
     };
     if (header_end > max_header_bytes) return HttpError.HeadersTooLarge;
     const line = try parseRequestLine(buf);
+    if (options.allow_chunked) {
+        if (!std.mem.eql(u8, line.version, "HTTP/1.0") and !std.mem.eql(u8, line.version, "HTTP/1.1")) return HttpError.BadRequest;
+        for (line.uri) |byte| if (byte < 0x21 or byte == 0x7f) return HttpError.BadRequest;
+    }
     const uri_parts = splitUri(line.uri);
     if (line.headers_start > header_end) return HttpError.BadRequest;
     const headers_raw = buf[line.headers_start..header_end];
@@ -148,7 +152,7 @@ pub fn parseRequestHeadWithOptions(buf: []const u8, options: HeadOptions) HttpEr
         }
     }
     if (chunked and has_length) return HttpError.BadRequest;
-    if (chunked and !std.mem.endsWith(u8, buf[0 .. line.headers_start - 2], " HTTP/1.1")) return HttpError.BadRequest;
+    if (chunked and !std.mem.eql(u8, line.version, "HTTP/1.1")) return HttpError.BadRequest;
     const content_length = try findContentLength(headers_raw);
     if (content_length > max_body_bytes) return HttpError.BodyTooLarge;
     return .{
@@ -311,6 +315,7 @@ fn parseMethod(str: []const u8) ?Method {
 const ParsedRequestLine = struct {
     method: Method,
     uri: []const u8,
+    version: []const u8,
     headers_start: usize,
 };
 
@@ -336,6 +341,7 @@ fn parseRequestLine(buf: []const u8) HttpError!ParsedRequestLine {
     return .{
         .method = method,
         .uri = uri,
+        .version = after_method[uri_end + 1 ..],
         .headers_start = line_end + 2,
     };
 }
@@ -607,4 +613,14 @@ test "proxy upload head parsing accepts bounded chunked requests without changin
         try std.testing.expectError(error.BadRequest, parseRequestHeadWithOptions(raw, .{ .allow_chunked = true }));
     }
     try std.testing.expectError(error.BadRequest, parseRequestHeadWithOptions("POST / HTTP/1.0\r\nHost: app.test\r\nTransfer-Encoding: chunked\r\n\r\n", .{ .allow_chunked = true }));
+}
+
+test "proxy upload rejects invalid request lines before forwarding" {
+    for ([_][]const u8{ "POST / HTTP/2.0", "POST / extra HTTP/1.1", "POST /bad\npath HTTP/1.1" }) |line| {
+        var buffer: [128]u8 = undefined;
+        const bytes = try std.fmt.bufPrint(&buffer, "{s}\r\nHost: app.test\r\n\r\n", .{line});
+        try std.testing.expectError(error.BadRequest, parseRequestHeadWithOptions(bytes, .{ .allow_chunked = true }));
+    }
+    const parsed = (try parseRequestHeadWithOptions("POST / HTTP/1.1\r\nHost: app.test\r\nContent-Length: \t12 \t\r\n\r\n", .{ .allow_chunked = true })).?;
+    try std.testing.expectEqual(@as(usize, 12), parsed.content_length);
 }
