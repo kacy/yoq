@@ -469,7 +469,7 @@ for a shorter end-to-end checklist, see [golden-path.md](golden-path.md).
 
 ### offline cluster backup and restore
 
-`yoq cluster backup` captures one stopped voter. stop **every voter and agent before the first capture**, and keep them stopped until every bundle is complete. wait for every voter to apply the cluster CA bootstrap before stopping them; a voter without that persisted identity cannot be captured. use a new set ID for each coordinated stop. the command cannot prove that another host has stopped; taking bundles while any voter is running is unsupported.
+`yoq cluster backup` captures one stopped voter. first, wait until every voter has applied the cluster CA bootstrap; capture requires that persisted identity. then stop **every voter and agent before the first capture**, and keep them stopped until every bundle is complete. use a new set ID for each coordinated stop. the command checks only its local host, so the operator must confirm that all other voters have stopped.
 
 on each voter, use the same set ID and a different destination. keep the effective API token in the data root's private `api_token` file, including when the server used a `--api-token` override. the join-token file must contain the existing cluster join token and have owner-only permissions:
 
