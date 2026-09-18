@@ -212,7 +212,9 @@ persistent storage for all yoq state.
 
 **secrets:** encrypted at rest with XChaCha20-Poly1305. can be mounted as files or injected as environment variables. rotation doesn't require container restart.
 
-**backup/restore:** uses the SQLite Online Backup API (`sqlite3_backup_init`/`step`/`finish`), which is safe to run while the server is running. restores migrate a private candidate, then compare its required columns, keys, indexes, foreign keys, check constraints, and triggers with the current schema before replacing the active database. unsupported format versions and incompatible candidates leave live state untouched. volume data is not included in backups — only the SQLite state.
+**backup/restore:** uses the SQLite Online Backup API (`sqlite3_backup_init`/`step`/`finish`), which is safe to run while the server is running. restores migrate a private candidate, then compare its required columns, keys, indexes, foreign keys, check constraints, and triggers with the current schema before replacing the active database. unsupported format versions and incompatible candidates leave live state untouched. volume data is not included in local database backups.
+
+**cluster recovery:** offline bundles capture each stopped fixed voter's raft log, replicated state, selected snapshot, and required credentials. private copies are checked for compatible schemas, retained command history, snapshot boundaries, and decryptable keys. set verification requires every voter and a shared cluster identity derived from its replicated ca. restore publishes into a fresh data root. the operator must stop every voter and agent before capture; this is not an online cluster snapshot. see [offline cluster recovery](cluster-guide.md#offline-cluster-backup-and-restore).
 
 key files:
 - `store.zig` — container/image CRUD operations

@@ -51,3 +51,9 @@ restart with a binary compatible with the restored database, then repeat the sta
 `yoq backup` covers the local `yoq.db`; it is not a coordinated backup of the raft log, replicated `cluster/state.db`, agent state, or application volumes. do not restore that archive over cluster state or copy one live sqlite file while omitting its wal.
 
 run `sudo -H "$(command -v yoq)" upgrade preflight --server <server-ip>:7700` before maintenance. keep the original fixed voter set. for an ordinary compatible upgrade, drain agents and replace servers while retaining quorum. this validation change requires a coordinated upgrade of all voters before accepting writes: follow [replicated command recovery](cluster-guide.md#upgrading-replicated-command-validation), including its checks for unsupported historical commands. do not assume that an old snapshot is consistent merely because it opens successfully.
+
+## offline cluster recovery
+
+`yoq cluster backup` captures one stopped voter, including its raft databases, selected snapshot, api token, join token, and available local encryption key. stop every voter and agent before taking the first bundle. use one set id for the operation, capture every fixed voter, and run `yoq cluster verify-set` on the complete set. each voter must have applied the cluster ca bootstrap; the ca identity binds bundles to the original cluster.
+
+restore into fresh data roots with the original node ids and voter set, then restart the voters before agents. bundles contain private credentials and need protected storage. they exclude volume data, object bytes, image caches, and agent enrollment. the [cluster recovery procedure](cluster-guide.md#offline-cluster-backup-and-restore) gives the commands and a recovery drill.

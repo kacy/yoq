@@ -473,7 +473,7 @@ all yoq state lives under `~/.local/share/yoq/`:
 - `yoq backup [--output path]` — uses SQLite Online Backup API, safe while running
 - `yoq restore <path>` — migrates and validates a private candidate before replacing the active database; incompatible schemas and unsupported format versions are rejected
 
-these commands cover the local database. cluster recovery uses a separate offline bundle for each fixed voter; it also requires the join token, encryption keys, and selected raft snapshot. stop every voter and agent before capture. volume data, object bytes, and agent enrollment need separate protection.
+these commands cover the local database. cluster recovery uses a separate offline bundle for each fixed voter; it also requires the join token, encryption keys, and selected raft snapshot. stop every voter and agent before capture. volume data, object bytes, and agent enrollment need separate protection. follow the [offline cluster recovery procedure](cluster-guide.md#offline-cluster-backup-and-restore).
 
 ### ports
 
