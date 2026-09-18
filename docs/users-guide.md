@@ -462,14 +462,18 @@ all yoq state lives under `~/.local/share/yoq/`:
 - `yoq.db` — SQLite database (containers, images, secrets, policies, history)
 - `blobs/sha256/` — content-addressable image store
 - `s3/` — S3 gateway object storage
-- `api_token` — API bearer token
+- `api_token` — api bearer token
+- `secrets.key` — local encryption key; keep a protected recovery copy
+- `cluster/` — server raft log, replicated state, and selected snapshot
+- `enrollment/` — agent identity and authenticated server discovery
+- `agent-cache.db` — cached assignments and durable result delivery
 
 ### backup and restore
 
 - `yoq backup [--output path]` — uses SQLite Online Backup API, safe while running
 - `yoq restore <path>` — migrates and validates a private candidate before replacing the active database; incompatible schemas and unsupported format versions are rejected
 
-volume data is not included in backups.
+these commands cover the local database. cluster recovery uses a separate offline bundle for each fixed voter; it also requires the join token, encryption keys, and selected raft snapshot. stop every voter and agent before capture. volume data, object bytes, and agent enrollment need separate protection.
 
 ### ports
 
