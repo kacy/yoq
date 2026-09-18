@@ -42,6 +42,10 @@ pub fn pullAndResolveImage(io: std.Io, alloc: std.mem.Allocator, target: []const
 }
 
 pub fn resolveImage(io: std.Io, alloc: std.mem.Allocator, target: []const u8, policy: PullPolicy) common.ImageCommandsError!ImageResolution {
+    return resolveWithPull(io, alloc, target, policy, registry.pull);
+}
+
+fn resolveWithPull(io: std.Io, alloc: std.mem.Allocator, target: []const u8, policy: PullPolicy, comptime pull_fn: anytype) common.ImageCommandsError!ImageResolution {
     const ref = spec.parseImageRef(target);
     var result = ImageResolution{ .rootfs = target };
     errdefer result.deinit();
@@ -53,7 +57,7 @@ pub fn resolveImage(io: std.Io, alloc: std.mem.Allocator, target: []const u8, po
             return error.ImageNotFound;
         }
         writeErr("pulling {s}...\n", .{target});
-        result.pull_result = registry.pull(io, alloc, ref) catch |err| {
+        result.pull_result = pull_fn(io, alloc, ref) catch |err| {
             common.writePullError(target, err);
             return error.PullFailed;
         };
@@ -153,8 +157,13 @@ test "local image resolution uses cached tags and rejects missing images without
     defer blob_store.removeBlob(digest);
     var digest_buf: [71]u8 = undefined;
     try store.saveImage(.{ .id = digest.string(&digest_buf), .repository = "local-resolution-test", .tag = "latest", .manifest_digest = digest.string(&digest_buf), .config_digest = config_digest.string(&config_buf), .total_size = 0, .created_at = 0 });
+    const Offline = struct {
+        fn pull(_: std.Io, _: std.mem.Allocator, _: spec.ImageRef) registry.RegistryError!registry.PullResult {
+            return error.NetworkError;
+        }
+    };
     for ([_]PullPolicy{ .missing, .never }) |policy| {
-        var result = try resolveImage(std.Options.debug_io, alloc, "local-resolution-test", policy);
+        var result = try resolveWithPull(std.Options.debug_io, alloc, "local-resolution-test", policy, Offline.pull);
         defer result.deinit();
         try std.testing.expectEqualStrings("cached", result.default_cmd[1]);
         try std.testing.expectEqual(@as(usize, 1), result.layer_paths.len);
@@ -162,5 +171,7 @@ test "local image resolution uses cached tags and rejects missing images without
         try std.testing.expectEqualStrings(digest.string(&digest_buf), result.manifest_digest);
         try std.testing.expectEqualStrings("SIGTERM", result.stop_signal.?);
     }
-    try std.testing.expectError(error.ImageNotFound, resolveImage(std.Options.debug_io, alloc, "not-cached", .never));
+    try std.testing.expectError(error.ImageNotFound, resolveWithPull(std.Options.debug_io, alloc, "not-cached", .never, Offline.pull));
+    try std.testing.expectError(error.PullFailed, resolveWithPull(std.Options.debug_io, alloc, "local-resolution-test", .always, Offline.pull));
+    try std.testing.expectError(error.PullFailed, resolveWithPull(std.Options.debug_io, alloc, "not-cached", .missing, Offline.pull));
 }
