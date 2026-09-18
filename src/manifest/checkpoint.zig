@@ -180,7 +180,7 @@ pub fn latestMountedCheckpoint(alloc: std.mem.Allocator, checkpoint_path: []cons
     var entries: [64]CheckpointEntry = undefined;
     const count = scanCheckpointDir(&entries, host);
     if (count == 0) return null;
-    return std.fs.path.join(alloc, &.{ checkpoint_path, std.fs.path.basename(entries[count - 1].pathSlice()) });
+    return try std.fs.path.join(alloc, &.{ checkpoint_path, std.fs.path.basename(entries[count - 1].pathSlice()) });
 }
 
 pub fn mountedDirectory(alloc: std.mem.Allocator, path: []const u8, mounts: []const @import("../runtime/container.zig").BindMount) !?[]const u8 {
