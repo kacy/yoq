@@ -39,6 +39,7 @@ pub const CronScheduleRecord = @import("store/crons.zig").CronScheduleRecord;
 pub const AuditLogRecord = @import("store/audit_log.zig").AuditLogRecord;
 pub const TokenRecord = @import("store/tokens.zig").TokenRecord;
 pub const ClusterCaRecord = @import("store/cluster_ca.zig").ClusterCaRecord;
+pub const TrainingExecutionMode = @import("store/training.zig").ExecutionMode;
 pub const TrainingJobRecord = @import("store/training.zig").TrainingJobRecord;
 pub const TrainingJobSummary = @import("store/training.zig").TrainingJobSummary;
 pub const CheckpointRecord = @import("store/training.zig").CheckpointRecord;

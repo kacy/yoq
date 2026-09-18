@@ -395,7 +395,8 @@ pub fn initTrainingTables(db: *sqlite.Db) SchemaError!void {
         \\    checkpoint_keep INTEGER,
         \\    restart_count INTEGER NOT NULL DEFAULT 0,
         \\    created_at INTEGER NOT NULL,
-        \\    updated_at INTEGER NOT NULL
+        \\    updated_at INTEGER NOT NULL,
+        \\    execution_mode INTEGER NOT NULL DEFAULT -1
         \\);
     );
     try exec(db,

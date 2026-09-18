@@ -82,7 +82,7 @@ test "worker run route schedules worker from latest app snapshot" {
     try expectJsonContains(resp.body, "\"failed\":0");
 }
 
-test "training start and status routes persist job state from app snapshot" {
+test "local owner training start and status persist cluster execution mode" {
     const alloc = std.testing.allocator;
     var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
     defer harness.deinit();
@@ -97,6 +97,9 @@ test "training start and status routes persist job state from app snapshot" {
     try expectJsonContains(start_resp.body, "\"training_job\":\"finetune\"");
     try expectJsonContains(start_resp.body, "\"state\":\"scheduling\"");
     try expectJsonContains(start_resp.body, "\"gpus\":1");
+    const record = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "demo-app", "finetune")).?;
+    defer record.deinit(alloc);
+    try std.testing.expectEqual(store.TrainingExecutionMode.cluster, record.execution_mode);
 
     const status_resp = try harness.trainingStatus("demo-app", "finetune");
     defer freeResponse(alloc, status_resp);

@@ -27,6 +27,7 @@ pub fn startCluster(self: anytype, server_ip: [4]u8, server_port: u16) !void {
     };
     if (self.job_id) |old| self.alloc.free(old);
     self.job_id = id;
+    self.execution_mode = .cluster;
     self.state = state;
     try state_support.createPersistentRecord(self);
     cli.write("{s}\n", .{response.body});

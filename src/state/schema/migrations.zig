@@ -14,6 +14,7 @@ pub fn apply(db: *sqlite.Db) SchemaError!void {
         _ = sqlite.c.sqlite3_exec(db.db, rollback, null, null, null);
     }
     try migrateContainers(db);
+    try migrateTrainingJobs(db);
     try migrateAgents(db);
     try migrateAssignments(db);
     try migrateServices(db);
@@ -23,6 +24,19 @@ pub fn apply(db: *sqlite.Db) SchemaError!void {
     try migrateTokens(db);
     try migrateClusterCa(db);
     try exec(db, if (owns_transaction) "COMMIT;" else "RELEASE yoq_migrations;");
+}
+
+fn migrateTrainingJobs(db: *sqlite.Db) SchemaError!void {
+    try addColumnIfMissing(db, "ALTER TABLE training_jobs ADD COLUMN execution_mode INTEGER NOT NULL DEFAULT -1;");
+    // local ids contain the complete app/job prefix and a 12-character suffix.
+    // check that shape first: an app name may itself begin with cluster-.
+    try exec(
+        db,
+        "UPDATE training_jobs SET execution_mode = CASE" ++
+            " WHEN length(id) = length(app_name) + length(name) + 14" ++
+            " AND substr(id, 1, length(app_name) + length(name) + 2) = app_name || '-' || name || '-' THEN 0" ++
+            " WHEN substr(id, 1, 8) = 'cluster-' THEN 1 ELSE 0 END WHERE execution_mode = -1;",
+    );
 }
 
 fn migrateContainers(db: *sqlite.Db) SchemaError!void {
