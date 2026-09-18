@@ -370,7 +370,7 @@ fn runAssignment(
         return;
     }
 
-    const layer_paths = image_layer.assembleRootfs(self.alloc, pull_result.layer_digests) catch {
+    const layer_paths = image_layer.assembleRootfsDescriptors(self.alloc, pull_result.layers) catch {
         log.warn("failed to assemble rootfs for assignment {s}", .{assignment_id});
         setContainerState(self, assignment_id, .failed);
         reportStatus(self, assignment_id, "failed", "rootfs_assemble_failed");
