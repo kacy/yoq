@@ -78,7 +78,7 @@ fn supervisorStillRunning(container: []const u8) !bool {
     defer db.deinit();
     try ensureSchema(db.db);
     const row = (try db.db.one(struct { supervisor_pid: i32 }, "SELECT supervisor_pid FROM local_service_instances WHERE container = ?;", .{}, .{container})) orelse return false;
-    return std.os.linux.errno(std.os.linux.kill(row.supervisor_pid, 0)) != .SRCH;
+    return std.os.linux.errno(std.os.linux.kill(row.supervisor_pid, @enumFromInt(0))) != .SRCH;
 }
 
 pub fn priorInstances(alloc: Allocator, app: []const u8, service: []const u8, token: []const u8) !std.ArrayList([]const u8) {
@@ -141,7 +141,7 @@ pub fn stopPriorInstances(alloc: Allocator, app: []const u8, service: []const u8
             };
             defer record.deinit(alloc);
             if (record.pid) |pid| {
-                const alive = std.os.linux.errno(std.os.linux.kill(pid, 0)) != .SRCH;
+                const alive = std.os.linux.errno(std.os.linux.kill(pid, @enumFromInt(0))) != .SRCH;
                 if (alive) {
                     pending = true;
                     continue;
