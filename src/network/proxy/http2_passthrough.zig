@@ -3,6 +3,7 @@ const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const hpack = @import("hpack.zig");
 const http2 = @import("http2.zig");
+const http2_request = @import("http2_request.zig");
 const socket_helpers = @import("socket_helpers.zig");
 
 const stream_buffer_size = 16 * 1024;
@@ -14,26 +15,28 @@ pub const Error = error{
 };
 
 pub fn parseStatusCode(alloc: std.mem.Allocator, response: []const u8) (Error || hpack.Error)!u16 {
+    var decoder: hpack.Decoder = .{};
+    defer decoder.deinit(alloc);
     var pos: usize = 0;
     while (pos + http2.frame_header_len <= response.len) {
-        const header = http2.parseFrameHeader(response[pos .. pos + http2.frame_header_len]) orelse return error.InvalidResponse;
-        pos += http2.frame_header_len;
-        if (pos + header.length > response.len) return error.InvalidResponse;
-        const payload = response[pos .. pos + header.length];
-        pos += header.length;
-
-        if (header.frame_type != .headers) continue;
-        var decoded = try hpack.decodeHeaderBlock(alloc, payload);
-        defer {
-            for (decoded.items) |field| field.deinit(alloc);
-            decoded.deinit(alloc);
+        const header = http2.parseFrameHeader(response[pos..]) orelse return error.InvalidResponse;
+        if (http2.frame_header_len + header.length > response.len - pos) return error.InvalidResponse;
+        if (header.frame_type != .headers) {
+            pos += http2.frame_header_len + header.length;
+            continue;
         }
-
-        for (decoded.items) |field| {
+        var sequence = http2_request.decodeHeaderSequence(alloc, &decoder, response, pos) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidResponse,
+        };
+        defer sequence.deinit(alloc);
+        pos += sequence.consumed;
+        for (sequence.headers.items) |field| {
             if (std.mem.eql(u8, field.name, ":status")) {
                 const status = std.fmt.parseInt(u16, field.value, 10) catch return error.InvalidResponse;
                 if (status < 100 or status > 599) return error.InvalidResponse;
-                // Informational HEADERS do not decide retry/circuit outcomes.
+                // informational blocks can insert entries used by the final
+                // response; keep decoding with the same connection table.
                 if (status < 200) break;
                 return status;
             }
@@ -110,4 +113,30 @@ pub fn relaySocketConnection(
             upstream_open = false;
         }
     }
+}
+
+test "http2 compression buffered status preserves informational header entries" {
+    const alloc = std.testing.allocator;
+    const informational = [_]u8{ 0x08, 3, '1', '0', '3', 0x40, 1, 'x', 1, 'a' };
+    const early = try http2.buildFrame(alloc, .{ .length = informational.len, .frame_type = .headers, .flags = 4, .stream_id = 1 }, &informational);
+    defer alloc.free(early);
+    const final = try http2.buildFrame(alloc, .{ .length = 2, .frame_type = .headers, .flags = 5, .stream_id = 1 }, &.{ 0x88, 0xbe });
+    defer alloc.free(final);
+    const response = try std.mem.concat(alloc, u8, &.{ early, final });
+    defer alloc.free(response);
+    try std.testing.expectEqual(@as(u16, 200), try parseStatusCode(alloc, response));
+}
+
+test "http2 compression buffered status joins final continuation blocks" {
+    const alloc = std.testing.allocator;
+    const informational = [_]u8{ 0x08, 3, '1', '0', '3', 0x40, 1, 'x', 1, 'a' };
+    const early = try http2.buildFrame(alloc, .{ .length = informational.len, .frame_type = .headers, .flags = 4, .stream_id = 1 }, &informational);
+    defer alloc.free(early);
+    const final = try http2.buildFrame(alloc, .{ .length = 3, .frame_type = .headers, .flags = 1, .stream_id = 1 }, &.{ 0x08, 3, '5' });
+    defer alloc.free(final);
+    const continuation = try http2.buildFrame(alloc, .{ .length = 3, .frame_type = .continuation, .flags = 4, .stream_id = 1 }, &.{ '0', '3', 0xbe });
+    defer alloc.free(continuation);
+    const response = try std.mem.concat(alloc, u8, &.{ early, final, continuation });
+    defer alloc.free(response);
+    try std.testing.expectEqual(@as(u16, 503), try parseStatusCode(alloc, response));
 }

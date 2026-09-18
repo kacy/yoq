@@ -77,6 +77,8 @@ const ConnectionRouter = struct {
     client_ip: ?[4]u8,
     peer_key: ?PeerKey = null,
     downstream_buf: std.ArrayList(u8) = .empty,
+    request_decoder: hpack.Decoder = .{},
+    last_client_stream_id: u32 = 0,
     streams: std.ArrayList(StreamSession) = .empty,
     saw_client_preface: bool = false,
     sent_settings: bool = false,
@@ -94,6 +96,7 @@ const ConnectionRouter = struct {
     fn deinit(self: *ConnectionRouter) void {
         if (self.peer_key) |*key| std.crypto.secureZero(u8, key);
         self.downstream_buf.deinit(self.allocator);
+        self.request_decoder.deinit(self.allocator);
         self.downstream_control.deinit(self.allocator);
         self.downstream_active.deinit(self.allocator);
         for (self.streams.items) |*session| session.deinit(self.allocator);
@@ -206,6 +209,8 @@ const ConnectionRouter = struct {
     }
 
     fn applyClientSettings(self: *ConnectionRouter, payload: []const u8) !void {
+        // header-table settings constrain our encoder, not the request decoder.
+        // every outbound block declares a zero-sized table, which fits any limit.
         if (try flow.initialSetting(payload)) |next| {
             const delta = next - self.downstream_initial_window;
             for (self.streams.items) |*session| try session.downstream_send.adjust(delta);
@@ -333,6 +338,7 @@ const ConnectionRouter = struct {
     }
 
     fn bootstrapUpgradedStream(self: *ConnectionRouter, upgraded: h2c_upgrade.ParsedUpgrade) !void {
+        self.last_client_stream_id = 1;
         const observation_started_ns = observations.nowNs();
         proxy_runtime.recordRequestStart();
 
@@ -513,23 +519,33 @@ const ConnectionRouter = struct {
         };
         const frame = http2.parseFrameHeader(self.downstream_buf.items).?;
         if (self.findStreamIndex(frame.stream_id)) |stream_idx| {
-            // trailers do not contain the request pseudoheaders used for routing.
-            // rewrite their stream id without parsing them as a new request.
             if (frame.flags & 1 == 0) return error.InvalidFrameSequence;
-            const rewritten = try http2_request.rewriteRequestHeaderSequence(self.allocator, self.downstream_buf.items, 0, .{ .stream_id = 1 });
-            defer rewritten.deinit(self.allocator);
-            try self.streams.items[stream_idx].flow_state.request.appendHeaders(self.allocator, rewritten.bytes);
+            var sequence = try http2_request.decodeHeaderSequence(self.allocator, &self.request_decoder, self.downstream_buf.items, 0);
+            defer sequence.deinit(self.allocator);
+            const rewritten = try http2_request.encodeForwardedHeaders(self.allocator, sequence.headers.items, true, .{ .stream_id = 1 });
+            defer self.allocator.free(rewritten);
+            try self.streams.items[stream_idx].flow_state.request.appendHeaders(self.allocator, rewritten);
             if (self.streams.items[stream_idx].mirror) |*mirror| {
-                self.forwardMirrorFrame(mirror, rewritten.bytes) catch self.failMirrorSession(stream_idx);
+                self.forwardMirrorFrame(mirror, rewritten) catch self.failMirrorSession(stream_idx);
             }
             self.streams.items[stream_idx].downstream_end_stream = true;
-            try self.consumeDownstreamBytes(rewritten.consumed);
+            try self.consumeDownstreamBytes(sequence.consumed);
             self.last_activity_ms = nowMs();
             return;
         }
 
+        if (frame.stream_id <= self.last_client_stream_id) {
+            // a cancelled or locally rejected stream can still have headers in
+            // flight. decode them so later streams retain the correct indices.
+            var discarded = try http2_request.decodeHeaderSequence(self.allocator, &self.request_decoder, self.downstream_buf.items, 0);
+            defer discarded.deinit(self.allocator);
+            try self.consumeDownstreamBytes(discarded.consumed);
+            return;
+        }
+        self.last_client_stream_id = frame.stream_id;
+
         const observation_started_ns = observations.nowNs();
-        const parsed = try http2_request.parseRequestHeaderSequence(self.allocator, self.downstream_buf.items, 0);
+        const parsed = try http2_request.parseRequestHeaderSequenceWithDecoder(self.allocator, &self.request_decoder, self.downstream_buf.items, 0);
         defer parsed.deinit(self.allocator);
         proxy_runtime.recordRequestStart();
 
@@ -585,16 +601,16 @@ const ConnectionRouter = struct {
             defer self.allocator.free(outbound_path);
             const outbound_authority = if (route.preserve_host) normalized_host else backend_service;
 
-            const rewritten = try http2_request.rewriteRequestHeaderSequence(self.allocator, self.downstream_buf.items, 0, .{
+            const rewritten = try http2_request.encodeForwardedHeaders(self.allocator, parsed.headers, parsed.request.end_stream, .{
                 .outbound_authority = if (std.mem.eql(u8, outbound_authority, normalized_host)) null else outbound_authority,
                 .outbound_path = if (std.mem.eql(u8, outbound_path, parsed.request.path)) null else outbound_path,
                 .forwarded_proto = forwarded_proto,
                 .stream_id = 1,
             });
-            defer rewritten.deinit(self.allocator);
+            defer self.allocator.free(rewritten);
 
             const request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms));
-            var connection = connectAndSendUpstream(self.allocator, self.peer_key, route, &upstream, rewritten.bytes, request_deadline_at_ms) catch |connect_err| {
+            var connection = connectAndSendUpstream(self.allocator, self.peer_key, route, &upstream, rewritten, request_deadline_at_ms) catch |connect_err| {
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
                 const failure_kind: proxy_runtime.UpstreamFailureKind = if (connect_err == error.ConnectFailed or connect_err == error.ConnectTimedOut) .connect else .send;
                 proxy_runtime.recordUpstreamFailure(failure_kind);
@@ -805,6 +821,7 @@ const ConnectionRouter = struct {
     }
 
     fn handleUpstreamSettings(self: *ConnectionRouter, session_idx: usize, frame: http2.FrameHeader) !void {
+        // requests also use a zero-sized table, including queued trailers.
         try flow.validateSettings(frame);
         const payload = self.streams.items[session_idx].upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
         if ((frame.flags & 0x1) == 0) {
@@ -841,8 +858,10 @@ const ConnectionRouter = struct {
 
     fn handleUpstreamHeaders(self: *ConnectionRouter, session_idx: usize) !void {
         const session = &self.streams.items[session_idx];
+        var sequence = try http2_request.decodeHeaderSequence(self.allocator, &session.response_decoder, session.upstream_buf.items, 0);
+        defer sequence.deinit(self.allocator);
         if (!session.response_started) {
-            const status = try parseResponseStatus(session.upstream_buf.items);
+            const status = try responseStatus(sequence.headers.items);
             session.response_started = true;
             session.response_status = status;
             if (status >= 500 and status <= 599) {
@@ -855,7 +874,15 @@ const ConnectionRouter = struct {
             }
             proxy_runtime.recordRouteResponseCode(session.route.name, session.route.service, session.backend_service, status);
         }
-        try self.forwardUpstreamStreamFrame(session_idx);
+        // every upstream has its own compression table. translate fields before
+        // merging streams, including trailers that reference earlier headers.
+        const rewritten = try http2_request.encodeForwardedHeaders(self.allocator, sequence.headers.items, sequence.frame.flags & 1 != 0, .{ .stream_id = 1 });
+        defer self.allocator.free(rewritten);
+        if (!self.sent_settings) try self.sendDownstreamSettingsFrame("");
+        try session.response.appendHeaders(self.allocator, rewritten);
+        if (sequence.frame.flags & 1 != 0) session.upstream_end_received = true;
+        try self.consumeUpstreamBytes(session_idx, sequence.consumed);
+        try self.flushDownstream();
     }
 
     fn forwardUpstreamStreamFrame(self: *ConnectionRouter, session_idx: usize) !void {
@@ -1059,7 +1086,7 @@ const ConnectionRouter = struct {
         const normalized_host = proxy_helpers.normalizeHost(parsed.request.authority);
         const outbound_authority = if (route.preserve_host) normalized_host else mirror_service;
         const forwarded_proto = trustedForwardedProto(parsed.headers, self.client_ip);
-        const rewritten = http2_request.rewriteRequestHeaderSequence(self.allocator, self.downstream_buf.items, 0, .{
+        const rewritten = http2_request.encodeForwardedHeaders(self.allocator, parsed.headers, parsed.request.end_stream, .{
             .outbound_authority = if (std.mem.eql(u8, outbound_authority, normalized_host)) null else outbound_authority,
             .outbound_path = if (std.mem.eql(u8, outbound_path, parsed.request.path)) null else outbound_path,
             .forwarded_proto = forwarded_proto,
@@ -1068,10 +1095,10 @@ const ConnectionRouter = struct {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
-        defer rewritten.deinit(self.allocator);
+        defer self.allocator.free(rewritten);
 
         const request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms));
-        var connection = connectAndSendUpstream(self.allocator, self.peer_key, route, &upstream, rewritten.bytes, request_deadline_at_ms) catch {
+        var connection = connectAndSendUpstream(self.allocator, self.peer_key, route, &upstream, rewritten, request_deadline_at_ms) catch {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
@@ -1204,16 +1231,15 @@ const ConnectionRouter = struct {
     fn handleMirrorHeaders(self: *ConnectionRouter, session_idx: usize) !void {
         const session = &self.streams.items[session_idx];
         const mirror = if (session.mirror) |*value| value else return;
+        var sequence = try http2_request.decodeHeaderSequence(self.allocator, &mirror.response_decoder, mirror.upstream_buf.items, 0);
+        defer sequence.deinit(self.allocator);
         if (!mirror.response_started) {
-            const status = parseResponseStatus(mirror.upstream_buf.items) catch {
-                proxy_runtime.recordMirrorRouteUpstreamFailure(session.route.name, session.route.service, mirror.backend_service);
-                self.closeMirrorSession(session_idx);
-                return;
-            };
+            const status = try responseStatus(sequence.headers.items);
             mirror.response_started = true;
             proxy_runtime.recordMirrorRouteResponseCode(session.route.name, session.route.service, mirror.backend_service, status);
         }
-        try self.discardMirrorStreamFrame(session_idx);
+        try self.consumeMirrorBytes(session_idx, sequence.consumed);
+        if (sequence.frame.flags & 1 != 0) self.closeMirrorSession(session_idx);
     }
 
     fn discardMirrorStreamFrame(self: *ConnectionRouter, session_idx: usize) !void {
@@ -1249,6 +1275,7 @@ const StreamSession = struct {
     connection: exchange.StreamingConnection,
     flow_state: flow.Upstream = .{},
     upstream_buf: std.ArrayList(u8) = .empty,
+    response_decoder: hpack.Decoder = .{},
     mirror: ?MirrorSession = null,
     downstream_send: flow.Window = .{},
     downstream_receive: flow.Window = .{},
@@ -1267,6 +1294,7 @@ const StreamSession = struct {
         alloc.free(self.backend_service);
         self.upstream.deinit(alloc);
         self.upstream_buf.deinit(alloc);
+        self.response_decoder.deinit(alloc);
         if (self.mirror) |*mirror| mirror.deinit(alloc);
     }
 };
@@ -1277,6 +1305,7 @@ const MirrorSession = struct {
     connection: exchange.StreamingConnection,
     flow_state: flow.Upstream = .{},
     upstream_buf: std.ArrayList(u8) = .empty,
+    response_decoder: hpack.Decoder = .{},
     response_started: bool = false,
     request_deadline_at_ms: i64,
 
@@ -1286,6 +1315,7 @@ const MirrorSession = struct {
         alloc.free(self.backend_service);
         self.upstream.deinit(alloc);
         self.upstream_buf.deinit(alloc);
+        self.response_decoder.deinit(alloc);
     }
 };
 
@@ -1324,35 +1354,8 @@ fn buildInitialUpstreamPreamble(alloc: std.mem.Allocator) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
-fn parseResponseStatus(buf: []const u8) !u16 {
-    var pos: usize = 0;
-    const first = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]) orelse return error.InvalidResponse;
-    if (first.frame_type != .headers or first.stream_id == 0) return error.InvalidResponse;
-    pos += http2.frame_header_len;
-    if (pos + first.length > buf.len) return error.BufferTooShort;
-
-    var header_block: std.ArrayList(u8) = .empty;
-    defer header_block.deinit(std.heap.page_allocator);
-    try header_block.appendSlice(std.heap.page_allocator, headerBlockFragment(buf[pos .. pos + first.length], first.flags) orelse return error.InvalidResponse);
-    pos += first.length;
-
-    while ((first.flags & 0x4) == 0) {
-        if (pos + http2.frame_header_len > buf.len) return error.BufferTooShort;
-        const continuation = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]) orelse return error.InvalidResponse;
-        if (continuation.frame_type != .continuation or continuation.stream_id != first.stream_id) return error.InvalidResponse;
-        pos += http2.frame_header_len;
-        if (pos + continuation.length > buf.len) return error.BufferTooShort;
-        try header_block.appendSlice(std.heap.page_allocator, buf[pos .. pos + continuation.length]);
-        pos += continuation.length;
-        if ((continuation.flags & 0x4) != 0) break;
-    }
-
-    var headers = try hpack.decodeHeaderBlock(std.heap.page_allocator, header_block.items);
-    defer {
-        for (headers.items) |header| header.deinit(std.heap.page_allocator);
-        headers.deinit(std.heap.page_allocator);
-    }
-    for (headers.items) |header| {
+fn responseStatus(headers: []const hpack.HeaderField) !u16 {
+    for (headers) |header| {
         if (std.mem.eql(u8, header.name, ":status")) {
             return std.fmt.parseInt(u16, header.value, 10) catch error.InvalidResponse;
         }
@@ -1413,19 +1416,6 @@ fn appendRewrittenFrame(
     try out.appendSlice(alloc, payload);
 }
 
-fn headerBlockFragment(payload: []const u8, flags: u8) ?[]const u8 {
-    var pos: usize = 0;
-    var padded_len: usize = 0;
-    if ((flags & 0x8) != 0) {
-        if (payload.len == 0) return null;
-        padded_len = payload[0];
-        pos += 1;
-    }
-    if ((flags & 0x20) != 0) pos += 5;
-    if (pos > payload.len or padded_len > payload.len - pos) return null;
-    return payload[pos .. payload.len - padded_len];
-}
-
 fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64 {
     var hasher = std.hash.Wyhash.init(0);
     hasher.update(method);
@@ -1474,9 +1464,9 @@ test "proxy transport policy refuses missing required peer credentials before di
 }
 
 fn peerTestResponse(alloc: std.mem.Allocator) ![]u8 {
-    const headers = try hpack.encodeHeaderBlockLiteral(alloc, &.{.{ .name = @constCast(":status"), .value = @constCast("200") }});
+    const headers = try hpack.encodeHeaderBlockIndependent(alloc, &.{.{ .name = @constCast(":status"), .value = @constCast("200") }});
     defer alloc.free(headers);
-    const trailers = try hpack.encodeHeaderBlockLiteral(alloc, &.{.{ .name = @constCast("grpc-status"), .value = @constCast("0") }});
+    const trailers = try hpack.encodeHeaderBlockIndependent(alloc, &.{.{ .name = @constCast("grpc-status"), .value = @constCast("0") }});
     defer alloc.free(trailers);
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(alloc);
@@ -1926,5 +1916,171 @@ test "http2 flow forwards large request trailers as contiguous primary and mirro
         try recovered.appendSlice(alloc, primary[offset + 9 ..][0..header.length]);
         offset += 9 + header.length;
     }
-    try std.testing.expectEqualSlices(u8, block, recovered.items);
+    try std.testing.expectEqual(@as(u8, 0x20), recovered.items[0]);
+    try std.testing.expectEqualSlices(u8, block, recovered.items[1..]);
+}
+
+test "http2 compression preserves interleaved upstream headers and indexed trailers" {
+    const alloc = std.testing.allocator;
+    var pair: [2]i32 = undefined;
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &pair) != 0) return error.SocketFailed;
+    defer linux_platform.posix.close(pair[0]);
+    defer linux_platform.posix.close(pair[1]);
+    var routing = ConnectionRouter{ .allocator = alloc, .routes = &.{}, .client_fd = pair[0], .client_ip = null, .sent_settings = true };
+    defer routing.deinit();
+    const route = router.Route{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" } };
+    const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-hpack", .address = "127.0.0.1", .port = 1 };
+    for ([_]u32{ 1, 3 }) |stream_id| {
+        try routing.streams.append(alloc, .{ .downstream_stream_id = stream_id, .route = route, .backend_service = try alloc.dupe(u8, "api"), .upstream = try ownedTestUpstream(alloc, upstream), .connection = .{ .connection = .{ .bare = try linux_platform.posix.dup(pair[0]) }, .timeout_ms = 1000 }, .request_deadline_at_ms = nowMs() + 1000 });
+    }
+    // the client's table limit constrains our output encoder, not the tables
+    // used by independent upstreams to encode their responses.
+    try routing.applyClientSettings(&.{ 0, 1, 0, 0, 0, 0 });
+    const block_a = [_]u8{ 0x88, 0x40, 6, 'x', '-', 'u', 's', 'e', 'r', 1, 'a' };
+    const block_b = [_]u8{ 0x88, 0x40, 6, 'x', '-', 'u', 's', 'e', 'r', 1, 'b' };
+    const trailer = [_]u8{0xbe};
+    for ([_][]const u8{ &block_a, &block_b, &trailer }, 0..) |block, index| {
+        const session_index: usize = if (index == 1) 1 else 0;
+        const frame = try http2.buildFrame(alloc, .{ .length = @intCast(block.len), .frame_type = .headers, .flags = if (index == 2) 5 else 4, .stream_id = 1 }, block);
+        defer alloc.free(frame);
+        try routing.streams.items[session_index].upstream_buf.appendSlice(alloc, frame);
+        try routing.handleUpstreamHeaders(session_index);
+    }
+    var bytes: [4096]u8 = undefined;
+    const count = try linux_platform.posix.recv(pair[1], &bytes, posix.MSG.DONTWAIT);
+    var decoder: hpack.Decoder = .{ .allowed_table_size = 0 };
+    defer decoder.deinit(alloc);
+    var offset: usize = 0;
+    for ([_]u32{ 1, 3, 1 }, [_][]const u8{ "a", "b", "a" }, 0..) |expected_id, expected_value, index| {
+        var sequence = try http2_request.decodeHeaderSequence(alloc, &decoder, bytes[0..count], offset);
+        defer sequence.deinit(alloc);
+        try std.testing.expectEqual(expected_id, sequence.frame.stream_id);
+        try std.testing.expectEqual(@as(u8, if (index == 2) 1 else 0), sequence.frame.flags & 1);
+        const field = sequence.headers.items[sequence.headers.items.len - 1];
+        try std.testing.expectEqualStrings("x-user", field.name);
+        try std.testing.expectEqualStrings(expected_value, field.value);
+        offset += sequence.consumed;
+    }
+    try std.testing.expectEqual(count, offset);
+}
+
+test "http2 compression consumes late headers on closed streams before the next request" {
+    const alloc = std.testing.allocator;
+    var pair: [2]i32 = undefined;
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &pair) != 0) return error.SocketFailed;
+    defer linux_platform.posix.close(pair[0]);
+    defer linux_platform.posix.close(pair[1]);
+    var routing = ConnectionRouter{ .allocator = alloc, .routes = &.{}, .client_fd = pair[0], .client_ip = null, .sent_settings = true, .saw_client_preface = true };
+    defer routing.deinit();
+    const first = [_]u8{ 0x82, 0x86, 0x84, 0x41, 3, 'a', 'p', 'i' };
+    const late_trailer = [_]u8{ 0x40, 1, 'x', 1, 'a' };
+    const second = [_]u8{ 0x82, 0x86, 0x84, 0xbf, 0xbe };
+    for ([_][]const u8{ &first, &late_trailer, &second }, [_]u32{ 1, 1, 3 }) |block, stream_id| {
+        const frame = try http2.buildFrame(alloc, .{ .length = @intCast(block.len), .frame_type = .headers, .flags = 5, .stream_id = stream_id }, block);
+        defer alloc.free(frame);
+        try routing.downstream_buf.appendSlice(alloc, frame);
+        try routing.processDownstreamBuffer();
+    }
+    try std.testing.expectEqual(@as(usize, 0), routing.downstream_buf.items.len);
+    try routing.flushDownstream();
+    var bytes: [4096]u8 = undefined;
+    const count = try linux_platform.posix.recv(pair[1], &bytes, posix.MSG.DONTWAIT);
+    var decoder: hpack.Decoder = .{ .allowed_table_size = 0 };
+    defer decoder.deinit(alloc);
+    var offset: usize = 0;
+    for ([_]u32{ 1, 3 }) |stream_id| {
+        var sequence = try http2_request.decodeHeaderSequence(alloc, &decoder, bytes[0..count], offset);
+        defer sequence.deinit(alloc);
+        try std.testing.expectEqual(stream_id, sequence.frame.stream_id);
+        try std.testing.expectEqual(@as(u16, 404), try responseStatus(sequence.headers.items));
+        offset += sequence.consumed;
+        const body = http2.parseFrameHeader(bytes[offset..count]).?;
+        try std.testing.expectEqual(http2.FrameType.data, body.frame_type);
+        try std.testing.expectEqual(stream_id, body.stream_id);
+        offset += 9 + body.length;
+    }
+    try std.testing.expectEqual(count, offset);
+}
+
+test "http2 compression cancellation preserves the connection decoder for late trailers" {
+    const alloc = std.testing.allocator;
+    var pair: [2]i32 = undefined;
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &pair) != 0) return error.SocketFailed;
+    defer linux_platform.posix.close(pair[0]);
+    defer linux_platform.posix.close(pair[1]);
+    var routing = ConnectionRouter{ .allocator = alloc, .routes = &.{}, .client_fd = pair[0], .client_ip = null, .sent_settings = true, .saw_client_preface = true, .last_client_stream_id = 1 };
+    defer routing.deinit();
+    const route = router.Route{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" } };
+    const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-hpack", .address = "127.0.0.1", .port = 1 };
+    try routing.streams.append(alloc, .{ .downstream_stream_id = 1, .route = route, .backend_service = try alloc.dupe(u8, "api"), .upstream = try ownedTestUpstream(alloc, upstream), .connection = .{ .connection = .{ .bare = try linux_platform.posix.dup(pair[0]) }, .timeout_ms = 1000 }, .request_deadline_at_ms = nowMs() + 1000 });
+    const reset = try http2.buildFrame(alloc, .{ .length = 4, .frame_type = .rst_stream, .flags = 0, .stream_id = 1 }, &.{ 0, 0, 0, 8 });
+    defer alloc.free(reset);
+    try routing.downstream_buf.appendSlice(alloc, reset);
+    try routing.processDownstreamBuffer();
+    try std.testing.expectEqual(@as(usize, 0), routing.streams.items.len);
+    const trailer = try http2.buildFrame(alloc, .{ .length = 5, .frame_type = .headers, .flags = 5, .stream_id = 1 }, &.{ 0x40, 1, 'x', 1, 'a' });
+    defer alloc.free(trailer);
+    try routing.downstream_buf.appendSlice(alloc, trailer);
+    try routing.processDownstreamBuffer();
+    var fields = try routing.request_decoder.decode(alloc, &.{0xbe});
+    defer {
+        for (fields.items) |field| field.deinit(alloc);
+        fields.deinit(alloc);
+    }
+    try std.testing.expectEqualStrings("x", fields.items[0].name);
+    try std.testing.expectEqualStrings("a", fields.items[0].value);
+}
+
+test "http2 compression fragments a small indexed block after literal expansion" {
+    const alloc = std.testing.allocator;
+    var pair: [2]i32 = undefined;
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &pair) != 0) return error.SocketFailed;
+    defer linux_platform.posix.close(pair[0]);
+    defer linux_platform.posix.close(pair[1]);
+    var routing = ConnectionRouter{ .allocator = alloc, .routes = &.{}, .client_fd = pair[0], .client_ip = null, .sent_settings = true };
+    defer routing.deinit();
+    const route = router.Route{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" } };
+    const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-hpack", .address = "127.0.0.1", .port = 1 };
+    try routing.streams.append(alloc, .{ .downstream_stream_id = 3, .route = route, .backend_service = try alloc.dupe(u8, "api"), .upstream = try ownedTestUpstream(alloc, upstream), .connection = .{ .connection = .{ .bare = try linux_platform.posix.dup(pair[0]) }, .timeout_ms = 1000 }, .request_deadline_at_ms = nowMs() + 1000 });
+    var value: [1024]u8 = undefined;
+    @memset(&value, 'v');
+    const indexed_literal = try hpack.encodeHeaderBlockLiteral(alloc, &.{.{ .name = @constCast("x-expanded"), .value = &value }});
+    defer alloc.free(indexed_literal);
+    // insert the literal once; every later field refers to dynamic index 62.
+    indexed_literal[0] = 0x40;
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(alloc);
+    try block.append(alloc, 0x88);
+    try block.appendSlice(alloc, indexed_literal);
+    try block.appendSlice(alloc, &([_]u8{0xbe} ** 20));
+    try std.testing.expect(block.items.len < flow.max_frame_payload);
+    const frame = try http2.buildFrame(alloc, .{ .length = @intCast(block.items.len), .frame_type = .headers, .flags = 5, .stream_id = 1 }, block.items);
+    defer alloc.free(frame);
+    try routing.streams.items[0].upstream_buf.appendSlice(alloc, frame);
+    try routing.handleUpstreamHeaders(0);
+    var bytes: [32768]u8 = undefined;
+    const count = try linux_platform.posix.recv(pair[1], &bytes, posix.MSG.DONTWAIT);
+    try std.testing.expect(count > flow.max_frame_payload);
+    var offset: usize = 0;
+    var frames: usize = 0;
+    while (offset < count) {
+        const header = http2.parseFrameHeader(bytes[offset..count]).?;
+        try std.testing.expectEqual(@as(u32, 3), header.stream_id);
+        try std.testing.expect(header.length <= flow.max_frame_payload);
+        try std.testing.expectEqual(if (frames == 0) http2.FrameType.headers else http2.FrameType.continuation, header.frame_type);
+        try std.testing.expectEqual(@as(u8, if (frames == 0) 1 else 0), header.flags & 1);
+        offset += 9 + header.length;
+        try std.testing.expectEqual(@as(u8, if (offset == count) 4 else 0), header.flags & 4);
+        frames += 1;
+    }
+    try std.testing.expect(frames > 1);
+    var decoder: hpack.Decoder = .{};
+    defer decoder.deinit(alloc);
+    var decoded = try http2_request.decodeHeaderSequence(alloc, &decoder, bytes[0..count], 0);
+    defer decoded.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 22), decoded.headers.items.len);
+    for (decoded.headers.items[1..]) |field| {
+        try std.testing.expectEqualStrings("x-expanded", field.name);
+        try std.testing.expectEqualSlices(u8, &value, field.value);
+    }
 }

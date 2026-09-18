@@ -40,21 +40,21 @@ fn formatSimpleResponseWithSettings(
     var status_buf: [3]u8 = undefined;
     const status = std.fmt.bufPrint(&status_buf, "{d:0>3}", .{status_code}) catch unreachable;
 
-    var header_block: std.ArrayList(u8) = .empty;
-    defer header_block.deinit(alloc);
-    try appendLiteralHeaderWithIndexedName(&header_block, alloc, 8, status);
-    try appendLiteralHeaderWithIndexedName(&header_block, alloc, 31, content_type);
-
     var content_length_buf: [20]u8 = undefined;
     const content_length = std.fmt.bufPrint(&content_length_buf, "{d}", .{body.len}) catch unreachable;
-    try appendLiteralHeaderWithIndexedName(&header_block, alloc, 28, content_length);
+    const header_block = try hpack.encodeHeaderBlockIndependent(alloc, &.{
+        .{ .name = @constCast(":status"), .value = status },
+        .{ .name = @constCast("content-type"), .value = @constCast(content_type) },
+        .{ .name = @constCast("content-length"), .value = content_length },
+    });
+    defer alloc.free(header_block);
 
     const headers = try http2.buildFrame(alloc, .{
-        .length = @intCast(header_block.items.len),
+        .length = @intCast(header_block.len),
         .frame_type = .headers,
         .flags = Flag.end_headers | if (body.len == 0) Flag.end_stream else 0,
         .stream_id = stream_id,
-    }, header_block.items);
+    }, header_block);
     defer alloc.free(headers);
 
     const data = if (body.len == 0) null else try http2.buildFrame(alloc, .{
@@ -89,43 +89,6 @@ fn formatSimpleResponseWithSettings(
     }
 
     return response[0..pos];
-}
-
-fn appendLiteralHeaderWithIndexedName(
-    buf: *std.ArrayList(u8),
-    alloc: std.mem.Allocator,
-    name_index: u8,
-    value: []const u8,
-) !void {
-    try appendInteger(buf, alloc, 0, 4, name_index);
-    try appendString(buf, alloc, value);
-}
-
-fn appendString(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, value: []const u8) !void {
-    try appendInteger(buf, alloc, 0, 7, value.len);
-    try buf.appendSlice(alloc, value);
-}
-
-fn appendInteger(
-    buf: *std.ArrayList(u8),
-    alloc: std.mem.Allocator,
-    first_byte_prefix: u8,
-    comptime prefix_bits: u8,
-    value: usize,
-) !void {
-    const max_prefix_value: usize = (@as(usize, 1) << prefix_bits) - 1;
-    if (value < max_prefix_value) {
-        try buf.append(alloc, first_byte_prefix | @as(u8, @intCast(value)));
-        return;
-    }
-
-    try buf.append(alloc, first_byte_prefix | @as(u8, @intCast(max_prefix_value)));
-    var remaining = value - max_prefix_value;
-    while (remaining >= 128) {
-        try buf.append(alloc, @as(u8, @intCast((remaining & 0x7f) | 0x80)));
-        remaining >>= 7;
-    }
-    try buf.append(alloc, @intCast(remaining));
 }
 
 fn parseNextFrame(buf: []const u8, pos: usize) ?struct { header: http2.FrameHeader, payload: []const u8, next: usize } {
