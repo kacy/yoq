@@ -311,7 +311,7 @@ For `GET /apps/<app>/training/<name>/logs`, the control plane now proxies the re
 
 ### agent drain
 
-`yoq drain <agent-id>` starts a durable handoff. the agent stays online in `drain_pending` while replacements start on other workers. a service's original assignment is stopped only after its replacement passes readiness. `drain_blocked` keeps existing work running: add capacity, correct a failed replacement, or finish work that cannot move. jobs and training ranks finish in place; local volumes and bind mounts require an explicit migration plan. drain does not copy their data.
+`yoq drain <agent-id>` starts a durable handoff. the agent stays online in `drain_pending` while replacements start on other workers. a service's original assignment is stopped only after its replacement passes readiness. `drain_blocked` keeps existing work running: add capacity, correct a failed replacement, or finish work that cannot move. jobs and training ranks finish in place; local volumes and bind mounts require an explicit migration plan. drain does not copy their data. a lost heartbeat does not release blocked assignments for placement elsewhere.
 
 wait for `drained` and no running containers before stopping the host. coordinator restarts retain the handoff state. older agents may need to be stopped manually once empty. every voter must understand the new handoff table before drain is used; see the [cluster guide](cluster-guide.md#draining-a-node).
 

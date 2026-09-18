@@ -12,7 +12,7 @@ fn seed(local_volume: bool) !Node {
     errdefer node.deinit();
     node.raft.role = .leader;
     const session = try mutation.Session.begin(&node);
-    try session.commit("INSERT INTO agents (id, address, status, cpu_cores, memory_mb, last_heartbeat, registered_at) VALUES ('source', '127.0.0.1', 'drain_pending', 2, 2048, 0, 0);" ++
+    try session.commit("INSERT INTO agents (id, address, status, cpu_cores, memory_mb, last_heartbeat, registered_at, node_id) VALUES ('source', '127.0.0.1', 'drain_pending', 2, 2048, 0, 0, 4);" ++
         "INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, app_name, workload_kind, workload_name, generation, created_at) VALUES ('original', 'source', 'example', '', 'running', 500, 128, 'demo', 'service', 'web', 7, 0);");
     const request: scheduler.PlacementRequest = .{ .image = "example", .command = "", .cpu_limit = 500, .memory_limit_mb = 128, .app_name = "demo", .workload_kind = "service", .workload_name = "web", .volume_constraints = if (local_volume) &.{.{ .driver = "local", .node_id = null }} else &.{} };
     const encoded = try std.json.Stringify.valueAlloc(alloc, request, .{});
@@ -141,10 +141,11 @@ test "cluster reliability: agent drain keeps a handoff original out of ordinary 
     const session = try mutation.Session.begin(&node);
     try addTarget(session);
     try drain.reconcile(alloc, session, "source");
-    var buffer: [256]u8 = undefined;
     const registry = @import("registry.zig");
-    try session.commit(try registry.markOfflineSql(&buffer, "source"));
-    try session.commit(try drain.orphanAssignmentsSql(&buffer, "source"));
+    const agent = (try registry.getAgent(alloc, node.stateMachineDb(), "source")).?;
+    defer agent.deinit(alloc);
+    @import("node/membership_sync.zig").checkAgentHealth(&node, &.{agent});
+    @import("node/action_loop.zig").processActions(&node);
     try expectStatus(&node, "agents", "source", "drain_pending");
     const row = (try node.stateMachineDb().oneAlloc(struct { agent_id: sqlite.Text }, alloc, "SELECT agent_id FROM assignments WHERE id = 'original';", .{}, .{})).?;
     defer alloc.free(row.agent_id.data);
@@ -160,4 +161,82 @@ test "cluster reliability: agent drain keeps a handoff original out of ordinary 
     try expectStatus(&node, "agents", "source", "drained");
     try expectStatus(&node, "assignments", "original", "stopped");
     try expectStatus(&node, "assignments", id, "running");
+}
+
+test "cluster reliability: blocked drain retains host data and jobs after source loss" {
+    const Kind = enum { local, bind, job };
+    for ([_]Kind{ .local, .bind, .job }) |kind| {
+        var node = try seed(kind == .local);
+        defer node.deinit();
+        node.fixPointers();
+        const session = try mutation.Session.begin(&node);
+        try addTarget(session);
+        if (kind == .bind) {
+            const request: scheduler.PlacementRequest = .{
+                .image = "example",
+                .command = "{\"volumes\":[{\"source\":\"/srv/data\",\"target\":\"/data\",\"kind\":\"bind\"}]}",
+                .cpu_limit = 500,
+                .memory_limit_mb = 128,
+                .app_name = "demo",
+                .workload_kind = "service",
+                .workload_name = "web",
+            };
+            const encoded = try std.json.Stringify.valueAlloc(alloc, request, .{});
+            defer alloc.free(encoded);
+            const command = try sql.render(alloc, "INSERT OR REPLACE INTO assignment_claims (assignment_id, gpu_count, release_id, group_id, request_json) VALUES ('original', 0, 'release', 'original', ?);", .{encoded});
+            defer alloc.free(command);
+            try session.commit(command);
+        } else if (kind == .job) {
+            try session.commit("UPDATE assignments SET workload_kind = 'job' WHERE id = 'original';");
+        }
+        try drain.reconcile(alloc, session, "source");
+        try expectStatus(&node, "agents", "source", "drain_blocked");
+
+        const registry = @import("registry.zig");
+        const membership = @import("node/membership_sync.zig");
+        const agent = (try registry.getAgent(alloc, node.stateMachineDb(), "source")).?;
+        defer agent.deinit(alloc);
+        // a health scan may have read active before the drain was committed.
+        var stale = agent;
+        stale.status = "active";
+        membership.checkAgentHealth(&node, &.{stale});
+        @import("node/action_loop.zig").processActions(&node);
+        membership.handleGossipMemberDead(&node, 4);
+        @import("node/action_loop.zig").processActions(&node);
+        try @import("placement_transaction.zig").reconcileOrphans(alloc, session);
+        try drain.reconcile(alloc, session, "source");
+        try expectStatus(&node, "agents", "source", "drain_blocked");
+        try expectStatus(&node, "assignments", "original", "running");
+        const row = (try node.stateMachineDb().oneAlloc(struct { agent_id: sqlite.Text }, alloc, "SELECT agent_id FROM assignments WHERE id = 'original';", .{}, .{})).?;
+        defer alloc.free(row.agent_id.data);
+        try std.testing.expectEqualStrings("source", row.agent_id.data);
+        const handoffs = (try node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignment_handoffs;", .{}, .{})).?;
+        try std.testing.expectEqual(@as(i64, 0), handoffs.count);
+    }
+}
+
+test "cluster reliability: ordinary worker loss atomically releases assignments and retries stale decisions" {
+    var node = try seed(false);
+    defer node.deinit();
+    node.fixPointers();
+    const session = try mutation.Session.begin(&node);
+    try session.commit("UPDATE agents SET status = 'active' WHERE id = 'source';");
+    const registry = @import("registry.zig");
+    const membership = @import("node/membership_sync.zig");
+    const actions = @import("node/action_loop.zig");
+    const agent = (try registry.getAgent(alloc, node.stateMachineDb(), "source")).?;
+    defer agent.deinit(alloc);
+    // this pending write invalidates the first health decision when it applies.
+    _ = try node.proposeLocked("UPDATE agents SET cpu_used = 1 WHERE id = 'source';");
+    membership.checkAgentHealth(&node, &.{agent});
+    actions.processActions(&node);
+    try expectStatus(&node, "agents", "source", "active");
+    try expectStatus(&node, "assignments", "original", "running");
+    membership.checkAgentHealth(&node, &.{agent});
+    actions.processActions(&node);
+    try expectStatus(&node, "agents", "source", "offline");
+    try expectStatus(&node, "assignments", "original", "pending");
+    const row = (try node.stateMachineDb().oneAlloc(struct { agent_id: sqlite.Text }, alloc, "SELECT agent_id FROM assignments WHERE id = 'original';", .{}, .{})).?;
+    defer alloc.free(row.agent_id.data);
+    try std.testing.expectEqualStrings("", row.agent_id.data);
 }

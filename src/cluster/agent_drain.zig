@@ -14,14 +14,6 @@ pub fn isDraining(status: []const u8) bool {
     return std.mem.eql(u8, status, "draining") or std.mem.eql(u8, status, "drain_pending") or std.mem.eql(u8, status, "drain_blocked");
 }
 
-/// handoffs already reserve replacement capacity. ordinary orphan placement
-/// must not create a second replacement when the draining worker goes away.
-pub fn orphanAssignmentsSql(buffer: []u8, agent_id: []const u8) ![]const u8 {
-    var escaped_buffer: [64]u8 = undefined;
-    const escaped = try @import("../lib/sql.zig").escapeSqlString(&escaped_buffer, agent_id);
-    return std.fmt.bufPrint(buffer, "UPDATE assignments SET agent_id = '', status = 'pending' WHERE agent_id = '{s}' AND status IN ('pending', 'running') AND id NOT IN (SELECT assignment_id FROM assignment_handoffs);", .{escaped});
-}
-
 pub fn reconcile(alloc: std.mem.Allocator, session: mutation.Session, agent_id: []const u8) !void {
     const lease = try placement.Lease.begin(session);
     defer lease.deinit();
