@@ -145,11 +145,20 @@ fn changePause(args: *std.process.Args.Iterator, ctx: AppContext, frozen: bool) 
         cg.setFrozen(previous) catch return error.PartialUpdate;
         return err;
     };
-    store.updateStatus(record.id, if (frozen) "paused" else "running", record.pid, record.exit_code) catch |err| {
+    savePausedStatus(record.id, record.pid.?, frozen) catch |err| {
         cg.setFrozen(previous) catch return error.PartialUpdate;
         return err;
     };
     cli.write("{s}\n", .{record.id});
+}
+
+fn savePausedStatus(id: []const u8, pid: i32, frozen: bool) !void {
+    var lease = try @import("../../../state/store/common.zig").leaseDb();
+    defer lease.deinit();
+    // Thawing can let the process exit before this write. Never restore a PID
+    // that the supervisor has already reaped and cleared.
+    try lease.db.exec("UPDATE containers SET status = ? WHERE id = ? AND pid = ? AND status IN ('running', 'paused');", .{}, .{ if (frozen) "paused" else "running", id, pid });
+    if (lease.db.rowsAffected() != 1) return error.NotRunning;
 }
 
 const Patch = struct {
@@ -210,7 +219,19 @@ fn parsePatch(args: anytype) !Patch {
         const eq = std.mem.indexOfScalar(u8, arg, '=');
         const option = if (eq) |index| arg[0..index] else arg;
         const value = if (eq) |index| arg[index + 1 ..] else args.next() orelse return error.InvalidArgument;
-        if (std.mem.eql(u8, option, "--memory")) patch.memory = value else if (std.mem.eql(u8, option, "--memory-high")) patch.memory_high = value else if (std.mem.eql(u8, option, "--pids")) patch.pids = value else if (std.mem.eql(u8, option, "--cpu-weight")) patch.cpu_weight = value else if (std.mem.eql(u8, option, "--cpus")) patch.cpus = value else if (std.mem.eql(u8, option, "--restart")) patch.restart = run_state.RestartPolicy.parse(value) orelse return error.InvalidArgument else return error.InvalidArgument;
+        if (std.mem.eql(u8, option, "--memory")) {
+            patch.memory = value;
+        } else if (std.mem.eql(u8, option, "--memory-high")) {
+            patch.memory_high = value;
+        } else if (std.mem.eql(u8, option, "--pids")) {
+            patch.pids = value;
+        } else if (std.mem.eql(u8, option, "--cpu-weight")) {
+            patch.cpu_weight = value;
+        } else if (std.mem.eql(u8, option, "--cpus")) {
+            patch.cpus = value;
+        } else if (std.mem.eql(u8, option, "--restart")) {
+            patch.restart = run_state.RestartPolicy.parse(value) orelse return error.InvalidArgument;
+        } else return error.InvalidArgument;
         changed = true;
     }
     if (!changed or patch.reference.len == 0) return error.InvalidArgument;
@@ -331,4 +352,18 @@ test "container resource patch rejects invalid values before changing the kernel
     config.restart_policy = .no;
     var fields: [5]admin.Field = undefined;
     try std.testing.expectError(error.InvalidArgument, (Patch{ .restart = .always }).apply(&config, &fields));
+}
+
+test "container pause status never restores an exited process" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const id = "f00dbadcafe0";
+    try store.save(.{ .id = id, .rootfs = "/fixture", .command = "test", .hostname = "test", .status = "running", .pid = 12345, .exit_code = null, .created_at = 0 });
+    try savePausedStatus(id, 12345, true);
+    try store.updateStatus(id, "stopped", null, 0);
+    try std.testing.expectError(error.NotRunning, savePausedStatus(id, 12345, false));
+    const record = try store.load(std.testing.allocator, id);
+    defer record.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("stopped", record.status);
+    try std.testing.expect(record.pid == null);
 }
