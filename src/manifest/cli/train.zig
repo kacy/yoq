@@ -501,8 +501,8 @@ fn trainScale(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
         return TrainError.InvalidArgument;
     };
 
-    if (gpus == 0) {
-        writeErr("GPU count must be > 0\n", .{});
+    if (gpus == 0 or gpus > manifest_spec.max_training_ranks) {
+        writeErr("gpu count must be between 1 and 4096\n", .{});
         return TrainError.InvalidArgument;
     }
 
@@ -553,23 +553,10 @@ fn trainScale(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
         return TrainError.DeploymentFailed;
     }
 
-    if (ctrl.state == .running) {
-        writeErr("pausing {s} for rescaling...\n", .{name});
-        try ctrl.pause();
-    }
-
-    if (ctrl.job_id) |jid| {
-        store.updateTrainingJobGpus(jid, gpus, std.Io.Clock.real.now(std.Options.debug_io).toSeconds()) catch {
-            writeErr("failed to update GPU count in store\n", .{});
-            return TrainError.StoreError;
-        };
-    }
-
     const old_gpus = ctrl.gpu_count;
-    try ctrl.resizeRanks(gpus);
+    try ctrl.scale(gpus);
     writeErr("scaled {s} from {d} to {d} gpus\n", .{ name, old_gpus, gpus });
 
-    try ctrl.resume_();
     writeErr("resuming {s} with {d} GPUs...\n", .{ name, gpus });
 
     if (server_addr) |addr| {

@@ -34,12 +34,33 @@ pub fn persistState(self: anytype) !void {
     try store.updateTrainingJobState(jid, self.state.label(), now);
 }
 
+pub fn persistStateForStop(self: anytype) !void {
+    const id = self.job_id orelse return;
+    try store.updateTrainingJobState(id, "stopped", std.Io.Clock.real.now(std.Options.debug_io).toSeconds());
+}
+
 pub fn persistRunnerState(self: anytype) !void {
     const id = self.job_id orelse return;
     if (!try store.updateTrainingRunnerState(id, self.state.label(), std.Io.Clock.real.now(std.Options.debug_io).toSeconds())) {
         if (try refreshControl(self)) return error.TrainingCanceled;
         return error.JobMissing;
     }
+}
+
+/// operator commands use a separate lock so pause can cancel a live runner
+/// without waiting for the runner's owner lease first.
+pub fn acquireControl(self: anytype) !?@import("../apply_lock.zig").ApplyLock {
+    if (self.job_id == null) return null;
+    const key = try std.fmt.allocPrint(self.alloc, "training-control:{s}:{s}", .{ self.app_name, self.job.name });
+    defer self.alloc.free(key);
+    return try @import("../apply_lock.zig").acquire(self.alloc, key);
+}
+
+pub fn transition(self: anytype, next: @TypeOf(self.state), gpus: u32) !void {
+    if (self.job_id) |id| {
+        if (!try store.transitionTrainingJob(id, self.state.label(), self.gpu_count, next.label(), gpus, std.Io.Clock.real.now(std.Options.debug_io).toSeconds())) return error.InvalidTrainingState;
+    }
+    self.state = next;
 }
 
 pub fn acquireOwner(self: anytype) !@import("../apply_lock.zig").ApplyLock {

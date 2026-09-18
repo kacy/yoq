@@ -127,35 +127,61 @@ pub const TrainingController = struct {
 
     pub fn stop(self: *TrainingController) !void {
         if (self.isClusterManaged()) return error.RemoteControlRequired;
+        var control = try state_support.acquireControl(self);
+        defer if (control) |*lock| lock.release();
+        // stop is terminal even if the runner advanced after this controller
+        // loaded its snapshot. later progress cannot clear cancellation.
+        try state_support.persistStateForStop(self);
         self.state = .stopped;
-        try self.persistState();
         try state_support.stopRunningRanks(self);
         state_support.syncCheckpoints(self);
     }
 
     pub fn pause(self: *TrainingController) !void {
-        if (self.state != .running and self.state != .scheduling) return;
         if (self.isClusterManaged()) return error.RemoteControlRequired;
-        self.state = .paused;
-        try self.persistState();
+        var control = try state_support.acquireControl(self);
+        defer if (control) |*lock| lock.release();
+        try self.pauseUnderControl();
+    }
+
+    fn pauseUnderControl(self: *TrainingController) !void {
+        if (self.state != .running and self.state != .scheduling) return;
+        try state_support.transition(self, .paused, self.gpu_count);
         try state_support.stopRunningRanks(self);
         state_support.syncCheckpoints(self);
     }
 
     pub fn resume_(self: *TrainingController) !void {
+        if (self.isClusterManaged()) return error.RemoteControlRequired;
         if (self.state != .paused) return;
-        // the previous runner must observe pause and release its owner lease
-        // before a resume request can clear the persisted cancellation.
+        var control = try state_support.acquireControl(self);
+        defer if (control) |*lock| lock.release();
+        // the old runner must release its lease before cancellation is cleared.
         var owner: ?@import("apply_lock.zig").ApplyLock = if (self.job_id != null) try state_support.waitForOwner(self) else null;
         defer if (owner) |*lock| lock.release();
-        if (self.job_id) |id| {
-            const record = try store.getTrainingJob(self.alloc, id);
-            defer record.deinit(self.alloc);
-            if (!std.mem.eql(u8, record.state, "paused")) return error.InvalidTrainingState;
-        }
         self.loadResumeCheckpoint();
-        self.state = .pending;
-        try self.persistState();
+        try state_support.transition(self, .pending, self.gpu_count);
+    }
+
+    /// prepare the replacement allocation before touching the running job.
+    /// the final count and resume transition are committed together.
+    pub fn scale(self: *TrainingController, gpus: u32) !void {
+        if (gpus == 0 or gpus > spec.max_training_ranks) return error.InvalidGpuCount;
+        if (self.isClusterManaged()) return error.RemoteControlRequired;
+        if (self.state != .running and self.state != .paused) return error.InvalidTrainingState;
+        const statuses = try self.alloc.alloc(RankStatus, gpus);
+        errdefer self.alloc.free(statuses);
+        @memset(statuses, .pending);
+        var control = try state_support.acquireControl(self);
+        defer if (control) |*lock| lock.release();
+        if (self.state == .running) try self.pauseUnderControl();
+        var owner: ?@import("apply_lock.zig").ApplyLock = if (self.job_id != null) try state_support.waitForOwner(self) else null;
+        defer if (owner) |*lock| lock.release();
+        self.loadResumeCheckpoint();
+        try state_support.transition(self, .pending, gpus);
+        self.alloc.free(self.rank_status);
+        self.rank_status = statuses;
+        self.gpu_count = gpus;
     }
 
     pub fn printStatus(self: *const TrainingController) void {
