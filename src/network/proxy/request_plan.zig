@@ -55,12 +55,17 @@ fn planHttp1Request(alloc: std.mem.Allocator, routes: []const router.Route, raw_
     defer alloc.free(request_headers);
     const route = router.matchRoute(routes, proxy_helpers.methodString(parsed.method), host, parsed.path_only, request_headers) orelse return error.RouteNotFound;
 
+    const owned_method = try alloc.dupe(u8, proxy_helpers.methodString(parsed.method));
+    errdefer alloc.free(owned_method);
+    const owned_host = try alloc.dupe(u8, host);
+    errdefer alloc.free(owned_host);
+    const owned_path = try alloc.dupe(u8, parsed.path);
     return .{
         .protocol = .http1,
         .method_enum = parsed.method,
-        .method = try alloc.dupe(u8, proxy_helpers.methodString(parsed.method)),
-        .host = try alloc.dupe(u8, host),
-        .path = try alloc.dupe(u8, parsed.path),
+        .method = owned_method,
+        .host = owned_host,
+        .path = owned_path,
         .route = route,
     };
 }
@@ -394,4 +399,22 @@ test "planRequest preserves unsupported HTTP/2 method as null method_enum" {
     try std.testing.expectEqual(.http2, plan.protocol);
     try std.testing.expectEqual(@as(?http.Method, null), plan.method_enum);
     try std.testing.expectEqualStrings("PATCH", plan.method);
+}
+
+test "proxy upload head planning does not wait for the body and releases partial allocations" {
+    const Probe = struct {
+        fn plan(alloc: std.mem.Allocator) !void {
+            const routes = [_]router.Route{.{
+                .name = "uploads",
+                .service = "files",
+                .vip_address = "10.43.0.2",
+                .match = .{ .host = "files.test", .path_prefix = "/upload" },
+            }};
+            const result = try planRequestHead(alloc, &routes, "POST /upload/data HTTP/1.1\r\nHost: files.test\r\nContent-Length: 2097152\r\n\r\n");
+            defer result.deinit(alloc);
+            try std.testing.expectEqualStrings("files", result.route.service);
+            try std.testing.expectEqualStrings("/upload/data", result.path);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.plan, .{});
 }

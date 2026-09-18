@@ -10,7 +10,7 @@ websocket requests retain their upgrade headers. after an upstream `101` respons
 
 client request headers have a fixed five-second deadline. `request_timeout_ms` controls upstream headers and socket operation deadlines. body progress renews the operation deadline, allowing streams to run longer than a single timeout. an idle websocket or event stream can still time out; send application heartbeats or configure a suitable timeout for the route.
 
-the http/1 listener reads at most 16 kib of request headers before routing. fixed-length and chunked uploads then stream with bounded buffers, up to 256 mib of decoded body data. conflicting content-length and transfer-encoding headers, repeated lengths, unsupported transfer codings, and malformed chunk framing are rejected. chunk lines are limited to 4 kib and trailers to 16 kib; trailers cannot change framing, routing, or authorization.
+the http/1 listener reads at most 16 kib of request headers before routing. fixed-length and chunked uploads then stream with bounded buffers, up to 256 mib of body data after chunk framing is removed. conflicting content-length and transfer-encoding headers, repeated lengths, unsupported transfer codings, and malformed chunk framing are rejected. chunk lines are limited to 4 kib and trailers to 16 kib; trailers cannot change framing, routing, or authorization.
 
 uploads share one worker with upstream response reads, so an early rejection stops forwarding even while the client is sending. slow upstream writes stop further client reads. the proxy handles `Expect: 100-continue` after sending the upstream request headers and removes that expectation from the forwarded request. body-bearing websocket and h2c upgrades are refused.
 
