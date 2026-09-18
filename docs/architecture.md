@@ -235,7 +235,7 @@ GPU detection, passthrough, scheduling, and distributed training support.
 
 **MIG/MPS:** supports NVIDIA Multi-Instance GPU (MIG) partitioning for sharing a single GPU across containers, and Multi-Process Service (MPS) for concurrent GPU access.
 
-**InfiniBand/NCCL:** detects InfiniBand HCAs, generates NCCL topology XML for optimal GPU-NIC affinity, and injects NCCL environment variables into training containers.
+**infiniband/nccl:** detects infiniband devices and injects communication settings and rank metadata into training containers. topology helpers can generate xml, but local and cluster training do not currently generate or attach a topology file.
 
 **health monitoring:** NVML provides gpu temperature, ecc errors, and utilization. service webhook thresholds cover the metrics listed in the [alert guide](alerts.md); gpu measurements are not additional webhook thresholds.
 
@@ -372,7 +372,7 @@ key files:
 
 **build cache identity.** cache keys include content, ordered parent layers, and execution context. earlier changes can invalidate later layers.
 
-**SQLite for everything.** container state, image metadata, service names, secrets, network policies, deployment history, and Raft log all live in SQLite. in cluster mode, the database is replicated via Raft. no etcd, no separate state store.
+**SQLite for everything.** container state, image metadata, service names, secrets, network policies, deployment history, and Raft log all live in SQLite. cluster servers replicate the committed cluster state through raft. local runtime and image records remain in the separate local database; they are not copied to every voter. no etcd is required.
 
 **hub-and-spoke WireGuard.** server nodes are WireGuard hubs that forward inter-agent traffic. agents connect only to servers, avoiding O(n²) peer configurations. agent join/leave is a single-peer operation on the server side.
 
