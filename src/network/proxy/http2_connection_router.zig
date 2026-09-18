@@ -511,25 +511,27 @@ const ConnectionRouter = struct {
             error.BufferTooShort => return,
             else => return err,
         };
-        const observation_started_ns = observations.nowNs();
-        const parsed = http2_request.parseRequestHeaderSequence(self.allocator, self.downstream_buf.items, 0) catch |err| switch (err) {
-            error.BufferTooShort => return,
-            else => return err,
-        };
-        defer parsed.deinit(self.allocator);
-
-        proxy_runtime.recordRequestStart();
-
-        if (self.findStreamIndex(parsed.request.stream_id)) |stream_idx| {
-            const rewritten = try http2_request.rewriteRequestHeaderSequence(self.allocator, self.downstream_buf.items, 0, .{
-                .stream_id = 1,
-            });
+        const frame = http2.parseFrameHeader(self.downstream_buf.items).?;
+        if (self.findStreamIndex(frame.stream_id)) |stream_idx| {
+            // trailers do not contain the request pseudoheaders used for routing.
+            // rewrite their stream id without parsing them as a new request.
+            if (frame.flags & 1 == 0) return error.InvalidFrameSequence;
+            const rewritten = try http2_request.rewriteRequestHeaderSequence(self.allocator, self.downstream_buf.items, 0, .{ .stream_id = 1 });
             defer rewritten.deinit(self.allocator);
-            try self.streams.items[stream_idx].flow_state.request.append(self.allocator, rewritten.bytes);
+            try self.streams.items[stream_idx].flow_state.request.appendHeaders(self.allocator, rewritten.bytes);
+            if (self.streams.items[stream_idx].mirror) |*mirror| {
+                self.forwardMirrorFrame(mirror, rewritten.bytes) catch self.failMirrorSession(stream_idx);
+            }
+            self.streams.items[stream_idx].downstream_end_stream = true;
             try self.consumeDownstreamBytes(rewritten.consumed);
             self.last_activity_ms = nowMs();
             return;
         }
+
+        const observation_started_ns = observations.nowNs();
+        const parsed = try http2_request.parseRequestHeaderSequence(self.allocator, self.downstream_buf.items, 0);
+        defer parsed.deinit(self.allocator);
+        proxy_runtime.recordRequestStart();
 
         // cap concurrent streams: refuse a new stream past the limit rather
         // than grow `streams` (and dial upstreams) without bound. handled
@@ -1146,6 +1148,8 @@ const ConnectionRouter = struct {
         const header = http2.parseFrameHeader(frame_bytes) orelse return error.BufferTooShort;
         if (header.frame_type == .data) {
             _ = try mirror.flow_state.request.appendData(self.allocator, frame_bytes);
+        } else if (header.frame_type == .headers) {
+            try mirror.flow_state.request.appendHeaders(self.allocator, frame_bytes);
         } else try mirror.flow_state.request.append(self.allocator, frame_bytes);
     }
 
@@ -1438,7 +1442,10 @@ fn connectAndSendUpstream(alloc: std.mem.Allocator, peer_key: ?PeerKey, route: r
     const preface_and_settings = try buildInitialUpstreamPreamble(alloc);
     defer alloc.free(preface_and_settings);
     try connection.writeAll(preface_and_settings);
-    try connection.writeAll(request_bytes);
+    var headers: flow.Queue = .{};
+    defer headers.deinit(alloc);
+    try headers.appendHeaders(alloc, request_bytes);
+    try connection.writeAll(headers.bytes.items);
     return connection;
 }
 
@@ -1864,4 +1871,60 @@ test "http2 flow event loop sends its settings before acknowledging the client w
     try std.testing.expectEqual(@as(u8, 0), server_settings.flags);
     try std.testing.expectEqual(http2.FrameType.settings, acknowledgment.frame_type);
     try std.testing.expectEqual(@as(u8, 1), acknowledgment.flags);
+}
+
+test "http2 flow forwards large request trailers as contiguous primary and mirror sequences" {
+    const alloc = std.testing.allocator;
+    var pair: [2]i32 = undefined;
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &pair) != 0) return error.SocketFailed;
+    defer linux_platform.posix.close(pair[0]);
+    defer linux_platform.posix.close(pair[1]);
+    var routing = ConnectionRouter{ .allocator = alloc, .routes = &.{}, .client_fd = pair[0], .client_ip = null, .sent_settings = true, .saw_client_preface = true };
+    defer routing.deinit();
+    const route = router.Route{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" } };
+    const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-trailers", .address = "127.0.0.1", .port = 1 };
+    try routing.streams.append(alloc, .{
+        .downstream_stream_id = 3,
+        .route = route,
+        .backend_service = try alloc.dupe(u8, "api"),
+        .upstream = try ownedTestUpstream(alloc, upstream),
+        .connection = .{ .connection = .{ .bare = try linux_platform.posix.dup(pair[0]) }, .timeout_ms = 1000 },
+        .request_deadline_at_ms = nowMs() + 1000,
+        .mirror = .{
+            .backend_service = try alloc.dupe(u8, "mirror"),
+            .upstream = try ownedTestUpstream(alloc, upstream),
+            .connection = .{ .connection = .{ .bare = try linux_platform.posix.dup(pair[0]) }, .timeout_ms = 1000 },
+            .request_deadline_at_ms = nowMs() + 1000,
+        },
+    });
+    const value = try alloc.alloc(u8, flow.max_frame_payload + 10);
+    defer alloc.free(value);
+    @memset(value, 'v');
+    const block = try hpack.encodeHeaderBlockLiteral(alloc, &.{.{ .name = @constCast("x-result"), .value = value }});
+    defer alloc.free(block);
+    const frame = try http2.buildFrame(alloc, .{ .length = @intCast(block.len), .frame_type = .headers, .flags = 5, .stream_id = 3 }, block);
+    defer alloc.free(frame);
+    var incoming: flow.Queue = .{};
+    defer incoming.deinit(alloc);
+    try incoming.appendHeaders(alloc, frame);
+    try routing.downstream_buf.appendSlice(alloc, incoming.bytes.items);
+    try routing.processDownstreamBuffer();
+    const session = &routing.streams.items[0];
+    const primary = (try session.flow_state.request.front()).?;
+    const mirrored = (try session.mirror.?.flow_state.request.front()).?;
+    try std.testing.expectEqualSlices(u8, primary, mirrored);
+    try std.testing.expect(session.downstream_end_stream);
+    try std.testing.expectEqual(@as(usize, 0), routing.downstream_buf.items.len);
+    var recovered: std.ArrayList(u8) = .empty;
+    defer recovered.deinit(alloc);
+    var offset: usize = 0;
+    while (offset < primary.len) {
+        const header = http2.parseFrameHeader(primary[offset..]).?;
+        try std.testing.expect(header.length <= flow.max_frame_payload);
+        try std.testing.expectEqual(@as(u32, 1), header.stream_id);
+        try std.testing.expectEqual(@as(u8, if (offset == 0) 1 else 0), header.flags & 1);
+        try recovered.appendSlice(alloc, primary[offset + 9 ..][0..header.length]);
+        offset += 9 + header.length;
+    }
+    try std.testing.expectEqualSlices(u8, block, recovered.items);
 }

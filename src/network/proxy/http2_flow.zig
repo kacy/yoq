@@ -85,6 +85,33 @@ pub const Queue = struct {
         try self.bytes.appendSlice(alloc, bytes);
     }
 
+    /// rewritten header blocks have no padding or priority prefix. keep every
+    /// fragment adjacent so the queue cannot insert DATA or control frames in
+    /// the middle of a HEADERS/CONTINUATION sequence.
+    pub fn appendHeaders(self: *Queue, alloc: std.mem.Allocator, frame: []const u8) !void {
+        const header = http2.parseFrameHeader(frame) orelse return error.BufferTooShort;
+        if (header.frame_type != .headers or header.flags & 4 == 0 or header.flags & 0x28 != 0 or frame.len != 9 + header.length) return error.InvalidFrameSequence;
+        const payload = frame[9..];
+        const fragments = @max(@as(usize, 1), std.math.divCeil(usize, payload.len, max_frame_payload) catch return error.InvalidFrameSequence);
+        const length = payload.len + fragments * http2.frame_header_len;
+        if (length > max_queue_bytes - self.bytes.items.len) return error.QueueFull;
+        try self.bytes.ensureUnusedCapacity(alloc, length);
+        var offset: usize = 0;
+        for (0..fragments) |index| {
+            const count = @min(payload.len - offset, max_frame_payload);
+            var encoded: [9]u8 = undefined;
+            try http2.writeFrameHeader(&encoded, .{
+                .length = @intCast(count),
+                .frame_type = if (index == 0) .headers else .continuation,
+                .flags = (if (index == 0) header.flags & 1 else @as(u8, 0)) | (if (index + 1 == fragments) @as(u8, 4) else 0),
+                .stream_id = header.stream_id,
+            });
+            self.bytes.appendSliceAssumeCapacity(&encoded);
+            self.bytes.appendSliceAssumeCapacity(payload[offset..][0..count]);
+            offset += count;
+        }
+    }
+
     /// padding has no application meaning. discard it before queuing and return
     /// its receive credit immediately; the remaining bytes can use tiny windows.
     pub fn appendData(self: *Queue, alloc: std.mem.Allocator, frame: []const u8) !usize {
@@ -363,4 +390,48 @@ test "http2 flow rejects malformed settings and oversized continuation frames" {
     try std.testing.expectError(error.InvalidFrameSequence, sequenceLength(&frames));
     try http2.writeFrameHeader(frames[9..], .{ .length = 0, .frame_type = .continuation, .flags = 4, .stream_id = 1 });
     try std.testing.expectEqual(@as(usize, 18), try sequenceLength(&frames));
+}
+
+test "http2 flow fragments header blocks at the frame boundary and preserves sequence flags" {
+    const alloc = std.testing.allocator;
+    for ([_]usize{ 0, max_frame_payload, max_frame_payload + 1, 2 * max_frame_payload + 1 }) |length| {
+        const payload = try alloc.alloc(u8, length);
+        defer alloc.free(payload);
+        @memset(payload, 0x6a);
+        for ([_]u8{ 4, 5 }) |flags| {
+            const frame = try http2.buildFrame(alloc, .{ .length = @intCast(length), .frame_type = .headers, .flags = flags, .stream_id = 3 }, payload);
+            defer alloc.free(frame);
+            var queue: Queue = .{};
+            defer queue.deinit(alloc);
+            try queue.appendHeaders(alloc, frame);
+            const sequence_bytes = queue.bytes.items.len;
+            const update = windowUpdate(0, 1);
+            try queue.append(alloc, &update);
+            const sequence = (try queue.front()).?;
+            try std.testing.expectEqual(sequence_bytes, sequence.len);
+            var offset: usize = 0;
+            var payload_bytes: usize = 0;
+            while (offset < sequence.len) {
+                const header = http2.parseFrameHeader(sequence[offset..]).?;
+                const final = offset + 9 + header.length == sequence.len;
+                try std.testing.expect(header.length <= max_frame_payload);
+                try std.testing.expectEqual(@as(u32, 3), header.stream_id);
+                try std.testing.expectEqual(if (offset == 0) http2.FrameType.headers else http2.FrameType.continuation, header.frame_type);
+                try std.testing.expectEqual((if (offset == 0) flags & 1 else @as(u8, 0)) | (if (final) @as(u8, 4) else 0), header.flags);
+                try std.testing.expectEqualSlices(u8, payload[payload_bytes..][0..header.length], sequence[offset + 9 ..][0..header.length]);
+                payload_bytes += header.length;
+                offset += 9 + header.length;
+            }
+            try std.testing.expectEqual(length, payload_bytes);
+            queue.remove(sequence_bytes);
+            try std.testing.expectEqualSlices(u8, &update, (try queue.front()).?);
+        }
+    }
+    const oversized = try alloc.alloc(u8, max_queue_bytes);
+    defer alloc.free(oversized);
+    try http2.writeFrameHeader(oversized[0..9], .{ .length = max_queue_bytes - 9, .frame_type = .headers, .flags = 4, .stream_id = 1 });
+    var queue: Queue = .{};
+    defer queue.deinit(alloc);
+    try std.testing.expectError(error.QueueFull, queue.appendHeaders(alloc, oversized));
+    try std.testing.expectEqual(@as(usize, 0), queue.bytes.items.len);
 }
