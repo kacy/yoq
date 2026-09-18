@@ -338,6 +338,18 @@ pub fn initSecurityTables(db: *sqlite.Db) SchemaError!void {
 
 pub fn initStorageTables(db: *sqlite.Db) SchemaError!void {
     try exec(db,
+        \\CREATE TABLE IF NOT EXISTS local_port_reservations (
+        \\    container_id TEXT NOT NULL,
+        \\    ordinal INTEGER NOT NULL,
+        \\    host_ip INTEGER NOT NULL DEFAULT 0,
+        \\    host_port INTEGER NOT NULL,
+        \\    protocol INTEGER NOT NULL,
+        \\    PRIMARY KEY (container_id, ordinal)
+        \\);
+    );
+    try exec(db, "CREATE INDEX IF NOT EXISTS idx_local_port_reservations_port ON local_port_reservations(host_port, protocol);");
+
+    try exec(db,
         \\CREATE TABLE IF NOT EXISTS volumes (
         \\    name TEXT NOT NULL,
         \\    app_name TEXT NOT NULL,
