@@ -68,7 +68,7 @@ pub fn copy(alloc: std.mem.Allocator, source: *sqlite.Db, destination: std.Io.Di
         const finish = c.sqlite3_backup_finish(handle);
         if (step != c.SQLITE_DONE or finish != c.SQLITE_OK) return error.DatabaseBackupFailed;
         // bundles contain self-contained databases, never wal sidecars.
-        try target.exec("PRAGMA journal_mode=DELETE;", .{}, .{});
+        try finishCopy(&target);
         try integrity(&target);
     }
     const output = try files.openRegular(destination, name, true);
@@ -77,15 +77,24 @@ pub fn copy(alloc: std.mem.Allocator, source: *sqlite.Db, destination: std.Io.Di
     return files.digest(destination, name, files.max_database_size);
 }
 
+/// checkpoint results are rows, not errors: a busy checkpoint must be rejected
+/// before copying a database without its wal file.
+pub fn finishCopy(db: *sqlite.Db) !void {
+    const checkpoint = (try db.one(struct { busy: i64, pages: i64, copied: i64 }, "PRAGMA wal_checkpoint(TRUNCATE);", .{}, .{})) orelse return error.DatabaseBackupFailed;
+    if (checkpoint.busy != 0) return error.DatabaseBackupFailed;
+    const mode = (try db.one(struct { mode: [6]u8 }, "PRAGMA journal_mode=DELETE;", .{}, .{})) orelse return error.DatabaseBackupFailed;
+    if (!std.mem.eql(u8, &mode.mode, "delete")) return error.DatabaseBackupFailed;
+}
+
 pub fn integrity(db: *sqlite.Db) !void {
     var result = try db.prepare("PRAGMA integrity_check;");
     defer result.deinit();
-    if (c.sqlite3_step(result.stmt) != c.SQLITE_ROW) return error.CorruptDatabase;
-    const value = c.sqlite3_column_text(result.stmt, 0) orelse return error.CorruptDatabase;
-    if (!std.mem.eql(u8, std.mem.span(value), "ok") or c.sqlite3_step(result.stmt) != c.SQLITE_DONE) return error.CorruptDatabase;
+    if (c.sqlite3_step(result.dynamic().stmt) != c.SQLITE_ROW) return error.CorruptDatabase;
+    const value = c.sqlite3_column_text(result.dynamic().stmt, 0) orelse return error.CorruptDatabase;
+    if (!std.mem.eql(u8, std.mem.span(value), "ok") or c.sqlite3_step(result.dynamic().stmt) != c.SQLITE_DONE) return error.CorruptDatabase;
     var foreign = try db.prepare("PRAGMA foreign_key_check;");
     defer foreign.deinit();
-    if (c.sqlite3_step(foreign.stmt) != c.SQLITE_DONE) return error.CorruptDatabase;
+    if (c.sqlite3_step(foreign.dynamic().stmt) != c.SQLITE_DONE) return error.CorruptDatabase;
 }
 
 /// migrate only a private staging copy, then compare it with the current schema.
@@ -118,6 +127,10 @@ pub fn validateVoters(voters: []const u8, node_id: u64) !void {
 pub fn readBoundary(alloc: std.mem.Allocator, raft: *sqlite.Db, state: *sqlite.Db) !Boundary {
     try integrity(raft);
     try validateRaftSchema(raft);
+    var expected_meta = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer expected_meta.deinit();
+    try @import("../state_machine/db_runtime.zig").initMeta(&expected_meta);
+    try compareDefinitions(&expected_meta, state, "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name IN ('state_machine_meta','rejected_commands') ORDER BY type,name;");
     const bad_schema = (try raft.one(struct { count: i64 }, "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('trigger','view');", .{}, .{})).?;
     if (bad_schema.count != 0) return error.InvalidRaftSchema;
     const membership = (try raft.oneAlloc(struct { node_id: i64, voters: []const u8 }, alloc, "SELECT node_id,voters FROM static_membership WHERE id=1;", .{}, .{})) orelse return error.InvalidMembership;
@@ -160,25 +173,28 @@ fn validateRaftSchema(actual: *sqlite.Db) !void {
     defer expected.deinit();
     try @import("../log/schema_support.zig").initSchema(&expected);
     try expected.exec("CREATE TABLE static_membership (id INTEGER PRIMARY KEY CHECK (id = 1), node_id INTEGER NOT NULL, voters TEXT NOT NULL);", .{}, .{});
-    const query = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name;";
+    try compareDefinitions(&expected, actual, "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name;");
+    const counts = (try actual.one(struct { state: i64, snapshot: i64, membership: i64 }, "SELECT (SELECT COUNT(*) FROM raft_state),(SELECT COUNT(*) FROM snapshot_meta),(SELECT COUNT(*) FROM static_membership);", .{}, .{})).?;
+    if (counts.state != 1 or counts.snapshot != 1 or counts.membership != 1) return error.InvalidRaftState;
+}
+
+fn compareDefinitions(expected: *sqlite.Db, actual: *sqlite.Db, comptime query: []const u8) !void {
     var left = try expected.prepare(query);
     defer left.deinit();
     var right = try actual.prepare(query);
     defer right.deinit();
     while (true) {
-        const a = c.sqlite3_step(left.stmt);
-        const b = c.sqlite3_step(right.stmt);
+        const a = c.sqlite3_step(left.dynamic().stmt);
+        const b = c.sqlite3_step(right.dynamic().stmt);
         if (a != b) return error.InvalidRaftSchema;
         if (a == c.SQLITE_DONE) break;
         if (a != c.SQLITE_ROW) return error.InvalidRaftSchema;
         for (0..4) |column| {
-            const x = c.sqlite3_column_text(left.stmt, @intCast(column)) orelse return error.InvalidRaftSchema;
-            const y = c.sqlite3_column_text(right.stmt, @intCast(column)) orelse return error.InvalidRaftSchema;
+            const x = c.sqlite3_column_text(left.dynamic().stmt, @intCast(column)) orelse return error.InvalidRaftSchema;
+            const y = c.sqlite3_column_text(right.dynamic().stmt, @intCast(column)) orelse return error.InvalidRaftSchema;
             if (!sameDefinition(std.mem.span(x), std.mem.span(y))) return error.InvalidRaftSchema;
         }
     }
-    const counts = (try actual.one(struct { state: i64, snapshot: i64, membership: i64 }, "SELECT (SELECT COUNT(*) FROM raft_state),(SELECT COUNT(*) FROM snapshot_meta),(SELECT COUNT(*) FROM static_membership);", .{}, .{})).?;
-    if (counts.state != 1 or counts.snapshot != 1 or counts.membership != 1) return error.InvalidRaftState;
 }
 
 fn sameDefinition(left: []const u8, right: []const u8) bool {

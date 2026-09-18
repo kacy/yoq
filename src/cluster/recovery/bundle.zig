@@ -201,15 +201,13 @@ fn validateContents(alloc: std.mem.Allocator, dir: std.Io.Dir, description: mani
     try validateSecrets(alloc, dir, description, &state);
     // schema.init enables wal; collapse every candidate database before the
     // caller copies it into the restored root without sidecars.
-    try state.exec("PRAGMA wal_checkpoint(TRUNCATE);", .{}, .{});
-    try state.exec("PRAGMA journal_mode=DELETE;", .{}, .{});
+    try databases.finishCopy(&state);
     if (description.contains("yoq.db")) {
         var local = try databases.open(alloc, dir, "yoq.db", true);
         defer local.deinit();
         try databases.validateState(&local);
         try validateSecrets(alloc, dir, description, &local);
-        try local.exec("PRAGMA wal_checkpoint(TRUNCATE);", .{}, .{});
-        try local.exec("PRAGMA journal_mode=DELETE;", .{}, .{});
+        try databases.finishCopy(&local);
     }
     const token = try files.readSmall(alloc, dir, "api_token", 4096);
     defer alloc.free(token);

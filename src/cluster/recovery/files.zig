@@ -8,7 +8,7 @@ pub const max_database_size: u64 = 4 * 1024 * 1024 * 1024;
 
 pub fn openDir(path: []const u8) !std.Io.Dir {
     const start: [:0]const u8 = if (std.fs.path.isAbsolute(path)) "/" else ".";
-    var rc = linux.openat(linux.AT.FDCWD, start, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0);
+    var rc = linux.openat(linux.AT.FDCWD, start.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0);
     if (linux.errno(rc) != .SUCCESS) return error.UnsafeDirectory;
     var dir: std.Io.Dir = .{ .handle = @intCast(rc) };
     errdefer dir.close(io);
@@ -65,9 +65,9 @@ pub fn copy(source: std.Io.Dir, name: []const u8, destination: std.Io.Dir, desti
         try output.writeStreamingAll(io, buffer[0..count]);
     }
     try output.sync(io);
-    var digest: [32]u8 = undefined;
-    hash.final(&digest);
-    return .{ .size = size, .sha256 = std.fmt.bytesToHex(digest, .lower) };
+    var sum: [32]u8 = undefined;
+    hash.final(&sum);
+    return .{ .size = size, .sha256 = std.fmt.bytesToHex(sum, .lower) };
 }
 
 pub fn digest(dir: std.Io.Dir, name: []const u8, limit: u64) !Digest {
@@ -132,7 +132,7 @@ pub const Stage = struct {
         return stage;
     }
 
-    pub fn name(self: *const Stage) []const u8 {
+    pub fn temporaryName(self: *const Stage) []const u8 {
         return std.mem.sliceTo(&self.temporary, 0);
     }
 
@@ -142,7 +142,7 @@ pub const Stage = struct {
 
     pub fn publish(self: *Stage) !void {
         try syncDir(self.dir);
-        const old = try std.posix.toPosixPath(self.name());
+        const old = try std.posix.toPosixPath(self.temporaryName());
         const final = try std.posix.toPosixPath(self.final_name[0..self.final_len]);
         switch (linux.errno(linux.renameat2(self.parent.handle, &old, self.parent.handle, &final, .{ .NOREPLACE = true }))) {
             .SUCCESS => {},
@@ -155,7 +155,7 @@ pub const Stage = struct {
 
     pub fn deinit(self: *Stage) void {
         self.dir.close(io);
-        if (!self.published) self.parent.deleteTree(io, self.name()) catch {};
+        if (!self.published) self.parent.deleteTree(io, self.temporaryName()) catch {};
         self.parent.close(io);
     }
 };

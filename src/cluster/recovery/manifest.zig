@@ -22,8 +22,8 @@ pub const Manifest = struct {
     snapshot_size: u64,
     files: []const Entry,
 
-    pub fn fromBoundary(boundary: databases.Boundary, entries: []const Entry, set_id: []const u8, fingerprint: []const u8) Manifest {
-        return .{ .set_id = set_id, .cluster_fingerprint = fingerprint, .node_id = boundary.node_id, .voters = boundary.voters, .current_term = boundary.current_term, .last_applied = boundary.last_applied, .last_log_index = boundary.last_log_index, .snapshot_index = boundary.snapshot_index, .snapshot_term = boundary.snapshot_term, .snapshot_size = boundary.snapshot_size, .files = entries };
+    pub fn fromBoundary(boundary: databases.Boundary, entries: []const Entry, set_id: []const u8, cluster_fingerprint: []const u8) Manifest {
+        return .{ .set_id = set_id, .cluster_fingerprint = cluster_fingerprint, .node_id = boundary.node_id, .voters = boundary.voters, .current_term = boundary.current_term, .last_applied = boundary.last_applied, .last_log_index = boundary.last_log_index, .snapshot_index = boundary.snapshot_index, .snapshot_term = boundary.snapshot_term, .snapshot_size = boundary.snapshot_size, .files = entries };
     }
 
     pub fn validate(self: Manifest) !void {
