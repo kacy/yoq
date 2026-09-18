@@ -58,7 +58,11 @@ pub fn initChildContext(config: anytype, overlay: *const OverlayRuntime) exec_ru
 
 pub fn setupNetwork(config: anytype, pid: posix.pid_t, net_info: *?net_setup.NetworkInfo, db: *sqlite.Db) !startup.NetworkFiles {
     const net_config = config.network orelse return .{};
-    const gateway = try gatewayForNode(net_config.node_id);
+    const gateway = if (net_config.network_name) |name| blk: {
+        const network = try @import("../../network/local_networks.zig").inspect(std.heap.page_allocator, name);
+        defer network.deinit(std.heap.page_allocator);
+        break :blk network.subnet.gateway;
+    } else try gatewayForNode(net_config.node_id);
     net_info.* = try net_setup.setupContainer(config.id, pid, net_config, db, config.hostname);
     // Keep ownership even if persistence fails: rollback must remove the veth,
     // mappings, service registration, and allocated IP.

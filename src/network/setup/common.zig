@@ -33,6 +33,7 @@ pub const NetworkConfig = struct {
     port_maps: []const PortMap = &.{},
     skip_dns: bool = false,
     node_id: ?u16 = null,
+    network_name: ?[]const u8 = null,
 };
 
 pub const PortMap = struct {

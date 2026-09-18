@@ -89,8 +89,19 @@ pub fn addPortMapAt(
     container_port: u16,
     protocol: Protocol,
 ) NatError!void {
-    enableRouteLocalnet(network_bridge.default_bridge) catch |e| {
-        log.warn("nat: failed to enable route_localnet on {s}: {}", .{ network_bridge.default_bridge, e });
+    return addPortMapOnBridge(network_bridge.default_bridge, host_ip, host_port, container_ip, container_port, protocol);
+}
+
+pub fn addPortMapOnBridge(
+    bridge_name: []const u8,
+    host_ip: ?[]const u8,
+    host_port: u16,
+    container_ip: []const u8,
+    container_port: u16,
+    protocol: Protocol,
+) NatError!void {
+    enableRouteLocalnet(bridge_name) catch |e| {
+        log.warn("nat: failed to enable route_localnet on {s}: {}", .{ bridge_name, e });
         return NatError.RouteLocalnetFailed;
     };
 
