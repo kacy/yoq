@@ -148,7 +148,7 @@ application management — the compose/orchestrator/control-plane layer.
 
 **cron scheduling:** periodic tasks run at configurable intervals (e.g., `every = "1h"`), with the active cron set derived from the current app release.
 
-**alerting:** services can define alert thresholds (CPU, memory, restart count, p99 latency, error rate) with webhook notifications. when a metric exceeds its threshold for consecutive checks, the configured webhook is fired.
+**alerting:** local supervisors and cluster agents sample configured service thresholds. a separate worker delivers bounded webhook requests, while sample and delivery status persist in the host database. resource measurements use the highest replica value on the host; request metrics use a bounded proxy history. cluster restart accounting is unavailable. see [service alerts](alerts.md).
 
 key files:
 - `spec.zig` — Service, Worker, Cron, Volume, TrainingJob, AlertSpec types

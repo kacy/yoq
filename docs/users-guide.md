@@ -254,7 +254,7 @@ new automation should prefer those nested objects rather than the older flat fie
 
 ### alerting
 
-services can define threshold-based alerts on CPU, memory, restart count, p99 latency, and error rate. when a metric exceeds its threshold for consecutive checks, the configured webhook is fired.
+services can define cpu, memory, local restart, proxy latency, and error-rate thresholds. the supervising process samples every five seconds and requires three consecutive threshold breaches. optional webhooks receive generic json notifications. see [service alerts](alerts.md) for measurements and delivery behavior.
 
 ---
 
@@ -444,7 +444,7 @@ the status JSON is the better debugging view when you want to inspect discovery 
 
 ### alerting
 
-threshold-based alerts on CPU, memory, restart count, p99 latency, and error rate. webhook notifications when thresholds are exceeded.
+`yoq status --alerts` shows persisted host alert state, unavailable measurements, and delivery failures. `GET /cluster/alerts` collects paginated agent reports; thresholds remain local to each hosting agent. cluster restart accounting is unavailable. see [service alerts](alerts.md).
 
 ### doctor
 

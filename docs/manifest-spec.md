@@ -71,6 +71,8 @@ service discovery uses a shared service-name namespace. active applications must
 
 local applies start the requested number of service instances. cluster applies place the whole replica group before activating its rollout target; insufficient capacity rejects the group. required labels filter cluster agents. these settings are preserved in app snapshots and rollback releases. status reports both logical services and desired service instances.
 
+one yoq data directory owns published-port rules in each network namespace. processes using another data directory are rejected; use the same user and state directory for runtime commands. the owner marker under `/run/yoq` lasts until reboot.
+
 published host ports are shared by the service's instances on each host. new tcp connections go to eligible replicas, and existing connections remain pinned by conntrack. health checks run per instance. removing one container releases only its port claims. a cluster replacement's old and new instances must fit within the 64-backend limit; a larger temporary group is rejected before placement.
 
 ### ports
@@ -462,7 +464,7 @@ master_port = 29500
 
 ## alerts
 
-defined under `[service.<name>.alerts]`. threshold-based monitoring with webhook notifications. when a metric exceeds its threshold for consecutive checks, the webhook is fired.
+defined under `[service.<name>.alerts]`. the local supervisor or hosting agent samples every five seconds. three consecutive values above a threshold fire an alert; three at or below it resolve the alert. missing data reports an unavailable metric. see [service alerts](alerts.md) for metric definitions, delivery retries, and status fields. cluster restart counts are unavailable.
 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
@@ -479,7 +481,7 @@ cpu_percent = 90
 memory_percent = 85
 restart_count = 5
 latency_p99_ms = 500
-webhook = "https://hooks.slack.com/services/T.../B.../xxx"
+webhook = "https://monitoring.example.com/events"
 ```
 
 ---
@@ -497,7 +499,7 @@ workers are one-shot tasks that run to completion. defined under `[worker.<name>
 | `working_dir` | string | no | image default | working directory |
 | `volumes` | array of strings | no | `[]` | volume mounts |
 | `gpu` | table | no | none | GPU passthrough (same fields as service GPU) |
-| `gpu_mesh` | table | no | none | GPU mesh (same fields as service GPU mesh) |
+| `gpu_mesh` | table | no | none | cluster gpu mesh; rejected for local workers |
 
 ```toml
 [worker.migrate]
