@@ -66,6 +66,7 @@ pub fn scanCheckpointDir(buf: []CheckpointEntry, checkpoint_path: []const u8) us
 }
 
 fn sortEntries(entries: []CheckpointEntry) void {
+    if (entries.len < 2) return;
     for (1..entries.len) |i| {
         var j = i;
         while (j > 0 and entries[j].step < entries[j - 1].step) {
@@ -546,4 +547,15 @@ test "training checkpoint retention preserves failed deletions and retries them"
     try expectRetainedSteps(&.{30});
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_20", .{}));
     try tmp.dir.access(std.Options.debug_io, "step_30", .{});
+}
+
+test "training checkpoint retention accepts an empty checkpoint directory" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(std.Options.debug_io, ".", alloc);
+    defer alloc.free(path);
+    var entries: [4]CheckpointEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 0), scanCheckpointDir(&entries, path));
+    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "not-yet-recorded", path, 2));
 }
