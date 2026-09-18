@@ -54,6 +54,8 @@ pub const TrainingController = struct {
     job: *const spec.TrainingJob,
     state: TrainingJobState,
     app_name: []const u8,
+    gpu_count: u32,
+    manifest_volumes: []const spec.Volume = &.{},
     rank_status: []RankStatus,
     job_id: ?[]const u8 = null,
     resume_path: ?[]const u8 = null,
@@ -61,19 +63,23 @@ pub const TrainingController = struct {
 
     pub fn init(alloc: std.mem.Allocator, job: *const spec.TrainingJob, app_name: []const u8) !TrainingController {
         const rank_status = try alloc.alloc(RankStatus, job.gpus);
+        errdefer alloc.free(rank_status);
         @memset(rank_status, .pending);
+        const owned_app_name = try alloc.dupe(u8, app_name);
 
         return .{
             .alloc = alloc,
             .job = job,
             .state = .pending,
-            .app_name = app_name,
+            .app_name = owned_app_name,
+            .gpu_count = job.gpus,
             .rank_status = rank_status,
         };
     }
 
     pub fn deinit(self: *TrainingController) void {
         self.alloc.free(self.rank_status);
+        self.alloc.free(self.app_name);
         if (self.resume_path) |rp| self.alloc.free(rp);
         if (self.job_id) |jid| self.alloc.free(jid);
     }
@@ -102,15 +108,17 @@ pub const TrainingController = struct {
         return state_support.isClusterManaged(self);
     }
 
-    /// start training job locally by launching one container per rank.
-    /// each rank gets RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT, LOCAL_RANK
-    /// injected into its environment along with NCCL mesh config.
-    ///
-    /// NOTE: ranks are launched sequentially via runOneShot which blocks until
-    /// exit. this means local multi-rank training will not work for distributed
-    /// workloads that require simultaneous rank communication (NCCL all-reduce).
-    /// for multi-rank training, use cluster mode (--server) which gang-schedules
-    /// ranks across agents. local mode is useful for single-rank testing.
+    pub fn resizeRanks(self: *TrainingController, gpus: u32) !void {
+        if (gpus == 0 or gpus > @import("../cluster/placement_transaction.zig").max_gang_ranks) return error.InvalidGpuCount;
+        const statuses = try self.alloc.alloc(RankStatus, gpus);
+        @memset(statuses, .pending);
+        self.alloc.free(self.rank_status);
+        self.rank_status = statuses;
+        self.gpu_count = gpus;
+    }
+
+    /// launch every rank before waiting for completion. rank containers share
+    /// a reachable rendezvous and each receives its own gpu selection.
     pub fn startLocal(self: *TrainingController) !void {
         return local_runner.startLocal(self);
     }
@@ -162,7 +170,7 @@ pub const TrainingController = struct {
         write("training job: {s}\n", .{self.job.name});
         write("state:        {s}\n", .{self.state.label()});
         write("image:        {s}\n", .{self.job.image});
-        write("gpus:         {d}\n", .{self.job.gpus});
+        write("gpus:         {d}\n", .{self.gpu_count});
         write("restarts:     {d}/{d}\n", .{ self.restart_count, self.job.fault_tolerance.max_restarts });
 
         if (self.job.gpu_type) |gt| {
@@ -341,4 +349,24 @@ test "cluster-managed job detection follows job id prefix" {
 
     try state_support.generateClusterJobId(&ctrl);
     try std.testing.expect(ctrl.isClusterManaged());
+}
+
+test "training controller owns the app name and restores the persisted rank count" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const job = spec.TrainingJob{ .name = "train", .image = "scratch", .command = &.{}, .env = &.{}, .working_dir = null, .volumes = &.{}, .gpus = 1 };
+    var app_name = [_]u8{ 'd', 'e', 'm', 'o' };
+    var ctrl = try TrainingController.init(alloc, &job, &app_name);
+    defer ctrl.deinit();
+    @memset(&app_name, 'x');
+    try std.testing.expectEqualStrings("demo", ctrl.app_name);
+    try ctrl.generateJobId();
+    ctrl.createPersistentRecord();
+    try store.updateTrainingJobGpus(ctrl.job_id.?, 3, 2);
+    try store.updateTrainingJobState(ctrl.job_id.?, "paused", 2);
+    try std.testing.expect(ctrl.loadFromStore());
+    try std.testing.expectEqual(@as(u32, 3), ctrl.gpu_count);
+    try std.testing.expectEqual(@as(usize, 3), ctrl.rank_status.len);
+    try std.testing.expectEqual(TrainingJobState.paused, ctrl.state);
 }

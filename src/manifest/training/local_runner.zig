@@ -33,7 +33,7 @@ pub fn startLocal(self: anytype) !void {
 
         var failed_ranks: u32 = 0;
 
-        for (0..self.job.gpus) |rank| {
+        for (0..self.gpu_count) |rank| {
             const success = runRank(self, &mesh_support, rank);
             if (success) {
                 self.rank_status[rank] = .stopped;
@@ -50,7 +50,7 @@ pub fn startLocal(self: anytype) !void {
 
             self.state = .failed;
             state_support.persistState(self);
-            writeErr("{d}/{d} ranks failed\n", .{ failed_ranks, self.job.gpus });
+            writeErr("{d}/{d} ranks failed\n", .{ failed_ranks, self.gpu_count });
             return;
         }
 
@@ -82,7 +82,7 @@ fn runRank(self: anytype, mesh_support: *gpu_runtime.MeshSupport, rank: usize) b
         &rank_env,
         "127.0.0.1",
         29500,
-        self.job.gpus,
+        self.gpu_count,
         @intCast(rank),
         @intCast(rank),
     );
@@ -94,7 +94,7 @@ fn runRank(self: anytype, mesh_support: *gpu_runtime.MeshSupport, rank: usize) b
     var hostname_buf: [128]u8 = undefined;
     const hostname = std.fmt.bufPrint(&hostname_buf, "{s}-rank-{d}", .{ self.job.name, rank }) catch self.job.name;
 
-    writeErr("  starting rank {d}/{d}...\n", .{ rank, self.job.gpus });
+    writeErr("  starting rank {d}/{d}...\n", .{ rank, self.gpu_count });
 
     return orchestrator.runOneShot(
         self.alloc,
@@ -119,7 +119,7 @@ fn shouldAutoRestart(self: anytype, failed_ranks: u32) bool {
     }
     writeErr("{d}/{d} ranks failed, restarting (attempt {d}/{d})...\n", .{
         failed_ranks,
-        self.job.gpus,
+        self.gpu_count,
         self.restart_count,
         self.job.fault_tolerance.max_restarts,
     });

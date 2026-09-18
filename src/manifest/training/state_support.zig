@@ -17,8 +17,9 @@ fn generateJobIdWithPrefix(self: anytype, prefix: []const u8) !void {
     var id_buf: [256]u8 = undefined;
     const ts = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
     const id_str = std.fmt.bufPrint(&id_buf, "{s}{s}-{s}-{d}", .{ prefix, self.app_name, self.job.name, ts }) catch return error.OutOfMemory;
+    const owned_id = try self.alloc.dupe(u8, id_str);
     if (self.job_id) |existing| self.alloc.free(existing);
-    self.job_id = try self.alloc.dupe(u8, id_str);
+    self.job_id = owned_id;
 }
 
 pub fn isClusterManaged(self: anytype) bool {
@@ -43,7 +44,7 @@ pub fn createPersistentRecord(self: anytype) void {
         .app_name = self.app_name,
         .state = self.state.label(),
         .image = self.job.image,
-        .gpus = @intCast(self.job.gpus),
+        .gpus = @intCast(self.gpu_count),
         .checkpoint_path = if (ckpt) |c| c.path else null,
         .checkpoint_interval = if (ckpt) |c| @as(?i64, @intCast(c.interval_secs)) else null,
         .checkpoint_keep = if (ckpt) |c| @as(?i64, @intCast(c.keep)) else null,
@@ -77,19 +78,19 @@ pub fn stopRunningRanks(self: anytype) void {
 }
 
 pub fn loadFromStore(self: anytype, state_enum: type) bool {
-    const rec = store.findTrainingJob(self.alloc, self.app_name, self.job.name) catch return false;
-    const r = rec orelse return false;
-
-    if (self.job_id) |jid| self.alloc.free(jid);
-    self.job_id = r.id;
-    self.restart_count = @intCast(r.restart_count);
-    self.state = state_enum.fromLabel(r.state) orelse .pending;
-
-    self.alloc.free(r.name);
-    self.alloc.free(r.app_name);
-    self.alloc.free(r.state);
-    self.alloc.free(r.image);
-    if (r.checkpoint_path) |p| self.alloc.free(p);
-
+    const r = (store.findTrainingJob(self.alloc, self.app_name, self.job.name) catch return false) orelse return false;
+    defer r.deinit(self.alloc);
+    const gpus = std.math.cast(u32, r.gpus) orelse return false;
+    const restarts = std.math.cast(u32, r.restart_count) orelse return false;
+    const state = state_enum.fromLabel(r.state) orelse return false;
+    const id = self.alloc.dupe(u8, r.id) catch return false;
+    self.resizeRanks(gpus) catch {
+        self.alloc.free(id);
+        return false;
+    };
+    if (self.job_id) |previous| self.alloc.free(previous);
+    self.job_id = id;
+    self.restart_count = restarts;
+    self.state = state;
     return true;
 }
