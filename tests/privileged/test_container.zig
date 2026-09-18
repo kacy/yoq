@@ -278,6 +278,7 @@ test "detached startup accepts fast exits independently of exit code" {
         for (0..100) |_| {
             var ps = try fixture.env.runYoq(&.{ "ps", "--json" });
             defer ps.deinit();
+            try ps.expectExitCode(0);
             const parsed = try std.json.parseFromSlice(std.json.Value, alloc, trimOutput(ps.stdout), .{});
             defer parsed.deinit();
             for (parsed.value.array.items) |entry| {
