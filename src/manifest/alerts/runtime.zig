@@ -92,8 +92,8 @@ pub const Registration = struct {
 
 // registrations borrow no manifest memory. entries stay stable until shutdown,
 // so a delivery can finish while its service is being stopped or replaced.
-pub fn register(app: []const u8, name: []const u8, config: spec.AlertSpec, local_restarts: bool) !Registration {
-    return registerWithOwner(app, name, config, local_restarts, null);
+pub fn registerCluster(app: []const u8, name: []const u8, config: spec.AlertSpec) !Registration {
+    return registerWithOwner(app, name, config, false, null);
 }
 
 pub fn registerOwned(app: []const u8, name: []const u8, config: spec.AlertSpec, token: []const u8) !Registration {
@@ -383,7 +383,7 @@ test "alert runtime joins workers and persists stopped status after last registr
     try store.initTestDb();
     defer store.deinitTestDb();
     defer shutdown();
-    const registration = try register("alerts-runtime", "api", .{ .restart_count = 1 }, false);
+    const registration = try registerCluster("alerts-runtime", "api", .{ .restart_count = 1 });
     var released = false;
     defer if (!released) registration.release();
     var observed = false;

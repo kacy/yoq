@@ -577,7 +577,7 @@ fn runAssignment(
         };
     }
     const alert_registration = if (execution.value.alerts) |config|
-        @import("../../manifest/alerts/runtime.zig").register(meta.app_name orelse "", meta.workload_name orelse container_id, config, false) catch {
+        @import("../../manifest/alerts/runtime.zig").registerCluster(meta.app_name orelse "", meta.workload_name orelse container_id, config) catch {
             c.forceStop() catch {};
             _ = c.wait() catch 255;
             cleanup(container_id);
