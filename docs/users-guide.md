@@ -368,9 +368,9 @@ training jobs follow a state machine: pending → scheduling → running → pau
 
 ## storage
 
-### S3-compatible gateway
+### s3-style storage gateway
 
-a filesystem-backed S3-compatible API. supports bucket CRUD, object HEAD/GET/PUT/DELETE, and multipart uploads. objects are stored under `~/.local/share/yoq/s3/`.
+a filesystem-backed s3-style api with yoq bearer authentication. it supports bucket operations, object HEAD/GET/PUT/DELETE, and multipart uploads within the [documented client contract](storage-api.md). it does not implement aws signature version 4, so an unmodified aws sdk is not a supported client. objects are stored under `~/.local/share/yoq/s3/`.
 
 ### volume drivers
 

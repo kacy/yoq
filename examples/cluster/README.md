@@ -6,12 +6,12 @@ this example follows the same cluster workflow as the main [cluster guide](../..
 
 ## 1. bootstrap the control plane
 
-complete the [credential setup](../../docs/cluster-guide.md#step-1-prepare-credentials) first, including the api token files. use the same join token on all three hosts. run each command on its matching host. each command lists the other two voters; membership cannot be expanded by starting a peerless server first:
+complete the [credential setup](../../docs/cluster-guide.md#step-1-prepare-credentials) first, including the api token files. use the same join token on all three hosts. run each command on its matching host in a separate terminal; servers and agents stay in the foreground. each command lists the other two voters; membership cannot be expanded by starting a peerless server first:
 
 ```bash
-sudo -H yoq init-server --id 1 --port 9700 --api-port 7700 --peers 2@10.0.0.2:9700,3@10.0.0.3:9700 --token "$TOKEN"
-sudo -H yoq init-server --id 2 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,3@10.0.0.3:9700 --token "$TOKEN"
-sudo -H yoq init-server --id 3 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,2@10.0.0.2:9700 --token "$TOKEN"
+sudo -H "$(command -v yoq)" init-server --id 1 --port 9700 --api-port 7700 --peers 2@10.0.0.2:9700,3@10.0.0.3:9700 --token "$TOKEN"
+sudo -H "$(command -v yoq)" init-server --id 2 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,3@10.0.0.3:9700 --token "$TOKEN"
+sudo -H "$(command -v yoq)" init-server --id 3 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,2@10.0.0.2:9700 --token "$TOKEN"
 ```
 
 ## 2. join worker nodes
@@ -19,23 +19,23 @@ sudo -H yoq init-server --id 3 --port 9700 --api-port 7700 --peers 1@10.0.0.1:97
 on each agent node:
 
 ```bash
-sudo -H yoq join 10.0.0.1:7700 --token "$TOKEN"
+sudo -H "$(command -v yoq)" join 10.0.0.1:7700 --token "$TOKEN"
 ```
 
 ## 3. deploy the manifest
 
-identify the leader with `sudo -H yoq cluster status` on the servers. the command below assumes `10.0.0.1:7700` is the leader; substitute its current address. run it from a server or operator host with the api token installed.
+identify the leader with `sudo -H "$(command -v yoq)" cluster status` on the servers. the command below assumes `10.0.0.1:7700` is the leader; substitute its current address. run it from a server or operator host with the api token installed.
 
 ```bash
-sudo -H env DB_PASSWORD=supersecret yoq up --server 10.0.0.1:7700 -f examples/cluster/manifest.toml
+sudo -H env DB_PASSWORD=supersecret "$(command -v yoq)" up --server 10.0.0.1:7700 -f examples/cluster/manifest.toml
 ```
 
 ## 4. verify
 
 ```bash
-sudo -H yoq nodes --server 10.0.0.1:7700
-sudo -H yoq status --server 10.0.0.1:7700
-sudo -H yoq metrics --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" nodes --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" status --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" metrics --server 10.0.0.1:7700
 ```
 
 ## notes
