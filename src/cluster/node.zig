@@ -1664,6 +1664,7 @@ test "processing actions after snapshot failure releases skipped payloads" {
     var node = try Node.initForTests(alloc, .{
         .id = 1,
         .port = 0,
+        .peers = &.{},
         .data_dir = try testDirPath(tmp.dir, &path_buf),
     });
     defer node.deinit();
