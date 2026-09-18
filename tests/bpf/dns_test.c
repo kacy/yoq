@@ -7,6 +7,7 @@
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wattributes"
 #include "../../bpf/dns_intercept.c"
 #pragma GCC diagnostic pop
 
