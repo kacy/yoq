@@ -1461,9 +1461,9 @@ test "proxy transport policy refuses missing required peer credentials before di
 }
 
 fn peerTestResponse(alloc: std.mem.Allocator) ![]u8 {
-    const headers = try hpack.encodeHeaderBlockLiteral(alloc, &.{.{ .name = @constCast(":status"), .value = @constCast("200") }});
+    const headers = try hpack.encodeHeaderBlockIndependent(alloc, &.{.{ .name = @constCast(":status"), .value = @constCast("200") }});
     defer alloc.free(headers);
-    const trailers = try hpack.encodeHeaderBlockLiteral(alloc, &.{.{ .name = @constCast("grpc-status"), .value = @constCast("0") }});
+    const trailers = try hpack.encodeHeaderBlockIndependent(alloc, &.{.{ .name = @constCast("grpc-status"), .value = @constCast("0") }});
     defer alloc.free(trailers);
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(alloc);
