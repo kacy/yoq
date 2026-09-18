@@ -145,3 +145,14 @@ pub fn removeRecord(id: []const u8) !void {
     try lease.db.exec("DELETE FROM local_containers WHERE container_id = ?;", .{}, .{id});
     try lease.db.exec("RELEASE remove_local_container;", .{}, .{});
 }
+
+test "legacy container names stay reserved after lazy lifecycle registration" {
+    const store = @import("../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try store.save(.{ .id = "111111111111", .rootfs = "/fixture", .command = "sh", .hostname = "legacy", .status = "stopped", .pid = null, .exit_code = 0, .created_at = 1 });
+    try ensureRegistered("111111111111");
+    try std.testing.expectError(error.NameInUse, register("222222222222", "legacy"));
+    try removeRecord("111111111111");
+    try register("222222222222", "legacy");
+}

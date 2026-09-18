@@ -78,6 +78,7 @@ pub fn inspect(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 pub fn containerCommand(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const name = cli.requireArg(args, "usage: yoq container <create|run|start|stop|restart|rm|wait|kill|inspect|exec|logs|ls>\n");
     const commands = @import("../../container_commands.zig");
+    if (std.mem.eql(u8, name, "recover")) return recover(args, ctx);
     if (std.mem.eql(u8, name, "inspect")) return inspect(args, ctx);
     if (std.mem.eql(u8, name, "create")) return @import("run_command.zig").create(args, ctx);
     if (std.mem.eql(u8, name, "start")) return start(args, ctx);
@@ -92,4 +93,24 @@ pub fn containerCommand(args: *std.process.Args.Iterator, ctx: AppContext) !void
     if (std.mem.eql(u8, name, "ls")) return commands.ps(ctx.alloc);
     cli.writeErr("unknown container command: {s}\n", .{name});
     return error.InvalidArgument;
+}
+
+pub fn recover(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    if (args.next() != null) return error.InvalidArgument;
+    var ids = try store.listIds(ctx.alloc);
+    defer {
+        for (ids.items) |id| ctx.alloc.free(id);
+        ids.deinit(ctx.alloc);
+    }
+    var failed = false;
+    for (ids.items) |id| {
+        const restarted = lifecycle.recover(ctx.io, ctx.alloc, id) catch |err| {
+            if (err == error.NotFound) continue; // manifest services have another owner.
+            cli.writeErr("could not recover container {s}: {}\n", .{ id, err });
+            failed = true;
+            continue;
+        };
+        if (restarted) cli.write("{s}\n", .{id});
+    }
+    if (failed) return error.RecoveryFailed;
 }

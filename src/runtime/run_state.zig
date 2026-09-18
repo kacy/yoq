@@ -588,3 +588,47 @@ test "loadConfig rejects oversized serialized string length" {
 
     try std.testing.expectError(RunStateError.InvalidFormat, loadConfig(std.testing.allocator, &config_id));
 }
+
+test "legacy run config version 1 retains effective defaults" {
+    const id = uniqueTestConfigId();
+    try paths.ensureDataDirStrict(configs_subdir);
+    var path_buf: [paths.max_path]u8 = undefined;
+    const path = try configPath(&path_buf, &id);
+    var bytes: [68]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&bytes, "01000000070000002f726f6f74667302000000736803000000626f78010000002f0000000000000000000000000000000000000000000000a08601000000000000000001");
+    {
+        const file = try cwd().createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, &bytes);
+    }
+    defer removeConfig(&id);
+    const cfg = try loadConfig(std.testing.allocator, &id);
+    defer cfg.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("/rootfs", cfg.rootfs);
+    try std.testing.expectEqual(RestartPolicy.always, cfg.restart_policy);
+    try std.testing.expectEqual(@as(u32, 5), cfg.stop_timeout_seconds);
+    try std.testing.expect(!cfg.interactive and !cfg.tty and !cfg.auto_remove);
+    try std.testing.expect(cfg.user == null);
+}
+
+test "legacy run config version 2 retains effective defaults" {
+    const id = uniqueTestConfigId();
+    try paths.ensureDataDirStrict(configs_subdir);
+    var path_buf: [paths.max_path]u8 = undefined;
+    const path = try configPath(&path_buf, &id);
+    var bytes: [75]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&bytes, "02000000070000002f726f6f74667302000000736803000000626f78010000002f0000000000000000000000000000000000000000000000a0860100000000000000000103000000617070");
+    {
+        const file = try cwd().createFile(std.testing.io, path, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, &bytes);
+    }
+    defer removeConfig(&id);
+    const cfg = try loadConfig(std.testing.allocator, &id);
+    defer cfg.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("/rootfs", cfg.rootfs);
+    try std.testing.expectEqual(RestartPolicy.always, cfg.restart_policy);
+    try std.testing.expectEqual(@as(u32, 5), cfg.stop_timeout_seconds);
+    try std.testing.expect(!cfg.interactive and !cfg.tty and !cfg.auto_remove);
+    try std.testing.expectEqualStrings("app", cfg.user.?);
+}

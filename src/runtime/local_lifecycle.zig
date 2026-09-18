@@ -190,3 +190,51 @@ fn removeSavedConfig(id: []const u8) !void {
         else => return err,
     };
 }
+
+// recovery is an explicit boot operation. repeating it periodically would
+// undo a manual stop of an always-restart container.
+pub fn recover(io: std.Io, alloc: std.mem.Allocator, id: []const u8) !bool {
+    const command_lock = try control.lock(id, .command, true);
+    defer command_lock.deinit();
+    const cfg = try run_state.loadConfig(alloc, id);
+    defer cfg.deinit(alloc);
+    if (!recoverPolicy(cfg.restart_policy, try control.wantsRunning(id))) return false;
+    {
+        const owner = control.lock(id, .owner, false) catch |err| {
+            if (err == error.Busy) return false;
+            return err;
+        };
+        defer owner.deinit();
+        const record = try store.load(alloc, id);
+        defer record.deinit(alloc);
+        if (std.mem.eql(u8, record.status, "removing")) return false;
+        if (record.pid) |pid| {
+            if (state_support.isOwnedContainerPid(id, pid)) return false;
+            const cg = try @import("cgroups.zig").Cgroup.open(id);
+            if (std.Io.Dir.cwd().access(io, cg.path(), .{})) |_| {
+                // an unreadable existing group is not evidence of an exit.
+                if (try cg.containsProcessChecked(pid)) return false;
+            } else |err| if (err != error.FileNotFound) return err;
+        }
+        try cleanupRuntime(alloc, &record);
+        try store.updateStatus(id, "stopped", null, record.exit_code);
+    }
+    try startLocked(io, alloc, id);
+    return true;
+}
+
+fn recoverPolicy(policy: run_state.RestartPolicy, desired_running: bool) bool {
+    return switch (policy) {
+        .always => true,
+        .unless_stopped => desired_running,
+        .no, .on_failure => false,
+    };
+}
+
+test "host recovery respects manual stop and failure-only policies" {
+    try std.testing.expect(recoverPolicy(.always, false));
+    try std.testing.expect(recoverPolicy(.unless_stopped, true));
+    try std.testing.expect(!recoverPolicy(.unless_stopped, false));
+    try std.testing.expect(!recoverPolicy(.on_failure, true));
+    try std.testing.expect(!recoverPolicy(.no, true));
+}
