@@ -60,11 +60,18 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     const host_mode = ctx.host_mode;
 
     if (!host_mode) {
-        const result = mountFilesystem(ctx);
+        const result = prepareFilesystemRoot(ctx);
         if (result != .success) {
             log.err("container filesystem preparation failed: {s}", .{@tagName(result)});
             return @intFromEnum(result);
         }
+    }
+
+    startup.notify(ctx.startup_fd, .overlay_ready) catch return @intFromEnum(ExitCode.general_error);
+    startup.expect(ctx.startup_fd, .volumes_ready) catch return @intFromEnum(ExitCode.general_error);
+    if (!host_mode) {
+        const result = mountContainerFilesystems(ctx);
+        if (result != .success) return @intFromEnum(result);
     }
 
     // Parent network setup needs the child's PID, while generated files must
@@ -109,12 +116,17 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     return init.run(execCommandWrapper, @ptrCast(@constCast(ctx)));
 }
 
-fn mountFilesystem(ctx: *const ChildExecContext) ExitCode {
+fn prepareFilesystemRoot(ctx: *const ChildExecContext) ExitCode {
     const root = if (ctx.has_overlay) ctx.fs_config.merged_dir else ctx.rootfs;
     if (!isSafeRoot(root)) return .filesystem_error;
     // Do this before the first mount, not just when pivoting the finished root.
     if (linux.errno(linux.mount(null, "/", null, linux.MS.REC | linux.MS.PRIVATE, 0)) != .SUCCESS) return .filesystem_error;
     if (ctx.has_overlay) filesystem.mountOverlay(ctx.fs_config) catch return .filesystem_error;
+    return .success;
+}
+
+fn mountContainerFilesystems(ctx: *const ChildExecContext) ExitCode {
+    const root = if (ctx.has_overlay) ctx.fs_config.merged_dir else ctx.rootfs;
     for (ctx.mounts) |mount| {
         if (!mount.isSourceAllowed()) return .permission_denied;
         if (!isCanonicalBindSource(mount.source)) return .bind_mount_denied;
@@ -197,7 +209,9 @@ test "startup mounted overlay and raw root retain generated network and device f
 
         fn run(ctx: *const ChildExecContext) u8 {
             if (linux.errno(linux.unshare(linux.CLONE.NEWNS)) != .SUCCESS) return 10;
-            const mounted = mountFilesystem(ctx);
+            const prepared = prepareFilesystemRoot(ctx);
+            if (prepared != .success) return @intFromEnum(prepared);
+            const mounted = mountContainerFilesystems(ctx);
             if (mounted != .success) return @intFromEnum(mounted);
             const completed = completeFilesystem(ctx, .{
                 .enabled = true,

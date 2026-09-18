@@ -334,3 +334,16 @@ test "standalone volume names cannot be empty or contain path components" {
     for ([_][]const u8{ "", ".", "..", "/tmp/data", "a/b", "-name", "a" ** 129 }) |name| try std.testing.expect(!validName(name));
     try std.testing.expect(validName("data_1.cache"));
 }
+
+pub fn needsInitialization(id: []const u8) VolumeError!bool {
+    var lease = store.leaseDb() catch return error.DbError;
+    defer lease.deinit();
+    const count = lease.db.one(
+        i64,
+        "SELECT COUNT(*) FROM local_volume_refs r JOIN local_volumes v ON v.name = r.volume_name " ++
+            "WHERE r.container_id = ? AND r.nocopy = 0 AND v.initialized = 0;",
+        .{},
+        .{sqlite.Text{ .data = id }},
+    ) catch return error.DbError;
+    return (count orelse 0) != 0;
+}

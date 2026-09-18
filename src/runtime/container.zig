@@ -247,9 +247,17 @@ pub const Container = struct {
         self.runtime.cgroup.?.setLimits(config.limits) catch return ContainerError.StartFailed;
         start_support.startLogCapture(config, &self.runtime, child) catch return ContainerError.StartFailed;
 
-        // Release namespace mapping first. The child mounts its root and final
-        // /dev, but cannot execute user code until the second explicit gate.
+        // Prepare the image root before managed volumes hide their target paths.
         child.signalReady();
+        startup.expect(channel.parent, .overlay_ready) catch return ContainerError.StartFailed;
+        if (!config.host_mode) {
+            const root = if (child_ctx.has_overlay) child_ctx.fs_config.merged_dir else child_ctx.rootfs;
+            @import("container/volume_init.zig").initialize(std.Options.debug_io, config.id, child.pid, root) catch |err| {
+                log.err("container {s}: volume initialization failed: {}", .{ config.id, err });
+                return ContainerError.StartFailed;
+            };
+        }
+        startup.notify(channel.parent, .volumes_ready) catch return ContainerError.StartFailed;
         startup.expect(channel.parent, .filesystem_ready) catch |err| {
             log.err("container {s}: waiting for filesystem_ready failed: {}", .{ config.id, err });
             return ContainerError.StartFailed;
