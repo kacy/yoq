@@ -122,6 +122,12 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
     var http_proxy_port: u16 = listener_runtime.default_listen_port;
     var peers_str: []const u8 = "";
     var join_token: ?[]const u8 = null;
+    var join_token_file: ?[]const u8 = null;
+    var owned_join_token: ?[]u8 = null;
+    defer if (owned_join_token) |token| {
+        std.crypto.secureZero(u8, token);
+        alloc.free(token);
+    };
     var api_token_arg: ?[]const u8 = null;
     var log_fmt: log.LogFormat = .json;
 
@@ -181,6 +187,9 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
                 writeErr("--token requires a join token\n", .{});
                 return ServerCommandError.InvalidArgument;
             };
+        } else if (std.mem.eql(u8, arg, "--token-file")) {
+            if (join_token_file != null) return ServerCommandError.InvalidArgument;
+            join_token_file = args.next() orelse return ServerCommandError.InvalidArgument;
         } else if (std.mem.eql(u8, arg, "--api-token")) {
             api_token_arg = args.next() orelse {
                 writeErr("--api-token requires a 64-character hex token\n", .{});
@@ -200,6 +209,20 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
                 return ServerCommandError.InvalidArgument;
             }
         }
+    }
+
+    if (join_token_file) |path| {
+        if (join_token != null) {
+            writeErr("use either --token or --token-file\n", .{});
+            return ServerCommandError.InvalidArgument;
+        }
+        var dir = @import("../recovery/files.zig").openDir(std.fs.path.dirname(path) orelse ".") catch return ServerCommandError.ConfigFailed;
+        defer dir.close(io);
+        owned_join_token = @import("../recovery/bundle.zig").readJoinToken(alloc, dir, std.fs.path.basename(path)) catch |err| {
+            writeErr("cannot read private join token file: {}\n", .{err});
+            return ServerCommandError.ConfigFailed;
+        };
+        join_token = owned_join_token;
     }
 
     log.setFormat(log_fmt);
@@ -234,7 +257,7 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
     };
 
     if (join_token == null) {
-        writeErr("cluster mode requires --token for join authentication and raft transport auth\n", .{});
+        writeErr("cluster mode requires --token or --token-file for join authentication and raft transport auth\n", .{});
         return ServerCommandError.InvalidArgument;
     }
 
