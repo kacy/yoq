@@ -1167,7 +1167,6 @@ const ConnectionRouter = struct {
             defer self.allocator.free(ack);
             try mirror.flow_state.control.append(self.allocator, ack);
         }
-        _ = payload;
         try self.discardMirrorFrame(session_idx);
     }
 
@@ -1823,4 +1822,35 @@ test "http2 flow streams large requests and responses with compliant small windo
     try std.testing.expect(server.ended and client.ended);
     try std.testing.expect(mirror_dropped and response_resumed);
     try std.testing.expectEqual(@as(usize, 0), routing.streams.items.len);
+}
+
+test "http2 flow event loop sends its settings before acknowledging the client window" {
+    const alloc = std.testing.allocator;
+    var pair: [2]i32 = undefined;
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &pair) != 0) return error.SocketFailed;
+    defer linux_platform.posix.close(pair[0]);
+    defer linux_platform.posix.close(pair[1]);
+    var routing = ConnectionRouter{ .allocator = alloc, .routes = &.{}, .client_fd = pair[0], .client_ip = null };
+    defer routing.deinit();
+    const settings = try http2.buildFrame(alloc, .{ .length = 6, .frame_type = .settings, .flags = 0, .stream_id = 0 }, &.{ 0, 4, 0, 0, 0, 0 });
+    defer alloc.free(settings);
+    try routing.downstream_buf.appendSlice(alloc, http2.client_preface);
+    try routing.downstream_buf.appendSlice(alloc, settings);
+    _ = std.os.linux.shutdown(pair[1], 1);
+    try routing.run();
+    var response: [18]u8 = undefined;
+    var count: usize = 0;
+    const socket = transport.Stream{ .fd = pair[1], .deadline = transport.Deadline.afterMilliseconds(1000) };
+    while (count < response.len) {
+        const got = try socket.read(response[count..]);
+        if (got == 0) return error.UnexpectedEof;
+        count += got;
+    }
+    try std.testing.expectEqual(@as(i64, 0), routing.downstream_initial_window);
+    const server_settings = http2.parseFrameHeader(&response).?;
+    const acknowledgment = http2.parseFrameHeader(response[9..]).?;
+    try std.testing.expectEqual(http2.FrameType.settings, server_settings.frame_type);
+    try std.testing.expectEqual(@as(u8, 0), server_settings.flags);
+    try std.testing.expectEqual(http2.FrameType.settings, acknowledgment.frame_type);
+    try std.testing.expectEqual(@as(u8, 1), acknowledgment.flags);
 }

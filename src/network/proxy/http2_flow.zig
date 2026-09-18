@@ -9,9 +9,9 @@ pub const max_queue_bytes = 256 * 1024;
 pub const Window = struct {
     value: i64 = initial_window,
 
-    pub fn add(self: *Window, increment: u32) !void {
-        if (increment == 0 or self.value + increment > max_window) return error.FlowControlError;
-        self.value += increment;
+    pub fn add(self: *Window, amount: u32) !void {
+        if (amount == 0 or self.value + amount > max_window) return error.FlowControlError;
+        self.value += amount;
     }
 
     pub fn adjust(self: *Window, delta: i64) !void {
