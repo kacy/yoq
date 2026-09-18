@@ -229,7 +229,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
         started_once = true;
         orch.states[idx].setStatus(.running);
 
-        const exit_code = c.wait() catch 255;
+        const exit_code = @import("../child_wait.zig").wait(&c, .{ .flag = &orch.states[idx].stop_requested, .shutdown = shutdown_requested });
         @import("../health.zig").unregisterContainer(id);
         if (svc.ports.len > 0) published_ports.removeInstance(orch.alloc, id) catch |err| {
             log.warn("failed to release published ports for {s}: {}", .{ svc.name, err });
