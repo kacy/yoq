@@ -150,7 +150,7 @@ pub fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
 
     switch (msg_type) {
         common.msg_request_vote => {
-            if (payload.len < 32) return error.InvalidMessage;
+            if (payload.len < vote_payload_size) return error.InvalidMessage;
             return .{ .request_vote = .{
                 .term = common.readU64(payload[0..]),
                 .candidate_id = common.readU64(payload[8..]),
@@ -159,7 +159,7 @@ pub fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
             } };
         },
         common.msg_request_vote_reply => {
-            if (payload.len < 9) return error.InvalidMessage;
+            if (payload.len < vote_reply_payload_size) return error.InvalidMessage;
             return .{ .request_vote_reply = .{
                 .term = common.readU64(payload[0..]),
                 .vote_granted = payload[8] != 0,
@@ -167,7 +167,7 @@ pub fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
         },
         common.msg_append_entries => return decodeAppendEntries(alloc, payload),
         common.msg_append_entries_reply => {
-            if (payload.len < 17) return error.InvalidMessage;
+            if (payload.len < append_reply_payload_size) return error.InvalidMessage;
             return .{ .append_entries_reply = .{
                 .term = common.readU64(payload[0..]),
                 .success = payload[8] != 0,
@@ -175,10 +175,11 @@ pub fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
             } };
         },
         common.msg_install_snapshot => {
-            if (payload.len < 36) return error.InvalidMessage;
+            if (payload.len < snapshot_header_size) return error.InvalidMessage;
             const data_len = common.readU32(payload[32..]);
-            if (payload.len < 36 + data_len) return error.InvalidMessage;
-            const data = try alloc.dupe(u8, payload[36..][0..data_len]);
+            const snapshot_data = payload[snapshot_header_size..];
+            if (data_len > snapshot_data.len) return error.InvalidMessage;
+            const data = try alloc.dupe(u8, snapshot_data[0..data_len]);
             return .{ .install_snapshot = .{
                 .term = common.readU64(payload[0..]),
                 .leader_id = common.readU64(payload[8..]),
@@ -188,7 +189,7 @@ pub fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
             } };
         },
         common.msg_install_snapshot_reply => {
-            if (payload.len < 8) return error.InvalidMessage;
+            if (payload.len < snapshot_reply_payload_size) return error.InvalidMessage;
             return .{ .install_snapshot_reply = .{
                 .term = common.readU64(payload[0..]),
             } };
@@ -198,33 +199,35 @@ pub fn decode(alloc: std.mem.Allocator, buf: []const u8) !Message {
 }
 
 fn decodeAppendEntries(alloc: std.mem.Allocator, payload: []const u8) !Message {
-    if (payload.len < 44) return error.InvalidMessage;
+    if (payload.len < append_entries_header_size) return error.InvalidMessage;
     const entry_count = common.readU32(payload[40..]);
-    const remaining_payload = payload.len - 44;
-    const max_possible_entries = remaining_payload / 20;
+    const remaining_payload = payload.len - append_entries_header_size;
+    const max_possible_entries = remaining_payload / entry_header_size;
     if (entry_count > max_possible_entries) return error.InvalidMessage;
 
-    var entries = try alloc.alloc(LogEntry, entry_count);
-    var offset: usize = 44;
-    for (0..entry_count) |i| {
-        if (offset + 20 > payload.len) {
-            alloc.free(entries);
-            return error.InvalidMessage;
-        }
+    const entries = try alloc.alloc(LogEntry, entry_count);
+    var decoded_count: usize = 0;
+    errdefer {
+        // only completed entries own a payload when decoding fails.
+        for (entries[0..decoded_count]) |entry| alloc.free(entry.data);
+        alloc.free(entries);
+    }
+
+    var offset: usize = append_entries_header_size;
+    for (entries) |*entry| {
+        if (payload.len - offset < entry_header_size) return error.InvalidMessage;
 
         const data_len = common.readU32(payload[offset + 16 ..]);
-        const data_start = offset + 20;
-        if (data_start + data_len > payload.len) {
-            alloc.free(entries);
-            return error.InvalidMessage;
-        }
+        const data_start = offset + entry_header_size;
+        if (data_len > payload.len - data_start) return error.InvalidMessage;
 
         const data = try alloc.dupe(u8, payload[data_start..][0..data_len]);
-        entries[i] = .{
+        entry.* = .{
             .index = common.readU64(payload[offset..]),
             .term = common.readU64(payload[offset + 8 ..]),
             .data = data,
         };
+        decoded_count += 1;
         offset = data_start + data_len;
     }
 
@@ -261,4 +264,108 @@ test "encode rejects every short buffer before writing the frame" {
         try std.testing.expectEqual(case.frame_size, try encode(buf[0..case.frame_size], case.message));
         try std.testing.expectEqual(case.frame_size - 4, common.readU32(&buf));
     }
+}
+
+test "decode releases earlier entries when a later header or payload is truncated" {
+    const entries = [_]LogEntry{
+        .{ .index = 1, .term = 1, .data = "first" },
+        .{ .index = 2, .term = 1, .data = "second" },
+    };
+    const message: Message = .{ .append_entries = .{
+        .term = 2,
+        .leader_id = 3,
+        .prev_log_index = 0,
+        .prev_log_term = 0,
+        .leader_commit = 0,
+        .entries = &entries,
+    } };
+    var buf: [128]u8 = undefined;
+    const size = try encode(&buf, message);
+    const second_header = 4 + 1 + 44 + 20 + entries[0].data.len;
+    try std.testing.expectError(error.InvalidMessage, decode(std.testing.allocator, buf[4 .. second_header + 19]));
+    try std.testing.expectError(error.InvalidMessage, decode(std.testing.allocator, buf[4 .. size - 1]));
+    common.writeU32(buf[second_header + 16 ..], std.math.maxInt(u32));
+    try std.testing.expectError(error.InvalidMessage, decode(std.testing.allocator, buf[4..size]));
+}
+
+fn decodeEntriesWithAllocator(alloc: std.mem.Allocator, body: []const u8) !void {
+    const decoded = try decode(alloc, body);
+    defer {
+        for (decoded.append_entries.entries) |entry| alloc.free(entry.data);
+        alloc.free(decoded.append_entries.entries);
+    }
+    try std.testing.expectEqual(@as(usize, 3), decoded.append_entries.entries.len);
+    try std.testing.expectEqualStrings("first", decoded.append_entries.entries[0].data);
+    try std.testing.expectEqualStrings("second", decoded.append_entries.entries[1].data);
+    try std.testing.expectEqualStrings("", decoded.append_entries.entries[2].data);
+}
+
+test "decode releases entries and payloads after any allocation failure" {
+    const entries = [_]LogEntry{
+        .{ .index = 1, .term = 1, .data = "first" },
+        .{ .index = 2, .term = 1, .data = "second" },
+        .{ .index = 3, .term = 1, .data = "" },
+    };
+    var buf: [128]u8 = undefined;
+    const size = try encode(&buf, .{ .append_entries = .{
+        .term = 2,
+        .leader_id = 3,
+        .prev_log_index = 0,
+        .prev_log_term = 0,
+        .leader_commit = 0,
+        .entries = &entries,
+    } });
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, decodeEntriesWithAllocator, .{buf[4..size]});
+}
+
+test "decode rejects snapshot lengths near the u32 limit" {
+    var body = [_]u8{0} ** 37;
+    body[0] = common.msg_install_snapshot;
+    for ([_]u32{ 1, std.math.maxInt(u32) - 36, std.math.maxInt(u32) - 35, std.math.maxInt(u32) }) |length| {
+        common.writeU32(body[33..], length);
+        try std.testing.expectError(error.InvalidMessage, decode(std.testing.allocator, &body));
+    }
+}
+
+test "append entries keeps the wire layout and accepts trailing bytes" {
+    const frame =
+        "\x44\x00\x00\x00" ++ // body length
+        "\x03" ++ // append entries
+        "\x01\x00\x00\x00\x00\x00\x00\x00" ++ // term
+        "\x02\x00\x00\x00\x00\x00\x00\x00" ++ // leader
+        "\x03\x00\x00\x00\x00\x00\x00\x00" ++ // previous index
+        "\x04\x00\x00\x00\x00\x00\x00\x00" ++ // previous term
+        "\x05\x00\x00\x00\x00\x00\x00\x00" ++ // committed index
+        "\x01\x00\x00\x00" ++ // entry count
+        "\x06\x00\x00\x00\x00\x00\x00\x00" ++ // entry index
+        "\x07\x00\x00\x00\x00\x00\x00\x00" ++ // entry term
+        "\x03\x00\x00\x00abc"; // entry data
+    var buf: [72]u8 = undefined;
+    const size = try encode(&buf, .{ .append_entries = .{
+        .term = 1,
+        .leader_id = 2,
+        .prev_log_index = 3,
+        .prev_log_term = 4,
+        .leader_commit = 5,
+        .entries = &.{.{ .index = 6, .term = 7, .data = "abc" }},
+    } });
+    try std.testing.expectEqualSlices(u8, frame, buf[0..size]);
+
+    const alloc = std.testing.allocator;
+    const body_with_trailing_bytes = frame[4..] ++ "trailing";
+    const decoded = try decode(alloc, body_with_trailing_bytes);
+    defer {
+        for (decoded.append_entries.entries) |entry| alloc.free(entry.data);
+        alloc.free(decoded.append_entries.entries);
+    }
+    const args = decoded.append_entries;
+    try std.testing.expectEqual(@as(u64, 1), args.term);
+    try std.testing.expectEqual(@as(u64, 2), args.leader_id);
+    try std.testing.expectEqual(@as(u64, 3), args.prev_log_index);
+    try std.testing.expectEqual(@as(u64, 4), args.prev_log_term);
+    try std.testing.expectEqual(@as(u64, 5), args.leader_commit);
+    try std.testing.expectEqual(@as(usize, 1), args.entries.len);
+    try std.testing.expectEqual(@as(u64, 6), args.entries[0].index);
+    try std.testing.expectEqual(@as(u64, 7), args.entries[0].term);
+    try std.testing.expectEqualStrings("abc", args.entries[0].data);
 }
