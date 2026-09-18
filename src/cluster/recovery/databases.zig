@@ -35,6 +35,15 @@ pub fn lock(db: *sqlite.Db) !void {
 pub fn open(alloc: std.mem.Allocator, dir: std.Io.Dir, name: []const u8, write: bool) !sqlite.Db {
     var file = try files.openRegular(dir, name, false);
     defer file.close(io);
+    for ([_][]const u8{ "-wal", "-shm", "-journal" }) |suffix| {
+        var sidecar_buf: [256]u8 = undefined;
+        const sidecar = try std.fmt.bufPrint(&sidecar_buf, "{s}{s}", .{ name, suffix });
+        var existing = files.openRegular(dir, sidecar, false) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        existing.close(io);
+    }
     // sqlite needs the real filename to find its wal and shared-memory files.
     // the caller holds the private directory and server ownership lock.
     const path = try dir.realPathFileAlloc(io, name, alloc);
@@ -45,6 +54,9 @@ pub fn open(alloc: std.mem.Allocator, dir: std.Io.Dir, name: []const u8, write: 
 }
 
 pub fn copy(alloc: std.mem.Allocator, source: *sqlite.Db, destination: std.Io.Dir, name: []const u8) !files.Digest {
+    const pages = (try source.one(struct { count: i64 }, "PRAGMA page_count;", .{}, .{})).?.count;
+    const page_size = (try source.one(struct { size: i64 }, "PRAGMA page_size;", .{}, .{})).?.size;
+    if (pages < 0 or page_size <= 0 or @as(u64, @intCast(pages)) > files.max_database_size / @as(u64, @intCast(page_size))) return error.FileTooLarge;
     var file = try files.create(destination, name);
     file.close(io);
     errdefer destination.deleteFile(io, name) catch {};
@@ -79,6 +91,8 @@ pub fn integrity(db: *sqlite.Db) !void {
 /// migrate only a private staging copy, then compare it with the current schema.
 pub fn validateState(db: *sqlite.Db) !void {
     try integrity(db);
+    const identity = (try db.one(struct { count: i64 }, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('containers','images','secrets','agents','assignments');", .{}, .{})).?;
+    if (identity.count != 5) return error.InvalidStateSchema;
     try backup_schema.validateExistingTriggers(db.db);
     try schema.init(db);
     try backup_schema.validate(db.db);
@@ -127,12 +141,14 @@ pub fn readBoundary(alloc: std.mem.Allocator, raft: *sqlite.Db, state: *sqlite.D
     const snapshot_term = std.math.cast(u64, snapshot.term) orelse return error.InvalidRaftState;
     const snapshot_size = std.math.cast(u64, snapshot.size) orelse return error.InvalidRaftState;
     if (snapshot_term > term or (snapshot_index == 0 and (snapshot_term != 0 or snapshot_size != 0))) return error.InvalidRaftState;
+    const state_rows = (try state.one(struct { count: i64 }, "SELECT COUNT(*) FROM state_machine_meta;", .{}, .{})).?;
+    if (state_rows.count != 1) return error.InvalidStateBoundary;
     const applied = (try state.one(struct { index: i64 }, "SELECT last_applied FROM state_machine_meta WHERE id=1;", .{}, .{})) orelse return error.InvalidStateBoundary;
     const last_applied = std.math.cast(u64, applied.index) orelse return error.InvalidStateBoundary;
     const suffix = (try raft.one(struct { count: i64, min: ?i64, max: ?i64, invalid: i64 }, "SELECT COUNT(*),MIN(log_index),MAX(log_index),COALESCE(SUM(term < 0 OR term > ?),0) FROM raft_log;", .{}, .{persistent.current_term})).?;
     var last_log_index = snapshot_index;
     if (suffix.count > 0) {
-        if (suffix.min.? != snapshot.index + 1 or suffix.max.? - suffix.min.? + 1 != suffix.count or suffix.invalid != 0) return error.InvalidLogBoundary;
+        if (snapshot.index == std.math.maxInt(i64) or suffix.min.? != snapshot.index + 1 or suffix.max.? - suffix.min.? + 1 != suffix.count or suffix.invalid != 0) return error.InvalidLogBoundary;
         last_log_index = std.math.cast(u64, suffix.max.?) orelse return error.InvalidLogBoundary;
     }
     if (last_applied < snapshot_index or last_applied > last_log_index) return error.InvalidStateBoundary;

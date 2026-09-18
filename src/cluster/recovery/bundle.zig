@@ -164,6 +164,11 @@ fn validateContents(alloc: std.mem.Allocator, dir: std.Io.Dir, description: mani
     const boundary = try databases.readBoundary(alloc, &raft, &state);
     errdefer boundary.deinit(alloc);
     if (!description.matches(boundary)) return error.BoundaryMismatch;
+    var validator = try @import("../state_machine/command.zig").Validator.init();
+    defer validator.deinit();
+    var machine = @import("../state_machine.zig").StateMachine{ .db = state, .last_applied = boundary.last_applied, .validator = validator };
+    var log = @import("../log.zig").Log{ .db = raft };
+    try machine.validateAppliedHistory(&log, alloc);
     try validateSecrets(alloc, dir, description, &state);
     // schema.init enables wal; collapse every candidate database before the
     // caller copies it into the restored root without sidecars.
@@ -193,6 +198,14 @@ fn validateContents(alloc: std.mem.Allocator, dir: std.Io.Dir, description: mani
     if (description.contains("snapshot.dat")) {
         const bytes = try files.readSmall(alloc, dir, "snapshot.dat", snapshot.max_snapshot_file_size);
         defer alloc.free(bytes);
+        _ = try snapshot.parseSnapshotMeta(bytes);
+        try files.write(dir, "snapshot-check.db", bytes[snapshot.snapshot_header_size..]);
+        defer dir.deleteFile(io, "snapshot-check.db") catch {};
+        {
+            var snapshot_db = try databases.open(alloc, dir, "snapshot-check.db", false);
+            defer snapshot_db.deinit();
+            try @import("../../state/backup_schema.zig").validateExistingTriggers(snapshot_db.db);
+        }
         var prepared = try snapshot.PreparedSnapshot.init(bytes);
         defer prepared.deinit();
         if (prepared.meta.last_included_index != boundary.snapshot_index or prepared.meta.last_included_term != boundary.snapshot_term or
@@ -214,6 +227,19 @@ fn validateSecrets(alloc: std.mem.Allocator, dir: std.Io.Dir, description: manif
         alloc.free(key);
     }
     if (key.len != 32) return error.InvalidSecretsKey;
+    var secrets = try @import("../../state/secrets.zig").SecretsStore.initWithKey(db, alloc, key[0..32].*);
+    defer std.crypto.secureZero(u8, &secrets.key);
+    var query = try db.prepare("SELECT name FROM secrets;");
+    defer query.deinit();
+    var rows = try query.iterator(struct { name: sqlite.Text }, .{});
+    while (try rows.nextAlloc(alloc, .{})) |row| {
+        defer alloc.free(row.name.data);
+        const plaintext = secrets.get(row.name.data) catch return error.InvalidSecretsKey;
+        defer {
+            std.crypto.secureZero(u8, plaintext);
+            alloc.free(plaintext);
+        }
+    }
 }
 
 pub fn readJoinToken(alloc: std.mem.Allocator, dir: std.Io.Dir, name: []const u8) ![]u8 {
