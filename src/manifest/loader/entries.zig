@@ -269,6 +269,16 @@ pub fn parseBackup(alloc: std.mem.Allocator, table: ?*const toml.Table) common.L
 }
 
 pub fn parseTrainingJob(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) common.LoadError!spec.TrainingJob {
+    if (table.getTable("data") != null) {
+        log.err("manifest: training.{s}.data is unsupported; prepare datasets in the job command and mount them as volumes", .{name});
+        return common.LoadError.InvalidTrainingConfig;
+    }
+    if (table.getTable("fault_tolerance")) |settings| {
+        if ((settings.getInt("spare_ranks") orelse 0) != 0) {
+            log.err("manifest: training.{s}.fault_tolerance.spare_ranks is unsupported; use zero", .{name});
+            return common.LoadError.InvalidTrainingConfig;
+        }
+    }
     var parsed_common = try parseCommonFields(alloc, "training", name, table);
     errdefer parsed_common.deinit(alloc);
 

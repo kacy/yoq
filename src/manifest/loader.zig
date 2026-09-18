@@ -2034,11 +2034,6 @@ test "training job — full parse with all sub-tables" {
         \\gpu_type = "H100"
         \\env = ["EPOCHS=10"]
         \\
-        \\[training.big-model.data]
-        \\dataset = "/mnt/lustre/pile"
-        \\sharding = "file"
-        \\preprocessing = "tokenize"
-        \\
         \\[training.big-model.checkpoint]
         \\path = "/mnt/checkpoints"
         \\interval = "15m"
@@ -2050,7 +2045,7 @@ test "training job — full parse with all sub-tables" {
         \\ib_required = true
         \\
         \\[training.big-model.fault_tolerance]
-        \\spare_ranks = 5
+        \\spare_ranks = 0
         \\auto_restart = true
         \\max_restarts = 20
     );
@@ -2064,11 +2059,7 @@ test "training job — full parse with all sub-tables" {
     try std.testing.expectEqualStrings("H100", tj.gpu_type.?);
     try std.testing.expectEqual(@as(usize, 2), tj.command.len);
 
-    // data
-    try std.testing.expect(tj.data != null);
-    try std.testing.expectEqualStrings("/mnt/lustre/pile", tj.data.?.dataset);
-    try std.testing.expectEqualStrings("file", tj.data.?.sharding);
-    try std.testing.expectEqualStrings("tokenize", tj.data.?.preprocessing.?);
+    try std.testing.expect(tj.data == null);
 
     // checkpoint
     try std.testing.expect(tj.checkpoint != null);
@@ -2082,7 +2073,7 @@ test "training job — full parse with all sub-tables" {
     try std.testing.expect(tj.resources.ib_required);
 
     // fault tolerance
-    try std.testing.expectEqual(@as(u32, 5), tj.fault_tolerance.spare_ranks);
+    try std.testing.expectEqual(@as(u32, 0), tj.fault_tolerance.spare_ranks);
     try std.testing.expect(tj.fault_tolerance.auto_restart);
     try std.testing.expectEqual(@as(u32, 20), tj.fault_tolerance.max_restarts);
 }
@@ -2165,21 +2156,21 @@ test "training job — checkpoint interval default" {
     try std.testing.expectEqual(@as(u32, 5), manifest.training_jobs[0].checkpoint.?.keep);
 }
 
-test "training job — data sharding default" {
-    const alloc = std.testing.allocator;
-
-    var manifest = try loadFromString(alloc,
+test "training rejects unsupported dataset preparation and spare ranks" {
+    try std.testing.expectError(LoadError.InvalidTrainingConfig, loadFromString(std.testing.allocator,
         \\[training.test]
         \\image = "scratch"
         \\gpus = 1
-        \\
         \\[training.test.data]
         \\dataset = "/data/pile"
-    );
-    defer manifest.deinit();
-
-    try std.testing.expectEqualStrings("file", manifest.training_jobs[0].data.?.sharding);
-    try std.testing.expect(manifest.training_jobs[0].data.?.preprocessing == null);
+    ));
+    try std.testing.expectError(LoadError.InvalidTrainingConfig, loadFromString(std.testing.allocator,
+        \\[training.test]
+        \\image = "scratch"
+        \\gpus = 1
+        \\[training.test.fault_tolerance]
+        \\spare_ranks = 1
+    ));
 }
 
 test "backup retention configuration parses count age and bytes" {

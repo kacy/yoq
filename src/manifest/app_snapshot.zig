@@ -104,6 +104,7 @@ pub fn findWorkerRunSpec(alloc: std.mem.Allocator, json: []const u8, name: []con
 
 pub fn findTrainingJobSpec(alloc: std.mem.Allocator, json: []const u8, name: []const u8) !?TrainingJobSpec {
     const obj = findNamedObject(json, "training_jobs", name) orelse return null;
+    if (json_helpers.extractJsonObject(obj, "data") != null) return error.UnsupportedTrainingData;
 
     const image = json_helpers.extractJsonString(obj, "image") orelse return null;
     const encoded = try extractCommandString(alloc, obj);
@@ -114,6 +115,7 @@ pub fn findTrainingJobSpec(alloc: std.mem.Allocator, json: []const u8, name: []c
     const numeric = try numbers.parse(alloc, obj);
     defer numeric.deinit();
     const resources = try placement_numbers.Resources.parse(numeric.value, 65536);
+    if (try numbers.field(u32, numeric.value, "spare_ranks", 0, std.math.maxInt(u32), 0) != 0) return error.UnsupportedSpareRanks;
     const checkpoint_path = if (json_helpers.extractJsonObject(obj, "checkpoint")) |checkpoint|
         json_helpers.extractJsonString(checkpoint, "path")
     else
