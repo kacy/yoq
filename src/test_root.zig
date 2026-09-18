@@ -155,6 +155,7 @@ comptime {
     _ = @import("manifest/backup_scheduler.zig");
     _ = @import("manifest/backup_retention.zig");
     _ = @import("manifest/training.zig");
+    _ = @import("manifest/checkpoint.zig");
     _ = @import("manifest/training/local_runner.zig");
     _ = @import("gpu/lease.zig");
     _ = @import("cluster/training_reconciler.zig");
