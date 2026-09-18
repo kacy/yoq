@@ -350,6 +350,24 @@ pub fn initStorageTables(db: *sqlite.Db) SchemaError!void {
         \\);
     );
     try exec(db,
+        \\CREATE TABLE IF NOT EXISTS local_volumes (
+        \\    name TEXT PRIMARY KEY,
+        \\    anonymous INTEGER NOT NULL DEFAULT 0,
+        \\    initialized INTEGER NOT NULL DEFAULT 0,
+        \\    created_at INTEGER NOT NULL
+        \\);
+    );
+    try exec(db,
+        \\CREATE TABLE IF NOT EXISTS local_volume_refs (
+        \\    container_id TEXT NOT NULL,
+        \\    target TEXT NOT NULL,
+        \\    volume_name TEXT NOT NULL REFERENCES local_volumes(name),
+        \\    nocopy INTEGER NOT NULL DEFAULT 0,
+        \\    PRIMARY KEY (container_id, target)
+        \\);
+    );
+    try exec(db, "CREATE INDEX IF NOT EXISTS idx_local_volume_refs_name ON local_volume_refs(volume_name);");
+    try exec(db,
         \\CREATE TABLE IF NOT EXISTS s3_multipart_uploads (
         \\    upload_id TEXT PRIMARY KEY,
         \\    bucket TEXT NOT NULL,

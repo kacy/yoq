@@ -38,6 +38,7 @@ comptime {
     _ = @import("runtime/cli/container/state_support.zig");
     _ = @import("runtime/run_state.zig");
     _ = @import("runtime/local_control.zig");
+    _ = @import("runtime/local_volumes.zig");
     _ = @import("state/store.zig");
     _ = @import("image/cli/prune_command.zig");
     _ = @import("state/store/images.zig");

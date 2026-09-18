@@ -144,6 +144,8 @@ pub fn parsePortMap(str: []const u8) ?net_setup.PortMap {
 }
 
 pub const VolumeMountSpec = struct {
+    kind: enum { bind, volume } = .bind,
+    volume_nocopy: bool = false,
     source: []const u8,
     target: []const u8,
     read_only: bool = true,
@@ -183,6 +185,9 @@ pub fn parseVolumeMount(str: []const u8) ?VolumeMountSpec {
 pub fn parseStructuredMount(str: []const u8) ?VolumeMountSpec {
     var source: ?[]const u8 = null;
     var target: ?[]const u8 = null;
+    var kind: @FieldType(VolumeMountSpec, "kind") = .bind;
+    var volume_nocopy = false;
+    var saw_nocopy = false;
     var saw_type = false;
     var saw_mode = false;
     var read_only = false;
@@ -192,7 +197,8 @@ pub fn parseStructuredMount(str: []const u8) ?VolumeMountSpec {
         const key = if (eq) |i| field[0..i] else field;
         const value = if (eq) |i| field[i + 1 ..] else "";
         if (std.mem.eql(u8, key, "type")) {
-            if (saw_type or !std.mem.eql(u8, value, "bind")) return null;
+            if (saw_type) return null;
+            kind = std.meta.stringToEnum(@FieldType(VolumeMountSpec, "kind"), value) orelse return null;
             saw_type = true;
         } else if (std.mem.eql(u8, key, "source") or std.mem.eql(u8, key, "src")) {
             if (source != null or value.len == 0) return null;
@@ -200,6 +206,10 @@ pub fn parseStructuredMount(str: []const u8) ?VolumeMountSpec {
         } else if (std.mem.eql(u8, key, "target") or std.mem.eql(u8, key, "dst") or std.mem.eql(u8, key, "destination")) {
             if (target != null or value.len == 0 or value[0] != '/') return null;
             target = value;
+        } else if (std.mem.eql(u8, key, "volume-nocopy")) {
+            if (saw_nocopy or eq != null) return null;
+            saw_nocopy = true;
+            volume_nocopy = true;
         } else if (std.mem.eql(u8, key, "readonly") or std.mem.eql(u8, key, "ro")) {
             if (saw_mode) return null;
             saw_mode = true;
@@ -210,7 +220,8 @@ pub fn parseStructuredMount(str: []const u8) ?VolumeMountSpec {
             } else return null;
         } else return null;
     }
-    return .{ .source = source orelse return null, .target = target orelse return null, .read_only = read_only };
+    if (kind == .bind and (source == null or volume_nocopy)) return null;
+    return .{ .kind = kind, .volume_nocopy = volume_nocopy, .source = source orelse "", .target = target orelse return null, .read_only = read_only };
 }
 
 /// reject non-finite values and quotas that would round down to zero.
@@ -664,9 +675,9 @@ test "structured mounts have explicit defaults and reject ambiguity" {
     try std.testing.expect(parseStructuredMount("source=/tmp,target=/data,readonly").?.read_only);
     try std.testing.expect(!parseStructuredMount("source=/tmp,target=/data,readonly=false").?.read_only);
     for ([_][]const u8{
-        "type=volume,src=data,dst=/data", "src=/tmp,dst=relative",                "src=/tmp,dst=/data,unknown=x",
-        "src=/tmp,source=/var,dst=/data", "src=/tmp,dst=/data,ro,readonly=false", "src=/tmp,dst=/data,",
-        "src=/tmp",                       "src=/tmp,dst=/data,readonly=",         "type=bind,type=bind,src=/tmp,dst=/data",
+        "type=unsupported,src=data,dst=/data", "src=/tmp,dst=relative",                "src=/tmp,dst=/data,unknown=x",
+        "src=/tmp,source=/var,dst=/data",      "src=/tmp,dst=/data,ro,readonly=false", "src=/tmp,dst=/data,",
+        "src=/tmp",                            "src=/tmp,dst=/data,readonly=",         "type=bind,type=bind,src=/tmp,dst=/data",
     }) |value| try std.testing.expect(parseStructuredMount(value) == null);
 }
 
@@ -676,4 +687,14 @@ test "cpu quotas reject non-finite and unrepresentable values" {
     for ([_][]const u8{ "nan", "inf", "-inf", "0", "-1", "1025", "0.000001", "1e999" }) |value| {
         try std.testing.expect(parseCpuQuota(value, 100_000) == null);
     }
+}
+
+test "structured managed volumes support named and anonymous storage" {
+    const named = parseStructuredMount("type=volume,source=data,target=/data").?;
+    try std.testing.expectEqual(@FieldType(VolumeMountSpec, "kind").volume, named.kind);
+    try std.testing.expect(!named.read_only);
+    const anonymous = parseStructuredMount("type=volume,target=/data,volume-nocopy").?;
+    try std.testing.expectEqualStrings("", anonymous.source);
+    try std.testing.expect(anonymous.volume_nocopy);
+    try std.testing.expect(parseStructuredMount("type=bind,source=/tmp,target=/data,volume-nocopy") == null);
 }
