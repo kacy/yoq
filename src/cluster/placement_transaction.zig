@@ -13,7 +13,7 @@ pub const Resources = capacity.Resources;
 pub const isTerminal = capacity.isTerminal;
 
 pub const max_gang_ranks = @import("../manifest/spec.zig").max_training_ranks;
-const max_batch_bytes = 1024 * 1024;
+const max_batch_bytes = @import("replication_limits.zig").max_command_bytes;
 
 var placement_mu: std.Io.Mutex = .init;
 

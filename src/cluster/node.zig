@@ -354,6 +354,7 @@ pub const Node = struct {
     /// contract as API requests without recursively locking the node.
     pub fn proposeLocked(self: *Node, data: []const u8) !LogIndex {
         if (self.snapshot_failed.load(.acquire)) return error.SnapshotRecoveryRequired;
+        if (data.len > @import("replication_limits.zig").max_command_bytes) return error.CommandTooLarge;
         try self.state_machine.validator.validate(data);
         return try self.raft.propose(data);
     }

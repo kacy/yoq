@@ -18,7 +18,7 @@ const snapshot_header_size = 36;
 const snapshot_reply_payload_size = 8;
 
 // check the whole frame before writing fields or narrowing lengths to u32.
-fn encodedSize(msg: Message) !usize {
+pub fn encodedSize(msg: Message) !usize {
     var payload_size: usize = switch (msg) {
         .request_vote => vote_payload_size,
         .request_vote_reply => vote_reply_payload_size,

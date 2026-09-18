@@ -3,6 +3,7 @@ const logger = @import("../../lib/log.zig");
 const common = @import("common.zig");
 const snapshot_runtime = @import("snapshot_runtime.zig");
 const types = @import("../raft_types.zig");
+const limits = @import("../replication_limits.zig");
 
 const AppendEntriesArgs = types.AppendEntriesArgs;
 const AppendEntriesReply = types.AppendEntriesReply;
@@ -136,13 +137,19 @@ pub fn sendAppendEntries(self: anytype, peer_idx: usize) void {
         for (entries_buf[0..count]) |entry| self.alloc.free(entry.data);
     };
 
+    var frame_bytes: usize = limits.append_header_bytes;
     if (next <= last) {
         var idx = next;
         while (idx <= last and count < entries_buf.len) : (idx += 1) {
-            if (self.log.getEntry(self.alloc, idx) catch null) |entry| {
-                entries_buf[count] = entry;
-                count += 1;
+            const entry = (self.log.getEntry(self.alloc, idx) catch return) orelse break;
+            const available = limits.max_append_frame_bytes - frame_bytes;
+            if (available < limits.entry_header_bytes or entry.data.len > available - limits.entry_header_bytes) {
+                self.alloc.free(entry.data);
+                break;
             }
+            frame_bytes += limits.entry_header_bytes + entry.data.len;
+            entries_buf[count] = entry;
+            count += 1;
         }
     }
 
@@ -261,7 +268,7 @@ test "append entries releases payloads when building or queueing the request fai
     }
 }
 
-test "append entries preserves missing log reads and the batch limit" {
+test "append entries stops at a missing log entry" {
     const Raft = @import("../raft.zig").Raft;
     const Action = @import("../raft.zig").Action;
     const Log = @import("../log.zig").Log;
@@ -282,10 +289,8 @@ test "append entries preserves missing log reads and the batch limit" {
     try std.testing.expectEqual(@as(usize, 1), actions.len);
     const request = actions[0].send_append_entries.args;
     try std.testing.expectEqual(@as(types.LogIndex, 0), request.prev_log_index);
-    try std.testing.expectEqual(@as(usize, 64), request.entries.len);
+    try std.testing.expectEqual(@as(usize, 1), request.entries.len);
     try std.testing.expectEqual(@as(types.LogIndex, 1), request.entries[0].index);
-    try std.testing.expectEqual(@as(types.LogIndex, 3), request.entries[1].index);
-    try std.testing.expectEqual(@as(types.LogIndex, 65), request.entries[63].index);
 }
 
 test "append entries retries commit notification after queue allocation failure" {
