@@ -31,6 +31,8 @@ pub const ServiceImageConfig = struct {
         if (self.pull_result) |*r| r.deinit();
         if (self.config_parsed) |*c| c.deinit();
         if (self.img_record) |img| img.deinit(alloc);
+        for (self.layer_paths) |path| alloc.free(path);
+        alloc.free(self.layer_paths);
     }
 };
 
@@ -99,6 +101,8 @@ pub fn resolveServiceImageWithIo(io: std.Io, alloc: std.mem.Allocator, image: []
     const img = store.findImage(alloc, ref.repository, ref.reference) catch return null;
 
     var result = ServiceImageConfig{ .rootfs = "/", .img_record = img };
+    var resolved = false;
+    defer if (!resolved) result.deinit(alloc);
 
     result.pull_result = registry.pull(io, alloc, ref) catch return null;
     result.config_parsed = image_spec.parseImageConfig(alloc, result.pull_result.?.config_bytes) catch return null;
@@ -116,10 +120,12 @@ pub fn resolveServiceImageWithIo(io: std.Io, alloc: std.mem.Allocator, image: []
     }
 
     result.layer_paths = layer.assembleRootfsDescriptors(alloc, result.pull_result.?.layers) catch return null;
-    if (result.layer_paths.len > 0) {
-        result.rootfs = result.layer_paths[result.layer_paths.len - 1];
+    if (result.layer_paths.len == 0) {
+        log.err("image {s} has no extracted root filesystem", .{image});
+        return null;
     }
-
+    result.rootfs = result.layer_paths[result.layer_paths.len - 1];
+    resolved = true;
     return result;
 }
 
@@ -165,67 +171,39 @@ pub fn resolveServiceVolumes(
         .resolved_sources = .empty,
     };
 
+    errdefer result.deinit(alloc);
     for (volumes) |vol| {
-        switch (vol.kind) {
-            .bind => {
-                var resolve_buf: [4096]u8 = undefined;
-                const abs_source_len = std.Io.Dir.cwd().realPathFile(std.Options.debug_io, vol.source, &resolve_buf) catch {
-                    log.warn("failed to resolve bind mount source: {s}", .{vol.source});
-                    continue;
+        var path_buf: [4096]u8 = undefined;
+        const source = switch (vol.kind) {
+            .bind => blk: {
+                const length = std.Io.Dir.cwd().realPathFile(std.Options.debug_io, vol.source, &path_buf) catch |err| {
+                    log.err("cannot resolve required bind mount {s}: {}", .{ vol.source, err });
+                    return error.VolumeFailed;
                 };
-                const abs_source = resolve_buf[0..abs_source_len];
-
-                const duped = alloc.dupe(u8, abs_source) catch {
-                    log.warn("orchestrator: failed to allocate bind mount source: {s}", .{vol.source});
-                    continue;
-                };
-                result.resolved_sources.append(alloc, duped) catch {
-                    alloc.free(duped);
-                    continue;
-                };
-
-                result.bind_mounts.append(alloc, .{
-                    .source = duped,
-                    .target = vol.target,
-                }) catch |err| {
-                    log.warn("failed to add bind mount for {s}: {}", .{ vol.target, err });
-                };
+                break :blk path_buf[0..length];
             },
-            .named => {
-                const vol_def = findVolumeByName(manifest_volumes, vol.source) orelse {
+            .named => blk: {
+                const definition = findVolumeByName(manifest_volumes, vol.source) orelse {
                     log.err("named volume '{s}' not defined in manifest", .{vol.source});
                     return error.VolumeFailed;
                 };
-
                 const timestamp = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
-                volumes_mod.createManaged(app_name, vol_def, timestamp, null) catch |err| {
+                volumes_mod.createManaged(app_name, definition, timestamp, null) catch |err| {
                     log.err("failed to create volume '{s}': {}", .{ vol.source, err });
                     return error.VolumeFailed;
                 };
-
-                var path_buf: [4096]u8 = undefined;
-                const vol_path = volumes_mod.resolveVolumePath(&path_buf, app_name, vol.source, vol_def.driver) catch |err| {
+                break :blk volumes_mod.resolveVolumePath(&path_buf, app_name, vol.source, definition.driver) catch |err| {
                     log.err("failed to resolve volume path '{s}': {}", .{ vol.source, err });
                     return error.VolumeFailed;
                 };
-
-                const duped = alloc.dupe(u8, vol_path) catch {
-                    log.warn("orchestrator: failed to allocate volume path: {s}", .{vol.source});
-                    continue;
-                };
-                result.resolved_sources.append(alloc, duped) catch {
-                    alloc.free(duped);
-                    continue;
-                };
-
-                result.bind_mounts.append(alloc, .{
-                    .source = duped,
-                    .target = vol.target,
-                }) catch |err| {
-                    log.warn("failed to add volume mount for {s}: {}", .{ vol.target, err });
-                };
             },
-        }
+        };
+        const owned = alloc.dupe(u8, source) catch return error.VolumeFailed;
+        result.resolved_sources.append(alloc, owned) catch {
+            alloc.free(owned);
+            return error.VolumeFailed;
+        };
+        result.bind_mounts.append(alloc, .{ .source = owned, .target = vol.target }) catch return error.VolumeFailed;
     }
 
     return result;
@@ -266,6 +244,40 @@ pub fn runOneShotWithIo(
     manifest_volumes: []const spec.Volume,
     app_name: []const u8,
 ) bool {
+    return runOneShotWithGpu(io, alloc, image, command, env, volumes, working_dir, hostname, manifest_volumes, app_name, null);
+}
+
+pub fn validateLocalWorker(worker: spec.Worker) !void {
+    if (worker.gpu_mesh != null) return error.UnsupportedLocalWorkerMesh;
+}
+
+pub fn runWorkerWithIo(io: std.Io, alloc: std.mem.Allocator, worker: spec.Worker, manifest_volumes: []const spec.Volume, app_name: []const u8) !bool {
+    try validateLocalWorker(worker);
+    return runOneShotWithGpu(io, alloc, worker.image, worker.command, worker.env, worker.volumes, worker.working_dir, worker.name, manifest_volumes, app_name, worker.gpu);
+}
+
+fn runOneShotWithGpu(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    image: []const u8,
+    command: []const []const u8,
+    env: []const []const u8,
+    volumes: []const spec.VolumeMount,
+    working_dir: ?[]const u8,
+    hostname: []const u8,
+    manifest_volumes: []const spec.Volume,
+    app_name: []const u8,
+    gpu: ?spec.GpuSpec,
+) bool {
+    var gpu_lease = if (gpu) |config|
+        @import("../../gpu/lease.zig").Lease.acquireWithMinimum(config.count, config.model, config.vram_min_mb) catch |err| {
+            writeErr("failed to reserve worker gpus: {}\n", .{err});
+            return false;
+        }
+    else
+        @import("../../gpu/lease.zig").Lease{};
+    defer gpu_lease.deinit();
+
     var img = resolveServiceImageWithIo(io, alloc, image) orelse {
         writeErr("failed to resolve image for worker {s}\n", .{hostname});
         return false;
@@ -279,7 +291,16 @@ pub fn runOneShotWithIo(
     defer resolved.args.deinit(alloc);
 
     var merged_env = mergeServiceEnv(alloc, img.image_env, env);
-    defer merged_env.deinit(alloc);
+    const owned_env_start = merged_env.items.len;
+    defer {
+        for (merged_env.items[owned_env_start..]) |entry| alloc.free(entry);
+        merged_env.deinit(alloc);
+    }
+    if (gpu_lease.count > 0) {
+        var gpu_env: [4096]u8 = undefined;
+        const data = @import("../../gpu/passthrough.zig").generateGpuEnv(gpu_lease.indices[0..gpu_lease.count], &gpu_env) catch return false;
+        @import("../gpu_runtime.zig").appendRequiredEnv(alloc, &merged_env, data) catch return false;
+    }
 
     var wd = img.working_dir;
     if (working_dir) |working_dir_override| wd = working_dir_override;
@@ -305,7 +326,7 @@ pub fn runOneShotWithIo(
         .status = "created",
         .pid = null,
         .exit_code = null,
-        .app_name = null,
+        .app_name = app_name,
         .created_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
     }) catch return false;
 
@@ -321,6 +342,7 @@ pub fn runOneShotWithIo(
             .lower_dirs = img.layer_paths,
             .hostname = hostname,
             .mounts = vols.bind_mounts.items,
+            .gpu_indices = gpu_lease.indices[0..gpu_lease.count],
         },
         .status = .created,
         .pid = null,
@@ -349,4 +371,28 @@ pub fn envKey(env_var: []const u8) []const u8 {
         return env_var[0..eq];
     }
     return env_var;
+}
+
+test "local workers reject unsupported mesh execution" {
+    const worker: spec.Worker = .{ .name = "mesh", .image = "scratch", .command = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{}, .gpu_mesh = .{ .world_size = 2 } };
+    try std.testing.expectError(error.UnsupportedLocalWorkerMesh, validateLocalWorker(worker));
+}
+
+test "volume resolution releases earlier mounts when a required source is missing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source_buf: [4096]u8 = undefined;
+    const length = try tmp.dir.realPathFile(std.Options.debug_io, ".", &source_buf);
+    const missing = try std.fmt.allocPrint(std.testing.allocator, "{s}/missing", .{source_buf[0..length]});
+    defer std.testing.allocator.free(missing);
+    const mounts = [_]spec.VolumeMount{
+        .{ .source = source_buf[0..length], .target = "/data", .kind = .bind },
+        .{ .source = missing, .target = "/required", .kind = .bind },
+    };
+    try std.testing.expectError(error.VolumeFailed, resolveServiceVolumes(std.testing.allocator, &mounts, &.{}, "app"));
+}
+
+test "volume resolution fails rather than omitting a mount after allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    try std.testing.expectError(error.VolumeFailed, resolveServiceVolumes(failing.allocator(), &.{.{ .source = ".", .target = "/data", .kind = .bind }}, &.{}, "app"));
 }

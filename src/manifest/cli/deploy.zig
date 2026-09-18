@@ -10,10 +10,8 @@ const manifest_spec = @import("../spec.zig");
 const doctor = @import("../../lib/doctor.zig");
 const doctor_manifest = @import("../../lib/doctor_manifest.zig");
 const store = @import("../../state/store.zig");
-const process = @import("../../runtime/process.zig");
 const http_client = @import("../../cluster/http_client.zig");
 const container_cmds = @import("../../runtime/container_commands.zig");
-const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -371,53 +369,36 @@ pub fn down(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocat
     const cwd = cwd_buf[0..cwd_len];
     const app_name = std.fs.path.basename(cwd);
 
-    var ids = store.listAppContainerIds(alloc, app_name) catch |err| {
-        writeErr("failed to query app containers: {}\n", .{err});
-        return DeployError.StoreError;
-    };
-    defer {
-        for (ids.items) |id| alloc.free(id);
-        ids.deinit(alloc);
-    }
-
-    if (ids.items.len == 0) {
-        writeErr("no running services found for {s}\n", .{app_name});
-        return;
-    }
-
+    const ownership = @import("../orchestrator/ownership.zig");
+    var token: [12]u8 = undefined;
+    try @import("../../runtime/container.zig").generateId(&token);
     var i: usize = manifest.services.len;
     while (i > 0) {
         i -= 1;
         const svc = manifest.services[i];
-
-        const record = store.findAppContainer(alloc, app_name, svc.name) catch continue;
-        const rec = record orelse continue;
-        defer rec.deinit(alloc);
-
+        try ownership.claim(app_name, svc.name, &token);
+        defer ownership.release(app_name, svc.name, &token) catch {};
         writeErr("stopping {s}...", .{svc.name});
+        try ownership.stopPriorInstances(alloc, app_name, svc.name, &token);
 
-        if (std.mem.eql(u8, rec.status, "running")) {
-            if (rec.pid) |pid| {
-                process.terminate(pid) catch {
-                    process.kill(pid) catch {};
-                };
-
-                var waited: u32 = 0;
-                while (waited < 100) : (waited += 1) {
-                    const result = process.wait(pid, true) catch break;
-                    switch (result.status) {
-                        .running => if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(100), "deploy stop wait")) break,
-                        else => break,
-                    }
-                }
-            }
+        // modern supervisors clean their own records. finish cleanup for older
+        // or interrupted supervisors only after their entire group has exited.
+        var previous = try ownership.priorInstances(alloc, app_name, svc.name, &token);
+        defer {
+            for (previous.items) |id| alloc.free(id);
+            previous.deinit(alloc);
         }
-
-        store.updateStatus(rec.id, "stopped", null, null) catch |e| {
-            writeErr("warning: failed to update status for {s}: {}\n", .{ svc.name, e });
-        };
-        container_cmds.cleanupStoppedContainer(rec.id, rec.ip_address, rec.veth_host);
-
+        for (previous.items) |id| {
+            const record = store.load(alloc, id) catch |err| switch (err) {
+                error.NotFound => continue,
+                else => return err,
+            };
+            defer record.deinit(alloc);
+            try store.updateStatus(id, "stopped", null, null);
+            if (svc.ports.len > 0) try @import("../../network/published_ports.zig").removeInstance(alloc, id);
+            container_cmds.cleanupStoppedContainer(id, record.ip_address, record.veth_host);
+            try ownership.removeInstance(id);
+        }
         writeErr(" stopped\n", .{});
     }
 

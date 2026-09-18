@@ -17,11 +17,13 @@
 const std = @import("std");
 
 const cli = @import("../lib/cli.zig");
+const container = @import("../runtime/container.zig");
 const spec = @import("spec.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const health = @import("health.zig");
 const cron_scheduler = @import("cron_scheduler.zig");
 const backup_scheduler = @import("backup_scheduler.zig");
+const instances = @import("orchestrator/instances.zig");
 const lifecycle_support = @import("orchestrator/lifecycle_support.zig");
 const runtime_loop = @import("orchestrator/runtime_loop.zig");
 const signal_support = @import("orchestrator/signal_support.zig");
@@ -37,14 +39,37 @@ pub const OrchestratorError = error{
     ManifestEmpty,
 };
 
-/// per-service state tracked by the orchestrator
+/// state owned by one replica supervisor
 pub const ServiceState = struct {
     container_id: [12]u8,
+    identity_mutex: std.Io.Mutex = .init,
+    ownership_claimed: bool = false,
     thread: ?std.Thread,
     status: Status,
     health_status: ?health.HealthStatus = null,
+    stop_requested: std.atomic.Value(bool) = .init(false),
 
-    pub const Status = enum {
+    pub fn containerId(self: *ServiceState) [12]u8 {
+        self.identity_mutex.lockUncancelable(std.Options.debug_io);
+        defer self.identity_mutex.unlock(std.Options.debug_io);
+        return self.container_id;
+    }
+
+    pub fn setContainerId(self: *ServiceState, id: [12]u8) void {
+        self.identity_mutex.lockUncancelable(std.Options.debug_io);
+        defer self.identity_mutex.unlock(std.Options.debug_io);
+        self.container_id = id;
+    }
+
+    pub fn getStatus(self: *const ServiceState) Status {
+        return @atomicLoad(Status, &self.status, .acquire);
+    }
+
+    pub fn setStatus(self: *ServiceState, value: Status) void {
+        @atomicStore(Status, &self.status, value, .release);
+    }
+
+    pub const Status = enum(u8) {
         pending,
         pulling,
         starting,
@@ -60,6 +85,7 @@ pub const Orchestrator = struct {
     alloc: std.mem.Allocator,
     manifest: *spec.Manifest,
     app_name: []const u8,
+    supervisor_token: [12]u8 = [_]u8{0} ** 12,
     states: []ServiceState,
     dev_mode: bool = false,
     restart_requested: []std.atomic.Value(bool),
@@ -74,17 +100,24 @@ pub const Orchestrator = struct {
     start_set: ?std.StringHashMapUnmanaged(void) = null,
 
     pub fn init(alloc: std.mem.Allocator, manifest: *spec.Manifest, app_name: []const u8) !Orchestrator {
-        const states = try alloc.alloc(ServiceState, manifest.services.len);
+        for (manifest.services) |svc| {
+            if (svc.gpu_mesh != null) return error.UnsupportedLocalServiceMesh;
+        }
+        const instance_count = try instances.count(manifest.services);
+        const states = try alloc.alloc(ServiceState, instance_count);
         errdefer alloc.free(states);
         for (states) |*s| {
             s.* = .{
-                .container_id = undefined,
+                .container_id = [_]u8{0} ** 12,
                 .thread = null,
                 .status = .pending,
             };
         }
 
-        const restart_flags = try alloc.alloc(std.atomic.Value(bool), manifest.services.len);
+        var supervisor_token: [12]u8 = undefined;
+        try container.generateId(&supervisor_token);
+
+        const restart_flags = try alloc.alloc(std.atomic.Value(bool), instance_count);
         for (restart_flags) |*f| {
             f.* = std.atomic.Value(bool).init(false);
         }
@@ -93,6 +126,7 @@ pub const Orchestrator = struct {
             .alloc = alloc,
             .manifest = manifest,
             .app_name = app_name,
+            .supervisor_token = supervisor_token,
             .states = states,
             .restart_requested = restart_flags,
         };
@@ -143,6 +177,26 @@ pub const Orchestrator = struct {
         completed_workers: *std.StringHashMapUnmanaged(void),
     ) OrchestratorError!void {
         return lifecycle_support.startServiceByIndex(self, OrchestratorError, idx, completed_workers, serviceThread);
+    }
+
+    pub fn serviceHealth(self: *const Orchestrator, service_index: usize) health.HealthStatus {
+        var result: health.HealthStatus = .healthy;
+        for (0..self.manifest.services[service_index].replicas) |replica| {
+            const state = &self.states[instances.instanceIndex(self.manifest.services, service_index, replica)];
+            const status = state.getStatus();
+            if (status == .failed or status == .stopped) return .unhealthy;
+            if (status != .running) {
+                result = .starting;
+                continue;
+            }
+            if (self.manifest.services[service_index].health_check != null) {
+                const id = state.containerId();
+                const readiness = health.getContainerStatus(&id) orelse .starting;
+                if (readiness == .unhealthy) return .unhealthy;
+                if (readiness == .starting) result = .starting;
+            }
+        }
+        return result;
     }
 
     /// register services for health checking and start the checker thread.
@@ -585,7 +639,7 @@ test "computeStartSet: no filter starts everything" {
 }
 
 fn fakeStartServiceThread(orch: *Orchestrator, idx: usize) void {
-    orch.states[idx].status = .running;
+    orch.states[idx].setStatus(.running);
 }
 
 fn fakeJoinableThread(_: *Orchestrator, _: usize) void {}
@@ -726,4 +780,94 @@ fn checkOrchestratorInit(alloc: std.mem.Allocator) !void {
 
 test "orchestrator init releases service states if restart allocation fails" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkOrchestratorInit, .{});
+}
+
+test "orchestrator starts and joins all three replicas as one service" {
+    const alloc = std.testing.allocator;
+    try @import("../state/store.zig").initTestDb();
+    defer @import("../state/store.zig").deinitTestDb();
+    var services = [_]spec.Service{testSvc("web", &.{})};
+    services[0].replicas = 3;
+    var manifest: spec.Manifest = .{ .services = &services, .workers = &.{}, .crons = &.{}, .training_jobs = &.{}, .volumes = &.{}, .alloc = alloc };
+    var orch = try Orchestrator.init(alloc, &manifest, "demo");
+    defer orch.deinit();
+    var completed_workers: std.StringHashMapUnmanaged(void) = .empty;
+    defer completed_workers.deinit(alloc);
+    try lifecycle_support.startServiceByIndex(&orch, OrchestratorError, 0, &completed_workers, fakeStartServiceThread);
+    for (orch.states) |state| {
+        try std.testing.expectEqual(ServiceState.Status.running, state.status);
+        try std.testing.expect(state.thread != null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), manifest.services.len);
+    orch.stopServiceByIndex(0);
+    for (orch.states) |state| {
+        try std.testing.expectEqual(ServiceState.Status.stopped, state.status);
+        try std.testing.expect(state.thread == null);
+    }
+}
+
+test "local rollout and snapshot rollback restore three independent replicas" {
+    const alloc = std.testing.allocator;
+    const loader = @import("loader.zig");
+    try @import("../state/store.zig").initTestDb();
+    defer @import("../state/store.zig").deinitTestDb();
+    var original = try loader.loadFromString(alloc, "[service.web]\nimage = \"nginx:old\"\nreplicas = 3");
+    defer original.deinit();
+    var app = try @import("app_spec.zig").fromManifest(alloc, "demo", &original);
+    defer app.deinit();
+    const snapshot = try app.toApplyJson(alloc);
+    defer alloc.free(snapshot);
+    var completed: std.StringHashMapUnmanaged(void) = .empty;
+    defer completed.deinit(alloc);
+
+    var old_runtime = try Orchestrator.init(alloc, &original, "demo");
+    defer old_runtime.deinit();
+    try lifecycle_support.startServiceByIndex(&old_runtime, OrchestratorError, 0, &completed, fakeStartServiceThread);
+    old_runtime.stopServiceByIndex(0);
+
+    var replacement = try loader.loadFromString(alloc, "[service.web]\nimage = \"nginx:new\"\nreplicas = 1");
+    defer replacement.deinit();
+    var new_runtime = try Orchestrator.init(alloc, &replacement, "demo");
+    defer new_runtime.deinit();
+    try lifecycle_support.startServiceByIndex(&new_runtime, OrchestratorError, 0, &completed, fakeStartServiceThread);
+    try std.testing.expectEqual(@as(usize, 1), new_runtime.states.len);
+    new_runtime.stopServiceByIndex(0);
+
+    var restored = try @import("rollback_snapshot.zig").loadLocalRollbackSnapshot(alloc, snapshot);
+    defer restored.deinit();
+    var restored_runtime = try Orchestrator.init(alloc, &restored.manifest, "demo");
+    defer restored_runtime.deinit();
+    try lifecycle_support.startServiceByIndex(&restored_runtime, OrchestratorError, 0, &completed, fakeStartServiceThread);
+    defer restored_runtime.stopServiceByIndex(0);
+    try std.testing.expectEqual(@as(usize, 3), restored_runtime.states.len);
+    try std.testing.expectEqualStrings("nginx:old", restored.manifest.services[0].image);
+    for (restored_runtime.states, 0..) |*state, index| {
+        try std.testing.expectEqual(ServiceState.Status.running, state.getStatus());
+        for (restored_runtime.states[0..index]) |other| try std.testing.expect(!std.mem.eql(u8, &state.container_id, &other.container_id));
+    }
+}
+
+test "replica identity snapshots remain complete during concurrent restarts" {
+    var state: ServiceState = .{ .container_id = "aaaaaaaaaaaa".*, .thread = null, .status = .running };
+    var start = std.atomic.Value(bool).init(false);
+    const Writer = struct {
+        fn run(shared: *ServiceState, ready: *std.atomic.Value(bool)) void {
+            while (!ready.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..10000) |index| shared.setContainerId(if (index % 2 == 0) "bbbbbbbbbbbb".* else "aaaaaaaaaaaa".*);
+        }
+    };
+    const writer = try std.Thread.spawn(.{}, Writer.run, .{ &state, &start });
+    defer writer.join();
+    start.store(true, .release);
+    for (0..10000) |_| {
+        const id = state.containerId();
+        try std.testing.expect(std.mem.eql(u8, &id, "aaaaaaaaaaaa") or std.mem.eql(u8, &id, "bbbbbbbbbbbb"));
+    }
+}
+
+test "local services reject mesh configuration before starting any replica" {
+    var service = testSvc("mesh", &.{});
+    service.gpu_mesh = .{ .world_size = 2 };
+    var manifest: spec.Manifest = .{ .services = &.{service}, .workers = &.{}, .crons = &.{}, .training_jobs = &.{}, .volumes = &.{}, .alloc = std.testing.allocator };
+    try std.testing.expectError(error.UnsupportedLocalServiceMesh, Orchestrator.init(std.testing.allocator, &manifest, "app"));
 }

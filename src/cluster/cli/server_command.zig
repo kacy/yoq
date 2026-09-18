@@ -320,6 +320,12 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
         issuer_worker = cert_issuer.spawn(&node, alloc, jt);
     }
 
+    var training_worker = @import("../training_reconciler.zig").spawn(alloc, &node) catch |err| {
+        log.err("failed to start training reconciliation: {}", .{err});
+        return ServerCommandError.ServerStartFailed;
+    };
+    defer training_worker.stop();
+
     const dns = @import("../../network/dns.zig");
     dns.setClusterDb(node.stateMachineDb());
     defer dns.setClusterDb(null);
@@ -342,6 +348,7 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
     orchestrator.installSignalHandlers();
     server.run();
 
+    training_worker.stop();
     if (issuer_worker) |*worker| worker.stop();
     if (ca_worker) |*worker| worker.stop();
     node.stop();

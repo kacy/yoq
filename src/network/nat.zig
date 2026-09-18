@@ -366,7 +366,7 @@ fn buildLoopbackMasqueradeArgs(
     return args;
 }
 
-fn enableRouteLocalnet(interface: []const u8) NatError!void {
+pub fn enableRouteLocalnet(interface: []const u8) NatError!void {
     var path_buf: [128]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/sys/net/ipv4/conf/{s}/route_localnet", .{interface}) catch
         return NatError.RouteLocalnetFailed;

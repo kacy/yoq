@@ -1,6 +1,7 @@
 const std = @import("std");
 const oci = @import("../image/oci.zig");
 const image_spec = @import("../image/spec.zig");
+const manifest = @import("../manifest/spec.zig");
 pub const max_encoded_bytes = 8192;
 pub const sql_buffer_size = max_encoded_bytes * 2 + 4096;
 
@@ -11,6 +12,15 @@ pub const Execution = struct {
     argv: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
     working_dir: ?[]const u8 = null,
+    volumes: []const manifest.VolumeMount = &.{},
+    volume_definitions: []const manifest.Volume = &.{},
+    ports: []const manifest.PortMapping = &.{},
+    gpu_count: u32 = 0,
+    gpu_model: ?[]const u8 = null,
+    gpu_vram_min_mb: ?u64 = null,
+    checkpoint: ?manifest.CheckpointSpec = null,
+    resume_checkpoint: bool = false,
+    ib_required: bool = false,
 };
 
 pub fn fromWorkload(alloc: std.mem.Allocator, json: []const u8) ![]u8 {
@@ -18,6 +28,19 @@ pub fn fromWorkload(alloc: std.mem.Allocator, json: []const u8) ![]u8 {
         command: std.json.Value = .null,
         env: []const []const u8 = &.{},
         working_dir: ?[]const u8 = null,
+        volumes: []const manifest.VolumeMount = &.{},
+        volume_definitions: []const manifest.Volume = &.{},
+        ports: []const manifest.PortMapping = &.{},
+        gpu: ?manifest.GpuSpec = null,
+        gpu_mesh: ?manifest.GpuMeshSpec = null,
+        gpus: u32 = 0,
+        gpu_limit: u32 = 0,
+        gpu_model: ?[]const u8 = null,
+        gpu_vram_min_mb: ?u64 = null,
+        gpus_per_rank: u32 = 0,
+        gpu_type: ?[]const u8 = null,
+        checkpoint: ?manifest.CheckpointSpec = null,
+        ib_required: bool = false,
     };
     const parsed = try std.json.parseFromSlice(Workload, alloc, json, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
@@ -34,12 +57,37 @@ pub fn fromWorkload(alloc: std.mem.Allocator, json: []const u8) ![]u8 {
         },
         else => return error.InvalidRequest,
     }
-    const execution = Execution{ .argv = argv.items, .env = parsed.value.env, .working_dir = parsed.value.working_dir };
+    const execution = Execution{
+        .argv = argv.items,
+        .env = parsed.value.env,
+        .working_dir = parsed.value.working_dir,
+        .volumes = parsed.value.volumes,
+        .volume_definitions = parsed.value.volume_definitions,
+        .ports = parsed.value.ports,
+        .gpu_count = if (parsed.value.gpus > 0) 1 else if (parsed.value.gpu_mesh) |mesh| mesh.gpus_per_rank else if (parsed.value.gpu) |gpu| gpu.count else if (parsed.value.gpus_per_rank > 0) parsed.value.gpus_per_rank else parsed.value.gpu_limit,
+        .gpu_model = parsed.value.gpu_type orelse parsed.value.gpu_model orelse if (parsed.value.gpu) |gpu| gpu.model else null,
+        .gpu_vram_min_mb = parsed.value.gpu_vram_min_mb orelse if (parsed.value.gpu) |gpu| gpu.vram_min_mb else null,
+        .checkpoint = parsed.value.checkpoint,
+        .ib_required = parsed.value.ib_required,
+    };
     try validate(execution);
     const encoded = try std.json.Stringify.valueAlloc(alloc, execution, .{});
     errdefer alloc.free(encoded);
     if (encoded.len > max_encoded_bytes) return error.InvalidRequest;
     return encoded;
+}
+
+pub fn withVolumeDefinitions(alloc: std.mem.Allocator, encoded: []const u8, snapshot: []const u8) ![]u8 {
+    var parsed = try decode(alloc, encoded);
+    defer parsed.deinit();
+    const Definitions = struct { volume_definitions: []const manifest.Volume = &.{} };
+    const definitions = try std.json.parseFromSlice(Definitions, alloc, snapshot, .{ .ignore_unknown_fields = true });
+    defer definitions.deinit();
+    parsed.value.volume_definitions = definitions.value.volume_definitions;
+    const result = try std.json.Stringify.valueAlloc(alloc, parsed.value, .{});
+    errdefer alloc.free(result);
+    if (result.len > max_encoded_bytes) return error.InvalidRequest;
+    return result;
 }
 
 pub fn decode(alloc: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(Execution) {
@@ -65,6 +113,11 @@ fn validate(execution: Execution) !void {
     for (execution.env) |env| {
         if (std.mem.indexOfScalar(u8, env, 0) != null or std.mem.indexOfScalar(u8, env, '=') == null) return error.InvalidRequest;
     }
+    if (execution.volumes.len > 128 or execution.ports.len > 128 or execution.gpu_count > 8) return error.InvalidRequest;
+    for (execution.volumes) |mount| {
+        if (mount.source.len == 0 or std.mem.indexOfScalar(u8, mount.source, 0) != null or mount.target.len == 0 or mount.target[0] != '/' or std.mem.indexOfScalar(u8, mount.target, 0) != null) return error.InvalidRequest;
+    }
+    for (execution.ports) |port| if (port.host_port == 0 or port.container_port == 0) return error.InvalidRequest;
     if (execution.working_dir) |dir| {
         if (dir.len == 0 or dir[0] != '/' or std.mem.indexOfScalar(u8, dir, 0) != null) return error.InvalidRequest;
     }
@@ -205,4 +258,27 @@ test "assignment resource limits reach actual kernel cgroup controls" {
         try std.testing.expectEqual(limits.cpu_max_period, actual.cpu_max_period.?);
         try std.testing.expectEqual(limits.memory_max, actual.memory_limit);
     }
+}
+
+test "training execution retains named mounts gpu settings and published ports" {
+    const alloc = std.testing.allocator;
+    const encoded = try fromWorkload(alloc,
+        \\{"command":["python","train script.py"],"env":["DATA=one two"],"working_dir":"/work","gpus":4,"gpu_type":"H100","volumes":[{"source":"dataset","target":"/data","kind":"named"}],"ports":[{"host_port":9090,"container_port":8080}],"checkpoint":{"path":"/data/checkpoints","interval_secs":60,"keep":3}}
+    );
+    defer alloc.free(encoded);
+    const enriched = try withVolumeDefinitions(alloc, encoded,
+        \\{"volume_definitions":[{"name":"dataset","driver":{"nfs":{"server":"storage","path":"/dataset","options":"vers=4"}}}]}
+    );
+    defer alloc.free(enriched);
+    const execution = try decode(alloc, enriched);
+    defer execution.deinit();
+    try std.testing.expectEqualStrings("train script.py", execution.value.argv[1]);
+    try std.testing.expectEqualStrings("DATA=one two", execution.value.env[0]);
+    try std.testing.expectEqualStrings("/work", execution.value.working_dir.?);
+    try std.testing.expectEqual(@as(u32, 1), execution.value.gpu_count);
+    try std.testing.expectEqualStrings("H100", execution.value.gpu_model.?);
+    try std.testing.expectEqualStrings("/data", execution.value.volumes[0].target);
+    try std.testing.expectEqualStrings("storage", execution.value.volume_definitions[0].driver.nfs.server);
+    try std.testing.expectEqual(@as(u16, 9090), execution.value.ports[0].host_port);
+    try std.testing.expectEqual(@as(u64, 60), execution.value.checkpoint.?.interval_secs);
 }

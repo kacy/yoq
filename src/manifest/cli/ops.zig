@@ -1242,6 +1242,8 @@ pub fn runWorker(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Al
         return OpsError.UnknownService;
     };
 
+    try @import("../orchestrator/service_runtime.zig").validateLocalWorker(worker.*);
+
     writeErr("pulling {s}...\n", .{worker.image});
     if (!orchestrator.ensureImageAvailable(alloc, worker.image)) {
         writeErr("failed to pull image: {s}\n", .{worker.image});
@@ -1254,7 +1256,7 @@ pub fn runWorker(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Al
     const app_name = std.fs.path.basename(cwd);
 
     writeErr("running worker {s}...\n", .{name});
-    if (orchestrator.runOneShot(alloc, worker.image, worker.command, worker.env, worker.volumes, worker.working_dir, name, manifest.volumes, app_name)) {
+    if (try @import("../orchestrator/service_runtime.zig").runWorkerWithIo(io, alloc, worker.*, manifest.volumes, app_name)) {
         writeErr("worker {s} completed successfully\n", .{name});
     } else {
         writeErr("worker {s} failed\n", .{name});

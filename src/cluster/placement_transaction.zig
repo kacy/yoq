@@ -12,12 +12,12 @@ const capacity = @import("placement_capacity.zig");
 pub const Resources = capacity.Resources;
 pub const isTerminal = capacity.isTerminal;
 
-pub const max_gang_ranks = 4096;
+pub const max_gang_ranks = @import("../manifest/spec.zig").max_training_ranks;
 const max_batch_bytes = 1024 * 1024;
 
 var placement_mu: std.Io.Mutex = .init;
 
-pub const schema_sql = "CREATE TABLE IF NOT EXISTS assignment_claims (assignment_id TEXT PRIMARY KEY, gpu_count INTEGER NOT NULL CHECK (gpu_count >= 0), release_id TEXT, group_id TEXT, request_json TEXT);";
+pub const schema_sql = @import("../state/schema.zig").assignment_claims_create_table_sql;
 pub const cleanup_sql = "DELETE FROM assignment_claims WHERE assignment_id NOT IN (SELECT id FROM assignments);";
 
 pub const Lease = struct {
@@ -111,7 +111,12 @@ pub const Placement = struct {
 };
 
 pub fn place(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8) mutation.Error!?Placement {
-    return placeWithMetadata(alloc, session, request, release_id, null);
+    return placeReplicas(alloc, session, request, release_id, 1);
+}
+
+/// reserve every replica together; a failed placement leaves the prior release intact.
+pub fn placeReplicas(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8, replicas: u32) mutation.Error!?Placement {
+    return placeWithMetadata(alloc, session, request, release_id, null, replicas);
 }
 
 /// Replace one workload only when its complete new placement fits. Assignment
@@ -121,14 +126,16 @@ pub fn replaceWorkload(alloc: std.mem.Allocator, session: mutation.Session, requ
     const workload_kind = request.workload_kind orelse return error.Conflict;
     const workload_name = request.workload_name orelse return error.Conflict;
     if (app_name.len == 0 or workload_kind.len == 0 or workload_name.len == 0) return error.Conflict;
-    return placeWithMetadata(alloc, session, request, null, metadata_sql);
+    return placeWithMetadata(alloc, session, request, null, metadata_sql, 1);
 }
 
-fn placeWithMetadata(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8, metadata_sql: ?[]const u8) mutation.Error!?Placement {
-    // Bound gang work before allocating a ranks array or building SQL.
+fn placeWithMetadata(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8, metadata_sql: ?[]const u8, replicas: u32) mutation.Error!?Placement {
+    // bound the full replica group before allocating or building sql.
+    if (replicas == 0 or replicas > @import("../manifest/spec.zig").max_service_replicas or @as(u64, replicas) * @max(@as(u64, 1), request.gang_world_size) > max_gang_ranks) return error.Conflict;
     if (request.cpu_limit <= 0 or request.memory_limit_mb <= 0 or request.gpu_limit < 0 or request.gang_world_size > max_gang_ranks) return error.Conflict;
+    if (std.mem.eql(u8, request.workload_kind orelse "", "service") and @as(u64, replicas) * @max(@as(u64, 1), request.gang_world_size) > @import("../manifest/spec.zig").max_service_replicas) return error.Conflict;
     for (0..3) |_| {
-        return placeOnce(alloc, session, request, release_id, metadata_sql) catch |err| {
+        return placeOnce(alloc, session, request, release_id, metadata_sql, replicas) catch |err| {
             if (err == error.Conflict) continue;
             return err;
         };
@@ -136,12 +143,14 @@ fn placeWithMetadata(alloc: std.mem.Allocator, session: mutation.Session, reques
     return error.Conflict;
 }
 
-fn placeOnce(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8, metadata_sql: ?[]const u8) mutation.Error!?Placement {
+fn placeOnce(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8, metadata_sql: ?[]const u8, replicas: u32) mutation.Error!?Placement {
     const lease = try Lease.begin(session);
     defer lease.deinit();
+    if (!try serviceNameAvailableInLease(lease, request)) return null;
     if (release_id) |id| {
-        if (try resumePlacement(alloc, lease, request, id)) |existing| return existing;
+        if (try resumePlacement(alloc, lease, request, id, replicas)) |existing| return existing;
     }
+    if (metadata_sql == null and !try serviceSurgeFits(lease, request, replicas)) return null;
     const prior = if (metadata_sql != null) try workloadIds(alloc, session, request) else Placement{ .assignment_ids = &.{} };
     defer prior.deinit(alloc);
     const agents = lease.agents(alloc, prior.assignment_ids) catch return error.InternalError;
@@ -154,37 +163,48 @@ fn placeOnce(alloc: std.mem.Allocator, session: mutation.Session, request: sched
         batch.writer.writeAll(metadata) catch return error.InternalError;
     }
     var ids: std.ArrayList([]const u8) = .empty;
-    errdefer {
+    defer {
         for (ids.items) |id| alloc.free(id);
         ids.deinit(alloc);
     }
     const request_json = std.json.Stringify.valueAlloc(alloc, request, .{}) catch return error.InternalError;
     defer alloc.free(request_json);
     const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
-    if (request.gang_world_size > 0) {
-        const placements = (scheduler.scheduleGang(alloc, request, agents.records) catch return error.InternalError) orelse return null;
-        defer alloc.free(placements);
-        for (placements) |placement| {
+    var gang_ports: std.ArrayList(u16) = .empty;
+    defer gang_ports.deinit(alloc);
+    for (0..replicas) |_| {
+        const first_rank = ids.items.len;
+        if (request.gang_world_size > 0) {
+            const placements = (scheduler.scheduleGang(alloc, request, agents.records) catch return error.InternalError) orelse return null;
+            defer alloc.free(placements);
+            const port = try reserveGangPort(session, request.gang_master_port, gang_ports.items);
+            gang_ports.append(alloc, port) catch return error.InternalError;
+            for (placements) |*rank| rank.master_port = port;
+            for (placements) |placement| {
+                const id = try newId(alloc);
+                ids.append(alloc, id) catch {
+                    alloc.free(id);
+                    return error.InternalError;
+                };
+                appendAssignment(&batch.writer, id, placement.agent_id, request, placement, agents.index, now) catch return error.InternalError;
+                appendClaim(&batch.writer, id, .{ .gpu_count = placement.gpu_count, .release_id = release_id, .group_id = ids.items[first_rank], .request_json = request_json }) catch return error.InternalError;
+                try consume(agents.records, placement.agent_id, .{ .cpu = request.cpu_limit, .memory = request.memory_limit_mb, .gpu = placement.gpu_count });
+                if (batch.written().len > max_batch_bytes) return error.Conflict;
+            }
+        } else {
+            const choices = scheduler.schedule(alloc, &.{request}, agents.records) catch return error.InternalError;
+            defer alloc.free(choices);
+            const choice = choices[0] orelse return null;
             const id = try newId(alloc);
             ids.append(alloc, id) catch {
                 alloc.free(id);
                 return error.InternalError;
             };
-            appendAssignment(&batch.writer, id, placement.agent_id, request, placement, agents.index, now) catch return error.InternalError;
-            appendClaim(&batch.writer, id, .{ .gpu_count = placement.gpu_count, .release_id = release_id, .group_id = ids.items[0], .request_json = request_json }) catch return error.InternalError;
+            appendAssignment(&batch.writer, id, choice.agent_id, request, null, agents.index, now) catch return error.InternalError;
+            appendClaim(&batch.writer, id, .{ .gpu_count = request.gpu_limit, .release_id = release_id, .group_id = id, .request_json = request_json }) catch return error.InternalError;
+            try consume(agents.records, choice.agent_id, .{ .cpu = request.cpu_limit, .memory = request.memory_limit_mb, .gpu = request.gpu_limit });
             if (batch.written().len > max_batch_bytes) return error.Conflict;
         }
-    } else {
-        const choices = scheduler.schedule(alloc, &.{request}, agents.records) catch return error.InternalError;
-        defer alloc.free(choices);
-        const choice = choices[0] orelse return null;
-        const id = try newId(alloc);
-        ids.append(alloc, id) catch {
-            alloc.free(id);
-            return error.InternalError;
-        };
-        appendAssignment(&batch.writer, id, choice.agent_id, request, null, agents.index, now) catch return error.InternalError;
-        appendClaim(&batch.writer, id, .{ .gpu_count = request.gpu_limit, .release_id = release_id, .group_id = id, .request_json = request_json }) catch return error.InternalError;
     }
     // Reserve memory for the returned IDs before committing. An allocation
     // failure must not strand a successful placement without its owner.
@@ -195,6 +215,68 @@ fn placeOnce(alloc: std.mem.Allocator, session: mutation.Session, request: sched
     }
     try lease.commit(batch.written());
     return .{ .assignment_ids = owned };
+}
+
+pub fn serviceNameAvailable(session: mutation.Session, request: scheduler.PlacementRequest) mutation.Error!bool {
+    const lease = try Lease.begin(session);
+    defer lease.deinit();
+    return serviceNameAvailableInLease(lease, request);
+}
+
+fn serviceNameAvailableInLease(lease: Lease, request: scheduler.PlacementRequest) mutation.Error!bool {
+    if (!std.mem.eql(u8, request.workload_kind orelse "", "service")) return true;
+    const name = request.workload_name orelse return true;
+    const node = lease.session.node;
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
+    try lease.session.checkLocked();
+    const row = node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignments WHERE workload_kind = 'service' AND workload_name = ? AND coalesce(app_name, '') != ? AND status IN ('pending', 'running');", .{}, .{ name, request.app_name orelse "" }) catch return error.InternalError;
+    return row.?.count == 0;
+}
+
+pub fn replicaSurgeFits(session: mutation.Session, request: scheduler.PlacementRequest, replicas: u32) mutation.Error!bool {
+    const lease = try Lease.begin(session);
+    defer lease.deinit();
+    return serviceSurgeFits(lease, request, replicas);
+}
+
+fn serviceSurgeFits(lease: Lease, request: scheduler.PlacementRequest, replicas: u32) mutation.Error!bool {
+    if (!std.mem.eql(u8, request.workload_kind orelse "", "service")) return true;
+    const app_name = request.app_name orelse return true;
+    const workload_name = request.workload_name orelse return true;
+    const node = lease.session.node;
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
+    try lease.session.checkLocked();
+    const row = node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignments WHERE app_name = ? AND workload_kind = 'service' AND workload_name = ? AND status IN ('pending', 'running');", .{}, .{ app_name, workload_name }) catch return error.InternalError;
+    const prior: u64 = @intCast(@max(0, row.?.count));
+    const desired = @as(u64, replicas) * @max(@as(u64, 1), request.gang_world_size);
+    return prior +| desired <= @import("../manifest/spec.zig").max_service_replicas;
+}
+
+// reserve from applied assignments and groups staged in this lease. old
+// assignments keep their port until their replacement commits, so cleanup of
+// an old rank cannot remove its replacement's rendezvous mapping.
+fn reserveGangPort(session: mutation.Session, preferred: u16, pending: []const u16) mutation.Error!u16 {
+    session.node.mu.lockUncancelable(std.Options.debug_io);
+    defer session.node.mu.unlock(std.Options.debug_io);
+    try session.checkLocked();
+    var used = [_]bool{false} ** 65536;
+    for (pending) |port| used[port] = true;
+    const Row = struct { port: i64 };
+    var statement = session.node.stateMachineDb().prepare("SELECT DISTINCT gang_master_port AS port FROM assignments WHERE gang_rank = 0 AND gang_master_port IS NOT NULL AND status IN ('pending', 'running');") catch return error.InternalError;
+    defer statement.deinit();
+    var rows = statement.iterator(Row, .{}) catch return error.InternalError;
+    while (rows.next(.{}) catch return error.InternalError) |row| {
+        const port = std.math.cast(u16, row.port) orelse return error.InternalError;
+        used[port] = true;
+    }
+    const first: u32 = @max(@as(u32, preferred), 1024);
+    for (0..64512) |offset| {
+        const port: u16 = @intCast(1024 + (first - 1024 + offset) % 64512);
+        if (!used[port]) return port;
+    }
+    return error.Conflict;
 }
 
 fn workloadIds(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest) mutation.Error!Placement {
@@ -225,7 +307,7 @@ fn newId(alloc: std.mem.Allocator) mutation.Error![]const u8 {
     return alloc.dupe(u8, &buffer) catch return error.InternalError;
 }
 
-fn resumePlacement(alloc: std.mem.Allocator, lease: Lease, request: scheduler.PlacementRequest, release_id: []const u8) mutation.Error!?Placement {
+fn resumePlacement(alloc: std.mem.Allocator, lease: Lease, request: scheduler.PlacementRequest, release_id: []const u8, replicas: u32) mutation.Error!?Placement {
     const node = lease.session.node;
     node.mu.lockUncancelable(std.Options.debug_io);
     defer node.mu.unlock(std.Options.debug_io);
@@ -246,7 +328,7 @@ fn resumePlacement(alloc: std.mem.Allocator, lease: Lease, request: scheduler.Pl
         };
     }
     if (ids.items.len == 0) return null;
-    const expected = @max(@as(usize, 1), request.gang_world_size);
+    const expected = @as(usize, replicas) * @max(@as(usize, 1), request.gang_world_size);
     if (ids.items.len != expected) return error.Conflict;
     return .{ .assignment_ids = ids.toOwnedSlice(alloc) catch return error.InternalError };
 }
@@ -348,6 +430,8 @@ fn reassignGroup(alloc: std.mem.Allocator, session: mutation.Session, orphan_id:
     if (request.gang_world_size > 0) {
         const ranks = (try scheduler.scheduleGang(alloc, request, snapshot.records)) orelse return;
         defer alloc.free(ranks);
+        const port = try reserveGangPort(session, request.gang_master_port, &.{});
+        for (ranks) |*rank| rank.master_port = port;
         for (ranks, ids.items) |rank, id| {
             try sql.write(&batch.writer, "UPDATE assignments SET agent_id = CASE WHEN (SELECT last_applied FROM state_machine_meta WHERE id = 1) = ? THEN ? ELSE NULL END, status = 'pending', status_reason = NULL, gang_master_addr = ?, gang_master_port = ? WHERE id = ?;", .{ snapshot.index, rank.agent_id, rank.master_addr, rank.master_port, id });
         }
@@ -511,8 +595,11 @@ test "rollback capacity conflict preserves current assignments and later restore
     try rollback.activateTarget(session, current_target);
     var other_request = new_request;
     other_request.app_name = "other";
+    other_request.workload_name = "other-service";
     other_request.cpu_limit = 700;
-    const other = (try place(alloc, session, other_request, "other-release")).?;
+    const other_placement = try place(alloc, session, other_request, "other-release");
+    try std.testing.expect(other_placement != null);
+    const other = other_placement.?;
     defer other.deinit(alloc);
     try std.testing.expectError(error.Conflict, state.rollbackActivatedTargets(session));
     const current_count = (try node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignments WHERE id = ?;", .{}, .{current.assignment_ids[0]})).?.count;
@@ -560,4 +647,109 @@ test "partial gang loss rehomes all ranks and their master endpoint atomically" 
     const moved = (try node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignments WHERE agent_id = 'replacement' AND gang_master_addr = '127.0.0.2';", .{}, .{})).?.count;
     try std.testing.expectEqual(@as(i64, 2), moved);
     try std.testing.expectEqual(@as(i64, 2), try countRows(node.stateMachineDb(), "assignment_claims"));
+}
+
+test "three service replicas reserve together resume and roll back as one target" {
+    const alloc = std.testing.allocator;
+    const rollback = @import("../api/routes/cluster_agents/cluster_rollback.zig");
+    const Target = @import("../api/routes/cluster_agents/rollout_targets.zig").ScheduledTarget;
+    var node = try testNode();
+    defer node.deinit();
+    const session = try mutation.Session.begin(&node);
+    var request = test_request;
+    request.cpu_limit = 100;
+    const original = (try placeReplicas(alloc, session, request, "original", 3)).?;
+    defer original.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 3), original.assignment_ids.len);
+    const resumed = (try placeReplicas(alloc, session, request, "original", 3)).?;
+    defer resumed.deinit(alloc);
+    try std.testing.expectEqual(@as(i64, 3), try countRows(node.stateMachineDb(), "assignments"));
+    var state = try rollback.RollbackState.capture(alloc, session, &.{.{ .request = request, .replicas = 3 }});
+    defer state.deinit();
+    const replacement = (try placeReplicas(alloc, session, request, "replacement", 3)).?;
+    defer replacement.deinit(alloc);
+    const target: Target = .{ .request = request, .assignment_ids = replacement.assignment_ids, .placement_count = 3 };
+    try state.recordActivatedTarget(target);
+    try rollback.activateTarget(session, target);
+    try std.testing.expectEqual(@as(i64, 3), try countRows(node.stateMachineDb(), "assignments"));
+    for (replacement.assignment_ids) |id| {
+        const row = try node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignments WHERE id = ? AND workload_name = 'web';", .{}, .{id});
+        try std.testing.expectEqual(@as(i64, 1), row.?.count);
+    }
+    try state.rollbackActivatedTargets(session);
+    try std.testing.expectEqual(@as(i64, 3), try countRows(node.stateMachineDb(), "assignments"));
+    for (original.assignment_ids) |id| {
+        try std.testing.expect((try node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignments WHERE id = ?;", .{}, .{id})).?.count == 1);
+    }
+}
+
+test "replica capacity rejection commits no partial group" {
+    const alloc = std.testing.allocator;
+    var node = try testNode();
+    defer node.deinit();
+    const session = try mutation.Session.begin(&node);
+    var request = test_request;
+    request.cpu_limit = 400;
+    try std.testing.expect((try placeReplicas(alloc, session, request, "too-large", 3)) == null);
+    try std.testing.expectEqual(@as(i64, 0), try countRows(node.stateMachineDb(), "assignments"));
+    try std.testing.expectEqual(@as(i64, 0), try countRows(node.stateMachineDb(), "assignment_claims"));
+}
+
+test "replica surge limit preserves the prior group and permits resume" {
+    const alloc = std.testing.allocator;
+    var node = try testNode();
+    defer node.deinit();
+    const session = try mutation.Session.begin(&node);
+    var request = test_request;
+    request.cpu_limit = 10;
+    request.memory_limit_mb = 1;
+    const prior = (try placeReplicas(alloc, session, request, "prior", 33)).?;
+    defer prior.deinit(alloc);
+    try std.testing.expect(!try replicaSurgeFits(session, request, 32));
+    try std.testing.expect((try placeReplicas(alloc, session, request, "replacement", 32)) == null);
+    try std.testing.expectEqual(@as(i64, 33), try countRows(node.stateMachineDb(), "assignments"));
+    try std.testing.expectEqual(@as(i64, 33), try countRows(node.stateMachineDb(), "assignment_claims"));
+    const resumed = (try placeReplicas(alloc, session, request, "prior", 33)).?;
+    defer resumed.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 33), resumed.assignment_ids.len);
+    _ = try node.proposeCommitted("UPDATE assignments SET status = 'stopped';", 0);
+    try std.testing.expect(try replicaSurgeFits(session, request, 32));
+    const replacement = (try placeReplicas(alloc, session, request, "replacement", 32)).?;
+    defer replacement.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 32), replacement.assignment_ids.len);
+}
+
+test "cluster placement reserves service names across apps" {
+    const alloc = std.testing.allocator;
+    var node = try testNode();
+    defer node.deinit();
+    const session = try mutation.Session.begin(&node);
+    const first = (try place(alloc, session, test_request, "first")).?;
+    defer first.deinit(alloc);
+    var other = test_request;
+    other.app_name = "another-app";
+    other.cpu_limit = 100;
+    try std.testing.expect(!try serviceNameAvailable(session, other));
+    try std.testing.expect((try place(alloc, session, other, "second")) == null);
+    try std.testing.expectEqual(@as(i64, 1), try countRows(node.stateMachineDb(), "assignments"));
+    _ = try node.proposeCommitted("UPDATE assignments SET status = 'stopped';", 0);
+    try std.testing.expect(try serviceNameAvailable(session, other));
+    const reused = (try place(alloc, session, other, "second")).?;
+    defer reused.deinit(alloc);
+}
+
+test "training and service gangs reserve distinct rendezvous ports" {
+    const alloc = std.testing.allocator;
+    var node = try testNode();
+    defer node.deinit();
+    _ = try node.proposeCommitted("UPDATE agents SET cpu_cores = 8, gpu_count = 8;", 0);
+    const session = try mutation.Session.begin(&node);
+    var request = test_request;
+    request.gang_world_size = 2;
+    request.gpus_per_rank = 1;
+    const groups = (try placeReplicas(alloc, session, request, "mesh", 2)).?;
+    defer groups.deinit(alloc);
+    const counts = (try node.stateMachineDb().one(struct { ports: i64, ranks: i64 }, "SELECT COUNT(DISTINCT gang_master_port) AS ports, COUNT(*) AS ranks FROM assignments;", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 2), counts.ports);
+    try std.testing.expectEqual(@as(i64, 4), counts.ranks);
 }

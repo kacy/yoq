@@ -189,6 +189,17 @@ pub fn countProxyConfiguredServices() usize {
 }
 
 pub fn drainEndpoint(service_name: []const u8, endpoint_id: []const u8) RuntimeError!void {
+    const alloc = std.heap.page_allocator;
+    const record = store.getServiceEndpoint(alloc, service_name, endpoint_id) catch |err| switch (err) {
+        error.NotFound => return error.EndpointNotFound,
+        else => return error.StoreReadFailed,
+    };
+    defer record.deinit(alloc);
+    var changed = false;
+    // this defer runs after the registry mutex is released. the publisher takes
+    // its own snapshot, so it must never run while the registry lock is held.
+    defer if (changed) @import("published_ports.zig").refreshContainer(record.container_id);
+
     mutex.lockUncancelable(std.Options.debug_io);
     defer mutex.unlock(std.Options.debug_io);
 
@@ -197,9 +208,21 @@ pub fn drainEndpoint(service_name: []const u8, endpoint_id: []const u8) RuntimeE
 
     store.markServiceEndpointAdminState(service_name, endpoint_id, "draining") catch return error.StoreWriteFailed;
     try syncServiceFromStoreLocked(service_name);
+    changed = true;
 }
 
 pub fn deleteEndpoint(service_name: []const u8, endpoint_id: []const u8) RuntimeError!void {
+    const alloc = std.heap.page_allocator;
+    const record = store.getServiceEndpoint(alloc, service_name, endpoint_id) catch |err| switch (err) {
+        error.NotFound => return error.EndpointNotFound,
+        else => return error.StoreReadFailed,
+    };
+    defer record.deinit(alloc);
+    var changed = false;
+    // this defer runs after the registry mutex is released. the publisher takes
+    // its own snapshot, so it must never run while the registry lock is held.
+    defer if (changed) @import("published_ports.zig").refreshContainer(record.container_id);
+
     mutex.lockUncancelable(std.Options.debug_io);
     defer mutex.unlock(std.Options.debug_io);
 
@@ -208,6 +231,7 @@ pub fn deleteEndpoint(service_name: []const u8, endpoint_id: []const u8) Runtime
 
     store.removeServiceEndpoint(service_name, endpoint_id) catch return error.StoreWriteFailed;
     try syncServiceFromStoreLocked(service_name);
+    changed = true;
 }
 
 fn ensureInitializedLocked() !void {

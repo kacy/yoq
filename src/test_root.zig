@@ -144,6 +144,7 @@ comptime {
     _ = @import("manifest/loader.zig");
     _ = @import("manifest/orchestrator.zig");
     _ = @import("manifest/orchestrator/route_inputs.zig");
+    _ = @import("manifest/orchestrator/ownership.zig");
     _ = @import("manifest/orchestrator/tls_resources.zig");
     _ = @import("manifest/gpu_runtime.zig");
     _ = @import("manifest/health.zig");
@@ -156,6 +157,11 @@ comptime {
     _ = @import("manifest/backup_scheduler.zig");
     _ = @import("manifest/backup_retention.zig");
     _ = @import("manifest/training.zig");
+    _ = @import("manifest/checkpoint.zig");
+    _ = @import("manifest/training/local_runner.zig");
+    _ = @import("manifest/training/rank_ownership.zig");
+    _ = @import("gpu/lease.zig");
+    _ = @import("cluster/training_reconciler.zig");
     _ = @import("manifest/alerting.zig");
     _ = @import("dev/log_mux.zig");
     _ = @import("dev/watcher.zig");

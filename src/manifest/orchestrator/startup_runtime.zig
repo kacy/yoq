@@ -14,6 +14,8 @@ const cli = @import("../../lib/cli.zig");
 const RouteInputs = @import("route_inputs.zig").RouteInputs;
 const tls_support = @import("tls_support.zig");
 
+const instances = @import("instances.zig");
+
 const writeErr = cli.writeErr;
 
 pub const TlsResources = @import("tls_resources.zig").TlsResources;
@@ -26,12 +28,13 @@ pub fn registerHealthChecks(
 ) void {
     var has_checks = false;
 
-    for (services, 0..) |svc, i| {
+    for (states, 0..) |_, i| {
+        const svc = services[instances.serviceIndex(services, i)];
         if (!shouldStart(start_set, svc.name)) continue;
         const hc = svc.health_check orelse continue;
         has_checks = true;
 
-        const id = states[i].container_id;
+        const id = states[i].containerId();
         const record = store.load(alloc, id[0..]) catch {
             log.warn("orchestrator: failed to load container for health check registration: {s}", .{svc.name});
             continue;
@@ -43,7 +46,7 @@ pub fn registerHealthChecks(
         else
             [4]u8{ 0, 0, 0, 0 };
 
-        health.registerService(svc.name, id, container_ip, hc) catch |err| {
+        health.registerReplicaService(svc.name, id, container_ip, hc) catch |err| {
             writeErr("health: failed to register checks for {s}: {}\n", .{ svc.name, err });
         };
         states[i].health_status = .starting;
@@ -92,7 +95,7 @@ pub fn refreshServiceRuntimeBindings(
     state: anytype,
     backend_registry: ?*tls_backend.BackendRegistry,
 ) void {
-    const id = state.container_id;
+    const id = state.containerId();
     const record = store.load(alloc, id[0..]) catch {
         log.warn("orchestrator: failed to load container for runtime binding refresh: {s}", .{svc.name});
         return;
@@ -105,23 +108,14 @@ pub fn refreshServiceRuntimeBindings(
         [4]u8{ 0, 0, 0, 0 };
 
     if (svc.health_check) |hc| {
-        health.unregisterService(svc.name);
-        health.registerService(svc.name, id, container_ip, hc) catch |err| {
+        health.registerReplicaService(svc.name, id, container_ip, hc) catch |err| {
             writeErr("health: failed to register checks for {s}: {}\n", .{ svc.name, err });
         };
         state.health_status = .starting;
         health.startChecker();
     }
 
-    if (svc.tls) |tls| {
-        const reg = backend_registry orelse return;
-        const target = tlsBackendTargetForService(alloc, svc, tls.domain, record.ip_address) orelse return;
-        defer alloc.free(target.ip);
-        reg.register(tls.domain, target.ip, target.port, tls.peer) catch {
-            log.warn("failed to refresh backend for {s}", .{tls.domain});
-            return;
-        };
-    }
+    registerTlsService(alloc, backend_registry orelse return, svc);
 }
 
 pub fn startTlsProxy(
@@ -146,7 +140,8 @@ pub fn startTlsProxy(
         return null;
     };
 
-    registerTlsBackends(alloc, resources.backend_registry, services, states, start_set);
+    _ = states;
+    registerTlsBackends(alloc, resources.backend_registry, services, start_set);
     if (hasManagedAcmeService(services, start_set)) resources.proxy.setRenewalConfig(.{});
     resources.proxy.start();
     provisionAcmeCerts(alloc, resources.certs, &resources.proxy.challenges, services, start_set);
@@ -170,29 +165,32 @@ fn registerTlsBackends(
     alloc: std.mem.Allocator,
     reg: *tls_backend.BackendRegistry,
     services: []const spec.Service,
-    states: anytype,
     start_set: ?std.StringHashMapUnmanaged(void),
 ) void {
-    for (services, 0..) |svc, i| {
+    for (services) |svc| {
         if (!shouldStart(start_set, svc.name)) continue;
-        const tls = svc.tls orelse continue;
-
-        const id = states[i].container_id;
-        const record = store.load(alloc, id[0..]) catch {
-            log.warn("could not find container for {s}, skipping TLS backend", .{svc.name});
-            continue;
-        };
-        defer record.deinit(alloc);
-
-        const target = tlsBackendTargetForService(alloc, svc, tls.domain, record.ip_address) orelse continue;
-        defer alloc.free(target.ip);
-
-        reg.register(tls.domain, target.ip, target.port, tls.peer) catch {
-            log.warn("failed to register backend for {s}", .{tls.domain});
-            continue;
-        };
-        writeErr("  tls: {s} -> {s}:{d}\n", .{ tls.domain, target.ip, target.port });
+        registerTlsService(alloc, reg, svc);
     }
+}
+
+fn registerTlsService(alloc: std.mem.Allocator, reg: *tls_backend.BackendRegistry, svc: spec.Service) void {
+    const tls = svc.tls orelse return;
+    if (serviceUsesTlsRoutedListener(svc, tls.domain)) {
+        const target = tlsRoutedListenerTarget(alloc, tls.domain) orelse {
+            reg.unregister(tls.domain);
+            return;
+        };
+        defer alloc.free(target.ip);
+        reg.register(tls.domain, target.ip, target.port, tls.peer) catch |err| {
+            log.warn("failed to register tls route for {s}: {}", .{ tls.domain, err });
+        };
+        return;
+    }
+
+    const port = if (svc.ports.len > 0) svc.ports[0].container_port else 80;
+    reg.registerService(tls.domain, svc.name, port, tls.peer) catch |err| {
+        log.warn("failed to register tls service for {s}: {}", .{ tls.domain, err });
+    };
 }
 
 const TlsBackendTarget = struct {
@@ -200,34 +198,16 @@ const TlsBackendTarget = struct {
     port: u16,
 };
 
-fn tlsBackendTargetForService(
-    alloc: std.mem.Allocator,
-    svc: spec.Service,
-    tls_domain: []const u8,
-    container_ip: ?[]const u8,
-) ?TlsBackendTarget {
-    if (serviceUsesTlsRoutedListener(svc, tls_domain)) {
-        if (listener_runtime.connectTargetIfRunning()) |target| {
-            return .{
-                .ip = std.fmt.allocPrint(alloc, "{d}.{d}.{d}.{d}", .{
-                    target.addr[0],
-                    target.addr[1],
-                    target.addr[2],
-                    target.addr[3],
-                }) catch return null,
-                .port = target.port,
-            };
-        }
-        log.warn("http listener not running for routed TLS domain {s}; falling back to direct backend", .{tls_domain});
-    }
-
-    const ip = container_ip orelse {
-        log.warn("no IP for {s}, skipping TLS backend", .{svc.name});
+fn tlsRoutedListenerTarget(alloc: std.mem.Allocator, tls_domain: []const u8) ?TlsBackendTarget {
+    const target = listener_runtime.connectTargetIfRunning() orelse {
+        log.warn("http listener not running for routed tls domain {s}", .{tls_domain});
         return null;
     };
     return .{
-        .ip = alloc.dupe(u8, ip) catch return null,
-        .port = if (svc.ports.len > 0) svc.ports[0].container_port else 80,
+        .ip = std.fmt.allocPrint(alloc, "{d}.{d}.{d}.{d}", .{
+            target.addr[0], target.addr[1], target.addr[2], target.addr[3],
+        }) catch return null,
+        .port = target.port,
     };
 }
 
@@ -375,7 +355,8 @@ test "tls backend target uses local listener for routed domains" {
     });
 
     const listener_target = listener_runtime.connectTargetIfRunning().?;
-    const target = tlsBackendTargetForService(alloc, svc, "api.example.test", "10.42.0.9").?;
+    try std.testing.expect(serviceUsesTlsRoutedListener(svc, "api.example.test"));
+    const target = tlsRoutedListenerTarget(alloc, "api.example.test").?;
     defer alloc.free(target.ip);
     try std.testing.expectEqualStrings("127.0.0.1", target.ip);
     try std.testing.expectEqual(listener_target.port, target.port);

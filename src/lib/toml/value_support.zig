@@ -17,7 +17,7 @@ pub fn freeValue(alloc: std.mem.Allocator, value: Value) void {
             table.deinit(alloc);
             alloc.destroy(table);
         },
-        .integer, .boolean => {},
+        .integer, .float, .boolean => {},
     }
 }
 
@@ -31,7 +31,14 @@ pub fn parseValue(alloc: std.mem.Allocator, raw: []const u8, line_num: usize) Pa
     if (raw[0] == '[') return parseStringArray(alloc, raw, line_num);
     if (std.mem.eql(u8, raw, "true")) return Value{ .boolean = true };
     if (std.mem.eql(u8, raw, "false")) return Value{ .boolean = false };
-    if (raw[0] == '-' or std.ascii.isDigit(raw[0])) return parseInt(raw, line_num);
+    if (raw[0] == '-' or raw[0] == '+' or std.ascii.isDigit(raw[0])) {
+        if (std.mem.indexOfAny(u8, raw, ".eE") != null) {
+            const number = std.fmt.parseFloat(f64, raw) catch return ParseError.InvalidValue;
+            if (!std.math.isFinite(number)) return ParseError.InvalidValue;
+            return .{ .float = number };
+        }
+        return parseInt(raw, line_num);
+    }
 
     log.err("toml: line {d}: unrecognized value: {s}", .{ line_num, raw });
     return ParseError.InvalidValue;
@@ -206,4 +213,13 @@ test "toml array strings release allocations at each failure point" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
+}
+
+test "toml floating point values stay finite" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectEqual(@as(f64, 95.5), (try parseValue(alloc, "95.5", 1)).float);
+    try std.testing.expectEqual(@as(f64, 125), (try parseValue(alloc, "1.25e2", 1)).float);
+    try std.testing.expectError(ParseError.InvalidValue, parseValue(alloc, "1e9999", 1));
+    try std.testing.expectError(ParseError.InvalidValue, parseValue(alloc, "nan", 1));
+    try std.testing.expectError(ParseError.InvalidValue, parseValue(alloc, "inf", 1));
 }

@@ -16,6 +16,7 @@ pub const max_table_depth = 64;
 pub const Value = union(enum) {
     string: []const u8,
     integer: i64,
+    float: f64,
     boolean: bool,
     array: []const []const u8,
     table: *Table,
@@ -36,6 +37,15 @@ pub const Table = struct {
         const val = self.entries.get(key) orelse return null;
         return switch (val) {
             .integer => |i| i,
+            else => null,
+        };
+    }
+
+    pub fn getFloat(self: *const Table, key: []const u8) ?f64 {
+        const value = self.entries.get(key) orelse return null;
+        return switch (value) {
+            .float => |number| number,
+            .integer => |number| @floatFromInt(number),
             else => null,
         };
     }
@@ -76,7 +86,7 @@ pub const Table = struct {
                     table.deinit(alloc);
                     alloc.destroy(table);
                 },
-                .integer, .boolean => {},
+                .integer, .float, .boolean => {},
             }
             alloc.free(key);
         }

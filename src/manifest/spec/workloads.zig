@@ -40,6 +40,8 @@ pub const Service = struct {
     gpu: ?shared_types.GpuSpec = null,
     gpu_mesh: ?shared_types.GpuMeshSpec = null,
     alerts: ?shared_types.AlertSpec = null,
+    replicas: u32 = 1,
+    required_labels: []const u8 = "",
 
     pub fn deinit(self: Service, alloc: std.mem.Allocator) void {
         freeCommonFields(alloc, self.name, self.image, self.command, self.env, self.working_dir, self.volumes);
@@ -52,6 +54,7 @@ pub const Service = struct {
         alloc.free(self.http_routes);
         if (self.gpu) |g| g.deinit(alloc);
         if (self.alerts) |a| a.deinit(alloc);
+        alloc.free(self.required_labels);
     }
 };
 
@@ -65,12 +68,14 @@ pub const Worker = struct {
     volumes: []const shared_types.VolumeMount,
     gpu: ?shared_types.GpuSpec = null,
     gpu_mesh: ?shared_types.GpuMeshSpec = null,
+    required_labels: []const u8 = "",
 
     pub fn deinit(self: Worker, alloc: std.mem.Allocator) void {
         freeCommonFields(alloc, self.name, self.image, self.command, self.env, self.working_dir, self.volumes);
         for (self.depends_on) |dep| alloc.free(dep);
         alloc.free(self.depends_on);
         if (self.gpu) |g| g.deinit(alloc);
+        alloc.free(self.required_labels);
     }
 };
 

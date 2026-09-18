@@ -95,14 +95,14 @@ test "training start and status routes persist job state from app snapshot" {
     try std.testing.expectEqual(http.StatusCode.ok, start_resp.status);
     try expectJsonContains(start_resp.body, "\"app_name\":\"demo-app\"");
     try expectJsonContains(start_resp.body, "\"training_job\":\"finetune\"");
-    try expectJsonContains(start_resp.body, "\"state\":\"running\"");
+    try expectJsonContains(start_resp.body, "\"state\":\"scheduling\"");
     try expectJsonContains(start_resp.body, "\"gpus\":1");
 
     const status_resp = try harness.trainingStatus("demo-app", "finetune");
     defer freeResponse(alloc, status_resp);
 
     try std.testing.expectEqual(http.StatusCode.ok, status_resp.status);
-    try expectJsonContains(status_resp.body, "\"state\":\"running\"");
+    try expectJsonContains(status_resp.body, "\"state\":\"scheduling\"");
     try expectJsonContains(status_resp.body, "\"training_job\":\"finetune\"");
 }
 
@@ -156,7 +156,7 @@ test "training scale route replaces prior scheduled assignments" {
     harness.applyCommitted();
 
     try std.testing.expectEqual(http.StatusCode.ok, scale_resp.status);
-    try expectJsonContains(scale_resp.body, "\"state\":\"running\"");
+    try expectJsonContains(scale_resp.body, "\"state\":\"scheduling\"");
     try expectJsonContains(scale_resp.body, "\"gpus\":2");
     try std.testing.expectEqual(@as(usize, 2), try countTrainingAssignments(harness.node.stateMachineDb(), "demo-app", "finetune"));
     const pause = try harness.trainingPause("demo-app", "finetune");
@@ -304,7 +304,7 @@ test "training state and assignments survive replica promotion and pause togethe
     const copied = (try store.findTrainingJobInDb(replica.node.stateMachineDb(), alloc, "replicated-training", "finetune")).?;
     defer copied.deinit(alloc);
     try std.testing.expectEqualStrings(original.id, copied.id);
-    try std.testing.expectEqualStrings("running", copied.state);
+    try std.testing.expectEqualStrings("scheduling", copied.state);
     try std.testing.expectEqual(@as(i64, 2), copied.gpus);
     try std.testing.expectEqual(@as(usize, 2), try countTrainingAssignments(replica.node.stateMachineDb(), "replicated-training", "finetune"));
 
@@ -335,7 +335,7 @@ test "rejected training pause preserves assignments and running metadata atomica
     try std.testing.expectEqual(http.StatusCode.conflict, pause.status);
     const unchanged = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "pause-conflict", "finetune")).?;
     defer unchanged.deinit(alloc);
-    try std.testing.expectEqualStrings("running", unchanged.state);
+    try std.testing.expectEqualStrings("scheduling", unchanged.state);
     try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(harness.node.stateMachineDb(), "pause-conflict", "finetune"));
     const claims = (try harness.node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignment_claims;", .{}, .{})).?;
     try std.testing.expectEqual(@as(i64, 1), claims.count);
@@ -380,7 +380,7 @@ test "oversized training scale preserves prior metadata and assignments" {
     try std.testing.expectEqual(index, harness.node.log.lastIndex());
     const record = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "bounded-training", "finetune")).?;
     defer record.deinit(alloc);
-    try std.testing.expectEqualStrings("running", record.state);
+    try std.testing.expectEqualStrings("scheduling", record.state);
     try std.testing.expectEqual(@as(i64, 1), record.gpus);
     try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(harness.node.stateMachineDb(), "bounded-training", "finetune"));
 }
@@ -404,7 +404,7 @@ test "training replacement keeps the original job when capacity or metadata reje
     try std.testing.expectEqual(http.StatusCode.conflict, rejected.status);
     const record = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "atomic-training", "finetune")).?;
     defer record.deinit(alloc);
-    try std.testing.expectEqualStrings("running", record.state);
+    try std.testing.expectEqualStrings("scheduling", record.state);
     try std.testing.expectEqual(@as(i64, 1), record.gpus);
     try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(harness.node.stateMachineDb(), "atomic-training", "finetune"));
     const retained = (try harness.node.stateMachineDb().oneAlloc(struct { id: []const u8 }, alloc, "SELECT id FROM assignments;", .{}, .{})).?;
@@ -473,11 +473,17 @@ test "training controls retain job identity until a new start" {
         try std.testing.expectEqual(original.restart_count, record.restart_count);
         try std.testing.expectEqual(@as(i64, 2), record.gpus);
         const stopped = std.mem.eql(u8, action, "stop");
-        try std.testing.expectEqualStrings(if (stopped) "stopped" else "running", record.state);
+        try std.testing.expectEqualStrings(if (stopped) "stopped" else "scheduling", record.state);
         try std.testing.expectEqual(@as(usize, if (stopped) 0 else 2), try countTrainingAssignments(db, "job-controls", "finetune"));
         try expectJsonContains(response.body, if (stopped) "\"message\":\"training job stopped\"" else "\"message\":\"training job scheduled\"");
     }
 
+    const duplicate = try harness.trainingStart("job-controls", "finetune");
+    defer freeResponse(alloc, duplicate);
+    try std.testing.expectEqual(http.StatusCode.conflict, duplicate.status);
+    const stopped_response = route(makeRequest(.POST, "/apps/job-controls/training/finetune/stop", ""), alloc, harness.ctx()).?;
+    defer freeResponse(alloc, stopped_response);
+    try std.testing.expectEqual(http.StatusCode.ok, stopped_response.status);
     const restarted = try harness.trainingStart("job-controls", "finetune");
     defer freeResponse(alloc, restarted);
     try std.testing.expectEqual(http.StatusCode.ok, restarted.status);
@@ -485,7 +491,7 @@ test "training controls retain job identity until a new start" {
     defer fresh.deinit(alloc);
     try std.testing.expect(!std.mem.eql(u8, original.id, fresh.id));
     try std.testing.expect(fresh.created_at > original.created_at);
-    try std.testing.expectEqual(original.restart_count, fresh.restart_count);
+    try std.testing.expectEqual(@as(i64, 0), fresh.restart_count);
     try std.testing.expectEqual(@as(i64, 1), fresh.gpus);
     try std.testing.expectEqual(@as(usize, 1), try countTrainingAssignments(db, "job-controls", "finetune"));
 }
@@ -504,4 +510,101 @@ test "training controls require an existing job except for start" {
     }
     try std.testing.expectEqual(@as(usize, 0), try countTrainingAssignments(harness.node.stateMachineDb(), "missing-job", "finetune"));
     try std.testing.expect((try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "missing-job", "finetune")) == null);
+}
+
+test "training reconciliation records completed ranks and preserves operator pause" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
+    defer harness.deinit();
+    try harness.seedTrainingRelease("reconcile", "finetune", 2);
+    const started = try harness.trainingStart("reconcile", "finetune");
+    defer freeResponse(alloc, started);
+    try std.testing.expectEqual(http.StatusCode.ok, started.status);
+    const jobs = @import("workload_training_jobs.zig");
+    _ = try harness.node.proposeCommitted("UPDATE assignments SET status = 'running';", 0);
+    try jobs.reconcileAll(alloc, harness.node);
+    const running = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "reconcile", "finetune")).?;
+    defer running.deinit(alloc);
+    try std.testing.expectEqualStrings("running", running.state);
+    _ = try harness.node.proposeCommitted("UPDATE assignments SET status = 'stopped';", 0);
+    try jobs.reconcileAll(alloc, harness.node);
+    const completed = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "reconcile", "finetune")).?;
+    defer completed.deinit(alloc);
+    try std.testing.expectEqualStrings("completed", completed.state);
+    try std.testing.expectEqual(@as(i64, 0), completed.restart_count);
+    const restarted = try harness.trainingStart("reconcile", "finetune");
+    defer freeResponse(alloc, restarted);
+    try std.testing.expectEqual(http.StatusCode.ok, restarted.status);
+    const paused = try harness.trainingPause("reconcile", "finetune");
+    defer freeResponse(alloc, paused);
+    try jobs.reconcileAll(alloc, harness.node);
+    const record = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "reconcile", "finetune")).?;
+    defer record.deinit(alloc);
+    try std.testing.expectEqualStrings("paused", record.state);
+    try std.testing.expectEqual(@as(usize, 0), try countTrainingAssignments(harness.node.stateMachineDb(), "reconcile", "finetune"));
+}
+
+test "training reconciliation retries failed groups once and restores checkpoint execution" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
+    defer harness.deinit();
+    try harness.seedLatestRelease("retry",
+        \\{"app_name":"retry","training_jobs":[{"name":"finetune","image":"trainer","command":["python","train script.py"],"env":["DATA=one two"],"working_dir":"/work","gpus":2,"cpu_limit":1000,"memory_limit_mb":1024,"max_restarts":1,"auto_restart":true,"checkpoint":{"path":"/ckpt","keep":3,"interval_secs":60}}]}
+    );
+    const started = try harness.trainingStart("retry", "finetune");
+    defer freeResponse(alloc, started);
+    try std.testing.expectEqual(http.StatusCode.ok, started.status);
+    const before = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "retry", "finetune")).?;
+    defer before.deinit(alloc);
+    const jobs = @import("workload_training_jobs.zig");
+    _ = try harness.node.proposeCommitted("UPDATE assignments SET status = 'failed' WHERE gang_rank = 1;", 0);
+    try jobs.reconcileAll(alloc, harness.node);
+    const retried = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "retry", "finetune")).?;
+    defer retried.deinit(alloc);
+    try std.testing.expectEqualStrings(before.id, retried.id);
+    try std.testing.expectEqualStrings("scheduling", retried.state);
+    try std.testing.expectEqual(@as(i64, 1), retried.restart_count);
+    try std.testing.expectEqual(@as(?i64, 60), retried.checkpoint_interval);
+    const row = (try harness.node.stateMachineDb().oneAlloc(struct { command: []const u8 }, alloc, "SELECT command FROM assignments WHERE gang_rank = 0;", .{}, .{})).?;
+    defer alloc.free(row.command);
+    const execution = try @import("../../../cluster/assignment_spec.zig").decode(alloc, row.command);
+    defer execution.deinit();
+    try std.testing.expect(execution.value.resume_checkpoint);
+    try std.testing.expectEqualStrings("train script.py", execution.value.argv[1]);
+    try std.testing.expectEqualStrings("DATA=one two", execution.value.env[0]);
+    try std.testing.expectEqualStrings("/work", execution.value.working_dir.?);
+    _ = try harness.node.proposeCommitted("UPDATE assignments SET status = 'failed';", 0);
+    try jobs.reconcileAll(alloc, harness.node);
+    const terminal_index = harness.node.log.lastIndex();
+    try jobs.reconcileAll(alloc, harness.node);
+    try std.testing.expectEqual(terminal_index, harness.node.log.lastIndex());
+    const failed = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "retry", "finetune")).?;
+    defer failed.deinit(alloc);
+    try std.testing.expectEqualStrings("failed", failed.state);
+    try std.testing.expectEqual(@as(i64, 1), failed.restart_count);
+    try std.testing.expectEqual(@as(usize, 0), try countTrainingAssignments(harness.node.stateMachineDb(), "retry", "finetune"));
+}
+
+test "training reconciliation waits for retry capacity without spending its restart budget" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
+    defer harness.deinit();
+    try harness.seedTrainingRelease("waiting", "finetune", 1);
+    const started = try harness.trainingStart("waiting", "finetune");
+    defer freeResponse(alloc, started);
+    try std.testing.expectEqual(http.StatusCode.ok, started.status);
+    _ = try harness.node.proposeCommitted("UPDATE assignments SET status = 'failed'; UPDATE agents SET gpu_used = gpu_count;", 0);
+    const jobs = @import("workload_training_jobs.zig");
+    try jobs.reconcileAll(alloc, harness.node);
+    const pending = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "waiting", "finetune")).?;
+    defer pending.deinit(alloc);
+    try std.testing.expectEqualStrings("pending", pending.state);
+    try std.testing.expectEqual(@as(i64, 0), pending.restart_count);
+    try std.testing.expectEqual(@as(usize, 0), try countTrainingAssignments(harness.node.stateMachineDb(), "waiting", "finetune"));
+    _ = try harness.node.proposeCommitted("UPDATE agents SET gpu_used = 0;", 0);
+    try jobs.reconcileAll(alloc, harness.node);
+    const resumed = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "waiting", "finetune")).?;
+    defer resumed.deinit(alloc);
+    try std.testing.expectEqualStrings("scheduling", resumed.state);
+    try std.testing.expectEqual(@as(i64, 1), resumed.restart_count);
 }
