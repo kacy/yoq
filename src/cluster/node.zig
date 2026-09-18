@@ -1656,6 +1656,48 @@ test "committed mutation waits for quorum and fences leadership loss" {
     node.mu.unlock(std.Options.debug_io);
 }
 
+test "processing actions after snapshot failure releases skipped payloads" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [512]u8 = undefined;
+    var node = try Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 0,
+        .peers = &.{},
+        .data_dir = try testDirPath(tmp.dir, &path_buf),
+    });
+    defer node.deinit();
+    node.fixPointers();
+    {
+        const entries = try alloc.alloc(types.LogEntry, 1);
+        errdefer alloc.free(entries);
+        const data = try alloc.dupe(u8, "skipped command");
+        errdefer alloc.free(data);
+        entries[0] = .{ .index = 1, .term = 1, .data = data };
+        try node.raft.actions.append(alloc, .{ .send_append_entries = .{
+            .target = 2,
+            .args = .{ .term = 1, .leader_id = 1, .prev_log_index = 0, .prev_log_term = 0, .entries = entries, .leader_commit = 0 },
+        } });
+    }
+    {
+        const data = try alloc.dupe(u8, "skipped snapshot");
+        errdefer alloc.free(data);
+        try node.raft.actions.append(alloc, .{ .apply_snapshot = .{
+            .data = data,
+            .meta = .{ .last_included_index = 1, .last_included_term = 1, .data_len = data.len },
+        } });
+    }
+    node.snapshot_failed.store(true, .release);
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
+
+    node.processActions();
+
+    try std.testing.expectEqual(@as(usize, 0), node.raft.actions.items.len);
+    try std.testing.expectEqual(@as(u64, 0), node.state_machine.last_applied);
+}
+
 test {
     _ = @import("static_membership.zig");
 }

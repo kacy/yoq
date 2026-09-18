@@ -255,14 +255,11 @@ pub fn processActions(self: anytype) void {
         logger.warn("raft: failed to drain pending actions: {}", .{err});
         return;
     };
-    defer self.alloc.free(actions);
+    defer self.raft.freeActions(actions);
 
     var has_sends = false;
     for (actions) |action| {
-        if (self.snapshot_failed.load(.acquire)) {
-            if (action == .apply_snapshot) self.alloc.free(action.apply_snapshot.data);
-            continue;
-        }
+        if (self.snapshot_failed.load(.acquire)) continue;
         switch (action) {
             .commit_entries => |commit| {
                 self.state_machine.applyUpTo(&self.log, self.alloc, commit.up_to);
@@ -274,7 +271,6 @@ pub fn processActions(self: anytype) void {
                 self.leader_id = follower.leader_id;
             },
             .apply_snapshot => |snap| {
-                defer self.alloc.free(snap.data);
                 snapshot_support.install(self, snap.data, null) catch |err| {
                     logger.warn("snapshot: failed to install queued snapshot: {}", .{err});
                 };
@@ -286,22 +282,14 @@ pub fn processActions(self: anytype) void {
         }
     }
 
-    if (self.snapshot_failed.load(.acquire)) {
-        for (actions) |action| {
-            if (action == .send_append_entries) freeEntries(self.alloc, action.send_append_entries.args.entries);
-        }
-        return;
-    }
+    if (self.snapshot_failed.load(.acquire)) return;
     if (!has_sends) return;
 
     self.mu.unlock(std.Options.debug_io);
     defer self.mu.lockUncancelable(std.Options.debug_io);
 
     for (actions) |action| {
-        if (self.snapshot_failed.load(.acquire)) {
-            if (action == .send_append_entries) freeEntries(self.alloc, action.send_append_entries.args.entries);
-            continue;
-        }
+        if (self.snapshot_failed.load(.acquire)) continue;
         switch (action) {
             .send_request_vote => |vote| {
                 self.transport.send(vote.target, .{ .request_vote = vote.args }) catch |e| {
@@ -312,7 +300,6 @@ pub fn processActions(self: anytype) void {
                 self.transport.send(append.target, .{ .append_entries = append.args }) catch |e| {
                     logger.warn("failed to send append entries to node {}: {}", .{ append.target, e });
                 };
-                freeEntries(self.alloc, append.args.entries);
             },
             .send_request_vote_reply => |vote| {
                 self.transport.send(vote.target, .{ .request_vote_reply = vote.reply }) catch |e| {

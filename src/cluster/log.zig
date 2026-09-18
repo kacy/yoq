@@ -42,6 +42,14 @@ pub const Log = struct {
         return state_runtime.readState(&self.db);
     }
 
+    pub fn setElectionState(self: *Log, term: Term, voted_for: ?NodeId) bool {
+        state_runtime.setElectionState(&self.db, term, voted_for) catch |e| {
+            logger.warn("raft_log: failed to set election state for term {d}: {}", .{ term, e });
+            return false;
+        };
+        return true;
+    }
+
     pub fn getCurrentTerm(self: *Log) LogError!Term {
         return state_runtime.getCurrentTerm(&self.db);
     }

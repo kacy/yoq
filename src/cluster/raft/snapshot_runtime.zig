@@ -50,14 +50,13 @@ pub fn handleInstallSnapshotReply(
     if (reply.term != current_term or self.role != .leader) return;
 
     const peer_idx = common.peerIndex(self, from) orelse return;
-    if (self.snapshot_meta) |meta| {
-        if (meta.last_included_index > self.match_index[peer_idx]) {
-            // Snapshot replies carry no index and may acknowledge an older
-            // snapshot. Probe the current boundary before counting progress.
-            self.next_index[peer_idx] = meta.last_included_index + 1;
-            replication_runtime.sendAppendEntries(self, peer_idx);
-        }
-    }
+    const meta = self.snapshot_meta orelse return;
+    if (meta.last_included_index <= self.match_index[peer_idx]) return;
+
+    // a reply may acknowledge an older snapshot. append entries must confirm
+    // the current boundary before it counts toward the replicated prefix.
+    self.next_index[peer_idx] = meta.last_included_index + 1;
+    replication_runtime.sendAppendEntries(self, peer_idx);
 }
 
 pub fn sendInstallSnapshot(self: anytype, peer_idx: usize, meta: SnapshotMeta) void {
@@ -78,14 +77,19 @@ pub fn sendInstallSnapshot(self: anytype, peer_idx: usize, meta: SnapshotMeta) v
 }
 
 pub fn finishInstallSnapshot(self: anytype, meta: SnapshotMeta) bool {
-    if (!self.log.setSnapshotMeta(meta)) return false;
-    self.snapshot_meta = meta;
+    if (!persistSnapshotMeta(self, meta)) return false;
+    // installing an older snapshot must not move applied or committed work back.
     self.commit_index = @max(self.commit_index, meta.last_included_index);
     self.last_applied = @max(self.last_applied, meta.last_included_index);
     return true;
 }
 
 pub fn onSnapshotComplete(self: anytype, meta: SnapshotMeta) bool {
+    return persistSnapshotMeta(self, meta);
+}
+
+fn persistSnapshotMeta(self: anytype, meta: SnapshotMeta) bool {
+    // publish the new boundary only after its metadata is durable.
     if (!self.log.setSnapshotMeta(meta)) return false;
     self.snapshot_meta = meta;
     return true;
