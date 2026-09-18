@@ -4,11 +4,14 @@ const std = @import("std");
 pub const SchemaError = error{InitFailed};
 
 pub fn apply(db: *sqlite.Db) SchemaError!void {
-    // keep an interrupted upgrade retryable, including callers that already
-    // have a transaction open. only duplicate columns are safe to ignore.
-    try exec(db, "SAVEPOINT yoq_migrations;");
+    // reserve the writer before reading the schema. a deferred transaction can
+    // otherwise lose its wal snapshot to a concurrent supervisor update.
+    // preserve an existing caller transaction with a nested savepoint.
+    const owns_transaction = sqlite.c.sqlite3_get_autocommit(db.db) != 0;
+    try exec(db, if (owns_transaction) "BEGIN IMMEDIATE;" else "SAVEPOINT yoq_migrations;");
     errdefer {
-        _ = sqlite.c.sqlite3_exec(db.db, "ROLLBACK TO yoq_migrations; RELEASE yoq_migrations;", null, null, null);
+        const rollback = if (owns_transaction) "ROLLBACK;" else "ROLLBACK TO yoq_migrations; RELEASE yoq_migrations;";
+        _ = sqlite.c.sqlite3_exec(db.db, rollback, null, null, null);
     }
     try migrateContainers(db);
     try migrateAgents(db);
@@ -19,7 +22,7 @@ pub fn apply(db: *sqlite.Db) SchemaError!void {
     try migrateAuditLog(db);
     try migrateTokens(db);
     try migrateClusterCa(db);
-    try exec(db, "RELEASE yoq_migrations;");
+    try exec(db, if (owns_transaction) "COMMIT;" else "RELEASE yoq_migrations;");
 }
 
 fn migrateContainers(db: *sqlite.Db) SchemaError!void {
@@ -334,4 +337,56 @@ test "schema migration failure rolls back added columns and retries cleanly" {
     try std.testing.expectEqual(@as(i64, 1), credentials.count);
     const startup = (try db.one(Row, "SELECT COUNT(*) AS count FROM pragma_table_info('containers') WHERE name = 'startup_outcome';", .{}, .{})).?;
     try std.testing.expectEqual(@as(i64, 1), startup.count);
+}
+
+test "schema migrations reserve the writer before reading an existing wal schema" {
+    const schema = @import("../schema.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_buf: [4096]u8 = undefined;
+    const directory_len = try tmp.dir.realPathFile(std.testing.io, ".", &directory_buf);
+    var path_buf: [4096]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/migration.db", .{directory_buf[0..directory_len]});
+    var migrator = try sqlite.Db.init(.{ .mode = .{ .File = path }, .open_flags = .{ .write = true, .create = true } });
+    defer migrator.deinit();
+    try schema.init(&migrator);
+    var supervisor = try sqlite.Db.init(.{ .mode = .{ .File = path }, .open_flags = .{ .write = true } });
+    defer supervisor.deinit();
+    // the competing write must report contention instead of waiting inside
+    // the callback while the migration holds its reservation.
+    _ = sqlite.c.sqlite3_busy_timeout(supervisor.db, 0);
+    const Contention = struct {
+        supervisor: *sqlite.Db,
+        attempted: bool = false,
+        result: c_int = -1,
+
+        fn authorize(context: ?*anyopaque, action: c_int, table: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (!self.attempted and action == sqlite.c.SQLITE_INSERT and table != null and std.mem.eql(u8, std.mem.span(table), "service_http_routes")) {
+                self.attempted = true;
+                self.result = sqlite.c.sqlite3_exec(self.supervisor.db, "INSERT INTO containers (id, rootfs, command, created_at) VALUES ('fast-exit', '/', 'exit 0', 0);", null, null, null);
+            }
+            return sqlite.c.SQLITE_OK;
+        }
+    };
+    var contention: Contention = .{ .supervisor = &supervisor };
+    try std.testing.expectEqual(sqlite.c.SQLITE_OK, sqlite.c.sqlite3_set_authorizer(migrator.db, Contention.authorize, &contention));
+    defer _ = sqlite.c.sqlite3_set_authorizer(migrator.db, null, null);
+    try apply(&migrator);
+    try std.testing.expect(contention.attempted);
+    try std.testing.expectEqual(sqlite.c.SQLITE_BUSY, contention.result);
+    try supervisor.exec("INSERT INTO containers (id, rootfs, command, created_at) VALUES ('after-migration', '/', 'exit 0', 0);", .{}, .{});
+    try std.testing.expectEqual(@as(c_int, 1), sqlite.c.sqlite3_get_autocommit(migrator.db));
+}
+
+test "schema migrations preserve the caller transaction" {
+    const schema = @import("../schema.zig");
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+    try db.exec("BEGIN IMMEDIATE; INSERT INTO containers (id, rootfs, command, created_at) VALUES ('outer', '/', 'true', 0);", .{}, .{});
+    try apply(&db);
+    try std.testing.expectEqual(@as(c_int, 0), sqlite.c.sqlite3_get_autocommit(db.db));
+    try db.exec("ROLLBACK;", .{}, .{});
+    try std.testing.expectEqual(@as(i64, 0), (try db.one(i64, "SELECT COUNT(*) FROM containers WHERE id = 'outer';", .{}, .{})).?);
 }

@@ -47,6 +47,7 @@ comptime {
     _ = @import("state/store/services_types.zig");
     _ = @import("state/store/training.zig");
     _ = @import("state/schema.zig");
+    _ = @import("state/schema/migrations.zig");
     _ = @import("state/commands.zig");
     _ = @import("state/volumes.zig");
     _ = @import("state/secrets.zig");
