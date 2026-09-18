@@ -127,6 +127,12 @@ the agent writes its private enrollment identity under `~/.local/share/yoq/enrol
 
 keep this directory across agent restarts. changing the join address, port or token selects a separate identity. older servers remain compatible but do not deduplicate enrollment; upgrade servers before relying on retry recovery. registrations created without a durable enrollment identity are not matched retroactively.
 
+the same enrollment directory stores trusted api alternatives in a `.api-servers` file. registration and heartbeat responses authenticate this list with the enrollment token. peers use the configured cluster-wide api port. the agent tries up to three trusted endpoints per operation and retains its position for the next retry. a bare leader hint cannot authorize sending credentials to a new address. keep the original join arguments when restarting an agent; failover does not change its identity.
+
+assignment attempts and status reports are durable in `~/.local/share/yoq/agent-cache.db`. keep this file with the enrollment directory. terminal reports remain queued until a server confirms committed application. each reassignment increments a generation, so a late result cannot stop a replacement attempt. after restart, the agent stops any cgroup recorded for an interrupted attempt before reporting it failed; it does not start work from an old cached snapshot. failed cleanup leaves that attempt blocked for a later retry.
+
+the result queue holds at most 8,192 attempts. if reports cannot drain, the agent stops admitting new work instead of deleting results. restore API connectivity or resolve local storage errors; deleting the cache can lose completion records. normal loops process at most eight results, and shutdown attempts one delivery before leaving the remainder for restart.
+
 from a server or operator host with the installed api token, verify the agent appears:
 
 ```
@@ -423,6 +429,12 @@ curl http://10.0.0.1:7700/metrics \
 
 the api token is the 64-character lowercase hex value installed during credential setup. these commands read `/root/.local/share/yoq/api_token`.
 
+### assignment recovery upgrade
+
+pause workload mutations and rescheduling while upgrading every voting server to the generation-aware schema. older voters cannot apply the new assignment statements consistently. upgrade agents before resuming scheduling, and preserve both enrollment files and `agent-cache.db`.
+
+successful enrollment from an older server remains readable. an older follower cannot introduce a new endpoint through an unsigned leader hint, and an older server's HTTP 200 does not confirm durable status delivery. those reports remain queued until an upgraded server returns a committed receipt. legacy status updates without a generation are accepted only for the original generation zero.
+
 ### rolling upgrades
 
 for a compatible binary upgrade, retain quorum while replacing servers. the replicated-command validation change requires a coordinated voter upgrade instead; see [replicated command recovery](#upgrading-replicated-command-validation). for ordinary compatible upgrades:
@@ -436,7 +448,7 @@ curl -X POST http://10.0.0.1:7700/cluster/step-down \
   -H "Authorization: Bearer $API_TOKEN"
 ```
 
-this gracefully transfers leadership to another server. if the node is not the leader, the response includes a `"leader"` field pointing to the current leader. the old leader can then be drained and upgraded. agents automatically follow the new leader via heartbeat responses.
+this gracefully transfers leadership to another server. if the node is not the leader, the response includes a `"leader"` field pointing to the current leader. the old leader can then be drained and upgraded. agents follow trusted leader hints and try their persisted alternatives if the current server becomes unreachable.
 
 ### routine failure drills
 

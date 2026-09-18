@@ -159,6 +159,13 @@ what to verify:
 - `yoq nodes --server ...` and `yoq status --server ...` still work
 - joined agents keep heartbeating without manual reconfiguration
 
+then repeat the drill with a hard failure: stop the current leader process or disconnect its API port while leaving a voting quorum available. leave that endpoint unavailable while checking recovery; graceful step-down alone does not test a broken connection.
+
+- agents reach a surviving server without changing their join arguments
+- agent and node IDs stay unchanged
+- assignment polling resumes and terminal results reach the surviving leader
+- a late result from an earlier assignment generation cannot stop its replacement
+
 ### agent restart and recovery
 
 restart one agent process or reboot one agent node.
@@ -167,7 +174,11 @@ what to verify:
 
 - the agent returns to `active`
 - cross-node service discovery still works after recovery
-- workloads either stay reachable or reconcile back to healthy state
+- interrupted assignment cgroups are stopped before their attempts are reported failed
+- a queued terminal result survives the restart and reaches committed state after API connectivity returns
+- a stale cached assignment does not launch a second copy
+
+preserve the enrollment directory and `agent-cache.db` throughout this drill. temporarily interrupt the API connection when a short worker exits, restart the agent, restore connectivity, and verify that the original attempt becomes terminal without a duplicate launch.
 
 ### rollout pause and resume
 
