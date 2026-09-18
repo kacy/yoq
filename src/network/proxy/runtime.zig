@@ -257,6 +257,7 @@ const RouteTrafficState = struct {
 };
 
 pub fn resetForTest() void {
+    @import("observations.zig").reset();
     mutex.lockUncancelable(std.Options.debug_io);
     defer mutex.unlock(std.Options.debug_io);
 

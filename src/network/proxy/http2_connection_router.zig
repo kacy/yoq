@@ -1,4 +1,5 @@
 const std = @import("std");
+const observations = @import("observations.zig");
 const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const http = @import("../../api/http.zig");
@@ -162,6 +163,7 @@ const ConnectionRouter = struct {
     }
 
     fn bootstrapUpgradedStream(self: *ConnectionRouter, upgraded: h2c_upgrade.ParsedUpgrade) !void {
+        const observation_started_ns = observations.nowNs();
         proxy_runtime.recordRequestStart();
 
         const route = router.matchRoute(
@@ -240,6 +242,7 @@ const ConnectionRouter = struct {
                 }
                 const route_failure: proxy_runtime.RouteFailureKind = if (failure_kind == .connect) .connect else .send;
                 proxy_runtime.recordRouteFailure(route.name, route_failure);
+                observations.record(backend_service, observation_started_ns, true);
                 proxy_runtime.recordResponse(.bad_gateway);
                 const body = if (failure_kind == .connect) "{\"error\":\"upstream connect failed\"}" else "{\"error\":\"upstream send failed\"}";
                 try self.sendLocalStreamResponse(1, .bad_gateway, body);
@@ -253,6 +256,7 @@ const ConnectionRouter = struct {
                 .upstream = upstream,
                 .upstream_fd = upstream_fd,
                 .request_deadline_at_ms = request_deadline_at_ms,
+                .observation_started_ns = observation_started_ns,
                 .mirror = self.startMirrorSessionForUpgrade(route, upgraded),
                 .downstream_end_stream = true,
             });
@@ -320,6 +324,7 @@ const ConnectionRouter = struct {
     }
 
     fn handleClientHeaders(self: *ConnectionRouter) !void {
+        const observation_started_ns = observations.nowNs();
         const parsed = http2_request.parseRequestHeaderSequence(self.allocator, self.downstream_buf.items, 0) catch |err| switch (err) {
             error.BufferTooShort => return,
             else => return err,
@@ -412,6 +417,7 @@ const ConnectionRouter = struct {
                 }
                 const route_failure: proxy_runtime.RouteFailureKind = if (failure_kind == .connect) .connect else .send;
                 proxy_runtime.recordRouteFailure(route.name, route_failure);
+                observations.record(backend_service, observation_started_ns, true);
                 proxy_runtime.recordResponse(.bad_gateway);
                 const body = if (failure_kind == .connect) "{\"error\":\"upstream connect failed\"}" else "{\"error\":\"upstream send failed\"}";
                 try self.sendLocalStreamResponse(parsed.request.stream_id, .bad_gateway, body);
@@ -426,6 +432,7 @@ const ConnectionRouter = struct {
                 .upstream = upstream,
                 .upstream_fd = upstream_fd,
                 .request_deadline_at_ms = request_deadline_at_ms,
+                .observation_started_ns = observation_started_ns,
                 .mirror = self.startMirrorSession(route, parsed),
             });
             try self.consumeDownstreamBytes(parsed.consumed);
@@ -617,6 +624,7 @@ const ConnectionRouter = struct {
         try self.consumeUpstreamBytes(session_idx, rewritten.consumed);
 
         if (frame.frame_type == .rst_stream or (frame.flags & 0x1) != 0) {
+            observations.record(session.backend_service, session.observation_started_ns, frame.frame_type == .rst_stream or (session.response_status orelse 500) >= 500);
             proxy_runtime.recordRouteRecovered(session.route.name);
             self.removeSession(session_idx);
         }
@@ -641,6 +649,7 @@ const ConnectionRouter = struct {
             .receive => .receive,
             .other => .receive,
         });
+        observations.record(session.backend_service, session.observation_started_ns, true);
         proxy_runtime.recordResponse(.bad_gateway);
         try self.sendLocalStreamResponse(session.downstream_stream_id, .bad_gateway, body);
         self.removeSession(session_idx);
@@ -972,6 +981,7 @@ const StreamSession = struct {
     response_status: ?u16 = null,
     downstream_end_stream: bool = false,
     request_deadline_at_ms: i64,
+    observation_started_ns: u64 = 0,
 
     fn deinit(self: *StreamSession, alloc: std.mem.Allocator) void {
         linux_platform.posix.close(self.upstream_fd);
