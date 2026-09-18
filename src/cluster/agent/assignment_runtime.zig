@@ -10,6 +10,8 @@ const manifest_health = @import("../../manifest/health.zig");
 const manifest_spec = @import("../../manifest/spec.zig");
 const store = @import("../../state/store.zig");
 const logs = @import("../../runtime/logs.zig");
+const api_endpoints = @import("../api_endpoints.zig");
+const result_store = @import("result_store.zig");
 const agent_store = @import("../agent_store.zig");
 const assignment_spec = @import("../assignment_spec.zig");
 const gpu_leases = @import("../../gpu/lease.zig");
@@ -37,6 +39,7 @@ pub const GangInfo = struct {
 };
 
 const AssignmentMeta = struct {
+    generation: i64 = 0,
     cpu_limit: i64 = 1000,
     memory_limit_mb: i64 = 256,
     app_name: ?[]const u8 = null,
@@ -84,6 +87,7 @@ const AssignmentInputs = struct {
             .command = command_copy,
             .gang_info = gang_copy,
             .meta = .{
+                .generation = meta.generation,
                 .cpu_limit = meta.cpu_limit,
                 .memory_limit_mb = meta.memory_limit_mb,
                 .app_name = app_name,
@@ -117,16 +121,14 @@ const ServiceReadinessResult = enum {
 };
 
 pub fn reconcile(self: anytype) void {
-    var resp = fetchAssignments(self) orelse {
-        reconcileFromCache(self);
-        return;
-    };
+    var resp = fetchAssignments(self) orelse return;
     defer resp.deinit(self.alloc);
 
     // Cancel work only after validating a successful assignment snapshot.
     // An error response does not mean the server removed every assignment.
     if (resp.status_code != 200) return;
     cancelRemovedAssignments(self, resp.body) catch return;
+    retireResults(self, resp.body) catch return;
 
     const now = nowRealSeconds();
     var iter = json_helpers.extractJsonObjects(resp.body);
@@ -146,6 +148,7 @@ pub fn reconcile(self: anytype) void {
         const workload_kind = extractJsonString(obj, "workload_kind");
         const workload_name = extractJsonString(obj, "workload_name");
         const health_check_json = json_helpers.extractJsonObject(obj, "health_check");
+        const generation = numbers.field(i64, numeric.value, "generation", 0, std.math.maxInt(i64), 0) catch continue;
         const gang_info = parseGang(numeric.value, extractJsonString(obj, "gang_master_addr")) catch continue;
 
         if (std.mem.eql(u8, status, "stopped") or std.mem.eql(u8, status, "failed")) {
@@ -165,6 +168,7 @@ pub fn reconcile(self: anytype) void {
 
         if (std.mem.eql(u8, status, "pending")) {
             startPendingAssignment(self, assignment_id, image, command, gang_info, .{
+                .generation = generation,
                 .cpu_limit = cpu_limit,
                 .memory_limit_mb = memory_limit_mb,
                 .app_name = app_name,
@@ -194,14 +198,14 @@ fn parseGang(object: std.json.Value, address: ?[]const u8) !?GangInfo {
 }
 
 fn cancelRemovedAssignments(self: anytype, body: []const u8) !void {
-    const Desired = struct { id: []const u8, status: []const u8 };
+    const Desired = struct { id: []const u8, status: []const u8, generation: i64 = 0 };
     const parsed = try std.json.parseFromSlice([]Desired, self.alloc, body, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
-    var desired = std.StringHashMap(void).init(self.alloc);
+    var desired = std.StringHashMap(i64).init(self.alloc);
     defer desired.deinit();
     for (parsed.value) |assignment| {
         if (std.mem.eql(u8, assignment.status, "pending") or std.mem.eql(u8, assignment.status, "running"))
-            try desired.put(assignment.id, {});
+            try desired.put(assignment.id, assignment.generation);
     }
     var retired: std.ArrayList([]const u8) = .empty;
     defer retired.deinit(self.alloc);
@@ -210,11 +214,11 @@ fn cancelRemovedAssignments(self: anytype, body: []const u8) !void {
         defer self.container_lock.unlock(std.Options.debug_io);
         var it = self.local_containers.iterator();
         while (it.next()) |entry| {
-            if (!desired.contains(entry.key_ptr.*)) {
+            if (desired.get(entry.key_ptr.*) == null or desired.get(entry.key_ptr.*).? != entry.value_ptr.*.generation) {
                 entry.value_ptr.*.canceled.store(true, .release);
                 agent_store.removeAssignment(entry.key_ptr.*) catch {};
             }
-            if (entry.value_ptr.*.canceled.load(.acquire) and entry.value_ptr.*.done.load(.acquire))
+            if (entry.value_ptr.*.canceled.load(.acquire) and entry.value_ptr.*.done.load(.acquire) and entry.value_ptr.*.pending_result == null)
                 try retired.append(self.alloc, entry.key_ptr.*);
         }
         for (retired.items) |id| {
@@ -235,23 +239,6 @@ fn cancelRemovedAssignments(self: anytype, body: []const u8) !void {
     }
 }
 
-fn reconcileFromCache(self: anytype) void {
-    const cached = agent_store.listPendingAssignments(self.alloc) catch return;
-    defer {
-        for (cached) |assignment| assignment.deinit(self.alloc);
-        self.alloc.free(cached);
-    }
-
-    if (cached.len == 0) return;
-    log.warn("server unreachable, reconciling from cache ({d} assignments)", .{cached.len});
-    for (cached) |assignment| {
-        startPendingAssignment(self, assignment.id, assignment.image, assignment.command, null, .{
-            .cpu_limit = assignment.cpu_limit,
-            .memory_limit_mb = assignment.memory_limit_mb,
-        }) catch {};
-    }
-}
-
 fn startPendingAssignment(
     self: anytype,
     id: []const u8,
@@ -264,6 +251,8 @@ fn startPendingAssignment(
     const already_tracked = self.local_containers.contains(id);
     self.container_lock.unlock(std.Options.debug_io);
     if (already_tracked) return;
+    if (!try result_store.claim(&self.id, id, meta.generation)) return;
+    errdefer result_store.record(&self.id, id, meta.generation, "failed", "worker_start_failed") catch {};
 
     const id_copy = try self.alloc.dupe(u8, id);
     errdefer self.alloc.free(id_copy);
@@ -271,7 +260,7 @@ fn startPendingAssignment(
     errdefer inputs.deinit(self.alloc);
     const owner = try self.alloc.create(@import("../agent.zig").LocalAssignment);
     errdefer self.alloc.destroy(owner);
-    owner.* = .{};
+    owner.* = .{ .generation = meta.generation };
 
     {
         self.container_lock.lockUncancelable(std.Options.debug_io);
@@ -301,7 +290,7 @@ fn startPendingAssignment(
 fn fetchAssignments(self: anytype) ?http_client.Response {
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/agents/{s}/assignments", .{self.id}) catch return null;
-    return http_client.getWithAuth(self.alloc, self.server_addr, self.server_port, path, self.worker_credential) catch return null;
+    return api_endpoints.request(self, .get, path, "", self.worker_credential) catch return null;
 }
 
 const StopToken = struct {
@@ -333,18 +322,19 @@ fn runAssignment(
 
     if (stopping.load(.acquire)) {
         setContainerState(self, assignment_id, .stopped);
+        reportStatus(self, assignment_id, meta.generation, "stopped", null);
         return;
     }
 
     var execution = assignment_spec.decode(self.alloc, command) catch {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "invalid_execution_spec");
+        reportStatus(self, assignment_id, meta.generation, "failed", "invalid_execution_spec");
         return;
     };
     defer execution.deinit();
     const limits = assignment_spec.resourceLimits(meta.cpu_limit, meta.memory_limit_mb) catch {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "invalid_resource_limits");
+        reportStatus(self, assignment_id, meta.generation, "failed", "invalid_resource_limits");
         return;
     };
     const ref = image_spec.parseImageRef(image);
@@ -354,26 +344,27 @@ fn runAssignment(
     var pull_result = image_registry.pull(threaded_io.io(), self.alloc, ref) catch {
         log.warn("failed to pull image {s} for assignment {s}", .{ image, assignment_id });
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "image_pull_failed");
+        reportStatus(self, assignment_id, meta.generation, "failed", "image_pull_failed");
         return;
     };
     defer pull_result.deinit();
     var config_parsed = image_spec.parseImageConfig(self.alloc, pull_result.config_bytes) catch {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "invalid_image_config");
+        reportStatus(self, assignment_id, meta.generation, "failed", "invalid_image_config");
         return;
     };
     defer config_parsed.deinit();
 
     if (stopping.load(.acquire)) {
         setContainerState(self, assignment_id, .stopped);
+        reportStatus(self, assignment_id, meta.generation, "stopped", null);
         return;
     }
 
     const layer_paths = image_layer.assembleRootfsDescriptors(self.alloc, pull_result.layers) catch {
         log.warn("failed to assemble rootfs for assignment {s}", .{assignment_id});
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "rootfs_assemble_failed");
+        reportStatus(self, assignment_id, meta.generation, "failed", "rootfs_assemble_failed");
         return;
     };
     defer {
@@ -383,7 +374,7 @@ fn runAssignment(
 
     if (layer_paths.len == 0) {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "empty_image_rootfs");
+        reportStatus(self, assignment_id, meta.generation, "failed", "empty_image_rootfs");
         return;
     }
     const rootfs = layer_paths[layer_paths.len - 1];
@@ -392,7 +383,7 @@ fn runAssignment(
     container.generateId(&id_buf) catch {
         log.warn("failed to generate container ID for assignment {s}", .{assignment_id});
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "container_id_failed");
+        reportStatus(self, assignment_id, meta.generation, "failed", "container_id_failed");
         return;
     };
     const container_id = id_buf[0..];
@@ -403,7 +394,7 @@ fn runAssignment(
     const gpu_count = if (execution.value.gpu_count == 0 and gang_info != null) 1 else execution.value.gpu_count;
     var gpus = gpu_leases.Lease.acquireWithMinimum(gpu_count, execution.value.gpu_model, execution.value.gpu_vram_min_mb) catch {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "gpu_unavailable");
+        reportStatus(self, assignment_id, meta.generation, "failed", "gpu_unavailable");
         return;
     };
     defer gpus.deinit();
@@ -414,7 +405,7 @@ fn runAssignment(
     }
     prepareGpuEnv(self.alloc, &mesh_env, &gpus, gang_info) catch {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "gpu_environment_failed");
+        reportStatus(self, assignment_id, meta.generation, "failed", "gpu_environment_failed");
         return;
     };
     var mounts_arena = std.heap.ArenaAllocator.init(self.alloc);
@@ -422,17 +413,17 @@ fn runAssignment(
     const mount_runtime = @import("../../manifest/orchestrator/service_runtime.zig");
     const mounts = mount_runtime.resolveServiceVolumes(mounts_arena.allocator(), execution.value.volumes, execution.value.volume_definitions, meta.app_name orelse "") catch {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "volume_mount_failed");
+        reportStatus(self, assignment_id, meta.generation, "failed", "volume_mount_failed");
         return;
     };
     if (mounts.bind_mounts.items.len != execution.value.volumes.len) {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "volume_mount_failed");
+        reportStatus(self, assignment_id, meta.generation, "failed", "volume_mount_failed");
         return;
     }
     if (execution.value.ib_required and @import("../../gpu/mesh.zig").detectInfiniband().count == 0) {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "infiniband_unavailable");
+        reportStatus(self, assignment_id, meta.generation, "failed", "infiniband_unavailable");
         return;
     }
     if (execution.value.checkpoint) |ckpt| {
@@ -440,21 +431,21 @@ fn runAssignment(
         const resume_path = if (execution.value.resume_checkpoint)
             checkpoints.latestMountedCheckpoint(mounts_arena.allocator(), ckpt.path, mounts.bind_mounts.items) catch {
                 setContainerState(self, assignment_id, .failed);
-                reportStatus(self, assignment_id, "failed", "checkpoint_path_invalid");
+                reportStatus(self, assignment_id, meta.generation, "failed", "checkpoint_path_invalid");
                 return;
             }
         else
             null;
         checkpoints.buildCheckpointEnv(self.alloc, &mesh_env, ckpt, resume_path) catch {
             setContainerState(self, assignment_id, .failed);
-            reportStatus(self, assignment_id, "failed", "checkpoint_environment_failed");
+            reportStatus(self, assignment_id, meta.generation, "failed", "checkpoint_environment_failed");
             return;
         };
     }
 
     var resolved = assignment_spec.resolve(self.alloc, execution.value, config_parsed.value.config, mesh_env.items) catch {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "invalid_execution_spec");
+        reportStatus(self, assignment_id, meta.generation, "failed", "invalid_execution_spec");
         return;
     };
     defer resolved.deinit(self.alloc);
@@ -472,7 +463,7 @@ fn runAssignment(
     }) catch {
         log.warn("failed to save container record for assignment {s}", .{assignment_id});
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "container_record_failed");
+        reportStatus(self, assignment_id, meta.generation, "failed", "container_record_failed");
         return;
     };
 
@@ -482,6 +473,12 @@ fn runAssignment(
             if (user.len > 0) image_user = user;
         }
     }
+    result_store.attachContainer(&self.id, assignment_id, meta.generation, container_id) catch {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, meta.generation, "failed", "result_store_failed");
+        cleanup(container_id);
+        return;
+    };
     var c = container.Container{
         .config = .{
             .id = container_id,
@@ -514,7 +511,7 @@ fn runAssignment(
     c.start() catch {
         log.warn("container {s} failed to start for assignment {s}", .{ container_id, assignment_id });
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "start_failed");
+        reportStatus(self, assignment_id, meta.generation, "failed", "start_failed");
         cleanup(container_id);
         return;
     };
@@ -525,7 +522,7 @@ fn runAssignment(
             published_ports.publishInstanceWithBootstrap(self.alloc, meta.app_name, hostname, container_id, &ports, gang.master_port) catch {
                 _ = waitForAssignmentExit(&c, stopping, true);
                 setContainerState(self, assignment_id, .failed);
-                reportStatus(self, assignment_id, "failed", "rendezvous_port_failed");
+                reportStatus(self, assignment_id, meta.generation, "failed", "rendezvous_port_failed");
                 cleanup(container_id);
                 return;
             };
@@ -541,12 +538,12 @@ fn runAssignment(
             _ = waitForAssignmentExit(&c, stopping, true);
             if (stopping.load(.acquire)) {
                 setContainerState(self, assignment_id, .stopped);
-                reportStatus(self, assignment_id, "stopped", null);
+                reportStatus(self, assignment_id, meta.generation, "stopped", null);
                 cleanup(container_id);
                 return;
             }
             setContainerState(self, assignment_id, .failed);
-            reportStatus(self, assignment_id, "failed", switch (readiness_result) {
+            reportStatus(self, assignment_id, meta.generation, "failed", switch (readiness_result) {
                 .healthy => unreachable,
                 .unhealthy => "readiness_failed",
                 .timeout => "readiness_timeout",
@@ -561,7 +558,7 @@ fn runAssignment(
         const ports = servicePublishedPorts(self.alloc, execution.value.ports, gang_info) catch {
             _ = waitForAssignmentExit(&c, stopping, true);
             setContainerState(self, assignment_id, .failed);
-            reportStatus(self, assignment_id, "failed", "invalid_published_ports");
+            reportStatus(self, assignment_id, meta.generation, "failed", "invalid_published_ports");
             cleanup(container_id);
             return;
         };
@@ -571,7 +568,7 @@ fn runAssignment(
             log.warn("assignment {s} could not publish service ports: {}", .{ assignment_id, err });
             _ = waitForAssignmentExit(&c, stopping, true);
             setContainerState(self, assignment_id, .failed);
-            reportStatus(self, assignment_id, "failed", "published_port_failed");
+            reportStatus(self, assignment_id, meta.generation, "failed", "published_port_failed");
             cleanup(container_id);
             return;
         };
@@ -586,14 +583,14 @@ fn runAssignment(
             _ = c.wait() catch 255;
             cleanup(container_id);
             setContainerState(self, assignment_id, .failed);
-            reportStatus(self, assignment_id, "failed", "alert_runtime_unavailable");
+            reportStatus(self, assignment_id, meta.generation, "failed", "alert_runtime_unavailable");
             return;
         }
     else
         null;
     defer if (alert_registration) |registration| registration.release();
 
-    reportStatus(self, assignment_id, "running", null);
+    reportStatus(self, assignment_id, meta.generation, "running", null);
     setContainerState(self, assignment_id, .running);
 
     const exit_code = waitForAssignmentExit(&c, stopping, false);
@@ -606,12 +603,12 @@ fn runAssignment(
     const interrupted = stopping.load(.acquire);
     if ((interrupted and !is_training) or (!interrupted and exit_code == 0)) {
         setContainerState(self, assignment_id, .stopped);
-        reportStatus(self, assignment_id, "stopped", null);
+        reportStatus(self, assignment_id, meta.generation, "stopped", null);
     } else {
         setContainerState(self, assignment_id, .failed);
         // an interrupted rank has not completed its training. operator pause
         // already removed its assignment; agent shutdown leaves it retryable.
-        reportStatus(self, assignment_id, "failed", if (interrupted) "rank_interrupted" else "process_failed");
+        reportStatus(self, assignment_id, meta.generation, "failed", if (interrupted) "rank_interrupted" else "process_failed");
     }
     if (is_training) {
         // keep the stopped record and logs so remote training logs remain
@@ -819,21 +816,137 @@ fn buildAssignmentHostname(buf: []u8, meta: AssignmentMeta, gang_info: ?GangInfo
     return "agent";
 }
 
-fn reportStatus(self: anytype, assignment_id: []const u8, status: []const u8, reason: ?[]const u8) void {
-    var path_buf: [128]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/agents/{s}/assignments/{s}/status", .{ self.id, assignment_id }) catch return;
-
-    var body_buf: [160]u8 = undefined;
-    const body = if (reason) |status_reason|
-        std.fmt.bufPrint(&body_buf, "{{\"status\":\"{s}\",\"reason\":\"{s}\"}}", .{ status, status_reason }) catch return
-    else
-        std.fmt.bufPrint(&body_buf, "{{\"status\":\"{s}\"}}", .{status}) catch return;
-
-    var resp = http_client.postWithAuth(self.alloc, self.server_addr, self.server_port, path, body, self.worker_credential) catch {
-        log.warn("failed to report status '{s}' for assignment {s}", .{ status, assignment_id });
-        return;
+fn reportStatus(self: anytype, assignment_id: []const u8, generation: i64, status: []const u8, reason: ?[]const u8) void {
+    result_store.record(&self.id, assignment_id, generation, status, reason) catch |err| {
+        log.err("could not persist assignment result {s}: {}", .{ assignment_id, err });
+        // keep the completed owner until a later loop can persist its result.
+        // a database failure must not turn completion into a duplicate start.
+        self.container_lock.lockUncancelable(std.Options.debug_io);
+        defer self.container_lock.unlock(std.Options.debug_io);
+        if (self.local_containers.get(assignment_id)) |owner| {
+            if (owner.generation != generation) return;
+            owner.pending_result = .{ .state = std.meta.stringToEnum(@import("../agent.zig").ContainerState, status) orelse .failed };
+            if (reason) |text| {
+                const len = @min(text.len, owner.pending_result.?.reason.len);
+                @memcpy(owner.pending_result.?.reason[0..len], text[0..len]);
+                owner.pending_result.?.reason_len = len;
+            }
+        }
     };
-    resp.deinit(self.alloc);
+}
+
+// the loop owns network delivery. workers only persist their latest result, so
+// failover cannot race an assignment thread reading the current api endpoint.
+pub fn flushResults(self: anytype) void {
+    flushResultsLimit(self, 8);
+}
+
+pub fn flushShutdownResults(self: anytype) void {
+    flushResultsLimit(self, 1);
+}
+
+fn flushResultsLimit(self: anytype, limit: usize) void {
+    {
+        self.container_lock.lockUncancelable(std.Options.debug_io);
+        defer self.container_lock.unlock(std.Options.debug_io);
+        var owners = self.local_containers.iterator();
+        while (owners.next()) |entry| {
+            const owner = entry.value_ptr.*;
+            if (owner.pending_result) |pending| {
+                result_store.record(&self.id, entry.key_ptr.*, owner.generation, @tagName(pending.state), if (pending.reason_len > 0) pending.reason[0..pending.reason_len] else null) catch continue;
+                owner.pending_result = null;
+            }
+        }
+    }
+    const results = result_store.list(self.alloc, &self.id) catch return;
+    defer {
+        for (results) |result| result.deinit(self.alloc);
+        self.alloc.free(results);
+    }
+    var delivered: usize = 0;
+    for (results) |result| {
+        if (delivered == limit) break;
+        self.container_lock.lockUncancelable(std.Options.debug_io);
+        const owner = self.local_containers.get(result.assignment_id);
+        const owned = if (owner) |value| value.generation == result.generation else false;
+        self.container_lock.unlock(std.Options.debug_io);
+        if (!result.terminal() and !owned) {
+            delivered += 1;
+            // a previous agent process cannot resume its worker thread. stop its
+            // recorded cgroup before allowing the scheduler to replace it.
+            recoverInterrupted(self, result) catch |err| log.warn("assignment recovery deferred for {s}: {}", .{ result.assignment_id, err });
+            continue;
+        }
+        if (result.delivered != 0 or std.mem.eql(u8, result.status, "starting")) continue;
+        delivered += 1;
+        result_store.attempted(&self.id, result) catch return;
+        var path_buffer: [192]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buffer, "/agents/{s}/assignments/{s}/status", .{ self.id, result.assignment_id }) catch continue;
+        var body = std.Io.Writer.Allocating.init(self.alloc);
+        defer body.deinit();
+        body.writer.print("{{\"status\":\"{s}\",\"generation\":{d}", .{ result.status, result.generation }) catch return;
+        if (result.reason) |reason| {
+            body.writer.writeAll(",\"reason\":\"") catch return;
+            json_helpers.writeJsonEscaped(&body.writer, reason) catch return;
+            body.writer.writeByte('"') catch return;
+        }
+        body.writer.writeByte('}') catch return;
+        var response = api_endpoints.request(self, .post, path, body.written(), self.worker_credential) catch break;
+        defer response.deinit(self.alloc);
+        if (response.status_code >= 500) break;
+        if (response.status_code != 200) continue;
+        const Receipt = struct { committed: bool = false, generation: i64 = -1 };
+        const receipt = std.json.parseFromSlice(Receipt, self.alloc, response.body, .{ .ignore_unknown_fields = true }) catch continue;
+        defer receipt.deinit();
+        if (!receipt.value.committed or receipt.value.generation != result.generation) continue;
+        result_store.acknowledge(&self.id, result) catch return;
+    }
+}
+
+fn recoverInterrupted(self: anytype, result: result_store.Result) !void {
+    if (result.container_id) |id| {
+        const group = try @import("../../runtime/cgroups.zig").Cgroup.open(id);
+        const exists = blk: {
+            std.Io.Dir.cwd().access(std.Options.debug_io, group.path(), .{}) catch |err| {
+                if (err == error.FileNotFound) break :blk false;
+                return err;
+            };
+            break :blk true;
+        };
+        if (exists) try group.destroy();
+        // the id was durably attached before c.start, so this cleanup never
+        // chooses a process by a reused pid or a matching workload name.
+        const record = store.load(self.alloc, id) catch |err| {
+            if (err != error.NotFound) return err;
+            try result_store.record(&self.id, result.assignment_id, result.generation, "failed", "agent_restarted");
+            return;
+        };
+        defer record.deinit(self.alloc);
+        @import("../../runtime/cli/container/lifecycle_commands.zig").cleanupNetwork(id, record.ip_address, record.veth_host);
+        try published_ports.removeInstance(self.alloc, id);
+        container.cleanupContainerDirs(id);
+        try store.updateStatus(id, "stopped", null, 255);
+    }
+    try result_store.record(&self.id, result.assignment_id, result.generation, "failed", "agent_restarted");
+}
+
+fn retireResults(self: anytype, snapshot: []const u8) !void {
+    const Desired = struct { id: []const u8, status: []const u8, generation: i64 = 0 };
+    const desired = try std.json.parseFromSlice([]Desired, self.alloc, snapshot, .{ .ignore_unknown_fields = true });
+    defer desired.deinit();
+    const results = try result_store.list(self.alloc, &self.id);
+    defer {
+        for (results) |result| result.deinit(self.alloc);
+        self.alloc.free(results);
+    }
+    for (results) |result| {
+        if (!result.terminal() or result.delivered == 0) continue;
+        const still_desired = for (desired.value) |assignment| {
+            if (std.mem.eql(u8, assignment.id, result.assignment_id) and assignment.generation == result.generation and
+                (std.mem.eql(u8, assignment.status, "pending") or std.mem.eql(u8, assignment.status, "running"))) break true;
+        } else false;
+        if (!still_desired) try result_store.retire(&self.id, result);
+    }
 }
 
 fn setContainerState(self: anytype, assignment_id: []const u8, state: anytype) void {
@@ -861,12 +974,15 @@ test "assignment startup releases owned inputs when worker admission fails" {
         }
     };
     const Fixture = struct {
+        id: [12]u8 = "fixtureagent".*,
         alloc: std.mem.Allocator,
         container_lock: std.Io.Mutex = .init,
         local_containers: std.StringHashMap(*agent_mod.LocalAssignment),
         assignment_workers: RejectingWorkers = .{},
 
         fn rejectAssignment(alloc: std.mem.Allocator, with_metadata: bool) !void {
+            try agent_store.initTestDb();
+            defer agent_store.closeDb();
             var fixture = @This(){
                 .alloc = alloc,
                 .local_containers = std.StringHashMap(*agent_mod.LocalAssignment).init(alloc),
@@ -1060,6 +1176,7 @@ test "assignment removal cancels a real process and invalidates cached work" {
         }
     };
     const Fixture = struct {
+        id: [12]u8 = "fixtureagent".*,
         alloc: std.mem.Allocator = std.testing.allocator,
         container_lock: std.Io.Mutex = .init,
         local_containers: std.StringHashMap(*agent_mod.LocalAssignment),
@@ -1103,6 +1220,7 @@ test "assignment cancellation retires completed owner when the same id becomes p
     const agent_mod = @import("../agent.zig");
     const alloc = std.testing.allocator;
     const Fixture = struct {
+        id: [12]u8 = "fixtureagent".*,
         alloc: std.mem.Allocator,
         container_lock: std.Io.Mutex = .init,
         local_containers: std.StringHashMap(*agent_mod.LocalAssignment),

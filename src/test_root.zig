@@ -6,6 +6,12 @@ test "smoke test" {
 
 // pull in tests from all modules
 comptime {
+    _ = @import("cluster/agent/recovery_test.zig");
+    _ = @import("cluster/api_endpoints.zig");
+    _ = @import("cluster/agent/result_store.zig");
+    _ = @import("cluster/agent/assignment_runtime.zig");
+    _ = @import("api/routes/cluster_agents/agent_routes.zig");
+
     _ = @import("test_socket_bind.zig");
     _ = @import("network/setup.zig");
     _ = @import("network/policy.zig");

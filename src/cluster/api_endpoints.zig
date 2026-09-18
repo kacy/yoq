@@ -173,7 +173,7 @@ pub fn request(self: anytype, method: enum { get, post }, path: []const u8, body
                 }
             }
         }
-        if (response.status_code == 503 and attempts + 1 < @min(self.api_endpoints.len, 3)) {
+        if ((response.status_code == 503 or (response.status_code == 400 and json.extractJsonString(response.body, "leader") != null)) and attempts + 1 < @min(self.api_endpoints.len, 3)) {
             response.deinit(self.alloc);
             self.api_endpoints.advance();
             continue;

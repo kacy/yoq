@@ -1,4 +1,5 @@
 const std = @import("std");
+const api_endpoints = @import("../api_endpoints.zig");
 const http_client = @import("../http_client.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const log = @import("../../lib/log.zig");
@@ -29,6 +30,8 @@ pub fn agentHeartbeatTicks(self: anytype) u32 {
 pub fn agentLoop(self: anytype) void {
     while (self.running.load(.acquire)) {
         doHeartbeat(self);
+        assignment_runtime.flushResults(self);
+        if (!self.running.load(.acquire)) break;
         assignment_runtime.reconcile(self);
 
         var remaining: u32 = agentHeartbeatTicks(self);
@@ -68,33 +71,14 @@ pub fn doHeartbeat(self: anytype) void {
     var path_buf: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/agents/{s}/heartbeat", .{self.id}) catch return;
 
-    var resp = http_client.postWithAuth(self.alloc, self.server_addr, self.server_port, path, body, self.worker_credential) catch return;
+    var resp = api_endpoints.request(self, .post, path, body, self.worker_credential) catch return;
     defer resp.deinit(self.alloc);
 
-    if (resp.status_code != 200) {
-        if (extractJsonString(resp.body, "leader")) |leader_str| {
-            if (request_support.parseHostPort(leader_str)) |hp| {
-                log.info("redirected to leader at {s}", .{leader_str});
-                self.server_addr = hp.addr;
-                self.server_port = hp.port;
-            }
-        }
-        return;
-    }
+    if (resp.status_code != 200) return;
 
     if (extractJsonString(resp.body, "status")) |status| {
         if (std.mem.eql(u8, status, "draining")) {
             self.running.store(false, .release);
-        }
-    }
-
-    if (extractJsonString(resp.body, "leader")) |leader_str| {
-        if (request_support.parseHostPort(leader_str)) |hp| {
-            if (!std.mem.eql(u8, &self.server_addr, &hp.addr) or self.server_port != hp.port) {
-                log.info("leader moved to {s}, following", .{leader_str});
-                self.server_addr = hp.addr;
-                self.server_port = hp.port;
-            }
         }
     }
 
@@ -180,5 +164,5 @@ pub fn reconcilePeers(self: anytype) void {
 
 pub fn fetchPeers(self: anytype) ?http_client.Response {
     const path = if (self.role == .agent) "/wireguard/peers?servers_only=1" else "/wireguard/peers";
-    return http_client.getWithAuth(self.alloc, self.server_addr, self.server_port, path, self.worker_credential) catch return null;
+    return api_endpoints.request(self, .get, path, "", self.worker_credential) catch return null;
 }

@@ -74,6 +74,7 @@ pub fn stop(self: anytype) void {
         self.loop_thread = null;
     }
     self.assignment_workers.join();
+    if (self.worker_credential != null) @import("assignment_runtime.zig").flushShutdownResults(self);
     @import("../../manifest/alerts/runtime.zig").shutdownIfUnused();
     stopLogServer(self);
 
@@ -93,6 +94,7 @@ pub fn wait(self: anytype) void {
         self.loop_thread = null;
     }
     self.assignment_workers.join();
+    if (self.worker_credential != null) @import("assignment_runtime.zig").flushShutdownResults(self);
     @import("../../manifest/alerts/runtime.zig").shutdownIfUnused();
     stopLogServer(self);
 }

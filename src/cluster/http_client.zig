@@ -96,6 +96,7 @@ fn buildPostRequest(alloc: Allocator, path: []const u8, body: []const u8, auth_t
 }
 
 fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) HttpClientError!Response {
+    const deadline = std.Io.Clock.awake.now(std.Options.debug_io).toMilliseconds() + 10_000;
     const fd = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch
         return HttpClientError.ConnectFailed;
     defer linux_platform.posix.close(fd);
@@ -112,7 +113,13 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
         return HttpClientError.ConnectFailed;
 
     // send
-    writeAll(fd, request) catch return HttpClientError.SendFailed;
+    var sent: usize = 0;
+    while (sent < request.len) {
+        setRemainingTimeout(fd, posix.SO.SNDTIMEO, deadline) catch return HttpClientError.SendFailed;
+        const count = linux_platform.posix.write(fd, request[sent..]) catch return HttpClientError.SendFailed;
+        if (count == 0) return HttpClientError.SendFailed;
+        sent += count;
+    }
 
     // read response
     const max_size: usize = 64 * 1024;
@@ -121,14 +128,16 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
 
     var total: usize = 0;
     while (total < buf.len) {
-        const bytes_read = posix.read(fd, buf[total..]) catch break;
+        setRemainingTimeout(fd, posix.SO.RCVTIMEO, deadline) catch return HttpClientError.ReceiveFailed;
+        const bytes_read = posix.read(fd, buf[total..]) catch return HttpClientError.ReceiveFailed;
         if (bytes_read == 0) break;
         total += bytes_read;
     }
 
     if (total == buf.len) {
         var overflow_buf: [1]u8 = undefined;
-        const extra = posix.read(fd, &overflow_buf) catch 0;
+        setRemainingTimeout(fd, posix.SO.RCVTIMEO, deadline) catch return HttpClientError.ReceiveFailed;
+        const extra = posix.read(fd, &overflow_buf) catch return HttpClientError.ReceiveFailed;
         if (extra > 0) return HttpClientError.ResponseTooLarge;
     }
 
@@ -140,6 +149,15 @@ fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) Http
     }
 
     return parseResponse(buf[0..total], buf) catch return HttpClientError.InvalidResponse;
+}
+
+// a per-read timeout alone lets a peer extend a request forever by sending a
+// few bytes before each timeout. keep one deadline across send and receive.
+fn setRemainingTimeout(fd: posix.fd_t, option: u32, deadline: i64) !void {
+    const remaining = deadline - std.Io.Clock.awake.now(std.Options.debug_io).toMilliseconds();
+    if (remaining <= 0) return error.Timeout;
+    const timeout = posix.timeval{ .sec = @intCast(@divTrunc(remaining, 1000)), .usec = @intCast(@mod(remaining, 1000) * 1000) };
+    try posix.setsockopt(fd, posix.SOL.SOCKET, option, std.mem.asBytes(&timeout));
 }
 
 fn writeAll(fd: linux_platform.posix.socket_t, data: []const u8) !void {
