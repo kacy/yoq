@@ -129,6 +129,7 @@ fn runSyncPass(trigger: SyncTrigger, ensure_listener: bool) void {
     steering_runtime.syncIfEnabled();
     // evict idle upstream connections so they do not linger when traffic is quiet.
     upstream_pool.sweepIdle(std.Io.Clock.real.now(std.Options.debug_io).toMilliseconds());
+    @import("observations.zig").flush();
     mutex.lockUncancelable(std.Options.debug_io);
     defer mutex.unlock(std.Options.debug_io);
     sync_passes_total += 1;

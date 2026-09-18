@@ -26,7 +26,9 @@ samples run every five seconds. a value must exceed its threshold for three cons
 
 cpu and memory stay unavailable if any running replica lacks the required measurement. the first cpu sample establishes a baseline. request metrics stay unavailable when there are no recent completed requests. direct container traffic, mirrored requests, client cancellations, and websocket sessions do not contribute to the request window. http/1 and http/2 proxy requests do.
 
-cluster thresholds apply separately on each hosting agent. they do not calculate a percentile or resource maximum across the cluster. a configured cluster `restart_count` threshold reports `unknown` with `cluster restart accounting unavailable`; it never derives restarts from scaling or deployment changes. other configured metrics continue to run.
+request history is shared through the host database, so a proxy in `yoq serve` can supply an app supervisor running in another process. the proxy control plane publishes its bounded history every 15 seconds; an embedded proxy publishes during the five-second alert sampling pass. no request performs a database write. the sampler combines the newest 256 samples across up to eight proxy producers for that service. histories expire after 60 seconds, and a boot identifier prevents reuse after a reboot. the database retains at most 4,096 producer histories.
+
+cluster thresholds apply separately on each hosting agent. they do not calculate a percentile or resource maximum across the cluster. a configured cluster `restart_count` threshold reports `unknown` with `cluster restart accounting unavailable`; it never derives restarts from scaling or deployment changes. other configured metrics continue to run. traffic handled only by a proxy on the coordinator is unavailable to an agent sampler; the coordinator status endpoint collects host results and does not redistribute request samples.
 
 ## webhook delivery
 

@@ -17,6 +17,17 @@ pub const secrets_create_table_sql =
 
 pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
     try exec(db,
+        \\CREATE TABLE IF NOT EXISTS proxy_observations (
+        \\    service TEXT NOT NULL,
+        \\    producer TEXT NOT NULL,
+        \\    boot TEXT NOT NULL,
+        \\    updated_ns INTEGER NOT NULL,
+        \\    history_json TEXT NOT NULL,
+        \\    PRIMARY KEY (service, producer)
+        \\);
+    );
+    try exec(db, "CREATE INDEX IF NOT EXISTS proxy_observations_updated ON proxy_observations(updated_ns);");
+    try exec(db,
         \\CREATE TABLE IF NOT EXISTS alert_status (
         \\    app TEXT NOT NULL,
         \\    service TEXT NOT NULL,

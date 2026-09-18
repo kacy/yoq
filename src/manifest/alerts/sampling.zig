@@ -14,6 +14,7 @@ pub const Values = struct {
     latency_p99_ms: ?f64 = null,
     error_rate_percent: ?f64 = null,
     resource_error: ?[]const u8 = null,
+    request_error: ?[]const u8 = null,
 };
 
 pub const Sampler = struct {
@@ -30,7 +31,11 @@ pub const Sampler = struct {
     pub fn collect(self: *Sampler, app: []const u8, service: []const u8, now_ms: u64, restarts: ?u64) Values {
         var values: Values = .{};
         values.restart_count = if (restarts) |total| self.restartCount(now_ms, total) else null;
-        if (observations.snapshot(service)) |traffic| {
+        const traffic_sample = observations.snapshotShared(service) catch blk: {
+            values.request_error = "proxy request history unavailable";
+            break :blk null;
+        };
+        if (traffic_sample) |traffic| {
             values.latency_p99_ms = traffic.latency_p99_ms;
             values.error_rate_percent = traffic.error_rate_percent;
         }

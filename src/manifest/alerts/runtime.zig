@@ -245,6 +245,7 @@ fn wait(milliseconds: u64) void {
 
 fn sampleLoop() void {
     while (!stopping.load(.acquire)) {
+        @import("../../network/proxy/observations.zig").flush();
         mutex.lockUncancelable(debug_io);
         for (entries.items) |entry| {
             if (entry.references == 0) continue;
@@ -257,7 +258,7 @@ fn sampleLoop() void {
                     state.sample_error = if (value != null) null else switch (metric) {
                         .cpu_percent, .memory_percent => values.resource_error orelse "waiting for cpu delta",
                         .restart_count => "cluster restart accounting unavailable",
-                        .latency_p99_ms, .error_rate_percent => "no recent completed proxy requests on this host",
+                        .latency_p99_ms, .error_rate_percent => values.request_error orelse "no recent completed proxy requests on this host",
                     };
                     entry.persist(index);
                 }
