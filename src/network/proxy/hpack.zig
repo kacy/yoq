@@ -6,6 +6,7 @@ pub const DecodeError = error{
     IntegerOverflow,
     InvalidIndex,
     InvalidHuffman,
+    InvalidTableSizeUpdate,
 };
 
 pub const Error = DecodeError || std.mem.Allocator.Error;
@@ -36,7 +37,7 @@ pub const IntegerDecode = struct {
     consumed: usize,
 };
 
-const dynamic_table_default_max_size = 4096;
+pub const dynamic_table_default_max_size = 4096;
 
 // DoS bounds for decoding attacker-controlled header blocks. HPACK integers
 // and string lengths are otherwise unbounded; a malicious peer could drive a
@@ -161,74 +162,102 @@ pub fn decodeString(alloc: std.mem.Allocator, buf: []const u8) Error!struct { va
     };
 }
 
-pub fn decodeHeaderBlock(alloc: std.mem.Allocator, block: []const u8) Error!std.ArrayList(HeaderField) {
-    var headers: std.ArrayList(HeaderField) = .empty;
-    errdefer {
-        for (headers.items) |header| header.deinit(alloc);
-        headers.deinit(alloc);
+// retain one decoder for each inbound connection, including trailers. decoded
+// fields own their bytes, so later table eviction cannot invalidate a request.
+pub const Decoder = struct {
+    table: DynamicTable = .{},
+    allowed_table_size: usize = dynamic_table_default_max_size,
+
+    pub fn deinit(self: *Decoder, alloc: std.mem.Allocator) void {
+        self.table.deinit(alloc);
+        self.* = .{};
     }
 
-    var dynamic_table: DynamicTable = .{};
-    defer dynamic_table.deinit(alloc);
+    pub fn decode(self: *Decoder, alloc: std.mem.Allocator, block: []const u8) Error!std.ArrayList(HeaderField) {
+        var headers: std.ArrayList(HeaderField) = .empty;
+        errdefer {
+            for (headers.items) |header| header.deinit(alloc);
+            headers.deinit(alloc);
+        }
 
-    // running total of decoded name+value bytes — bounds total memory even
-    // when individual fields are small but numerous.
-    var decoded_bytes: usize = 0;
+        // running total of decoded name+value bytes — bounds total memory even
+        // when individual fields are small but numerous.
+        var decoded_bytes: usize = 0;
 
-    var pos: usize = 0;
-    while (pos < block.len) {
-        if (headers.items.len >= max_headers_per_block) return error.IntegerOverflow;
-        const byte = block[pos];
-        if ((byte & 0x80) != 0) {
-            const index_info = try decodeInteger(block[pos..], 7);
-            const field = lookupHeader(index_info.value, &dynamic_table) orelse return error.InvalidIndex;
-            decoded_bytes += field.name.len + field.value.len;
+        var pos: usize = 0;
+        while (pos < block.len) {
+            if (headers.items.len >= max_headers_per_block) return error.IntegerOverflow;
+            const byte = block[pos];
+            if ((byte & 0x80) != 0) {
+                const index_info = try decodeInteger(block[pos..], 7);
+                const field = lookupHeader(index_info.value, &self.table) orelse return error.InvalidIndex;
+                decoded_bytes += field.name.len + field.value.len;
+                if (decoded_bytes > max_decoded_header_bytes) return error.IntegerOverflow;
+                const owned = try HeaderField.duplicate(alloc, field.name, field.value);
+                errdefer owned.deinit(alloc);
+                try headers.append(alloc, owned);
+                pos += index_info.consumed;
+                continue;
+            }
+
+            if ((byte & 0xe0) == 0x20) {
+                const size_info = try decodeInteger(block[pos..], 5);
+                if (headers.items.len != 0 or size_info.value > self.allowed_table_size) return error.InvalidTableSizeUpdate;
+                self.table.updateMaxSize(alloc, size_info.value);
+                pos += size_info.consumed;
+                continue;
+            }
+
+            const name_prefix: u3 = if ((byte & 0xc0) == 0x40) 6 else 4;
+            const incremental_indexing = (byte & 0xc0) == 0x40;
+            const name_index_info = try decodeInteger(block[pos..], name_prefix);
+            pos += name_index_info.consumed;
+
+            const name = if (name_index_info.value == 0) blk: {
+                const literal = try decodeString(alloc, block[pos..]);
+                pos += literal.consumed;
+                break :blk literal.value;
+            } else blk: {
+                const field = lookupHeader(name_index_info.value, &self.table) orelse return error.InvalidIndex;
+                break :blk try alloc.dupe(u8, field.name);
+            };
+            errdefer alloc.free(name);
+
+            const value = blk: {
+                const literal = try decodeString(alloc, block[pos..]);
+                pos += literal.consumed;
+                break :blk literal.value;
+            };
+            errdefer alloc.free(value);
+
+            decoded_bytes += name.len + value.len;
             if (decoded_bytes > max_decoded_header_bytes) return error.IntegerOverflow;
-            const owned = try HeaderField.duplicate(alloc, field.name, field.value);
-            errdefer owned.deinit(alloc);
-            try headers.append(alloc, owned);
-            pos += index_info.consumed;
-            continue;
+
+            if (incremental_indexing) try self.table.add(alloc, name, value);
+            // ownership moves only after every other fallible operation succeeds.
+            try headers.append(alloc, .{ .name = name, .value = value });
         }
 
-        if ((byte & 0xe0) == 0x20) {
-            const size_info = try decodeInteger(block[pos..], 5);
-            dynamic_table.updateMaxSize(alloc, size_info.value);
-            pos += size_info.consumed;
-            continue;
-        }
-
-        const name_prefix: u3 = if ((byte & 0xc0) == 0x40) 6 else 4;
-        const incremental_indexing = (byte & 0xc0) == 0x40;
-        const name_index_info = try decodeInteger(block[pos..], name_prefix);
-        pos += name_index_info.consumed;
-
-        const name = if (name_index_info.value == 0) blk: {
-            const literal = try decodeString(alloc, block[pos..]);
-            pos += literal.consumed;
-            break :blk literal.value;
-        } else blk: {
-            const field = lookupHeader(name_index_info.value, &dynamic_table) orelse return error.InvalidIndex;
-            break :blk try alloc.dupe(u8, field.name);
-        };
-        errdefer alloc.free(name);
-
-        const value = blk: {
-            const literal = try decodeString(alloc, block[pos..]);
-            pos += literal.consumed;
-            break :blk literal.value;
-        };
-        errdefer alloc.free(value);
-
-        decoded_bytes += name.len + value.len;
-        if (decoded_bytes > max_decoded_header_bytes) return error.IntegerOverflow;
-
-        if (incremental_indexing) try dynamic_table.add(alloc, name, value);
-        // ownership moves only after every other fallible operation succeeds.
-        try headers.append(alloc, .{ .name = name, .value = value });
+        return headers;
     }
+};
 
-    return headers;
+// convenience for standalone blocks whose compression context ends here.
+pub fn decodeHeaderBlock(alloc: std.mem.Allocator, block: []const u8) Error!std.ArrayList(HeaderField) {
+    var decoder: Decoder = .{};
+    defer decoder.deinit(alloc);
+    return decoder.decode(alloc, block);
+}
+
+// each forwarded block is independent of every other upstream connection.
+// size zero also satisfies a peer that lowers SETTINGS_HEADER_TABLE_SIZE.
+pub fn encodeHeaderBlockIndependent(alloc: std.mem.Allocator, headers: []const HeaderField) ![]u8 {
+    const literal = try encodeHeaderBlockLiteral(alloc, headers);
+    defer alloc.free(literal);
+    const block = try alloc.alloc(u8, literal.len + 1);
+    block[0] = 0x20;
+    @memcpy(block[1..], literal);
+    return block;
 }
 
 pub fn encodeHeaderBlockLiteral(alloc: std.mem.Allocator, headers: []const HeaderField) ![]u8 {
@@ -568,4 +597,102 @@ test "hpack header and dynamic table ownership survive every allocation failure"
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.decode, .{});
+}
+
+test "hpack connection retains indexed fields across blocks and evicts on table shrink" {
+    const alloc = std.testing.allocator;
+    var decoder: Decoder = .{};
+    defer decoder.deinit(alloc);
+    var first = try decoder.decode(alloc, &.{ 0x40, 1, 'x', 1, 'a' });
+    defer {
+        for (first.items) |field| field.deinit(alloc);
+        first.deinit(alloc);
+    }
+    var second = try decoder.decode(alloc, &.{0xbe});
+    defer {
+        for (second.items) |field| field.deinit(alloc);
+        second.deinit(alloc);
+    }
+    try std.testing.expectEqualStrings("a", second.items[0].value);
+    var shrink = try decoder.decode(alloc, &.{0x20});
+    defer shrink.deinit(alloc);
+    try std.testing.expectError(error.InvalidIndex, decoder.decode(alloc, &.{0xbe}));
+    // output owns its bytes even after the connection's table is cleared.
+    try std.testing.expectEqualStrings("a", first.items[0].value);
+    try std.testing.expectEqualStrings("a", second.items[0].value);
+}
+
+test "hpack connection rejects table updates above the advertised limit or after fields" {
+    const alloc = std.testing.allocator;
+    var decoder: Decoder = .{};
+    defer decoder.deinit(alloc);
+    try std.testing.expectError(error.InvalidTableSizeUpdate, decoder.decode(alloc, &.{ 0x82, 0x20 }));
+    // 4097 exceeds the default SETTINGS_HEADER_TABLE_SIZE of 4096.
+    try std.testing.expectError(error.InvalidTableSizeUpdate, decoder.decode(alloc, &.{ 0x3f, 0xe2, 0x1f }));
+}
+
+test "hpack independent blocks respect a zero table limit" {
+    const alloc = std.testing.allocator;
+    var decoder: Decoder = .{ .allowed_table_size = 0 };
+    defer decoder.deinit(alloc);
+    const encoded = try encodeHeaderBlockIndependent(alloc, &.{.{ .name = @constCast("x-result"), .value = @constCast("value") }});
+    defer alloc.free(encoded);
+    var headers = try decoder.decode(alloc, encoded);
+    defer {
+        for (headers.items) |field| field.deinit(alloc);
+        headers.deinit(alloc);
+    }
+    try std.testing.expectEqual(@as(usize, 0), decoder.table.max_size);
+    try std.testing.expectEqualStrings("value", headers.items[0].value);
+}
+
+test "hpack connection decodes consecutive blocks from an independent encoder" {
+    const alloc = std.testing.allocator;
+    // python-hpack 4.2.0 generated these blocks with one encoder: huffman
+    // request, indexed request, indexed trailer, then a table shrink to zero.
+    const Vector = struct { hex: []const u8, fields: []const StaticHeaderField };
+    const vectors = [_]Vector{
+        .{ .hex = "8287418b1d665cbe474d7415749509448360f5174085f2b10649cb83f03b29", .fields = &.{
+            .{ .name = ":method", .value = "GET" },
+            .{ .name = ":scheme", .value = "https" },
+            .{ .name = ":authority", .value = "api.example.test" },
+            .{ .name = ":path", .value = "/one" },
+            .{ .name = "x-cache", .value = "warm" },
+        } },
+        .{ .hex = "8287c04483613e0fbf", .fields = &.{
+            .{ .name = ":method", .value = "GET" },
+            .{ .name = ":scheme", .value = "https" },
+            .{ .name = ":authority", .value = "api.example.test" },
+            .{ .name = ":path", .value = "/two" },
+            .{ .name = "x-cache", .value = "warm" },
+        } },
+        .{ .hex = "4088f2b127293aa2da7f831c6493c0", .fields = &.{
+            .{ .name = "x-checksum", .value = "abcd" },
+            .{ .name = "x-cache", .value = "warm" },
+        } },
+        .{ .hex = "208287418b1d665cbe474d741574950944856133d852ff", .fields = &.{
+            .{ .name = ":method", .value = "GET" },
+            .{ .name = ":scheme", .value = "https" },
+            .{ .name = ":authority", .value = "api.example.test" },
+            .{ .name = ":path", .value = "/three" },
+        } },
+    };
+    var decoder: Decoder = .{};
+    defer decoder.deinit(alloc);
+    for (vectors) |vector| {
+        var bytes: [64]u8 = undefined;
+        const block = try std.fmt.hexToBytes(&bytes, vector.hex);
+        var fields = try decoder.decode(alloc, block);
+        defer {
+            for (fields.items) |field| field.deinit(alloc);
+            fields.deinit(alloc);
+        }
+        try std.testing.expectEqual(vector.fields.len, fields.items.len);
+        for (vector.fields, fields.items) |expected, actual| {
+            try std.testing.expectEqualStrings(expected.name, actual.name);
+            try std.testing.expectEqualStrings(expected.value, actual.value);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), decoder.table.max_size);
+    try std.testing.expectEqual(@as(usize, 0), decoder.table.size);
 }
