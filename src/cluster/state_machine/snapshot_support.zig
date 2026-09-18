@@ -12,6 +12,7 @@ pub const SnapshotError = error{
     InvalidSnapshot,
     CorruptSnapshot,
     SnapshotConflict,
+    SchemaMigrationFailed,
 };
 
 pub fn parseSnapshotMeta(data: []const u8) SnapshotError!SnapshotMeta {
@@ -186,11 +187,17 @@ pub const PreparedSnapshot = struct {
             defer tmp.file.close(std.Options.debug_io);
             tmp.file.writeStreamingAll(std.Options.debug_io, data[snapshot_header_size..]) catch return SnapshotError.IoError;
         }
-        if (c.sqlite3_open_v2(tmp.path.ptr, &prepared.db, c.SQLITE_OPEN_READONLY, null) != c.SQLITE_OK or prepared.db == null) {
+        if (c.sqlite3_open_v2(tmp.path.ptr, &prepared.db, c.SQLITE_OPEN_READWRITE, null) != c.SQLITE_OK or prepared.db == null) {
             if (prepared.db) |db| _ = c.sqlite3_close(db);
             return SnapshotError.CorruptSnapshot;
         }
         errdefer _ = c.sqlite3_close(prepared.db);
+        try validateDatabase(prepared.db, prepared.meta.last_included_index);
+        // upgrade the private staging copy before touching live state. an old
+        // snapshot must not remove columns that startup already migrated.
+        var staged = sqlite.Db{ .db = prepared.db.? };
+        @import("../../state/schema.zig").init(&staged) catch return error.SchemaMigrationFailed;
+        @import("db_runtime.zig").initMeta(&staged) catch return error.SchemaMigrationFailed;
         try validateDatabase(prepared.db, prepared.meta.last_included_index);
         return prepared;
     }
