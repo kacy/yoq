@@ -1,8 +1,8 @@
 // shared types and helpers for bpf programs
 //
-// provides the minimal subset of kernel types needed by yoq's BPF
+// provides the minimal subset of kernel types needed by yoq's bpf
 // programs. we define these ourselves
-// rather than pulling in vmlinux.h or kernel headers to keep the BPF
+// rather than pulling in vmlinux.h or kernel headers to keep the bpf
 // build self-contained and reproducible.
 //
 // compiled with: clang -target bpf -O2 -g -c
@@ -26,14 +26,14 @@ typedef signed long long __s64;
 
 #define SEC(name) __attribute__((section(name), used))
 
-// -- TC action return codes --
+// -- tc action return codes --
 
 #define TC_ACT_UNSPEC  -1
 #define TC_ACT_OK       0
 #define TC_ACT_SHOT     2
 #define TC_ACT_REDIRECT 7
 
-// -- BPF map types --
+// -- bpf map types --
 
 #define BPF_MAP_TYPE_HASH     1
 #define BPF_MAP_TYPE_ARRAY    2
@@ -47,11 +47,11 @@ typedef signed long long __s64;
 #define BPF_F_PSEUDO_HDR      0x10
 #define BPF_F_MARK_MANGLED_0  0x20
 
-// -- BPF map definition --
+// -- bpf map definition --
 //
-// classic bpf_map_def style (pre-BTF). maps defined with this struct
+// classic bpf_map_def style (pre-btf). maps defined with this struct
 // in a SEC("maps") section are picked up by our ELF extractor tool
-// (tools/bpf_gen.zig) and turned into comptime Zig arrays.
+// (tools/bpf_gen.zig) and turned into comptime zig arrays.
 
 struct bpf_map_def {
     __u32 type;
@@ -61,9 +61,9 @@ struct bpf_map_def {
     __u32 map_flags;
 };
 
-// -- BPF helper functions --
+// -- bpf helper functions --
 //
-// these are function pointer casts to BPF helper IDs. the verifier
+// these are function pointer casts to bpf helper ids. the verifier
 // resolves them to actual kernel helpers at load time.
 
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) =
@@ -76,15 +76,15 @@ static long (*bpf_map_delete_elem)(void *map, const void *key) =
 
 // -- checksum helpers --
 //
-// used by both DNS interceptor (IP length rewrite) and load balancer
-// (DNAT address rewrite) to incrementally update L3/L4 checksums.
+// used by both dns interceptor (ip length rewrite) and load balancer
+// (dnat address rewrite) to incrementally update l3/l4 checksums.
 
 static long (*bpf_l3_csum_replace)(void *skb, __u32 offset, __u64 from,
                                    __u64 to, __u64 size) = (void *)10;
 static long (*bpf_l4_csum_replace)(void *skb, __u32 offset, __u64 from,
                                    __u64 to, __u64 flags) = (void *)11;
 
-// -- TC sk_buff context --
+// -- tc sk_buff context --
 //
 // subset of __sk_buff fields used by our programs. the kernel maps
 // this to the real sk_buff at runtime; field order and widths must match.
@@ -112,7 +112,7 @@ struct __sk_buff {
 
 // -- network header helpers --
 //
-// ethernet, IPv4, UDP header structs for packet parsing.
+// ethernet, ipv4, udp header structs for packet parsing.
 // packed to match wire format exactly.
 
 struct ethhdr {

@@ -1,8 +1,8 @@
-// completed block reads and writes, grouped by the current task's cgroup.
+// block read/write completion events, grouped by the current task's cgroup.
 //
 // completion can run in an interrupt or worker context. that cgroup may
 // differ from the request's origin, so these counters cannot identify the
-// originating container reliably.
+// originating container reliably. partial completions count as separate events.
 
 #include "common.h"
 

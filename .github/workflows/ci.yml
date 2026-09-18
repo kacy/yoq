@@ -255,7 +255,10 @@ jobs:
             exit 1
           fi
 
-      - name: verify load balancer with the kernel
+      - name: verify bpf helper failures and packet parsing
+        run: bash scripts/bpf-host-tests.sh
+
+      - name: verify bpf packet handling with the kernel
         run: bash scripts/bpf-load-balancer-smoke.sh
 
       - name: verify shared TC policy enforcement with the kernel

@@ -125,7 +125,10 @@ fn run(fd: std.posix.fd_t, packet: *const Packet) !Result {
     attr.test_run.data_out = @intFromPtr(&result.packet.data);
     attr.test_run.repeat = 1;
     const rc = linux.bpf(.prog_test_run, &attr, @sizeOf(BPF.TestRunAttr));
-    if (linux.errno(rc) != .SUCCESS) return error.PacketTestFailed;
+    if (linux.errno(rc) != .SUCCESS) {
+        std.debug.print("packet test failed: errno={s}, input length={d}\n", .{ @tagName(linux.errno(rc)), packet.len });
+        return error.PacketTestFailed;
+    }
     result.action = attr.test_run.retval;
     result.packet.len = attr.test_run.data_size_out;
     return result;
@@ -158,6 +161,17 @@ fn malformedTransport(fd: std.posix.fd_t, protocol: u8, action: u32) !void {
     try expectUnchanged(fd, &packet, action);
 }
 
+// find an independently checksummed packet whose translated udp checksum is zero.
+fn zeroChecksumPort(destination: [4]u8, destination_port: u16) !u16 {
+    var port: u32 = 1;
+    while (port <= std.math.maxInt(u16)) : (port += 1) {
+        var packet = transportPacket(17, client, destination, @intCast(port), destination_port);
+        put16(&packet, 40, 0);
+        if (transportChecksum(&packet) == 0) return @intCast(port);
+    }
+    return error.NoZeroChecksumFixture;
+}
+
 fn testPortMap() !void {
     const code = @import("port_bytecode");
     const loaded = try Loaded(code).init(.xdp);
@@ -188,6 +202,10 @@ fn testPortMap() !void {
             put16(&unchecked, 40, 0);
             const translated = try run(loaded.fd, &unchecked);
             try equal(@as(u16, 0), get16(&translated.packet, 40));
+            const source_port = try zeroChecksumPort(wildcard.ip, 9001);
+            const zero_result = try run(loaded.fd, &transportPacket(17, client, vip, source_port, 8080));
+            try equal(@as(u16, 0xffff), get16(&zero_result.packet, 40));
+            try expectChecksums(&zero_result.packet);
         }
     }
     std.debug.print("port mapping: exact and wildcard matches, tcp/udp checksums, short udp and malformed packets passed\n", .{});
@@ -215,6 +233,13 @@ fn testLoadBalancer() !void {
         try bytesEqual(u8, &vip, reverse.packet.data[26..30]);
         try expectChecksums(&reverse.packet);
         try malformedTransport(loaded.fd, protocol, tc_continue);
+        // two vips cannot share the same backend reply tuple without snat.
+        const second_vip = [4]u8{ 10, 43, 0, 2 };
+        try maps.mapUpdate(loaded.fds[0], &second_vip, std.mem.asBytes(&backends));
+        const conflict = transportPacket(protocol, client, second_vip, 12000, 8080);
+        try expectUnchanged(loaded.fd, &conflict, 2);
+        const still_original = try run(egress, &reply);
+        try bytesEqual(u8, &vip, still_original.packet.data[26..30]);
         if (protocol == 17) {
             var unchecked = packet;
             put16(&unchecked, 40, 0);
@@ -222,7 +247,25 @@ fn testLoadBalancer() !void {
             try equal(@as(u16, 0), get16(&translated.packet, 40));
         }
     }
-    std.debug.print("load balancing: short udp, bidirectional checksums and malformed packets passed\n", .{});
+    const source_port = try zeroChecksumPort(backend, 8080);
+    const zero_result = try run(loaded.fd, &transportPacket(17, client, vip, source_port, 8080));
+    try equal(@as(u16, 0xffff), get16(&zero_result.packet, 40));
+    try expectChecksums(&zero_result.packet);
+
+    // full hash maps force each conntrack insertion to fail without relying on
+    // memory pressure or lru eviction. both failures must leave the packet alone.
+    for ([_]usize{ 1, 2 }) |index| {
+        const full_map = try maps.createMap(.hash, 16, 4, 1);
+        defer close(full_map);
+        try maps.mapUpdate(full_map, &(@as([16]u8, @splat(0))), &vip);
+        var test_fds = loaded.fds;
+        test_fds[index] = full_map;
+        const fail_fd = try programs.loadProgram(code, &test_fds);
+        defer close(fail_fd);
+        const packet = transportPacket(6, client, vip, @intCast(13000 + index), 8080);
+        try expectUnchanged(fail_fd, &packet, 2);
+    }
+    std.debug.print("load balancing: checksums, malformed packets, tuple conflicts and full conntrack maps passed\n", .{});
 }
 
 fn testPolicy() !void {
@@ -243,7 +286,9 @@ fn testPolicy() !void {
         put16(&packet, 16, length);
         try equal(@as(u32, 2), (try run(loaded.fd, &packet)).action);
     }
-    packet.len = 33;
+    // the kernel test runner requires a base ipv4 header; truncate its options.
+    packet.data[14] = 0x46;
+    packet.len = 34;
     try equal(@as(u32, 2), (try run(loaded.fd, &packet)).action);
     std.debug.print("policy: isolation, allow/deny, fragments and truncated ipv4 passed\n", .{});
 }
