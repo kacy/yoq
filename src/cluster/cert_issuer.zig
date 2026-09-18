@@ -365,7 +365,7 @@ test "failure counter increments and clears" {
     try std.testing.expectEqualStrings("checkout", snap2.items[0].service_name);
 }
 
-test "proxy issuer lifecycle issues and rotates with no registered services" {
+test "cluster certificate issuer rotates the ingress identity without registered services" {
     const alloc = std.testing.allocator;
     const credentials = @import("../tls/proxy_credentials.zig");
     try store.initTestDb();

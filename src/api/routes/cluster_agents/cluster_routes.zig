@@ -256,7 +256,7 @@ test "applied snapshot cluster status exposes and clears the committed apply bac
     try std.testing.expect(recovered_json.value.object.get("apply_healthy").?.bool);
 }
 
-test "cluster ca route reads the node database while the local store is empty" {
+test "cluster certificate route reads the node database while the local store is empty" {
     const alloc = std.testing.allocator;
     try store.initTestDb();
     defer store.deinitTestDb();
