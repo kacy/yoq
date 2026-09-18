@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 fn ensureSchema(db: *sqlite.Db) !void {
     try db.exec("CREATE TABLE IF NOT EXISTS local_service_owners (app TEXT NOT NULL, service TEXT NOT NULL, token TEXT NOT NULL, generation INTEGER NOT NULL, PRIMARY KEY(app, service));", .{}, .{});
     try db.exec("CREATE UNIQUE INDEX IF NOT EXISTS local_service_active_name ON local_service_owners(service) WHERE token != '';", .{}, .{});
-    try db.exec("CREATE TABLE IF NOT EXISTS local_service_instances (container TEXT PRIMARY KEY, app TEXT NOT NULL, service TEXT NOT NULL, generation INTEGER NOT NULL);", .{}, .{});
+    try db.exec("CREATE TABLE IF NOT EXISTS local_service_instances (container TEXT PRIMARY KEY, app TEXT NOT NULL, service TEXT NOT NULL, generation INTEGER NOT NULL, supervisor_pid INTEGER NOT NULL);", .{}, .{});
 }
 
 pub fn claim(app: []const u8, service: []const u8, token: []const u8) !void {
@@ -55,7 +55,7 @@ pub fn registerInstance(app: []const u8, service: []const u8, token: []const u8,
     var db = try common.leaseDb();
     defer db.deinit();
     try ensureSchema(db.db);
-    try db.db.exec("INSERT INTO local_service_instances (container, app, service, generation) SELECT ?, app, service, generation FROM local_service_owners WHERE app = ? AND service = ? AND token = ?;", .{}, .{ container, app, service, token });
+    try db.db.exec("INSERT INTO local_service_instances (container, app, service, generation, supervisor_pid) SELECT ?, app, service, generation, ? FROM local_service_owners WHERE app = ? AND service = ? AND token = ?;", .{}, .{ container, @as(i64, @intCast(std.os.linux.getpid())), app, service, token });
     if (db.db.rowsAffected() != 1) return error.SupervisorSuperseded;
 }
 
@@ -71,6 +71,14 @@ pub fn instanceExists(container: []const u8) !bool {
     defer db.deinit();
     try ensureSchema(db.db);
     return (try db.db.one(struct { generation: i64 }, "SELECT generation FROM local_service_instances WHERE container = ?;", .{}, .{container})) != null;
+}
+
+fn supervisorStillRunning(container: []const u8) !bool {
+    var db = try common.leaseDb();
+    defer db.deinit();
+    try ensureSchema(db.db);
+    const row = (try db.db.one(struct { supervisor_pid: i32 }, "SELECT supervisor_pid FROM local_service_instances WHERE container = ?;", .{}, .{container})) orelse return false;
+    return std.os.linux.errno(std.os.linux.kill(row.supervisor_pid, 0)) != .SRCH;
 }
 
 pub fn priorInstances(alloc: Allocator, app: []const u8, service: []const u8, token: []const u8) !std.ArrayList([]const u8) {
@@ -92,6 +100,71 @@ pub fn priorInstances(alloc: Allocator, app: []const u8, service: []const u8, to
         };
     }
     return result;
+}
+
+/// wait for older supervisors to release their children and device leases.
+pub fn stopPriorInstances(alloc: Allocator, app: []const u8, service: []const u8, token: []const u8) !void {
+    const store = @import("../../state/store.zig");
+    var previous = try priorInstances(alloc, app, service, token);
+    defer {
+        for (previous.items) |id| alloc.free(id);
+        previous.deinit(alloc);
+    }
+    // only older generations are candidates, even when another replacement
+    // claims the service after this snapshot was read.
+    for (previous.items) |id| {
+        const record = store.load(alloc, id) catch |err| switch (err) {
+            error.NotFound => continue,
+            else => return err,
+        };
+        defer record.deinit(alloc);
+        @import("../health.zig").unregisterContainer(id);
+        if (record.pid) |pid| @import("../../runtime/process.zig").terminate(pid) catch {
+            @import("../../runtime/process.zig").kill(pid) catch {};
+        };
+    }
+    const deadline = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds() + 5 * std.time.ns_per_s;
+    var forced = false;
+    while (true) {
+        var pending = false;
+        for (previous.items) |id| {
+            if (try supervisorStillRunning(id)) {
+                pending = true;
+                continue;
+            }
+            const record = store.load(alloc, id) catch |err| switch (err) {
+                error.NotFound => {
+                    try removeInstance(id);
+                    continue;
+                },
+                else => return err,
+            };
+            defer record.deinit(alloc);
+            if (record.pid) |pid| {
+                const alive = std.os.linux.errno(std.os.linux.kill(pid, 0)) != .SRCH;
+                if (alive) {
+                    pending = true;
+                    continue;
+                }
+            }
+            try store.updateStatus(id, "stopped", null, null);
+            if (record.ip_address != null) try @import("../../network/published_ports.zig").removeInstance(alloc, id);
+            @import("../../runtime/container_commands.zig").cleanupStoppedContainer(id, record.ip_address, record.veth_host);
+            try removeInstance(id);
+        }
+        if (!pending) break;
+        const now = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
+        if (now >= deadline + 5 * std.time.ns_per_s) return error.PreviousServiceStopTimeout;
+        if (!forced and now >= deadline) {
+            for (previous.items) |id| {
+                const record = store.load(alloc, id) catch continue;
+                defer record.deinit(alloc);
+                if (record.pid) |pid| @import("../../runtime/process.zig").kill(pid) catch {};
+            }
+            forced = true;
+        }
+        if (!@import("../../lib/runtime_wait.zig").sleep(std.Io.Duration.fromMilliseconds(100), "previous service shutdown")) return error.WaitInterrupted;
+    }
 }
 
 test "replacement generations reject stale restarts and preserve the current owner" {
@@ -159,4 +232,22 @@ test "global service names reject a different active app" {
     try release("first", "web", "replacement");
     try claim("second", "web", "second-owner");
     try std.testing.expect(try isOwner("second", "web", "second-owner"));
+}
+
+test "retiring a replica group clears registration left by a dead supervisor" {
+    const store = @import("../../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try claim("app", "web", "old");
+    try registerInstance("app", "web", "old", "gone-record!");
+    {
+        var db = try common.leaseDb();
+        defer db.deinit();
+        try db.db.exec("UPDATE local_service_instances SET supervisor_pid = 2147483647;", .{}, .{});
+    }
+    try claim("app", "web", "down");
+    try stopPriorInstances(std.testing.allocator, "app", "web", "down");
+    try std.testing.expect(!try instanceExists("gone-record!"));
+    try release("app", "web", "down");
+    try std.testing.expect(!try isOwner("app", "web", "down"));
 }

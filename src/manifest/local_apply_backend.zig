@@ -313,56 +313,7 @@ fn stopPreviousServiceContainers(orch: *orchestrator.Orchestrator, idx: usize) !
         ownership.release(orch.app_name, name, &orch.supervisor_token) catch {};
         orch.states[idx].ownership_claimed = false;
     }
-    var previous = try ownership.priorInstances(orch.alloc, orch.app_name, name, &orch.supervisor_token);
-    defer {
-        for (previous.items) |id| orch.alloc.free(id);
-        previous.deinit(orch.alloc);
-    }
-    // only older generations are candidates, even when another replacement
-    // claims the service after this snapshot was read.
-    for (previous.items) |id| {
-        const record = store.load(orch.alloc, id) catch |err| switch (err) {
-            error.NotFound => continue,
-            else => return err,
-        };
-        defer record.deinit(orch.alloc);
-        health.unregisterContainer(id);
-        if (record.pid) |pid| @import("../runtime/process.zig").terminate(pid) catch {
-            @import("../runtime/process.zig").kill(pid) catch {};
-        };
-    }
-    const deadline = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds() + 5 * std.time.ns_per_s;
-    var forced = false;
-    while (true) {
-        var pending = false;
-        for (previous.items) |id| {
-            if (try ownership.instanceExists(id)) {
-                pending = true;
-                continue;
-            }
-            const record = store.load(orch.alloc, id) catch |err| switch (err) {
-                error.NotFound => continue,
-                else => return err,
-            };
-            defer record.deinit(orch.alloc);
-            if (record.pid) |pid| {
-                @import("../runtime/process.zig").sendSignal(pid, 0) catch continue;
-                pending = true;
-            }
-        }
-        if (!pending) break;
-        const now = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
-        if (now >= deadline + 5 * std.time.ns_per_s) return error.PreviousServiceStopTimeout;
-        if (!forced and now >= deadline) {
-            for (previous.items) |id| {
-                const record = store.load(orch.alloc, id) catch continue;
-                defer record.deinit(orch.alloc);
-                if (record.pid) |pid| @import("../runtime/process.zig").kill(pid) catch {};
-            }
-            forced = true;
-        }
-        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(100), "previous service shutdown")) return error.WaitInterrupted;
-    }
+    try ownership.stopPriorInstances(orch.alloc, orch.app_name, name, &orch.supervisor_token);
 }
 
 fn runReplacementPlan(
