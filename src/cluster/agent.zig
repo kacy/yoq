@@ -33,8 +33,13 @@ const AgentResources = agent_types.AgentResources;
 const writeErr = cli.writeErr;
 
 pub const AgentError = error{
-    /// POST /agents/register returned a non-200 status or connection failed
+    /// local identity, request construction, or cache initialization failed
     RegisterFailed,
+    /// transport or quorum is temporarily unavailable
+    EnrollmentUnavailable,
+    /// the server rejected the token, identity, or registration parameters
+    RegistrationRejected,
+    Canceled,
     /// the registration response could not be parsed (missing or malformed agent ID)
     InvalidResponse,
 };
@@ -128,6 +133,11 @@ pub const Agent = struct {
     /// loads its durable wireguard identity and sends the public key to the
     /// server, which assigns a node_id and overlay IP in response.
     pub fn register(self: *Agent) AgentError!void {
+        return self.registerWithOptions(.{});
+    }
+
+    pub fn registerWithOptions(self: *Agent, options: http_client.RequestOptions) AgentError!void {
+        options.check() catch |err| return if (err == error.Canceled) error.Canceled else error.EnrollmentUnavailable;
         const resources = resource_support.getSystemResources();
 
         // Publish identity before the request so an uncertain commit can be retried.
@@ -151,12 +161,14 @@ pub const Agent = struct {
             return AgentError.RegisterFailed;
         defer self.alloc.free(body);
 
-        var resp = api_endpoints.request(self, .post, "/agents/register", body, self.token) catch return AgentError.RegisterFailed;
-        if (resp.status_code != 200) {
-            resp.deinit(self.alloc);
-            return AgentError.RegisterFailed;
-        }
+        var resp = api_endpoints.requestWithOptions(self, .post, "/agents/register", body, self.token, options) catch |err| return switch (err) {
+            error.ServersUnavailable, error.RequestTimeout => error.EnrollmentUnavailable,
+            error.Canceled => error.Canceled,
+            error.InvalidResponse, error.ResponseTooLarge => error.InvalidResponse,
+            else => error.RegisterFailed,
+        };
         defer resp.deinit(self.alloc);
+        try @import("agent/enrollment_retry.zig").checkStatus(resp.status_code, resp.body);
 
         // parse agent ID from response: {"id":"xxxxxxxxxxxx","node_id":N,"overlay_ip":"10.40.0.N"}
         const id_str = extractJsonString(resp.body, "id") orelse {
@@ -168,6 +180,8 @@ pub const Agent = struct {
             writeErr("unexpected agent ID length: {d}\n", .{id_str.len});
             return AgentError.InvalidResponse;
         }
+
+        for (id_str) |byte| if (!std.ascii.isHex(byte)) return AgentError.InvalidResponse;
 
         const secret = extractJsonString(resp.body, "credential") orelse return AgentError.InvalidResponse;
         if (secret.len != 64) return AgentError.InvalidResponse;

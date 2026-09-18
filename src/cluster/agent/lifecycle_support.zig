@@ -88,6 +88,14 @@ pub fn stop(self: anytype) void {
     if (self.worker_credential) |secret| std.crypto.secureZero(u8, secret);
 }
 
+// signal handlers set the shared flag; joining alone cannot stop the agent loop.
+pub fn waitForShutdown(self: anytype, canceled: *const std.atomic.Value(bool)) void {
+    while (self.running.load(.acquire) and !canceled.load(.acquire)) {
+        if (!@import("../../lib/runtime_wait.zig").sleep(.fromMilliseconds(100), "agent shutdown wait")) break;
+    }
+    self.stop();
+}
+
 pub fn wait(self: anytype) void {
     if (self.loop_thread) |t| {
         t.join();
@@ -143,4 +151,34 @@ pub fn deinit(self: anytype) void {
         self.worker_credential = null;
     }
     agent_store.closeDb();
+}
+
+test "agent enrollment shutdown wait stops a running agent and retains pending results" {
+    const alloc = std.testing.allocator;
+    var agent = agent_mod.Agent.init(alloc, .{ 127, 0, 0, 1 }, 7700, "cluster-token");
+    defer agent.deinit();
+    agent.id = "worker000001".*;
+    try agent_store.initTestDb();
+    const results = @import("result_store.zig");
+    try std.testing.expect(try results.claim(&agent.id, "assignment", 1));
+    try results.record(&agent.id, "assignment", 1, "failed", "image_pull_failed");
+    agent.running.store(true, .release);
+    var canceled: std.atomic.Value(bool) = .init(false);
+    const Worker = struct {
+        fn run(target: *agent_mod.Agent, flag: *const std.atomic.Value(bool)) void {
+            waitForShutdown(target, flag);
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{ &agent, &canceled });
+    canceled.store(true, .release);
+    thread.join();
+    try std.testing.expect(!agent.running.load(.acquire));
+    const pending = try results.list(alloc, &agent.id);
+    defer {
+        for (pending) |result| result.deinit(alloc);
+        alloc.free(pending);
+    }
+    try std.testing.expectEqual(@as(usize, 1), pending.len);
+    try std.testing.expectEqualStrings("failed", pending[0].status);
+    try std.testing.expectEqual(@as(i64, 0), pending[0].delivered);
 }

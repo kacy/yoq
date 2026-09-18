@@ -229,6 +229,8 @@ comptime {
     _ = @import("cluster/agent.zig");
     _ = @import("cluster/agent/gossip_support.zig");
     _ = @import("cluster/agent/enrollment_identity.zig");
+    _ = @import("cluster/agent/enrollment_retry.zig");
+    _ = @import("cluster/agent/lifecycle_support.zig");
     _ = @import("cluster/agent/assignment_runtime.zig");
     _ = @import("cluster/agent/log_server.zig");
     _ = @import("cluster/scheduler.zig");

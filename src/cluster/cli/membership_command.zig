@@ -92,7 +92,9 @@ pub fn join(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     agent.role = role;
     agent.region = region;
 
-    agent.register() catch |err| {
+    orchestrator.installSignalHandlers();
+    @import("../agent/enrollment_retry.zig").run(&agent, &orchestrator.shutdown_requested, .{}) catch |err| {
+        if (err == error.Canceled) return;
         writeErr("failed to register with server: {}\n", .{err});
         writeErr("hint: check that the server is running and the token is correct\n", .{});
         return MembershipError.ConnectionFailed;
@@ -108,8 +110,7 @@ pub fn join(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
         return MembershipError.ServerStartFailed;
     };
 
-    orchestrator.installSignalHandlers();
-    agent.wait();
+    @import("../agent/lifecycle_support.zig").waitForShutdown(&agent, &orchestrator.shutdown_requested);
 
     writeErr("agent stopped\n", .{});
 }
