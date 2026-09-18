@@ -23,7 +23,7 @@ yoq pull <image>                     pull from a registry
 yoq push <source> [target]           push to a registry
 yoq images [--json]                  list local images
 yoq inspect <image>                  show image metadata
-yoq rmi <image>                      remove an image
+yoq rmi <image>                      remove one local image reference
 yoq prune [--json]                   delete unreferenced blobs and layers
 ```
 

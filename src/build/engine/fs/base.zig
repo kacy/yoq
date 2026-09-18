@@ -34,7 +34,7 @@ pub fn processFrom(
     const ref = spec.parseImageRef(image_str);
     log.info("FROM {s}", .{image_str});
 
-    const local = state_store.findImage(alloc, ref.repository, ref.reference) catch null;
+    const local = state_store.findImage(alloc, ref.host, ref.repository, ref.reference) catch null;
     if (local) |img| {
         defer img.deinit(alloc);
         return loadLocalBaseImage(alloc, state, img.manifest_digest);
@@ -52,6 +52,7 @@ pub fn processFrom(
 
     state_store.saveImage(.{
         .id = result.manifest_digest,
+        .registry = ref.host,
         .repository = ref.repository,
         .tag = ref.reference,
         .manifest_digest = result.manifest_digest,

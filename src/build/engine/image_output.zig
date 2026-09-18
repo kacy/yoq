@@ -4,6 +4,7 @@ const blob_store = @import("../../image/store.zig");
 const state_store = @import("../../state/store.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
 const log = @import("../../lib/log.zig");
+const image_spec = @import("../../image/spec.zig");
 const types = @import("types.zig");
 
 fn nowRealSeconds() i64 {
@@ -28,23 +29,16 @@ pub fn produceImage(alloc: std.mem.Allocator, state: *types.BuildState, tag: ?[]
     const owned_digest = alloc.dupe(u8, manifest_digest_str) catch
         return types.BuildError.ImageStoreFailed;
 
-    const repo = if (tag) |t| blk: {
-        if (std.mem.lastIndexOfScalar(u8, t, ':')) |colon| break :blk t[0..colon];
-        break :blk t;
-    } else "build";
-
-    const img_tag = if (tag) |t| blk: {
-        if (std.mem.lastIndexOfScalar(u8, t, ':')) |colon| break :blk t[colon + 1 ..];
-        break :blk @as([]const u8, "latest");
-    } else "latest";
+    const ref = image_spec.parseImageRef(tag orelse "build:latest");
 
     var config_digest_str_buf: [71]u8 = undefined;
     const config_digest_str = config_digest.string(&config_digest_str_buf);
 
     state_store.saveImage(.{
         .id = owned_digest,
-        .repository = repo,
-        .tag = img_tag,
+        .registry = ref.host,
+        .repository = ref.repository,
+        .tag = ref.reference,
         .manifest_digest = owned_digest,
         .config_digest = config_digest_str,
         .total_size = @intCast(state.total_size),

@@ -240,12 +240,16 @@ pub fn parseImageRef(ref: []const u8) ImageRef {
     if (std.mem.indexOfScalar(u8, name, '/')) |slash_idx| {
         const prefix = name[0..slash_idx];
         if (std.mem.indexOfScalar(u8, prefix, '.') != null or
-            std.mem.indexOfScalar(u8, prefix, ':') != null)
+            std.mem.indexOfScalar(u8, prefix, ':') != null or std.mem.eql(u8, prefix, "localhost"))
         {
             host = prefix;
             remainder = name[slash_idx + 1 ..];
         }
     }
+
+    if (std.ascii.eqlIgnoreCase(host, "docker.io") or
+        std.ascii.eqlIgnoreCase(host, "index.docker.io") or
+        std.ascii.eqlIgnoreCase(host, "registry-1.docker.io")) host = "registry-1.docker.io";
 
     var repository = remainder;
     if (std.mem.lastIndexOfScalar(u8, remainder, ':')) |colon_idx| {
@@ -606,4 +610,19 @@ test "parse image ref preserves registry ports and namespaces before digest suff
         try std.testing.expectEqualStrings(digest, parsed.reference);
         try std.testing.expect(parsed.digest_reference);
     }
+}
+
+test "image reliability docker hub host aliases use the registry endpoint" {
+    inline for (.{ "docker.io/alpine", "index.docker.io/alpine", "REGISTRY-1.DOCKER.IO/alpine" }) |name| {
+        const ref = parseImageRef(name);
+        try std.testing.expectEqualStrings("registry-1.docker.io", ref.host);
+        try std.testing.expectEqualStrings("alpine", ref.repository);
+    }
+}
+
+test "image reliability localhost without a port is a registry" {
+    const ref = parseImageRef("localhost/team/app:stable");
+    try std.testing.expectEqualStrings("localhost", ref.host);
+    try std.testing.expectEqualStrings("team/app", ref.repository);
+    try std.testing.expectEqualStrings("stable", ref.reference);
 }
