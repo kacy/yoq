@@ -31,59 +31,49 @@ const PreparedService = struct {
     img: service_runtime.ServiceImageConfig,
     resolved: oci.ResolvedCommand,
     merged_env: std.ArrayList([]const u8),
+    owned_env_start: usize,
     working_dir: []const u8,
     vols: service_runtime.ServiceVolumes,
     net_config: ?net_setup.NetworkConfig,
-    gpu_indices_buf: [8]u32,
-    gpu_indices_len: usize,
-    mesh_support: ?gpu_runtime.MeshSupport,
+    gpu_lease: @import("../../gpu/lease.zig").Lease,
 
-    fn init(io: std.Io, orch: anytype, idx: usize) ?PreparedService {
+    fn init(io: std.Io, orch: anytype, idx: usize) !PreparedService {
         const svc = orch.manifest.services[instances.serviceIndex(orch.manifest.services, idx)];
         const alloc = orch.alloc;
 
-        var img = service_runtime.resolveServiceImageWithIo(io, alloc, svc.image) orelse return null;
+        var img = service_runtime.resolveServiceImageWithIo(io, alloc, svc.image) orelse return error.ImageUnavailable;
         errdefer img.deinit(alloc);
 
         var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, svc.command) catch {
             log.err("failed to resolve command for {s}: out of memory", .{svc.name});
-            return null;
+            return error.PreparationFailed;
         };
         errdefer resolved.args.deinit(alloc);
 
         var merged_env = service_runtime.mergeServiceEnv(alloc, img.image_env, svc.env);
-        errdefer merged_env.deinit(alloc);
+        const owned_env_start = merged_env.items.len;
+        errdefer {
+            for (merged_env.items[owned_env_start..]) |entry| alloc.free(entry);
+            merged_env.deinit(alloc);
+        }
 
         var working_dir = img.working_dir;
         if (svc.working_dir) |wd| working_dir = wd;
 
         var vols = service_runtime.resolveServiceVolumes(alloc, svc.volumes, orch.manifest.volumes, orch.app_name) catch {
-            return null;
+            return error.PreparationFailed;
         };
         errdefer vols.deinit(alloc);
 
-        var gpu_indices_buf: [8]u32 = undefined;
-        var gpu_indices_len: usize = 0;
-        if (svc.gpu) |gpu_spec| {
-            const count = @min(gpu_spec.count, gpu_indices_buf.len);
-            for (0..count) |i| gpu_indices_buf[i] = @intCast(i);
-            gpu_indices_len = count;
-            gpu_runtime.appendGpuPassthroughEnv(alloc, &merged_env, gpu_indices_buf[0..count]);
-        }
-
-        var mesh_support: ?gpu_runtime.MeshSupport = null;
-        errdefer if (mesh_support) |*support| support.deinit();
-        if (svc.gpu_mesh) |mesh_spec| {
-            mesh_support = gpu_runtime.MeshSupport.init(alloc);
-            mesh_support.?.appendEnv(
-                alloc,
-                &merged_env,
-                "127.0.0.1",
-                mesh_spec.master_port,
-                mesh_spec.world_size,
-                0,
-                0,
-            );
+        var gpu_lease = if (svc.gpu) |gpu_spec|
+            try @import("../../gpu/lease.zig").Lease.acquire(gpu_spec.count, gpu_spec.model)
+        else
+            @import("../../gpu/lease.zig").Lease{};
+        errdefer gpu_lease.deinit();
+        if (gpu_lease.count > 0) {
+            var gpu_env: [4096]u8 = undefined;
+            const data = try @import("../../gpu/passthrough.zig").generateGpuEnv(gpu_lease.indices[0..gpu_lease.count], &gpu_env);
+            try gpu_runtime.appendRequiredEnv(alloc, &merged_env, data);
         }
 
         const has_health_check = svc.health_check != null;
@@ -94,18 +84,18 @@ const PreparedService = struct {
             .img = img,
             .resolved = resolved,
             .merged_env = merged_env,
+            .owned_env_start = owned_env_start,
             .working_dir = working_dir,
             .vols = vols,
             .net_config = net_config,
-            .gpu_indices_buf = gpu_indices_buf,
-            .gpu_indices_len = gpu_indices_len,
-            .mesh_support = mesh_support,
+            .gpu_lease = gpu_lease,
         };
     }
 
     fn deinit(self: *PreparedService) void {
-        if (self.mesh_support) |*support| support.deinit();
+        self.gpu_lease.deinit();
         self.vols.deinit(self.alloc);
+        for (self.merged_env.items[self.owned_env_start..]) |entry| self.alloc.free(entry);
         self.merged_env.deinit(self.alloc);
         self.resolved.args.deinit(self.alloc);
         self.img.deinit(self.alloc);
@@ -127,7 +117,7 @@ const PreparedService = struct {
                 .mounts = self.vols.bind_mounts.items,
                 .dev_service_name = if (orch.dev_mode) hostname else null,
                 .dev_color_idx = idx,
-                .gpu_indices = self.gpu_indices_buf[0..self.gpu_indices_len],
+                .gpu_indices = self.gpu_lease.indices[0..self.gpu_lease.count],
             },
             .status = .created,
             .pid = null,
@@ -143,7 +133,8 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
     var threaded_io = std.Io.Threaded.init(orch.alloc, .{});
     defer threaded_io.deinit();
 
-    var prepared = PreparedService.init(threaded_io.io(), orch, idx) orelse {
+    var prepared = PreparedService.init(threaded_io.io(), orch, idx) catch |err| {
+        log.err("failed to prepare service {s}: {}", .{ svc.name, err });
         orch.states[idx].setStatus(.failed);
         return;
     };

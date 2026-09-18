@@ -97,6 +97,9 @@ pub const Orchestrator = struct {
     start_set: ?std.StringHashMapUnmanaged(void) = null,
 
     pub fn init(alloc: std.mem.Allocator, manifest: *spec.Manifest, app_name: []const u8) !Orchestrator {
+        for (manifest.services) |svc| {
+            if (svc.gpu_mesh != null) return error.UnsupportedLocalServiceMesh;
+        }
         const instance_count = try instances.count(manifest.services);
         const states = try alloc.alloc(ServiceState, instance_count);
         errdefer alloc.free(states);
@@ -853,4 +856,11 @@ test "replica identity snapshots remain complete during concurrent restarts" {
         const id = state.containerId();
         try std.testing.expect(std.mem.eql(u8, &id, "aaaaaaaaaaaa") or std.mem.eql(u8, &id, "bbbbbbbbbbbb"));
     }
+}
+
+test "local services reject mesh configuration before starting any replica" {
+    var service = testSvc("mesh", &.{});
+    service.gpu_mesh = .{ .world_size = 2 };
+    var manifest: spec.Manifest = .{ .services = &.{service}, .workers = &.{}, .crons = &.{}, .training_jobs = &.{}, .volumes = &.{}, .alloc = std.testing.allocator };
+    try std.testing.expectError(error.UnsupportedLocalServiceMesh, Orchestrator.init(std.testing.allocator, &manifest, "app"));
 }
