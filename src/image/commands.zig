@@ -13,6 +13,8 @@ const common = @import("cli/common.zig");
 
 pub const ImageCommandsError = common.ImageCommandsError;
 pub const ImageResolution = resolution.ImageResolution;
+pub const PullPolicy = resolution.PullPolicy;
+pub const resolveImage = resolution.resolveImage;
 
 pub fn pullAndResolveImage(io: std.Io, alloc: std.mem.Allocator, target: []const u8) ImageCommandsError!ImageResolution {
     return resolution.pullAndResolveImage(io, alloc, target);
