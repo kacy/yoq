@@ -74,6 +74,7 @@ pub fn stop(self: anytype) void {
         self.loop_thread = null;
     }
     self.assignment_workers.join();
+    @import("../../manifest/alerts/runtime.zig").shutdownIfUnused();
     stopLogServer(self);
 
     if (self.node_id != null) {
@@ -92,11 +93,11 @@ pub fn wait(self: anytype) void {
         self.loop_thread = null;
     }
     self.assignment_workers.join();
+    @import("../../manifest/alerts/runtime.zig").shutdownIfUnused();
     stopLogServer(self);
 }
 
 pub fn deinit(self: anytype) void {
-    defer @import("../../manifest/alerts/runtime.zig").shutdownIfUnused();
     stop(self);
 
     self.container_lock.lockUncancelable(std.Options.debug_io);

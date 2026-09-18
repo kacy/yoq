@@ -102,3 +102,33 @@ fn fetchInner(alloc: std.mem.Allocator, io: std.Io, agent: registry.AgentRecord,
     parsed.deinit();
     return .{ .body = body };
 }
+
+test "cluster alert collection validates bounded agent responses and does not follow redirects" {
+    const Server = @import("../../../image/registry/test_support.zig").Server;
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    for ([_]Server.Reply{
+        .{ .body = "[]" },
+        .{ .body = "{}" },
+        .{ .repeated_bytes = response_limit + 1 },
+        .{ .status = "302 Found", .headers = "Location: http://127.0.0.1:1/private\r\n" },
+    }, 0..) |reply, index| {
+        var server = try Server.init(&.{reply});
+        defer server.deinit();
+        try server.start();
+        var host_buffer: [64]u8 = undefined;
+        const host = try server.host(&host_buffer);
+        const port = try std.fmt.parseInt(u16, host[std.mem.lastIndexOfScalar(u8, host, ':').? + 1 ..], 10);
+        const agent: registry.AgentRecord = .{ .id = "agent", .address = "127.0.0.1", .agent_api_port = port, .status = "active", .cpu_cores = 1, .memory_mb = 100, .cpu_used = 0, .memory_used_mb = 0, .containers = 0, .last_heartbeat = 0, .registered_at = 0 };
+        const result = fetch(std.testing.allocator, threaded.io(), agent, "join-token");
+        defer if (result.body) |body| std.testing.allocator.free(body);
+        if (index == 0) {
+            try std.testing.expectEqualStrings("[]", result.body.?);
+            try std.testing.expect(result.failure == null);
+        } else try std.testing.expect(result.failure != null);
+        server.worker.?.join();
+        server.worker = null;
+        try std.testing.expectEqual(@as(usize, 1), server.requests);
+        try std.testing.expect(std.mem.indexOf(u8, server.last_request[0..server.last_request_length], "Authorization: Bearer join-token\r\n") != null);
+    }
+}

@@ -301,3 +301,24 @@ test "log server serves remote training logs with auth" {
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "HTTP/1.1 200 OK") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "rank zero logs\n") != null);
 }
+
+test "agent alert status requires authentication and returns persisted records" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    for ([_][]const u8{ "wrong-token", "join-token" }) |token| {
+        var sockets: [2]posix.fd_t = undefined;
+        if (std.c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
+        defer linux_platform.posix.close(sockets[0]);
+        var request_buffer: [256]u8 = undefined;
+        const request = try std.fmt.bufPrint(&request_buffer, "GET /v1/status/alerts HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {s}\r\n\r\n", .{token});
+        _ = try linux_platform.posix.write(sockets[0], request);
+        var server: LogServer = .{ .alloc = std.testing.allocator, .listen_fd = -1, .token = "join-token", .port = 0, .running = .init(true), .started = .init(true) };
+        handleConnection(&server, sockets[1]);
+        var response: [1024]u8 = undefined;
+        const count = try posix.read(sockets[0], &response);
+        if (std.mem.eql(u8, token, "join-token")) {
+            try std.testing.expect(std.mem.indexOf(u8, response[0..count], "HTTP/1.1 200 OK") != null);
+            try std.testing.expect(std.mem.endsWith(u8, response[0..count], "[]"));
+        } else try std.testing.expect(std.mem.indexOf(u8, response[0..count], "HTTP/1.1 401 Unauthorized") != null);
+    }
+}
