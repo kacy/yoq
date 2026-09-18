@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: set up zig
         uses: ./.github/actions/setup-zig
@@ -105,7 +105,7 @@ jobs:
         include: ${{ fromJSON(inputs.scope == 'cluster' && '[{"lane":"cluster","command":"test-runtime-cluster"}]' || '[{"lane":"core","command":"test-runtime-core"},{"lane":"network","command":"test-runtime-network"},{"lane":"cluster","command":"test-runtime-cluster"}]') }}
     steps:
       - name: check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: set up zig
         uses: ./.github/actions/setup-zig
@@ -182,7 +182,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: set up zig
         uses: ./.github/actions/setup-zig
