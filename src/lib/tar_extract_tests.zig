@@ -6,7 +6,7 @@ const alloc = std.testing.allocator;
 
 const Entry = struct {
     name: []const u8,
-    kind: enum { file, directory, symlink } = .file,
+    kind: enum { file, directory, symlink, hardlink } = .file,
     content: []const u8 = "",
 };
 
@@ -19,6 +19,12 @@ fn archiveBytes(entries: []const Entry) ![]u8 {
             .file => try tar.writeFileBytes(entry.name, entry.content, .{}),
             .directory => try tar.writeDir(entry.name, .{}),
             .symlink => try tar.writeLink(entry.name, entry.content, .{}),
+            .hardlink => {
+                try tar.writeLink(entry.name, entry.content, .{});
+                const header = output.writer.buffer[output.writer.end - 512 .. output.writer.end];
+                header[156] = '1';
+                updateChecksum(header);
+            },
         }
     }
     try tar.finishPedantically();
@@ -301,4 +307,144 @@ test "gzip tar extraction uses the same confinement for archive-created symlinks
     const dest_len = try tmp.dir.realPathFile(io, "dest", &dest_buf);
     try expectFailure(extract.extractTarGzFile(archive_buf[0..archive_len], dest_buf[0..dest_len], "gzip containment test"));
     try expectContents(tmp.dir, "outside/marker", "outside remains intact");
+}
+
+fn updateChecksum(header: []u8) void {
+    @memset(header[148..156], ' ');
+    var checksum: u32 = 0;
+    for (header) |byte| checksum += byte;
+    _ = std.fmt.bufPrint(header[148..156], "{o:0>6}\x00 ", .{checksum}) catch unreachable;
+}
+
+fn expectSameInode(dir: std.Io.Dir, first: []const u8, second: []const u8) !void {
+    const a = try dir.statFile(io, first, .{});
+    const b = try dir.statFile(io, second, .{});
+    try std.testing.expectEqual(a.inode, b.inode);
+    try std.testing.expect(a.nlink >= 2);
+}
+
+test "tar hard links resolve previous targets forward references and chains" {
+    for ([_]bool{ false, true }) |forward| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try prepareDest(tmp);
+        var entries = [_]Entry{
+            .{ .name = "original", .content = "shared value" },
+            .{ .name = "alias", .kind = .hardlink, .content = "./original" },
+            .{ .name = "chain", .kind = .hardlink, .content = "alias" },
+        };
+        if (forward) std.mem.reverse(Entry, &entries);
+        try extractEntries(tmp, &entries);
+        try expectContents(tmp.dir, "dest/chain", "shared value");
+        try expectSameInode(tmp.dir, "dest/original", "dest/alias");
+        try expectSameInode(tmp.dir, "dest/original", "dest/chain");
+    }
+}
+
+test "tar hard links bind before later replacement and later destination entries win" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try prepareDest(tmp);
+    try extractEntries(tmp, &.{
+        .{ .name = "alias", .kind = .hardlink, .content = "original" },
+        .{ .name = "original", .content = "first" },
+        .{ .name = "original", .content = "second" },
+        .{ .name = "replaced", .kind = .hardlink, .content = "missing" },
+        .{ .name = "replaced", .content = "replacement" },
+    });
+    try expectContents(tmp.dir, "dest/alias", "first");
+    try expectContents(tmp.dir, "dest/original", "second");
+    try expectContents(tmp.dir, "dest/replaced", "replacement");
+}
+
+test "tar hard links replace destination symlinks without changing outside files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try prepareDest(tmp);
+    try tmp.dir.symLink(io, "../outside/marker", "dest/alias", .{});
+    try extractEntries(tmp, &.{
+        .{ .name = "original", .content = "inside" },
+        .{ .name = "alias", .kind = .hardlink, .content = "original" },
+    });
+    try expectContents(tmp.dir, "outside/marker", "outside remains intact");
+    try expectSameInode(tmp.dir, "dest/original", "dest/alias");
+}
+
+test "tar hard links reject escaping targets symlink targets cycles and absent targets" {
+    for ([_][]const u8{ "../outside/marker", "/etc/passwd", "link", "missing", "alias" }) |target| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try prepareDest(tmp);
+        const result = extractEntries(tmp, &.{
+            .{ .name = "link", .kind = .symlink, .content = "/etc/passwd" },
+            .{ .name = "alias", .kind = .hardlink, .content = target },
+        });
+        try expectFailure(result);
+        try expectContents(tmp.dir, "outside/marker", "outside remains intact");
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try prepareDest(tmp);
+    try std.testing.expectError(error.UnresolvedHardLinks, extractEntries(tmp, &.{
+        .{ .name = "one", .kind = .hardlink, .content = "two" },
+        .{ .name = "two", .kind = .hardlink, .content = "one" },
+    }));
+}
+
+test "tar hard links preserve rooted resolution through absolute directory symlinks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try prepareDest(tmp);
+    try extractEntries(tmp, &.{
+        .{ .name = "inside/original", .content = "inside" },
+        .{ .name = "parent", .kind = .symlink, .content = "/inside" },
+        .{ .name = "parent/alias", .kind = .hardlink, .content = "parent/original" },
+    });
+    try expectSameInode(tmp.dir, "dest/inside/original", "dest/inside/alias");
+}
+
+test "tar hard links retain GNU long names and link targets" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try prepareDest(tmp);
+    const target = "target-" ++ "x" ** 120;
+    const alias = "alias-" ++ "y" ** 120;
+    try extractEntries(tmp, &.{
+        .{ .name = target, .content = "long target" },
+        .{ .name = alias, .kind = .hardlink, .content = target },
+    });
+    try expectSameInode(tmp.dir, "dest/" ++ target, "dest/" ++ alias);
+}
+
+test "tar hard links retain PAX path and linkpath metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try prepareDest(tmp);
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    defer output.deinit();
+    var tar: std.tar.Writer = .{ .underlying_writer = &output.writer };
+    try tar.writeFileBytes("target", "pax target", .{});
+    const metadata = "14 path=alias\n" ++ "19 linkpath=target\n";
+    // lengths include the length field itself and the final newline.
+    try std.testing.expectEqual(@as(usize, 33), metadata.len);
+    try writeRawHeader(&output.writer, "pax", 'x', metadata.len);
+    try output.writer.writeAll(metadata);
+    const zeroes: [512]u8 = @splat(0);
+    try output.writer.writeAll(zeroes[0 .. 512 - metadata.len]);
+    try writeRawHeader(&output.writer, "fallback", '1', 0);
+    try tar.finishPedantically();
+    try extractBytes(tmp, output.written());
+    try expectSameInode(tmp.dir, "dest/target", "dest/alias");
+}
+
+test "tar hard links reject data payloads and archive headers retain checksum validation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try prepareDest(tmp);
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    defer output.deinit();
+    try writeRawHeader(&output.writer, "alias", '1', 1);
+    try std.testing.expectError(error.InvalidHardLink, extractBytes(tmp, output.written()));
+    output.writer.buffer[0] ^= 1;
+    try std.testing.expectError(error.TarHeaderChksum, extractBytes(tmp, output.written()));
 }

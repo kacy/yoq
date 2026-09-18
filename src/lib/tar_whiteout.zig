@@ -14,7 +14,7 @@ pub const Pending = struct {
         self.names.deinit();
     }
 
-    pub fn add(self: *Pending, name: []const u8, entry: std.tar.Iterator.File) !bool {
+    pub fn add(self: *Pending, name: []const u8, entry: @import("tar_entries.zig").Iterator.File) !bool {
         const basename = std.fs.path.basename(name);
         if (!std.mem.startsWith(u8, basename, ".wh.")) return false;
         if (entry.kind != .file or entry.size != 0) return error.InvalidWhiteout;

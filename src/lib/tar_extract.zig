@@ -5,6 +5,8 @@ const linux = std.os.linux;
 const log = @import("log.zig");
 const syscall = @import("syscall.zig");
 const Metadata = @import("tar_metadata.zig").Metadata;
+const TarIterator = @import("tar_entries.zig").Iterator;
+const hardlinks = @import("tar_hardlinks.zig");
 
 pub const max_file_size: u64 = 10 * 1024 * 1024 * 1024;
 
@@ -89,6 +91,8 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
     const restore_owner = image_layer and linux.geteuid() == 0;
     var whiteouts = @import("tar_whiteout.zig").Pending{};
     defer whiteouts.deinit();
+    var pending_links: hardlinks.Pending = .{};
+    defer pending_links.deinit();
     var directory_path_bytes: usize = 0;
     var directories: std.StringHashMap(Metadata) = .init(std.heap.page_allocator);
     defer {
@@ -102,7 +106,7 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
     var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
     var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
     var normalized_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    var it: std.tar.Iterator = .init(reader, .{
+    var it: TarIterator = .init(reader, .{
         .file_name_buffer = &file_name_buffer,
         .link_name_buffer = &link_name_buffer,
     });
@@ -119,6 +123,7 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
             return error.UnsafeArchivePath;
         }
 
+        pending_links.cancel(name);
         if (image_layer and try whiteouts.add(name, entry)) continue;
 
         switch (entry.kind) {
@@ -160,6 +165,13 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
                 if (image_layer) try (try Metadata.fromHeader(&it.header_buffer, entry.mode)).apply(file.file, restore_owner);
                 try file.replace(std.Options.debug_io);
             },
+            .hard_link => {
+                var target_buffer: [std.fs.max_path_bytes]u8 = undefined;
+                const target = try normalizeTarPath(entry.link_name, &target_buffer);
+                if (target.len == 0) return error.UnsafeArchivePath;
+                if (!try hardlinks.create(dest_dir, name, target, ensureParentDir, openRootedFile))
+                    try pending_links.add(name, target);
+            },
             .sym_link => {
                 if (!isSafeSymlinkTarget(name, entry.link_name)) {
                     log.warn("{s}: rejecting unsafe symlink '{s}' -> '{s}'", .{
@@ -180,7 +192,9 @@ fn extractTarReader(reader: *std.Io.Reader, dest_path: []const u8, context: []co
                 }
             },
         }
+        try pending_links.resolve(dest_dir, ensureParentDir, openRootedFile);
     }
+    try pending_links.finish();
     try whiteouts.apply(dest_dir, ensureDirectory);
 
     // Apply directories deepest-first after contents are complete, so a mode
@@ -248,7 +262,7 @@ pub fn isSafeSymlinkTarget(entry_path: []const u8, link_target: []const u8) bool
     return true;
 }
 
-fn copyTarEntryToFile(it: *std.tar.Iterator, entry: std.tar.Iterator.File, fs_file: std.Io.File) !void {
+fn copyTarEntryToFile(it: *TarIterator, entry: TarIterator.File, fs_file: std.Io.File) !void {
     var remaining = entry.size;
     var buf: [8192]u8 = undefined;
     while (remaining > 0) {
@@ -318,12 +332,22 @@ fn ensureDirectory(root: std.Io.Dir, path: []const u8) !std.Io.Dir {
 /// Linux 6.1+ is required by the runtime. Do not fall back to ordinary openat:
 /// it would follow archive-controlled symlinks against the host filesystem.
 fn openRootedDir(root: std.Io.Dir, path: []const u8) !std.Io.Dir {
+    const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
+    return .{ .handle = try openRooted(root, path, flags) };
+}
+
+fn openRootedFile(root: std.Io.Dir, path: []const u8) !std.Io.File {
+    // the final component must remain an inode, not a followed symbolic link.
+    const flags: linux.O = .{ .PATH = true, .NOFOLLOW = true, .CLOEXEC = true };
+    return .{ .handle = try openRooted(root, path, flags), .flags = .{ .nonblocking = false } };
+}
+
+fn openRooted(root: std.Io.Dir, path: []const u8, flags: linux.O) !std.posix.fd_t {
     if (@import("builtin").os.tag != .linux) return error.OperationUnsupported;
 
     const OpenHow = extern struct { flags: u64, mode: u64 = 0, resolve: u64 };
     const resolve_no_magiclinks = 0x02;
     const resolve_in_root = 0x10;
-    const flags: linux.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
     const how: OpenHow = .{
         .flags = @as(u32, @bitCast(flags)),
         .resolve = resolve_in_root | resolve_no_magiclinks,
@@ -331,7 +355,7 @@ fn openRootedDir(root: std.Io.Dir, path: []const u8) !std.Io.Dir {
     const path_z = try std.posix.toPosixPath(path);
     while (true) {
         const rc = linux.syscall4(.openat2, @intCast(root.handle), @intFromPtr(&path_z), @intFromPtr(&how), @sizeOf(OpenHow));
-        if (!syscall.isError(rc)) return .{ .handle = @intCast(rc) };
+        if (!syscall.isError(rc)) return @intCast(rc);
         switch (@as(linux.E, @enumFromInt(syscall.getErrno(rc)))) {
             .INTR => continue,
             .NOENT => return error.FileNotFound,
