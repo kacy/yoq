@@ -31,27 +31,27 @@ pub fn top(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const cg = try cgroups.Cgroup.open(record.id);
     const pids = try cg.processes(ctx.alloc);
     defer ctx.alloc.free(pids);
-    var rows: std.ArrayList(ProcessRow) = .empty;
-    defer {
-        for (rows.items) |row| ctx.alloc.free(row.command);
-        rows.deinit(ctx.alloc);
-    }
+    var output_buffer: [8192]u8 = undefined;
+    var output = std.Io.File.stdout().writerStreaming(ctx.io, &output_buffer);
+    const writer = &output.interface;
+    if (selected.json) try writer.writeByte('[') else try writer.writeAll("PID\tPPID\tSTATE\tCOMMAND\n");
+    var first = true;
     for (pids) |pid| {
         const row = readProcess(ctx.io, ctx.alloc, pid) catch |err| switch (err) {
             error.FileNotFound, error.ProcessNotFound => continue,
             else => return err,
         };
-        rows.append(ctx.alloc, row) catch |err| {
-            ctx.alloc.free(row.command);
-            return err;
-        };
+        defer ctx.alloc.free(row.command);
+        if (selected.json) {
+            if (!first) try writer.writeByte(',');
+            try std.json.Stringify.value(row, .{}, writer);
+        } else {
+            try writer.print("{d}\t{d}\t{s}\t{s}\n", .{ row.pid, row.parent_pid, row.state, row.command });
+        }
+        first = false;
     }
-    if (selected.json) {
-        try writeJson(ctx.alloc, rows.items);
-    } else {
-        cli.write("PID\tPPID\tSTATE\tCOMMAND\n", .{});
-        for (rows.items) |row| cli.write("{d}\t{d}\t{s}\t{s}\n", .{ row.pid, row.parent_pid, row.state, row.command });
-    }
+    if (selected.json) try writer.writeAll("]\n");
+    try writer.flush();
 }
 
 const ProcessRow = struct { pid: i32, parent_pid: i32, state: []const u8, command: []u8 };
