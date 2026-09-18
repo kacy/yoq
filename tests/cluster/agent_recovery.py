@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 
 
@@ -194,6 +195,20 @@ def exercise(rig):
     leader = wait_for("leader election after process death", rig.leader)
     if leader == first:
         raise RuntimeError("dead server remained leader")
+    follower = next(node for node in range(1, 4) if node not in (first, leader))
+
+    def follower_redirects():
+        try:
+            rig.request(follower, f"/agents/{agent_id}/heartbeat", b"{}", rig.worker_credential())
+        except urllib.error.HTTPError as error:
+            with error:
+                return error.code == 503 and json.load(error).get("leader") == f"10.233.0.{leader}:7700"
+        return False
+
+    wait_for("surviving follower learns the elected leader", follower_redirects)
+    wait_for("committed heartbeat after leader loss",
+             lambda: any(item["id"] == agent_id and item["last_heartbeat"] > agents[0]["last_heartbeat"]
+                         for item in rig.request(leader, "/agents")))
     registry = HeldRegistry()
     try:
         sql = ("INSERT INTO assignments (id, agent_id, image, command, status, workload_kind, created_at) "
