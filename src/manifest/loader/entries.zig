@@ -286,8 +286,8 @@ pub fn parseTrainingJob(alloc: std.mem.Allocator, name: []const u8, table: *cons
         log.err("manifest: training '{s}' is missing required field 'gpus'", .{name});
         return common.LoadError.InvalidTrainingConfig;
     };
-    if (gpus_raw < 1) {
-        log.err("manifest: training '{s}' gpus must be >= 1", .{name});
+    if (gpus_raw < 1 or gpus_raw > spec.max_training_ranks) {
+        log.err("manifest: training.{s}.gpus must be between 1 and {d}", .{ name, spec.max_training_ranks });
         return common.LoadError.InvalidTrainingConfig;
     }
 
