@@ -2,6 +2,7 @@
 """exercise leader loss and durable reports with real servers and an agent."""
 
 import argparse
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -115,14 +116,15 @@ class Rig:
 
     def reports(self):
         path = self.data(4) / "agent-cache.db"
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1) as database:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)) as database:
             return database.execute("SELECT assignment_id, status, delivered FROM assignment_results").fetchall()
 
     def cleanup(self):
         for node in self.processes:
             self.stop(node)
         for namespace in self.namespaces.values():
-            namespace.kill()
+            if namespace.poll() is None:
+                namespace.kill()
             namespace.wait(timeout=10)
         for log in self.logs:
             log.close()
