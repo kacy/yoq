@@ -37,6 +37,7 @@ const Service = struct {
     owner_token: ?[]const u8 = null,
     cluster_generation: ?u64 = null,
     restart_total: u64 = 0,
+    activation_revision: u64 = 0,
     sampler: sampling.Sampler = .{},
     rules: [metrics.len]?RuleState = @splat(null),
 
@@ -213,6 +214,7 @@ fn updateClusterOwner(app: []const u8, name: []const u8) !void {
     if (!try status_store.setClusterGeneration(app, name, selected)) return;
     for (entries.items) |entry| {
         if (entry.cluster_generation == null or !std.mem.eql(u8, entry.app, app) or !std.mem.eql(u8, entry.name, name)) continue;
+        entry.activation_revision +|= 1;
         for (metrics, 0..) |_, index| {
             if (entry.rules[index]) |*state| {
                 state.* = .{ .rule = .{ .threshold = state.rule.threshold, .revision = state.rule.revision +| 1, .in_flight = state.rule.in_flight } };
@@ -355,12 +357,18 @@ fn deliveryLoop() void {
             continue;
         };
         defer alloc.free(payload);
-        const outcome = if (work.service.isCurrent()) webhook.send(alloc, threaded.io(), work.service.config.webhook.?, payload) else webhook.Delivery{ .failure = "SupervisorSuperseded" };
+        const outcome = if (workIsCurrent(work)) webhook.send(alloc, threaded.io(), work.service.config.webhook.?, payload) else webhook.Delivery{ .failure = "SupervisorSuperseded" };
         finishDelivery(work, outcome);
     }
 }
 
-const Work = struct { service: *Service, index: usize, event: evaluator.Event, threshold: f64 };
+const Work = struct { service: *Service, index: usize, event: evaluator.Event, threshold: f64, activation_revision: u64 };
+
+fn workIsCurrent(work: Work) bool {
+    mutex.lockUncancelable(debug_io);
+    defer mutex.unlock(debug_io);
+    return work.activation_revision == work.service.activation_revision and work.service.isCurrent();
+}
 
 fn selectDelivery(cursor: *usize) ?Work {
     const count = entries.items.len * metrics.len;
@@ -382,7 +390,7 @@ fn selectDelivery(cursor: *usize) ?Work {
         state.rule.queued();
         state.delivery = "sending";
         entry.persist(index);
-        return .{ .service = entry, .index = index, .event = event, .threshold = state.rule.threshold };
+        return .{ .service = entry, .index = index, .event = event, .threshold = state.rule.threshold, .activation_revision = entry.activation_revision };
     }
     return null;
 }
@@ -391,6 +399,12 @@ fn finishDelivery(work: Work, outcome: webhook.Delivery) void {
     mutex.lockUncancelable(debug_io);
     defer mutex.unlock(debug_io);
     const state = &work.service.rules[work.index].?;
+    // a retired generation can become current again while its old request is
+    // still finishing. that response belongs to the previous activation.
+    if (work.activation_revision != work.service.activation_revision) {
+        state.rule.in_flight = false;
+        return;
+    }
     state.rule.delivered(work.event.revision, outcome.failure == null, nowMs());
     state.delivery = if (outcome.failure == null) "delivered" else "failed";
     state.delivery_error = outcome.failure;
@@ -551,4 +565,26 @@ test "cluster alert generations tolerate overlap late arrivals and retirement wi
     const cleared = try status_store.listJson(std.testing.allocator, "app");
     defer std.testing.allocator.free(cleared);
     try std.testing.expectEqualStrings("[]", cleared);
+}
+
+test "cluster alert fallback discards delivery selected before retirement" {
+    const store = @import("../../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    defer shutdown();
+    const config: spec.AlertSpec = .{ .cpu_percent = 80, .webhook = "https://example.com/hook" };
+    const old = try registerLocked("app", "web", config, false, null, 1);
+    try updateClusterOwner("app", "web");
+    for (0..evaluator.consecutive_samples) |_| old.rules[0].?.rule.observe(90);
+    var cursor: usize = 0;
+    const selected = selectDelivery(&cursor).?;
+    const newer = try registerLocked("app", "web", config, false, null, 2);
+    try updateClusterOwner("app", "web");
+    (Registration{ .service = newer }).release();
+    try std.testing.expect(old.isCurrent());
+    try std.testing.expect(!workIsCurrent(selected));
+    finishDelivery(selected, .{ .status = 204 });
+    try std.testing.expect(!old.rules[0].?.rule.in_flight);
+    try std.testing.expectEqualStrings("idle", old.rules[0].?.delivery);
+    try std.testing.expect(old.rules[0].?.delivered_at == null);
 }
