@@ -291,8 +291,8 @@ fn syncExistingServiceStates(orch: *orchestrator.Orchestrator, release: *const r
             if (!std.mem.eql(u8, record.app_name orelse "", release.app.app_name) or !std.mem.eql(u8, record.hostname, svc.name)) continue;
             if (replica >= svc.replicas) break;
             const instance = @import("orchestrator/instances.zig").instanceIndex(orch.manifest.services, idx, replica);
-            if (record.id.len != orch.states[instance].container_id.len) continue;
-            @memcpy(&orch.states[instance].container_id, record.id);
+            if (record.id.len != 12) continue;
+            orch.states[instance].setContainerId(record.id[0..12].*);
             orch.states[instance].setStatus(.running);
             replica += 1;
         }

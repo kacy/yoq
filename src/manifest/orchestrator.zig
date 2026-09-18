@@ -38,13 +38,26 @@ pub const OrchestratorError = error{
     ManifestEmpty,
 };
 
-/// per-service state tracked by the orchestrator
+/// state owned by one replica supervisor
 pub const ServiceState = struct {
     container_id: [12]u8,
+    identity_mutex: std.Io.Mutex = .init,
     thread: ?std.Thread,
     status: Status,
     health_status: ?health.HealthStatus = null,
     stop_requested: std.atomic.Value(bool) = .init(false),
+
+    pub fn containerId(self: *ServiceState) [12]u8 {
+        self.identity_mutex.lockUncancelable(std.Options.debug_io);
+        defer self.identity_mutex.unlock(std.Options.debug_io);
+        return self.container_id;
+    }
+
+    pub fn setContainerId(self: *ServiceState, id: [12]u8) void {
+        self.identity_mutex.lockUncancelable(std.Options.debug_io);
+        defer self.identity_mutex.unlock(std.Options.debug_io);
+        self.container_id = id;
+    }
 
     pub fn getStatus(self: *const ServiceState) Status {
         return @atomicLoad(Status, &self.status, .acquire);
@@ -167,7 +180,8 @@ pub const Orchestrator = struct {
                 continue;
             }
             if (self.manifest.services[service_index].health_check != null) {
-                const readiness = health.getContainerStatus(&state.container_id) orelse .starting;
+                const id = state.containerId();
+                const readiness = health.getContainerStatus(&id) orelse .starting;
                 if (readiness == .unhealthy) return .unhealthy;
                 if (readiness == .starting) result = .starting;
             }
@@ -820,5 +834,23 @@ test "local rollout and snapshot rollback restore three independent replicas" {
     for (restored_runtime.states, 0..) |*state, index| {
         try std.testing.expectEqual(ServiceState.Status.running, state.getStatus());
         for (restored_runtime.states[0..index]) |other| try std.testing.expect(!std.mem.eql(u8, &state.container_id, &other.container_id));
+    }
+}
+
+test "replica identity snapshots remain complete during concurrent restarts" {
+    var state: ServiceState = .{ .container_id = "aaaaaaaaaaaa".*, .thread = null, .status = .running };
+    var start = std.atomic.Value(bool).init(false);
+    const Writer = struct {
+        fn run(shared: *ServiceState, ready: *std.atomic.Value(bool)) void {
+            while (!ready.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..10000) |index| shared.setContainerId(if (index % 2 == 0) "bbbbbbbbbbbb".* else "aaaaaaaaaaaa".*);
+        }
+    };
+    const writer = try std.Thread.spawn(.{}, Writer.run, .{ &state, &start });
+    defer writer.join();
+    start.store(true, .release);
+    for (0..10000) |_| {
+        const id = state.containerId();
+        try std.testing.expect(std.mem.eql(u8, &id, "aaaaaaaaaaaa") or std.mem.eql(u8, &id, "bbbbbbbbbbbb"));
     }
 }

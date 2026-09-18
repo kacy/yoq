@@ -152,6 +152,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
     var backoff_ms: u64 = initial_backoff_ms;
 
     while (!orch.states[idx].stop_requested.load(.acquire) and !shutdown_requested.load(.acquire)) {
+        orch.states[idx].setStatus(.starting);
         var id_buf: [12]u8 = undefined;
         container.generateId(&id_buf) catch {
             writeErr("failed to generate container ID for {s}\n", .{svc.name});
@@ -159,7 +160,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             return;
         };
         const id = id_buf[0..];
-        @memcpy(&orch.states[idx].container_id, id);
+        orch.states[idx].setContainerId(id_buf);
 
         store.save(.{
             .id = id,
@@ -184,6 +185,16 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             orch.states[idx].setStatus(.failed);
             return;
         };
+
+        // shutdown can arrive while start is creating the process. recheck here
+        // so a stop request cannot join a supervisor waiting on a new child.
+        if (orch.states[idx].stop_requested.load(.acquire) or shutdown_requested.load(.acquire)) {
+            c.forceStop() catch {};
+            _ = c.wait() catch 255;
+            cleanupContainerArtifacts(id);
+            orch.states[idx].setStatus(.stopped);
+            return;
+        }
 
         startup_runtime.refreshServiceRuntimeBindings(
             orch.alloc,
@@ -248,7 +259,7 @@ pub fn watcherThread(orch: anytype, w: *watcher_mod.Watcher, shutdown_requested:
 
             for (0..svc.replicas) |replica| {
                 const instance = instances.instanceIndex(orch.manifest.services, service_idx, replica);
-                const id = orch.states[instance].container_id;
+                const id = orch.states[instance].containerId();
                 const record = store.load(orch.alloc, id[0..]) catch |err| {
                     log.debug("watcher: container {s} not found (may have exited): {}", .{ svc.name, err });
                     orch.restart_requested[instance].store(true, .release);

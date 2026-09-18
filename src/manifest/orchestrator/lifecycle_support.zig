@@ -180,11 +180,14 @@ pub fn startServiceByIndex(
         const instance = instances.instanceIndex(self.manifest.services, idx, replica);
         self.states[instance].stop_requested.store(false, .release);
         self.states[instance].setStatus(.starting);
-        container.generateId(&self.states[instance].container_id) catch {
+        var id_buf: [12]u8 = undefined;
+        container.generateId(&id_buf) catch {
             writeErr("failed to generate container ID for {s}\n", .{svc.name});
             self.states[instance].setStatus(.failed);
             return OrchestratorError.StartFailed;
         };
+
+        self.states[instance].setContainerId(id_buf);
 
         const thread = std.Thread.spawn(.{}, serviceThreadFn, .{ self, instance }) catch {
             writeErr("failed to spawn thread for {s}\n", .{svc.name});
@@ -198,7 +201,7 @@ pub fn startServiceByIndex(
             return OrchestratorError.StartFailed;
         }
 
-        const id = self.states[instance].container_id;
+        const id = self.states[instance].containerId();
         writeErr("started {s} ({s})\n", .{ svc.name, id[0..] });
     }
 }
@@ -240,7 +243,7 @@ pub fn stopServiceByIndex(self: anytype, idx: usize) void {
         const instance = instances.instanceIndex(self.manifest.services, idx, replica);
         const state = &self.states[instance];
         if (state.getStatus() == .pending) continue;
-        const id = state.container_id;
+        const id = state.containerId();
         health.unregisterContainer(&id);
         if (store.load(self.alloc, &id)) |record| {
             defer record.deinit(self.alloc);

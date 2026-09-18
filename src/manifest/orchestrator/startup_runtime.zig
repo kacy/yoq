@@ -34,7 +34,7 @@ pub fn registerHealthChecks(
         const hc = svc.health_check orelse continue;
         has_checks = true;
 
-        const id = states[i].container_id;
+        const id = states[i].containerId();
         const record = store.load(alloc, id[0..]) catch {
             log.warn("orchestrator: failed to load container for health check registration: {s}", .{svc.name});
             continue;
@@ -95,7 +95,7 @@ pub fn refreshServiceRuntimeBindings(
     state: anytype,
     backend_registry: ?*tls_backend.BackendRegistry,
 ) void {
-    const id = state.container_id;
+    const id = state.containerId();
     const record = store.load(alloc, id[0..]) catch {
         log.warn("orchestrator: failed to load container for runtime binding refresh: {s}", .{svc.name});
         return;
