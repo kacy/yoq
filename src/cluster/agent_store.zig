@@ -73,10 +73,11 @@ pub fn initWithPath(file_path: []const u8) !void {
 
     // create schema
     db.exec(create_table_sql, .{}, .{}) catch return error.InitFailed;
+    db.exec(@import("agent/result_store.zig").schema, .{}, .{}) catch return error.InitFailed;
 
     // WAL mode for concurrent reads
     _ = sqlite.c.sqlite3_exec(db.db, "PRAGMA journal_mode=WAL;", null, null, null);
-    _ = sqlite.c.sqlite3_exec(db.db, "PRAGMA synchronous=NORMAL;", null, null, null);
+    if (sqlite.c.sqlite3_exec(db.db, "PRAGMA synchronous=FULL;", null, null, null) != sqlite.c.SQLITE_OK) return error.InitFailed;
     _ = sqlite.c.sqlite3_exec(db.db, "PRAGMA busy_timeout=5000;", null, null, null);
 
     global_db = db;
@@ -93,12 +94,27 @@ pub fn initTestDb() !void {
     }) catch return error.InitFailed;
 
     db.exec(create_table_sql, .{}, .{}) catch return error.InitFailed;
+    db.exec(@import("agent/result_store.zig").schema, .{}, .{}) catch return error.InitFailed;
 
     global_db = db;
 }
 
 fn getDb() !*sqlite.Db {
     return &(global_db orelse return error.NotInitialized);
+}
+
+// result delivery shares this connection so cache and durable reports use the
+// same database lifetime. the caller must pair this with unlockDb.
+pub fn lockDb() !*sqlite.Db {
+    db_mutex.lockUncancelable(std.Options.debug_io);
+    return getDb() catch |err| {
+        db_mutex.unlock(std.Options.debug_io);
+        return err;
+    };
+}
+
+pub fn unlockDb() void {
+    db_mutex.unlock(std.Options.debug_io);
 }
 
 /// insert or update a cached assignment.
