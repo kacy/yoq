@@ -17,7 +17,7 @@ const max_batch_bytes = 1024 * 1024;
 
 var placement_mu: std.Io.Mutex = .init;
 
-pub const schema_sql = "CREATE TABLE IF NOT EXISTS assignment_claims (assignment_id TEXT PRIMARY KEY, gpu_count INTEGER NOT NULL CHECK (gpu_count >= 0), release_id TEXT, group_id TEXT, request_json TEXT);";
+pub const schema_sql = @import("../state/schema.zig").assignment_claims_create_table_sql;
 pub const cleanup_sql = "DELETE FROM assignment_claims WHERE assignment_id NOT IN (SELECT id FROM assignments);";
 
 pub const Lease = struct {
@@ -170,11 +170,16 @@ fn placeOnce(alloc: std.mem.Allocator, session: mutation.Session, request: sched
     const request_json = std.json.Stringify.valueAlloc(alloc, request, .{}) catch return error.InternalError;
     defer alloc.free(request_json);
     const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+    var gang_ports: std.ArrayList(u16) = .empty;
+    defer gang_ports.deinit(alloc);
     for (0..replicas) |_| {
         const first_rank = ids.items.len;
         if (request.gang_world_size > 0) {
             const placements = (scheduler.scheduleGang(alloc, request, agents.records) catch return error.InternalError) orelse return null;
             defer alloc.free(placements);
+            const port = try reserveGangPort(session, request.gang_master_port, gang_ports.items);
+            gang_ports.append(alloc, port) catch return error.InternalError;
+            for (placements) |*rank| rank.master_port = port;
             for (placements) |placement| {
                 const id = try newId(alloc);
                 ids.append(alloc, id) catch {
@@ -247,6 +252,31 @@ fn serviceSurgeFits(lease: Lease, request: scheduler.PlacementRequest, replicas:
     const prior: u64 = @intCast(@max(0, row.?.count));
     const desired = @as(u64, replicas) * @max(@as(u64, 1), request.gang_world_size);
     return prior +| desired <= @import("../manifest/spec.zig").max_service_replicas;
+}
+
+// reserve from applied assignments and groups staged in this lease. old
+// assignments keep their port until their replacement commits, so cleanup of
+// an old rank cannot remove its replacement's rendezvous mapping.
+fn reserveGangPort(session: mutation.Session, preferred: u16, pending: []const u16) mutation.Error!u16 {
+    session.node.mu.lockUncancelable(std.Options.debug_io);
+    defer session.node.mu.unlock(std.Options.debug_io);
+    try session.checkLocked();
+    var used = [_]bool{false} ** 65536;
+    for (pending) |port| used[port] = true;
+    const Row = struct { port: i64 };
+    var statement = session.node.stateMachineDb().prepare("SELECT DISTINCT gang_master_port AS port FROM assignments WHERE gang_rank = 0 AND gang_master_port IS NOT NULL AND status IN ('pending', 'running');") catch return error.InternalError;
+    defer statement.deinit();
+    var rows = statement.iterator(Row, .{}) catch return error.InternalError;
+    while (rows.next(.{}) catch return error.InternalError) |row| {
+        const port = std.math.cast(u16, row.port) orelse return error.InternalError;
+        used[port] = true;
+    }
+    const first: u32 = @max(@as(u32, preferred), 1024);
+    for (0..64512) |offset| {
+        const port: u16 = @intCast(1024 + (first - 1024 + offset) % 64512);
+        if (!used[port]) return port;
+    }
+    return error.Conflict;
 }
 
 fn workloadIds(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest) mutation.Error!Placement {
@@ -400,6 +430,8 @@ fn reassignGroup(alloc: std.mem.Allocator, session: mutation.Session, orphan_id:
     if (request.gang_world_size > 0) {
         const ranks = (try scheduler.scheduleGang(alloc, request, snapshot.records)) orelse return;
         defer alloc.free(ranks);
+        const port = try reserveGangPort(session, request.gang_master_port, &.{});
+        for (ranks) |*rank| rank.master_port = port;
         for (ranks, ids.items) |rank, id| {
             try sql.write(&batch.writer, "UPDATE assignments SET agent_id = CASE WHEN (SELECT last_applied FROM state_machine_meta WHERE id = 1) = ? THEN ? ELSE NULL END, status = 'pending', status_reason = NULL, gang_master_addr = ?, gang_master_port = ? WHERE id = ?;", .{ snapshot.index, rank.agent_id, rank.master_addr, rank.master_port, id });
         }
@@ -696,4 +728,20 @@ test "cluster placement reserves service names across apps" {
     try std.testing.expect(try serviceNameAvailable(session, other));
     const reused = (try place(alloc, session, other, "second")).?;
     defer reused.deinit(alloc);
+}
+
+test "replicated gang groups reserve distinct rendezvous ports" {
+    const alloc = std.testing.allocator;
+    var node = try testNode();
+    defer node.deinit();
+    _ = try node.proposeCommitted("UPDATE agents SET cpu_cores = 8, gpu_count = 8;", 0);
+    const session = try mutation.Session.begin(&node);
+    var request = test_request;
+    request.gang_world_size = 2;
+    request.gpus_per_rank = 1;
+    const groups = (try placeReplicas(alloc, session, request, "mesh", 2)).?;
+    defer groups.deinit(alloc);
+    const counts = (try node.stateMachineDb().one(struct { ports: i64, ranks: i64 }, "SELECT COUNT(DISTINCT gang_master_port) AS ports, COUNT(*) AS ranks FROM assignments;", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 2), counts.ports);
+    try std.testing.expectEqual(@as(i64, 4), counts.ranks);
 }
