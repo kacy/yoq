@@ -281,9 +281,7 @@ pub const TestCluster = struct {
     }
 
     pub fn stopAll(self: *TestCluster) void {
-        for (self.nodes.items) |*node| {
-            node.stop();
-        }
+        stopNodes(self.nodes.items, 20_000);
     }
 
     pub fn stopNode(self: *TestCluster, node_id: u64) void {
@@ -509,4 +507,95 @@ fn freeStrings(alloc: std.mem.Allocator, strings: []const []const u8) void {
     for (strings) |s| {
         alloc.free(s);
     }
+}
+
+fn stopNodes(nodes: []ClusterNode, grace_ms: i64) void {
+    // begin shutdown together so a five-node fixture pays one grace period.
+    for (nodes) |*node| {
+        if (node.process) |*child| {
+            if (child.id) |pid| std.posix.kill(pid, .TERM) catch {};
+        }
+    }
+    const deadline = std.Io.Clock.awake.now(std.testing.io).toMilliseconds() + grace_ms;
+    while (std.Io.Clock.awake.now(std.testing.io).toMilliseconds() < deadline) {
+        var pending = false;
+        for (nodes) |*node| {
+            if (node.process) |*child| {
+                if (childExited(child)) {
+                    _ = child.wait(std.testing.io) catch {};
+                    node.process = null;
+                } else pending = true;
+            }
+        }
+        if (!pending) return;
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(10 * std.time.ns_per_ms), .awake) catch {};
+    }
+    // unreaped children still own their pids, so escalation cannot target a
+    // reused process id. wait also releases pipes owned by the child handle.
+    for (nodes) |*node| {
+        if (node.process) |*child| {
+            if (child.id) |pid| std.posix.kill(pid, .KILL) catch {};
+            _ = child.wait(std.testing.io) catch {};
+            node.process = null;
+        }
+    }
+}
+
+fn childExited(child: *const std.process.Child) bool {
+    const pid = child.id orelse return true;
+    const linux = std.os.linux;
+    var info: linux.siginfo_t = std.mem.zeroes(linux.siginfo_t);
+    // observe exit without reaping; Child.wait must perform its own cleanup.
+    const result = linux.waitid(.PID, pid, &info, linux.W.EXITED | linux.W.NOHANG | linux.W.NOWAIT, null);
+    return linux.errno(result) == .SUCCESS and info.fields.common.first.piduid.pid != 0;
+}
+
+fn spawnUncooperativeChild() !std.process.Child {
+    var child = try std.process.spawn(std.testing.io, .{
+        .argv = &.{ "/bin/sh", "-c", "trap '' TERM; printf r; read value" },
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
+    errdefer {
+        if (child.id) |pid| std.posix.kill(pid, .KILL) catch {};
+        _ = child.wait(std.testing.io) catch {};
+    }
+    var ready: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try std.posix.read(child.stdout.?.handle, &ready));
+    try std.testing.expectEqual(@as(u8, 'r'), ready[0]);
+    return child;
+}
+
+test "cluster fixture teardown reaps owned children within one grace period" {
+    var nodes = [_]ClusterNode{
+        .{ .id = 1, .raft_port = 0, .api_port = 0, .data_dir = "", .alloc = std.testing.allocator },
+        .{ .id = 2, .raft_port = 0, .api_port = 0, .data_dir = "", .alloc = std.testing.allocator },
+    };
+    defer stopNodes(&nodes, 0);
+    nodes[0].process = try std.process.spawn(std.testing.io, .{
+        .argv = &.{ "/bin/sh", "-c", "exit 0" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    nodes[1].process = try spawnUncooperativeChild();
+    const owned = [_]std.posix.pid_t{ nodes[0].process.?.id.?, nodes[1].process.?.id.? };
+    var unrelated = try spawnUncooperativeChild();
+    defer {
+        if (unrelated.id) |pid| std.posix.kill(pid, .KILL) catch {};
+        _ = unrelated.wait(std.testing.io) catch {};
+    }
+    const started = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
+    stopNodes(&nodes, 100);
+    const elapsed = std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - started;
+    try std.testing.expect(elapsed >= 100 and elapsed < 5000);
+    for (nodes) |node| try std.testing.expect(node.process == null);
+    for (owned) |pid| {
+        const linux = std.os.linux;
+        var info: linux.siginfo_t = std.mem.zeroes(linux.siginfo_t);
+        const result = linux.waitid(.PID, pid, &info, linux.W.EXITED | linux.W.NOHANG, null);
+        try std.testing.expectEqual(linux.E.CHILD, linux.errno(result));
+    }
+    try std.testing.expect(!childExited(&unrelated));
 }
