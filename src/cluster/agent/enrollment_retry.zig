@@ -106,3 +106,14 @@ test "agent enrollment startup deadline and cancellation bound retry waits" {
     try std.testing.expectError(error.Canceled, run(&already_canceled, &canceled, .{}));
     try std.testing.expectEqual(@as(usize, 0), already_canceled.calls);
 }
+
+test "agent enrollment cancellation prevents a real registration from touching local identity" {
+    const Agent = @import("../agent.zig").Agent;
+    var agent = Agent.init(std.testing.allocator, .{ 127, 0, 0, 1 }, 7700, "cluster-token");
+    defer agent.deinit();
+    const canceled: std.atomic.Value(bool) = .init(true);
+    try std.testing.expectError(error.Canceled, agent.registerWithOptions(.{ .canceled = &canceled }));
+    try std.testing.expect(agent.enrollment_target == null);
+    try std.testing.expect(agent.worker_credential == null);
+    try std.testing.expectError(error.Canceled, run(&agent, &canceled, .{}));
+}
