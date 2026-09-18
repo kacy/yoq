@@ -21,6 +21,7 @@ pub fn wait(child: anytype, cancellation: ?Cancellation) u8 {
 }
 
 fn waitWithGrace(child: anytype, cancellation: ?Cancellation, grace: i96) u8 {
+    if (cancellation == null) return child.wait() catch 255;
     var deadline: ?i96 = null;
     while (true) {
         child.poll() catch {};
@@ -119,9 +120,25 @@ const TestChild = struct {
     }
 };
 
+// a broken cancellation path must fail the test instead of hanging the suite.
+fn rescueChildren(fds: []const std.posix.fd_t, finished: *const std.atomic.Value(bool)) void {
+    for (0..100) |_| {
+        if (finished.load(.acquire)) return;
+        _ = runtime_wait.sleep(.fromMilliseconds(20), "cancellation test watchdog");
+    }
+    for (fds) |fd| _ = std.os.linux.pidfd_send_signal(fd, .KILL, null, 0);
+}
+
 test "child wait cancels an active cron and reaps a term ignoring process" {
     var child = try TestChild.init();
     defer child.deinit();
+    var finished: std.atomic.Value(bool) = .init(false);
+    const fds = [_]std.posix.fd_t{child.fd};
+    const rescue = try std.Thread.spawn(.{}, rescueChildren, .{ &fds, &finished });
+    defer {
+        finished.store(true, .release);
+        rescue.join();
+    }
     var scheduler = try @import("cron_scheduler.zig").CronScheduler.init(std.testing.allocator, &.{}, &.{}, "cancel-test");
     defer scheduler.deinit();
     scheduler.running.store(true, .release);
@@ -144,6 +161,13 @@ test "service shutdown cancels every replica before joining and reaps stubborn c
     const spec = @import("spec.zig");
     var children = [_]TestChild{ try TestChild.init(), try TestChild.init() };
     defer for (&children) |*child| child.deinit();
+    var finished: std.atomic.Value(bool) = .init(false);
+    const fds = [_]std.posix.fd_t{ children[0].fd, children[1].fd };
+    const rescue = try std.Thread.spawn(.{}, rescueChildren, .{ &fds, &finished });
+    defer {
+        finished.store(true, .release);
+        rescue.join();
+    }
     const services = [_]spec.Service{.{ .name = "service", .image = "scratch", .command = &.{}, .ports = &.{}, .env = &.{}, .depends_on = &.{}, .working_dir = null, .volumes = &.{}, .replicas = 2 }};
     var states = [_]orchestration.ServiceState{
         .{ .container_id = "canceltest01".*, .status = .running, .thread = null },
