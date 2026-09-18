@@ -363,6 +363,9 @@ pub fn rewriteClientStreamChunk(
             .stream_id = frame.stream_id,
         });
         pos = frame_start + sequence.consumed;
+        // return one expanded block at a time. the caller consumes this prefix
+        // before invoking us again for any pipelined headers still buffered.
+        break;
     }
 
     if (pos == 0) return null;
@@ -924,4 +927,33 @@ test "http2 compression streaming rewrite retains indices across streams and tra
     try std.testing.expectEqual(@as(usize, 1), fields.headers.items.len);
     try std.testing.expectEqualStrings("x", fields.headers.items[0].name);
     try std.testing.expectEqualStrings("a", fields.headers.items[0].value);
+}
+
+test "http2 compression streaming rewrite returns one pipelined block at a time" {
+    const alloc = std.testing.allocator;
+    var state: StreamRewriteState = .{};
+    defer state.deinit(alloc);
+    const first_block = [_]u8{ 0x82, 0x86, 0x84, 0x41, 3, 'a', 'p', 'i' };
+    const second_block = [_]u8{ 0x82, 0x86, 0x84, 0xbe };
+    const first_frame = try http2.buildFrame(alloc, .{ .length = first_block.len, .frame_type = .headers, .flags = 5, .stream_id = 1 }, &first_block);
+    defer alloc.free(first_frame);
+    const second_frame = try http2.buildFrame(alloc, .{ .length = second_block.len, .frame_type = .headers, .flags = 5, .stream_id = 3 }, &second_block);
+    defer alloc.free(second_frame);
+    const input = try std.mem.concat(alloc, u8, &.{ http2.client_preface, first_frame, second_frame });
+    defer alloc.free(input);
+    const first = (try rewriteClientStreamChunk(alloc, input, &state, "http")).?;
+    defer first.deinit(alloc);
+    try std.testing.expectEqual(http2.client_preface.len + first_frame.len, first.consumed);
+    const first_request = try parseClientConnectionPreface(alloc, first.bytes);
+    defer first_request.deinit(alloc);
+    try std.testing.expectEqual(@as(u32, 1), first_request.request.stream_id);
+    try std.testing.expectEqualStrings("api", first_request.request.authority);
+    const second = (try rewriteClientStreamChunk(alloc, input[first.consumed..], &state, "http")).?;
+    defer second.deinit(alloc);
+    try std.testing.expectEqual(second_frame.len, second.consumed);
+    const second_request = try parseRequestHeaderSequence(alloc, second.bytes, 0);
+    defer second_request.deinit(alloc);
+    try std.testing.expectEqual(@as(u32, 3), second_request.request.stream_id);
+    try std.testing.expectEqualStrings("api", second_request.request.authority);
+    try std.testing.expectEqual(input.len, first.consumed + second.consumed);
 }
