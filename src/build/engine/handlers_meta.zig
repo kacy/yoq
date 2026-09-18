@@ -1,6 +1,7 @@
 const std = @import("std");
 const log = @import("../../lib/log.zig");
 const types = @import("types.zig");
+const command_config = @import("command_config.zig");
 
 pub fn processEnv(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
     const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
@@ -19,21 +20,27 @@ pub fn processWorkdir(alloc: std.mem.Allocator, state: *types.BuildState, args: 
 }
 
 pub fn processCmd(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
-    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
-    if (state.cmd) |old| alloc.free(old);
+    const owned = try command_config.parse(alloc, args, state.shell);
+    if (state.cmd) |old| command_config.free(alloc, old);
     state.cmd = owned;
 }
 
 pub fn processEntrypoint(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
-    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
-    if (state.entrypoint) |old| alloc.free(old);
+    const owned = try command_config.parse(alloc, args, state.shell);
+    if (state.entrypoint) |old| command_config.free(alloc, old);
     state.entrypoint = owned;
 }
 
 pub fn processExpose(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
-    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
-    errdefer alloc.free(owned);
-    try state.exposed_ports.append(alloc, owned);
+    var ports = std.mem.tokenizeAny(u8, args, " \t");
+    while (ports.next()) |port| {
+        const owned = if (std.mem.indexOfScalar(u8, port, '/') == null)
+            try std.fmt.allocPrint(alloc, "{s}/tcp", .{port})
+        else
+            try alloc.dupe(u8, port);
+        errdefer alloc.free(owned);
+        try state.exposed_ports.append(alloc, owned);
+    }
 }
 
 pub fn processUser(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
@@ -44,9 +51,46 @@ pub fn processUser(alloc: std.mem.Allocator, state: *types.BuildState, args: []c
 }
 
 pub fn processLabel(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
-    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
-    errdefer alloc.free(owned);
-    try state.labels.append(alloc, owned);
+    var offset: usize = 0;
+    while (offset < args.len) {
+        while (offset < args.len and std.ascii.isWhitespace(args[offset])) : (offset += 1) {}
+        if (offset == args.len) break;
+        var word: std.ArrayList(u8) = .empty;
+        defer word.deinit(alloc);
+        var quote: ?u8 = null;
+        while (offset < args.len) : (offset += 1) {
+            const ch = args[offset];
+            if (ch == '\\' and offset + 1 < args.len) {
+                offset += 1;
+                try word.append(alloc, args[offset]);
+            } else if (quote) |q| {
+                if (ch == q) quote = null else try word.append(alloc, ch);
+            } else if (ch == '"' or ch == '\'') {
+                quote = ch;
+            } else if (std.ascii.isWhitespace(ch)) {
+                break;
+            } else try word.append(alloc, ch);
+        }
+        if (quote != null) return error.MetadataFailed;
+        const eq = std.mem.indexOfScalar(u8, word.items, '=') orelse return error.MetadataFailed;
+        if (eq == 0) return error.MetadataFailed;
+        try setLabel(alloc, state, word.items[0..eq], word.items[eq + 1 ..]);
+    }
+}
+
+pub fn setLabel(alloc: std.mem.Allocator, state: *types.BuildState, key: []const u8, value: []const u8) types.BuildError!void {
+    const owned_value = try alloc.dupe(u8, value);
+    errdefer alloc.free(owned_value);
+    const entry = try state.labels.getOrPut(alloc, key);
+    if (entry.found_existing) {
+        alloc.free(entry.value_ptr.*);
+    } else {
+        entry.key_ptr.* = alloc.dupe(u8, key) catch {
+            _ = state.labels.remove(key);
+            return error.OutOfMemory;
+        };
+    }
+    entry.value_ptr.* = owned_value;
 }
 
 pub fn processArg(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
@@ -98,13 +142,17 @@ pub fn processVolume(alloc: std.mem.Allocator, state: *types.BuildState, args: [
 }
 
 pub fn processShell(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
-    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
+    if (!std.mem.startsWith(u8, std.mem.trim(u8, args, " \t"), "[")) return error.MetadataFailed;
+    const parsed = try command_config.parse(alloc, args, null);
+    defer command_config.free(alloc, parsed);
+    if (parsed.len == 0) return error.MetadataFailed;
+    const owned = try std.json.Stringify.valueAlloc(alloc, parsed, .{});
     if (state.shell) |old| alloc.free(old);
     state.shell = owned;
 }
 
 pub fn processHealthcheck(alloc: std.mem.Allocator, state: *types.BuildState, args: []const u8) types.BuildError!void {
-    const owned = alloc.dupe(u8, args) catch return types.BuildError.OutOfMemory;
+    const owned = try @import("healthcheck.zig").parse(alloc, args);
     if (state.healthcheck) |old| alloc.free(old);
     state.healthcheck = owned;
 }

@@ -35,13 +35,15 @@ pub const BuildState = struct {
     layers: std.ArrayListUnmanaged(Layer) = .empty,
     total_size: u64 = 0,
 
+    architecture: ?[]const u8 = null,
+    os: ?[]const u8 = null,
     env: std.ArrayListUnmanaged([]const u8) = .empty,
-    cmd: ?[]const u8 = null,
-    entrypoint: ?[]const u8 = null,
+    cmd: ?[]const []const u8 = null,
+    entrypoint: ?[]const []const u8 = null,
     workdir: []const u8 = "/",
     user: ?[]const u8 = null,
     exposed_ports: std.ArrayListUnmanaged([]const u8) = .empty,
-    labels: std.ArrayListUnmanaged([]const u8) = .empty,
+    labels: std.StringHashMapUnmanaged([]const u8) = .empty,
     volumes: std.ArrayListUnmanaged([]const u8) = .empty,
     shell: ?[]const u8 = null,
     stop_signal: ?[]const u8 = null,
@@ -68,12 +70,18 @@ pub const BuildState = struct {
         self.env.deinit(self.alloc);
         for (self.exposed_ports.items) |port| self.alloc.free(port);
         self.exposed_ports.deinit(self.alloc);
-        for (self.labels.items) |label| self.alloc.free(label);
+        var labels = self.labels.iterator();
+        while (labels.next()) |entry| {
+            self.alloc.free(entry.key_ptr.*);
+            self.alloc.free(entry.value_ptr.*);
+        }
         self.labels.deinit(self.alloc);
         for (self.volumes.items) |vol| self.alloc.free(vol);
         self.volumes.deinit(self.alloc);
-        if (self.cmd) |cmd| self.alloc.free(cmd);
-        if (self.entrypoint) |ep| self.alloc.free(ep);
+        if (self.cmd) |cmd| @import("command_config.zig").free(self.alloc, cmd);
+        if (self.entrypoint) |ep| @import("command_config.zig").free(self.alloc, ep);
+        if (self.architecture) |arch| self.alloc.free(arch);
+        if (self.os) |os| self.alloc.free(os);
         if (!std.mem.eql(u8, self.workdir, "/")) self.alloc.free(self.workdir);
         if (self.user) |user| self.alloc.free(user);
         if (self.shell) |sh| self.alloc.free(sh);

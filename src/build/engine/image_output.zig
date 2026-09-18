@@ -1,5 +1,4 @@
 const std = @import("std");
-const dockerfile = @import("../dockerfile.zig");
 const blob_store = @import("../../image/store.zig");
 const state_store = @import("../../state/store.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
@@ -62,7 +61,11 @@ pub fn buildConfigJson(alloc: std.mem.Allocator, state: *const types.BuildState)
     const writer = &buf_writer.writer;
 
     try writer.writeAll("{");
-    try writer.writeAll("\"architecture\":\"amd64\",\"os\":\"linux\"");
+    const native = @import("../../image/registry/manifest.zig").nativePlatform();
+    try writer.writeAll("\"architecture\":");
+    try std.json.Stringify.value(state.architecture orelse native.architecture, .{}, writer);
+    try writer.writeAll(",\"os\":");
+    try std.json.Stringify.value(state.os orelse native.os, .{}, writer);
     try writer.writeAll(",\"config\":{");
 
     var first = true;
@@ -81,27 +84,35 @@ pub fn buildConfigJson(alloc: std.mem.Allocator, state: *const types.BuildState)
 
     if (state.cmd) |cmd| {
         if (!first) try writer.writeAll(",");
-        if (dockerfile.isJsonForm(cmd)) {
-            try writer.writeAll("\"Cmd\":");
-            try writer.writeAll(cmd);
-        } else {
-            try writer.writeAll("\"Cmd\":[\"/bin/sh\",\"-c\",\"");
-            try json_helpers.writeJsonEscaped(writer, cmd);
-            try writer.writeAll("\"]");
-        }
+        try writer.writeAll("\"Cmd\":");
+        try std.json.Stringify.value(cmd, .{}, writer);
         first = false;
     }
-
     if (state.entrypoint) |ep| {
         if (!first) try writer.writeAll(",");
-        if (dockerfile.isJsonForm(ep)) {
-            try writer.writeAll("\"Entrypoint\":");
-            try writer.writeAll(ep);
-        } else {
-            try writer.writeAll("\"Entrypoint\":[\"");
-            try json_helpers.writeJsonEscaped(writer, ep);
-            try writer.writeAll("\"]");
+        try writer.writeAll("\"Entrypoint\":");
+        try std.json.Stringify.value(ep, .{}, writer);
+        first = false;
+    }
+    if (state.labels.count() > 0) {
+        if (!first) try writer.writeAll(",");
+        try writer.writeAll("\"Labels\":{");
+        var iter = state.labels.iterator();
+        var label_first = true;
+        while (iter.next()) |entry| {
+            if (!label_first) try writer.writeAll(",");
+            try std.json.Stringify.value(entry.key_ptr.*, .{}, writer);
+            try writer.writeByte(':');
+            try std.json.Stringify.value(entry.value_ptr.*, .{}, writer);
+            label_first = false;
         }
+        try writer.writeByte('}');
+        first = false;
+    }
+    if (state.exposed_ports.items.len > 0) {
+        if (!first) try writer.writeAll(",");
+        try writer.writeAll("\"ExposedPorts\":");
+        try writeObjectKeys(writer, state.exposed_ports.items);
         first = false;
     }
 
@@ -123,27 +134,15 @@ pub fn buildConfigJson(alloc: std.mem.Allocator, state: *const types.BuildState)
 
     if (state.volumes.items.len > 0) {
         if (!first) try writer.writeAll(",");
-        try writer.writeAll("\"Volumes\":{");
-        for (state.volumes.items, 0..) |vol, i| {
-            if (i > 0) try writer.writeAll(",");
-            try writer.writeByte('"');
-            try json_helpers.writeJsonEscaped(writer, vol);
-            try writer.writeAll("\":{}");
-        }
-        try writer.writeAll("}");
+        try writer.writeAll("\"Volumes\":");
+        try writeObjectKeys(writer, state.volumes.items);
         first = false;
     }
 
     if (state.shell) |sh| {
         if (!first) try writer.writeAll(",");
-        if (dockerfile.isJsonForm(sh)) {
-            try writer.writeAll("\"Shell\":");
-            try writer.writeAll(sh);
-        } else {
-            try writer.writeAll("\"Shell\":[\"");
-            try json_helpers.writeJsonEscaped(writer, sh);
-            try writer.writeAll("\"]");
-        }
+        try writer.writeAll("\"Shell\":");
+        try writer.writeAll(sh);
         first = false;
     }
 
@@ -157,10 +156,8 @@ pub fn buildConfigJson(alloc: std.mem.Allocator, state: *const types.BuildState)
 
     if (state.healthcheck) |hc| {
         if (!first) try writer.writeAll(",");
-        try writer.writeAll("\"Healthcheck\":{\"Test\":[\"CMD-SHELL\",\"");
-        const cmd_str = if (std.mem.startsWith(u8, hc, "CMD ")) hc[4..] else hc;
-        try json_helpers.writeJsonEscaped(writer, cmd_str);
-        try writer.writeAll("\"]}");
+        try writer.writeAll("\"Healthcheck\":");
+        try writer.writeAll(hc);
         first = false;
     }
 
@@ -187,6 +184,26 @@ pub fn buildConfigJson(alloc: std.mem.Allocator, state: *const types.BuildState)
     try writer.writeAll("]}}");
 
     return try buf_writer.toOwnedSlice();
+}
+
+fn writeObjectKeys(writer: *std.Io.Writer, keys: []const []const u8) !void {
+    try writer.writeByte('{');
+    var first = true;
+    for (keys, 0..) |key, index| {
+        var duplicate = false;
+        for (keys[0..index]) |previous| {
+            if (std.mem.eql(u8, previous, key)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        if (!first) try writer.writeByte(',');
+        try std.json.Stringify.value(key, .{}, writer);
+        try writer.writeAll(":{}");
+        first = false;
+    }
+    try writer.writeByte('}');
 }
 
 pub fn buildManifestJson(
@@ -233,12 +250,117 @@ test "config json format" {
 
     const env = try alloc.dupe(u8, "PATH=/usr/bin");
     try state.env.append(alloc, env);
-    state.cmd = try alloc.dupe(u8, "node server.js");
+    try @import("handlers_meta.zig").processCmd(alloc, &state, "node server.js");
     state.workdir = try alloc.dupe(u8, "/app");
 
     const json = try buildConfigJson(alloc, &state);
     defer alloc.free(json);
 
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"architecture\":\"amd64\"") != null);
+    var parsed = try image_spec.parseImageConfig(alloc, json);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(@import("../../image/registry/manifest.zig").nativePlatform().architecture, parsed.value.architecture.?);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"WorkingDir\":\"/app\"") != null);
+}
+
+test "build metadata inheritance retains complete process and image configuration" {
+    const alloc = std.testing.allocator;
+    var base = try image_spec.parseImageConfig(alloc,
+        \\{"architecture":"arm64","os":"linux","config":{
+        \\ "Cmd":["server","--config","a b",""],"Entrypoint":["/init","--"],
+        \\ "Shell":["/bin/bash","-e","-c"],"Labels":{"owner":"base"},
+        \\ "ExposedPorts":{"80/tcp":{}},"Volumes":{"/data":{}},"StopSignal":"SIGQUIT",
+        \\ "Healthcheck":{"Test":["CMD","probe","--ready"],"Interval":2000000000,"Retries":3}
+        \\}}
+    );
+    defer base.deinit();
+    var state = types.BuildState.init(alloc);
+    defer state.deinit();
+    try @import("config_inherit.zig").inheritConfig(alloc, &state, base.value);
+    const meta = @import("handlers_meta.zig");
+    try meta.processLabel(alloc, &state, "owner=derived description=\"two words\"");
+    try meta.processExpose(alloc, &state, "8080 53/udp 80/tcp");
+    const json = try buildConfigJson(alloc, &state);
+    defer alloc.free(json);
+    var result = try image_spec.parseImageConfig(alloc, json);
+    defer result.deinit();
+    const config = result.value.config.?;
+    try std.testing.expectEqualStrings("arm64", result.value.architecture.?);
+    try std.testing.expectEqualDeep(base.value.config.?.Cmd, config.Cmd);
+    try std.testing.expectEqualDeep(base.value.config.?.Entrypoint, config.Entrypoint);
+    try std.testing.expectEqualDeep(base.value.config.?.Shell, config.Shell);
+    try std.testing.expectEqualDeep(base.value.config.?.Healthcheck, config.Healthcheck);
+    try std.testing.expectEqualStrings("SIGQUIT", config.StopSignal.?);
+    try std.testing.expect(config.Volumes.?.object.contains("/data"));
+    try std.testing.expect(config.ExposedPorts.?.object.contains("80/tcp"));
+    try std.testing.expect(config.ExposedPorts.?.object.contains("8080/tcp"));
+    try std.testing.expect(config.ExposedPorts.?.object.contains("53/udp"));
+    try std.testing.expectEqualStrings("derived", config.Labels.?.object.get("owner").?.string);
+    try std.testing.expectEqualStrings("two words", config.Labels.?.object.get("description").?.string);
+}
+
+test "build commands retain their shell at declaration and preserve empty exec arrays" {
+    const alloc = std.testing.allocator;
+    var state = types.BuildState.init(alloc);
+    defer state.deinit();
+    const meta = @import("handlers_meta.zig");
+    try meta.processShell(alloc, &state, "[\"/bin/bash\",\"-e\",\"-c\"]");
+    try meta.processCmd(alloc, &state, "echo $HOME");
+    try meta.processEntrypoint(alloc, &state, "exec server --flag");
+    try meta.processShell(alloc, &state, "[\"/bin/sh\",\"-c\"]");
+    const json = try buildConfigJson(alloc, &state);
+    defer alloc.free(json);
+    var result = try image_spec.parseImageConfig(alloc, json);
+    defer result.deinit();
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{ "/bin/bash", "-e", "-c", "echo $HOME" }), result.value.config.?.Cmd.?);
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{ "/bin/bash", "-e", "-c", "exec server --flag" }), result.value.config.?.Entrypoint.?);
+    try meta.processCmd(alloc, &state, "[]");
+    try std.testing.expectEqual(@as(usize, 0), state.cmd.?.len);
+    try std.testing.expectError(error.MetadataFailed, meta.processCmd(alloc, &state, "[1]"));
+}
+
+test "build healthchecks serialize exec shell disabled and timing forms" {
+    const alloc = std.testing.allocator;
+    var state = types.BuildState.init(alloc);
+    defer state.deinit();
+    const meta = @import("handlers_meta.zig");
+    try meta.processHealthcheck(alloc, &state, "--interval=1m30s --timeout=0.5s --retries=4 CMD [\"probe\",\"--ready\"]");
+    var parsed = try image_spec.parseJson(image_spec.Healthcheck, alloc, state.healthcheck.?);
+    defer parsed.deinit();
+    try std.testing.expectEqualDeep(@as([]const []const u8, &.{ "CMD", "probe", "--ready" }), parsed.value.Test.?);
+    try std.testing.expectEqual(@as(i64, 90_000_000_000), parsed.value.Interval.?);
+    try std.testing.expectEqual(@as(i64, 500_000_000), parsed.value.Timeout.?);
+    try std.testing.expectEqual(@as(i64, 4), parsed.value.Retries.?);
+    try meta.processHealthcheck(alloc, &state, "CMD curl -f localhost || exit 1");
+    var shell = try image_spec.parseJson(image_spec.Healthcheck, alloc, state.healthcheck.?);
+    defer shell.deinit();
+    try std.testing.expectEqualStrings("CMD-SHELL", shell.value.Test.?[0]);
+    try meta.processHealthcheck(alloc, &state, "NONE");
+    var disabled = try image_spec.parseJson(image_spec.Healthcheck, alloc, state.healthcheck.?);
+    defer disabled.deinit();
+    try std.testing.expectEqualStrings("NONE", disabled.value.Test.?[0]);
+    try std.testing.expectError(error.MetadataFailed, meta.processHealthcheck(alloc, &state, "--retries=0 CMD true"));
+    try std.testing.expectError(error.MetadataFailed, meta.processHealthcheck(alloc, &state, "--timeout=99999999999999999999h CMD true"));
+}
+
+test "build metadata ownership survives allocation failures" {
+    const Fixture = struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var base = try image_spec.parseImageConfig(alloc,
+                \\{"architecture":"amd64","config":{"Cmd":["server","--ready"],"Entrypoint":["/init","--"],
+                \\ "Shell":["/bin/sh","-c"],"Labels":{"owner":"base"},"Volumes":{"/data":{}},
+                \\ "ExposedPorts":{"80/tcp":{}},"Healthcheck":{"Test":["CMD","true"]},"StopSignal":"SIGTERM"}}
+            );
+            defer base.deinit();
+            var state = types.BuildState.init(alloc);
+            defer state.deinit();
+            try @import("config_inherit.zig").inheritConfig(alloc, &state, base.value);
+            const meta = @import("handlers_meta.zig");
+            try meta.processLabel(alloc, &state, "owner=derived another=value");
+            try meta.processCmd(alloc, &state, "echo ready");
+            try meta.processHealthcheck(alloc, &state, "--interval=2s CMD [\"true\"]");
+            const json = try buildConfigJson(alloc, &state);
+            defer alloc.free(json);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Fixture.run, .{});
 }
