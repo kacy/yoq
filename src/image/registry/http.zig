@@ -13,8 +13,10 @@ pub fn requestWithTimeout(
     var request_options = options;
     // zig's redirect handler does not clear authorization overrides. registry
     // credentials therefore never follow an automatic redirect, even on the
-    // same host: a changed port or scheme is a different origin.
-    if (request_options.headers.authorization == .override and
+    // same host: a changed port or scheme is a different origin. manual blob
+    // redirects remain visible to the caller, which drops credentials first.
+    if (request_options.redirect_behavior != .unhandled and
+        request_options.headers.authorization == .override and
         request_options.headers.authorization.override.len > 0)
         request_options.redirect_behavior = .not_allowed;
     // registry callers consume raw body readers and verify blob digests.
