@@ -147,7 +147,7 @@ default automated cluster smoke does not depend on it yet.
 4. temporarily remove quorum, submit a status or drain change, and confirm the api does not acknowledge it as committed. restore quorum and check the retried operation's durable result.
 5. restore connectivity and start the stopped server with its original data directory and fixed peer list. confirm convergence before tearing down the rig.
 
-save server and agent logs, assignment generations, and api responses with the rig artifacts. a reachable api or a successful graceful handoff alone does not establish durable result delivery. these checks are not part of the automated eight-class smoke suite above.
+save server and agent logs, assignment generations, and api responses with the rig artifacts. a reachable api or a successful graceful handoff alone does not establish durable result delivery. these checks are not part of the automated eight-class cloud smoke suite above. ci separately runs [the process recovery fixture](../scripts/agent-recovery-smoke.sh) with three server processes and a joined agent in isolated network namespaces. it kills the leader, interrupts result delivery, and restarts the agent; it does not replace validation on the cloud rig.
 
 ## cost and stability defaults
 
