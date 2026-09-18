@@ -25,6 +25,10 @@ pub fn handleAppendEntries(
         }
     } else if (self.role == .candidate) {
         self.role = .follower;
+    }
+    // an existing follower also learns the leader after an election. publishing
+    // only candidate transitions leaves the api without a usable redirect.
+    if (self.role == .follower) {
         self.actions.append(self.alloc, .{ .become_follower = .{ .leader_id = args.leader_id } }) catch |e| {
             logger.warn("raft: failed to queue become_follower action: {}", .{e});
         };

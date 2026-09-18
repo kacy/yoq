@@ -736,7 +736,8 @@ test "handleInstallSnapshot defers state update until snapshot is finished" {
 
     const actions = try follower.drainActions();
     defer alloc.free(actions);
-    try testing.expectEqual(@as(usize, 0), actions.len);
+    try testing.expectEqual(@as(usize, 1), actions.len);
+    try testing.expectEqual(@as(NodeId, 1), actions[0].become_follower.leader_id);
 
     try testing.expect(follower.finishInstallSnapshot(.{
         .last_included_index = 100,

@@ -24,6 +24,9 @@ pub fn handleInstallSnapshot(
         }
     } else if (self.role == .candidate) {
         self.role = .follower;
+    }
+    // snapshots identify the leader even when this node was already a follower.
+    if (self.role == .follower) {
         self.actions.append(self.alloc, .{
             .become_follower = .{ .leader_id = args.leader_id },
         }) catch |e| {
