@@ -17,3 +17,15 @@ hard links use archive-root-relative targets and preserve the target file's inod
 extraction resolves both paths within the destination root, rejects absolute or parent-traversing hard-link targets, and requires the final target to be a regular file. directory symlinks remain confined to that root; a final symlink cannot be a hard-link target. missing targets and cycles fail extraction before an image cache entry is published. hard links require access to `/proc/self/fd`.
 
 forward references are limited to 4,096 pending links, 4 mib of stored paths, and 1,048,576 resolution attempts per archive. these bounds also apply to unresolved chains. device nodes, fifos, and sparse archive entries remain unsupported; global PAX headers are ignored.
+
+## local image references and pruning
+
+local references include the registry host and port, repository, and tag or digest. docker hub names such as `alpine`, `docker.io/library/alpine:latest`, and `registry-1.docker.io/library/alpine:latest` identify the same reference. different registries and ports remain separate. pulling a changed tag replaces that reference; other tags for the previous content remain available.
+
+`yoq rmi <image>` removes only the named reference. removing its last reference also removes its content record; a later `yoq prune` reclaims unused blobs and extracted layers. the image api's delete-by-id operation removes all references to that id. `yoq images` includes the registry, and its json output has a `registry` field.
+
+older databases did not record the registry origin. their content records remain available by id and are retained by prune, but name lookup does not guess an origin. pull or build the image again to establish its full reference. legacy entries appear with `<unknown>` in the registry column; remove them by id through the image api if they are no longer needed.
+
+prune reads every saved manifest, config, and build-cache digest before deleting anything. unreadable or malformed metadata and allocation failures abort the mark phase. digest marks own their bytes, so they remain valid after parsed documents are released.
+
+stop workloads and finish image pulls and builds before pruning. prune does not yet coordinate with active image writers or track the lower directories of running overlays. in particular, do not remove an image's last reference while a container still uses its layers.

@@ -38,12 +38,15 @@ fn markImages(alloc: std.mem.Allocator, referenced: *DigestSet) !void {
 
         var parsed_manifest = spec.parseManifest(alloc, manifest_bytes) catch return error.PruneFailed;
         defer parsed_manifest.deinit();
+        try markDigest(referenced, parsed_manifest.value.config.digest);
 
         for (parsed_manifest.value.layers) |entry| {
             try markDigest(referenced, entry.digest);
         }
 
         const config_digest = blob_store.Digest.parse(img.config_digest) orelse return error.InvalidDigest;
+        const manifest_config = blob_store.Digest.parse(parsed_manifest.value.config.digest) orelse return error.InvalidDigest;
+        if (!config_digest.eql(manifest_config)) return error.PruneFailed;
         const config_bytes = blob_store.getBlob(alloc, config_digest) catch return error.PruneFailed;
         defer alloc.free(config_bytes);
 
@@ -174,6 +177,9 @@ test "image reliability prune keeps owned layer marks and rejects incomplete ima
     try std.testing.expect(!blob_store.hasBlob(garbage));
 
     _ = try blob_store.putBlob("prune unreferenced layer");
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try std.testing.expectError(error.StoreFailed, prune(failing.allocator()));
+    try std.testing.expect(blob_store.hasBlob(garbage));
     blob_store.removeBlob(config);
     try std.testing.expectError(error.PruneFailed, prune(alloc));
     try std.testing.expect(blob_store.hasBlob(garbage));
@@ -203,4 +209,33 @@ test "image reliability prune propagates mark allocation failure and invalid dig
     var referenced = DigestSet.init(std.testing.allocator);
     defer referenced.deinit();
     try std.testing.expectError(error.InvalidDigest, markDigest(&referenced, "sha256:" ++ "z" ** 64));
+}
+
+test "image reliability prune rejects conflicting config references before deletion" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const alloc = std.testing.allocator;
+    const live = try blob_store.putBlob("layer referenced only by manifest config");
+    defer blob_store.removeBlob(live);
+    var live_buf: [71]u8 = undefined;
+    const config_bytes = try std.fmt.allocPrint(alloc, "{{\"rootfs\":{{\"type\":\"layers\",\"diff_ids\":[\"{s}\"]}}}}", .{live.string(&live_buf)});
+    defer alloc.free(config_bytes);
+    const actual_config = try blob_store.putBlob(config_bytes);
+    defer blob_store.removeBlob(actual_config);
+    const stale_config = try blob_store.putBlob("{}");
+    defer blob_store.removeBlob(stale_config);
+    var config_buf: [71]u8 = undefined;
+    const manifest_bytes = try std.json.Stringify.valueAlloc(alloc, spec.Manifest{
+        .config = .{ .mediaType = spec.media_type.oci_config, .digest = actual_config.string(&config_buf), .size = config_bytes.len },
+        .layers = &.{},
+    }, .{});
+    defer alloc.free(manifest_bytes);
+    const manifest = try blob_store.putBlob(manifest_bytes);
+    defer blob_store.removeBlob(manifest);
+    var manifest_buf: [71]u8 = undefined;
+    var stale_buf: [71]u8 = undefined;
+    try store.saveImage(.{ .id = manifest.string(&manifest_buf), .repository = "prune-mismatch", .tag = "latest", .manifest_digest = manifest.string(&manifest_buf), .config_digest = stale_config.string(&stale_buf), .total_size = 0, .created_at = 1 });
+    try std.testing.expectError(error.PruneFailed, prune(alloc));
+    try std.testing.expect(blob_store.hasBlob(live));
+    try std.testing.expect(blob_store.hasBlob(actual_config));
 }
