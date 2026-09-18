@@ -557,3 +557,76 @@ test "local parity forwards piped stdin through foreground run exec and attach" 
     try attached.expectExitCode(0);
     try std.testing.expectEqualStrings("<attached-input>", attached.stdout);
 }
+
+fn waitHealth(env: *helpers.TestEnv, name: []const u8, expected: []const u8, exit_code: u8) !void {
+    for (0..100) |_| {
+        var result = try env.runYoq(&.{ "container", "inspect", name });
+        defer result.deinit();
+        try result.expectExitCode(0);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, result.stdout, .{});
+        defer parsed.deinit();
+        if (parsed.value.object.get("health")) |health| {
+            if (health == .object and std.mem.eql(u8, health.object.get("status").?.string, expected)) {
+                const last_exit = health.object.get("last_exit").?;
+                if (last_exit == .integer and last_exit.integer == exit_code) return;
+            }
+        }
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake);
+    }
+    return error.HealthStatusNotReached;
+}
+
+fn activeHealthGroup(id: []const u8) ![]const u8 {
+    const prefix = try std.fmt.allocPrint(alloc, "health-{s}-", .{id});
+    defer alloc.free(prefix);
+    for (0..100) |_| {
+        var directory = try std.Io.Dir.cwd().openDir(std.testing.io, "/sys/fs/cgroup/yoq", .{ .iterate = true });
+        defer directory.close(std.testing.io);
+        var iterator = directory.iterate();
+        while (try iterator.next(std.testing.io)) |entry| {
+            if (entry.kind != .directory or !std.mem.startsWith(u8, entry.name, prefix)) continue;
+            const path = try std.fmt.allocPrint(alloc, "/sys/fs/cgroup/yoq/{s}/cgroup.procs", .{entry.name});
+            defer alloc.free(path);
+            const processes = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, alloc, .limited(4096)) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
+            defer alloc.free(processes);
+            // The helper and its child must both have joined before cancellation.
+            var lines = std.mem.tokenizeScalar(u8, processes, '\n');
+            _ = lines.next() orelse continue;
+            _ = lines.next() orelse continue;
+            return std.fmt.allocPrint(alloc, "/sys/fs/cgroup/yoq/{s}", .{entry.name});
+        }
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
+    }
+    return error.HealthCheckNotRunning;
+}
+
+test "local parity health transitions and stop cleans up an active timed check" {
+    var fixture = try ImageFixture.init();
+    defer fixture.deinit();
+    defer cleanupContainer(&fixture.env, "health-owner");
+    const check = "test \"$FIXTURE_ENV\" = image-value && test \"$PWD\" = /work || exit 9; if test -f /work/timeout; then sleep 30 & wait; fi";
+    var started = try fixture.env.runYoq(&.{ "run", "--no-net", "-d", "--name", "health-owner", "--health-cmd", check, "--health-interval", "100ms", "--health-timeout", "500ms", "--health-retries", "1", ImageFixture.tag, "sleep", "60" });
+    defer started.deinit();
+    try started.expectExitCode(0);
+    const id = trimOutput(started.stdout);
+    try waitHealth(&fixture.env, "health-owner", "healthy", 0);
+    try expectExecOutput(&fixture.env, "health-owner", ": > /work/timeout", "");
+    try waitHealth(&fixture.env, "health-owner", "unhealthy", 124);
+    const group = try activeHealthGroup(id);
+    defer alloc.free(group);
+    const process_file = try std.fmt.allocPrint(alloc, "{s}/cgroup.procs", .{group});
+    defer alloc.free(process_file);
+    const processes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, process_file, alloc, .limited(4096));
+    defer alloc.free(processes);
+    try expectCommand(&fixture.env, &.{ "stop", "health-owner" });
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, group, .{}));
+    var lines = std.mem.tokenizeScalar(u8, processes, '\n');
+    while (lines.next()) |pid| {
+        const proc_path = try std.fmt.allocPrint(alloc, "/proc/{s}", .{pid});
+        defer alloc.free(proc_path);
+        try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, proc_path, .{}));
+    }
+}
