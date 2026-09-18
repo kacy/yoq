@@ -226,7 +226,7 @@ fn validateContents(alloc: std.mem.Allocator, dir: std.Io.Dir, description: mani
 }
 
 fn validateSecrets(alloc: std.mem.Allocator, dir: std.Io.Dir, description: manifest.Manifest, db: *sqlite.Db) !void {
-    const encrypted = (try db.one(struct { count: i64 }, "SELECT COUNT(*) FROM secrets;", .{}, .{})).?;
+    const encrypted = (try db.one(struct { count: i64 }, "SELECT (SELECT COUNT(*) FROM secrets)+(SELECT COUNT(*) FROM certificates WHERE source != 'mtls');", .{}, .{})).?;
     if (!description.contains("secrets.key")) {
         if (encrypted.count != 0) return error.MissingSecretsKey;
         return;
@@ -248,6 +248,20 @@ fn validateSecrets(alloc: std.mem.Allocator, dir: std.Io.Dir, description: manif
         defer {
             std.crypto.secureZero(u8, plaintext);
             alloc.free(plaintext);
+        }
+    }
+    var certificates = try @import("../../tls/cert_store.zig").CertStore.initWithKey(db, alloc, key[0..32].*);
+    defer std.crypto.secureZero(u8, &certificates.key);
+    var cert_query = try db.prepare("SELECT domain FROM certificates WHERE source != 'mtls';");
+    defer cert_query.deinit();
+    var cert_rows = try cert_query.iterator(struct { domain: sqlite.Text }, .{});
+    while (try cert_rows.nextAlloc(alloc, .{})) |row| {
+        defer alloc.free(row.domain.data);
+        const certificate = certificates.get(row.domain.data) catch return error.InvalidSecretsKey;
+        defer {
+            std.crypto.secureZero(u8, certificate.key_pem);
+            alloc.free(certificate.key_pem);
+            alloc.free(certificate.cert_pem);
         }
     }
 }

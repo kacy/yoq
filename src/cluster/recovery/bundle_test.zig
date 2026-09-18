@@ -368,3 +368,34 @@ test "cluster bundle rejects wrong secret keys invalid ca keys and reused token 
     }
     try std.testing.expectError(error.ClusterIdentityUnavailable, capture(root, invalid));
 }
+
+test "cluster bundle requires the encryption key for stored certificates without secrets" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const ca = try Ca.init();
+    defer ca.deinit();
+    const base = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(base);
+    const root = try joinPath(base, "source");
+    defer alloc.free(root);
+    const destination = try joinPath(base, "bundle");
+    defer alloc.free(destination);
+    try fixture(root, 1, false, ca);
+    const local_path = try joinPath(root, "yoq.db");
+    defer alloc.free(local_path);
+    {
+        var db = try @import("sqlite").Db.init(.{ .mode = .{ .File = local_path }, .open_flags = .{ .write = true } });
+        defer db.deinit();
+        try db.exec("DELETE FROM secrets;", .{}, .{});
+        const encrypted = try @import("../../state/secrets.zig").encrypt(alloc, "stored certificate key", ("k" ** 32).*);
+        defer alloc.free(encrypted.ciphertext);
+        const Blob = @import("sqlite").Blob;
+        try db.exec("INSERT INTO certificates (domain,cert_pem,encrypted_key,key_nonce,key_tag,not_after,source,created_at,updated_at) VALUES ('app.example','certificate',?,?,?,2000000000,'manual',1,1);", .{}, .{ Blob{ .data = encrypted.ciphertext }, Blob{ .data = &encrypted.nonce }, Blob{ .data = &encrypted.tag } });
+    }
+    const dir = try files.openDir(root);
+    defer dir.close(io);
+    try dir.deleteFile(io, "secrets.key");
+    try std.testing.expectError(error.MissingSecretsKey, capture(root, destination));
+    try files.write(dir, "secrets.key", "w" ** 32);
+    try std.testing.expectError(error.InvalidSecretsKey, capture(root, destination));
+}
