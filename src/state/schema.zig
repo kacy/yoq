@@ -19,6 +19,7 @@ pub const SchemaError = error{
 
 pub const secrets_create_table_sql = tables.secrets_create_table_sql;
 pub const assignment_claims_create_table_sql = tables.assignment_claims_create_table_sql;
+pub const assignment_handoffs_create_table_sql = tables.assignment_handoffs_create_table_sql;
 
 /// initialize the database schema. safe to call multiple times
 /// (uses CREATE TABLE IF NOT EXISTS).

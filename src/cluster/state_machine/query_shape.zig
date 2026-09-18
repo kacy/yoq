@@ -4,7 +4,7 @@
 const std = @import("std");
 
 pub fn allowed(statement: []const u8) bool {
-    if (matches(statement, cleanup) or matches(statement, allocate_node) or matches(statement, insert_peer) or matches(statement, refresh_peer)) return true;
+    if (matches(statement, orphan_assignments) or matches(statement, cleanup) or matches(statement, allocate_node) or matches(statement, insert_peer) or matches(statement, refresh_peer)) return true;
     var tokens = Tokens{ .input = statement };
     var previous: []const u8 = "";
     while (tokens.next()) |token| {
@@ -27,6 +27,7 @@ pub fn isBarrier(statement: []const u8) bool {
     return matches(statement, "UPDATE agents SET id = id WHERE 0");
 }
 
+const orphan_assignments = "UPDATE assignments SET agent_id = $string , status = $string WHERE agent_id = $string AND status IN ( $string , $string ) AND id NOT IN ( SELECT assignment_id FROM assignment_handoffs )";
 const refresh_peer = "UPDATE wireguard_peers SET endpoint = $string WHERE agent_id = $string AND EXISTS ( SELECT 1 FROM agents WHERE id = $string AND credential_hash = $string AND wg_public_key = $string )";
 const cleanup = "DELETE FROM assignment_claims WHERE assignment_id NOT IN ( SELECT id FROM assignments )";
 const allocate_node =

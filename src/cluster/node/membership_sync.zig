@@ -2,6 +2,7 @@ const std = @import("std");
 const agent_registry = @import("../registry.zig");
 const placement = @import("../placement_transaction.zig");
 const mutation_session = @import("../mutation_session.zig");
+const agent_drain = @import("../agent_drain.zig");
 const gossip_mod = @import("../gossip.zig");
 const gossip_sender_validation = @import("../gossip_sender_validation.zig");
 const ip_mod = @import("../../network/ip.zig");
@@ -28,7 +29,7 @@ pub fn checkAgentHealth(self: anytype, agents: []const agent_registry.AgentRecor
     const timeout: i64 = base_timeout * multiplier;
 
     for (agents) |agent| {
-        if (!std.mem.eql(u8, agent.status, "active")) continue;
+        if (!std.mem.eql(u8, agent.status, "active") and !agent_drain.isDraining(agent.status)) continue;
         if (now - agent.last_heartbeat <= timeout) continue;
 
         var sql_buf: [256]u8 = undefined;
@@ -42,7 +43,10 @@ pub fn checkAgentHealth(self: anytype, agents: []const agent_registry.AgentRecor
         }
 
         var orphan_buf: [256]u8 = undefined;
-        const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent.id) catch continue;
+        const orphan_sql = (if (agent_drain.isDraining(agent.status))
+            agent_drain.orphanAssignmentsSql(&orphan_buf, agent.id)
+        else
+            agent_registry.orphanAssignmentsSql(&orphan_buf, agent.id)) catch continue;
         _ = proposeUnderLock(self, orphan_sql) catch |e| {
             logger.warn("failed to propose assignment orphaning for agent {s}: {}", .{ agent.id, e });
         };
@@ -60,6 +64,16 @@ pub fn reconcileOrphanedAssignments(
     placement.reconcileOrphans(self.alloc, session) catch |err| {
         logger.warn("failed to reconcile assignment capacity: {}", .{err});
     };
+}
+
+pub fn reconcileDrainingAgents(self: anytype, agents: []const agent_registry.AgentRecord) void {
+    for (agents) |agent| {
+        if (!agent_drain.isDraining(agent.status)) continue;
+        const session = mutation_session.Session.begin(self) catch return;
+        agent_drain.reconcile(self.alloc, session, agent.id) catch |err| {
+            logger.warn("failed to advance drain for agent {s}: {}", .{ agent.id, err });
+        };
+    }
 }
 
 pub fn cleanupDeadAgents(self: anytype, agents: []const agent_registry.AgentRecord) void {
@@ -196,7 +210,12 @@ pub fn handleGossipMemberDead(self: anytype, member_id: u64) void {
     service_reconciler.noteNodeLost(@intCast(member_id));
 
     var orphan_buf: [256]u8 = undefined;
-    const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent_id) catch return;
+    const agent = (agent_registry.getAgent(self.alloc, &self.state_machine.db, agent_id) catch return) orelse return;
+    defer agent.deinit(self.alloc);
+    const orphan_sql = (if (agent_drain.isDraining(agent.status))
+        agent_drain.orphanAssignmentsSql(&orphan_buf, agent_id)
+    else
+        agent_registry.orphanAssignmentsSql(&orphan_buf, agent_id)) catch return;
     _ = self.proposeLocked(orphan_sql) catch |e| {
         logger.warn("gossip: failed to orphan assignments for agent {s}: {}", .{ agent_id, e });
     };

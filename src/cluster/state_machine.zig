@@ -1157,7 +1157,7 @@ test "replicated poison rejection survives restart and validates retained histor
     try expectBatchTestState(&sm, 2, 1, 2);
 }
 
-test "replicated admission and restored snapshots share the complete current schema" {
+test "cluster reliability: replicated admission and restored snapshots share the complete current schema" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const alloc = std.testing.allocator;
@@ -1173,6 +1173,7 @@ test "replicated admission and restored snapshots share the complete current sch
     try expectBatchTestState(&old, 1, 0, 0);
     // reproduce a snapshot from before these schema additions.
     try old.db.exec("DROP TABLE assignment_claims;", .{}, .{});
+    try old.db.exec("DROP TABLE assignment_handoffs;", .{}, .{});
     try old.db.exec("ALTER TABLE agents DROP COLUMN credential_hash;", .{}, .{});
     try old.takeSnapshot(path, .{ .last_included_index = 1, .last_included_term = 1, .data_len = 0 });
 
@@ -1182,6 +1183,10 @@ test "replicated admission and restored snapshots share the complete current sch
     restored.apply(.{ .index = 2, .term = 1, .data = read_claims ++ " UPDATE agents SET credential_hash = 'restored';" });
     try expectBatchTestState(&restored, 2, 0, 0);
     try std.testing.expect(!try command.wasRejected(&restored.db, 2, 1));
+    restored.apply(.{ .index = 3, .term = 1, .data = "INSERT INTO assignment_handoffs (assignment_id, replacement_id, generation) VALUES ('original', 'replacement', 4);" });
+    try std.testing.expect(!try command.wasRejected(&restored.db, 3, 1));
+    const handoff = (try restored.db.one(struct { generation: i64 }, "SELECT generation FROM assignment_handoffs WHERE assignment_id = 'original';", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 4), handoff.generation);
 }
 
 test "replicated admission rejects scan-order-dependent reads and key updates" {

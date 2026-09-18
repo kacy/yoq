@@ -10,12 +10,18 @@ const Allocator = std.mem.Allocator;
 pub const AgentStatus = enum {
     active,
     draining,
+    drain_pending,
+    drain_blocked,
+    drained,
     offline,
 
     pub fn toString(self: AgentStatus) []const u8 {
         return switch (self) {
             .active => "active",
             .draining => "draining",
+            .drain_pending => "drain_pending",
+            .drain_blocked => "drain_blocked",
+            .drained => "drained",
             .offline => "offline",
         };
     }
@@ -23,6 +29,9 @@ pub const AgentStatus = enum {
     pub fn fromString(s: []const u8) ?AgentStatus {
         if (std.mem.eql(u8, s, "active")) return .active;
         if (std.mem.eql(u8, s, "draining")) return .draining;
+        if (std.mem.eql(u8, s, "drain_pending")) return .drain_pending;
+        if (std.mem.eql(u8, s, "drain_blocked")) return .drain_blocked;
+        if (std.mem.eql(u8, s, "drained")) return .drained;
         if (std.mem.eql(u8, s, "offline")) return .offline;
         return null;
     }
@@ -145,7 +154,7 @@ pub const Assignment = struct {
 // -- tests --
 
 test "agent status round-trip" {
-    const statuses = [_]AgentStatus{ .active, .draining, .offline };
+    const statuses = [_]AgentStatus{ .active, .draining, .drain_pending, .drain_blocked, .drained, .offline };
     for (statuses) |s| {
         const str = s.toString();
         const parsed = AgentStatus.fromString(str).?;

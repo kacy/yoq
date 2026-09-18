@@ -225,7 +225,7 @@ test "drainSql generates valid SQL" {
     var buf: [256]u8 = undefined;
     const sql = try drainSql(&buf, "abc123def456");
 
-    try std.testing.expect(std.mem.indexOf(u8, sql, "draining") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "drain_pending") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "abc123def456") != null);
 }
 
@@ -382,6 +382,8 @@ test "orphanAssignmentsSql only affects non-terminal assignments" {
         \\);
     , .{}, .{}) catch return;
 
+    try db.exec(@import("../state/schema.zig").assignment_handoffs_create_table_sql, .{}, .{});
+
     // insert assignments in different statuses
     db.exec("INSERT INTO assignments (id, agent_id, image, status) VALUES ('a1', 'agent1', 'nginx', 'pending');", .{}, .{}) catch return;
     db.exec("INSERT INTO assignments (id, agent_id, image, status) VALUES ('a2', 'agent1', 'redis', 'running');", .{}, .{}) catch return;
@@ -391,7 +393,7 @@ test "orphanAssignmentsSql only affects non-terminal assignments" {
     // orphan agent1's assignments
     var sql_buf: [256]u8 = undefined;
     const sql = orphanAssignmentsSql(&sql_buf, "agent1") catch return;
-    db.execDynamic(sql, .{}, .{}) catch return;
+    try db.execDynamic(sql, .{}, .{});
 
     // pending and running should be orphaned (agent_id = '', status = pending)
     const alloc = std.testing.allocator;

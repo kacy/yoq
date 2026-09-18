@@ -287,7 +287,8 @@ fn handleAgentHeartbeatImpl(alloc: std.mem.Allocator, request: http.Request, id:
 
         const writer = &json_buf_writer.writer;
         writer.writeAll("{\"status\":\"") catch return common.internalError();
-        writer.writeAll(a.status) catch return common.internalError();
+        const status = if (std.mem.eql(u8, a.status, "draining")) "drain_pending" else a.status;
+        writer.writeAll(status) catch return common.internalError();
         writer.print("\",\"peers_count\":{d}", .{peers_count}) catch return common.internalError();
         var addr_buf: [64]u8 = undefined;
         if (node.leaderAddrBuf(&addr_buf)) |addr| {
@@ -455,8 +456,13 @@ pub fn handleAgentDrain(alloc: std.mem.Allocator, id: []const u8, ctx: RouteCont
         return deploy_routes.mutationFailure(alloc, node, err);
     };
 
+    @import("../../../cluster/agent_drain.zig").reconcile(alloc, session, id) catch |err|
+        return deploy_routes.mutationFailure(alloc, node, mutation.mapError(err));
+    const agent = (agent_registry.getAgent(alloc, node.stateMachineDb(), id) catch return common.internalError()) orelse return common.notFound();
+    defer agent.deinit(alloc);
+    const body = std.fmt.allocPrint(alloc, "{{\"status\":\"{s}\"}}", .{agent.status}) catch return common.internalError();
     audit.record(.agent_drain, id, .ok);
-    return .{ .status = .ok, .body = "{\"status\":\"draining\"}", .allocated = false };
+    return .{ .status = .ok, .body = body, .allocated = true };
 }
 
 pub fn handleUpdateLabels(alloc: std.mem.Allocator, request: http.Request, id: []const u8, ctx: RouteContext) Response {

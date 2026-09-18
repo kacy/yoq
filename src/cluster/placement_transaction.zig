@@ -318,7 +318,7 @@ fn resumePlacement(alloc: std.mem.Allocator, lease: Lease, request: scheduler.Pl
     defer node.mu.unlock(std.Options.debug_io);
     try lease.session.checkLocked();
     const Row = struct { id: sqlite.Text };
-    var stmt = node.stateMachineDb().prepare("SELECT a.id FROM assignments a JOIN assignment_claims c ON c.assignment_id = a.id WHERE c.release_id = ? AND a.app_name = ? AND a.workload_kind = ? AND a.workload_name = ? ORDER BY a.gang_rank, a.id;") catch return error.InternalError;
+    var stmt = node.stateMachineDb().prepare("SELECT a.id FROM assignments a JOIN assignment_claims c ON c.assignment_id = a.id WHERE c.release_id = ? AND a.app_name = ? AND a.workload_kind = ? AND a.workload_name = ? AND a.id NOT IN (SELECT assignment_id FROM assignment_handoffs) ORDER BY a.gang_rank, a.id;") catch return error.InternalError;
     defer stmt.deinit();
     var rows = stmt.iterator(Row, .{ release_id, request.app_name, request.workload_kind, request.workload_name }) catch return error.InternalError;
     var ids: std.ArrayList([]const u8) = .empty;
