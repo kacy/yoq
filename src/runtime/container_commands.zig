@@ -53,3 +53,7 @@ pub fn restart(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 pub fn runSupervisor(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     return supervisor_runtime.runSupervisor(args, ctx.alloc);
 }
+
+pub fn attach(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    return query_commands.attach_cmd(args, ctx.alloc);
+}

@@ -17,11 +17,13 @@ const security = @import("security.zig");
 const syscall_util = @import("../lib/syscall.zig");
 const exec_helpers = @import("../lib/exec_helpers.zig");
 const process_config = @import("process_config.zig");
+const session = @import("session.zig");
 
 pub const ExecError = error{
     /// the target container is not in a running state
     ContainerNotRunning,
     InvalidArguments,
+    SessionFailed,
     RootOpenFailed,
     /// could not open a namespace fd from /proc/<pid>/ns/ (container may be gone)
     NamespaceOpenFailed,
@@ -47,6 +49,8 @@ pub const ExecConfig = struct {
     env: []const []const u8,
     /// working directory inside the container
     working_dir: []const u8,
+    interactive: bool = false,
+    tty: bool = false,
 };
 
 /// enter a running container's namespaces and exec a command.
@@ -77,58 +81,37 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
             return ExecError.NamespaceOpenFailed;
     }
 
-    // enter each namespace via setns.
-    // order matters: user first (grants permission for the rest),
-    // mount last (so /proc lookups work during earlier setns calls).
-    // pid namespace only affects future children, not the caller.
-    for (ns_fds) |fd| {
-        try sysSetns(fd, 0);
-    }
+    var channels = session.ProcessIo.init(config.interactive, config.tty) catch return ExecError.SessionFailed;
+    defer channels.deinit();
 
-    // fork so the PID namespace takes effect.
-    // setns(CLONE_NEWPID) only moves future children into the new
-    // PID namespace, not the calling process. the fork gives us a
-    // child that's actually inside the container's PID namespace.
-    const child_pid = try sysFork();
-
-    if (child_pid == 0) {
-        // child process — we're now fully inside the container.
-
-        // close inherited namespace fds (not needed after setns)
-        for (ns_fds) |fd| {
-            if (fd >= 0) linux_platform.posix.close(fd);
+    // Namespace entry stays in a helper process. The client retains its host
+    // terminal and namespace context while relaying input and output.
+    const helper_pid = try sysFork();
+    if (helper_pid == 0) {
+        for (ns_fds) |fd| sysSetns(fd, 0) catch linux.exit_group(126);
+        const child_pid = sysFork() catch linux.exit_group(126);
+        if (child_pid == 0) {
+            for (ns_fds) |fd| linux_platform.posix.close(fd);
+            channels.applyChild() catch linux.exit_group(126);
+            if (linux.errno(linux.fchdir(root_fd)) != .SUCCESS) linux.exit_group(126);
+            if (linux.errno(linux.chroot(".")) != .SUCCESS) linux.exit_group(126);
+            linux_platform.posix.close(root_fd);
+            linux_platform.posix.chdir(config.working_dir) catch linux.exit_group(126);
+            security.apply() catch linux.exit_group(1);
+            linux.exit_group(process_config.execCommand(config.command, config.args, config.env));
         }
-
-        if (linux.errno(linux.fchdir(root_fd)) != .SUCCESS) linux.exit_group(126);
-        if (linux.errno(linux.chroot(".")) != .SUCCESS) linux.exit_group(126);
-        linux_platform.posix.close(root_fd);
-        linux_platform.posix.chdir(config.working_dir) catch linux.exit_group(126);
-
-        // apply seccomp + capability restrictions so exec'd commands
-        // are subject to the same security policy as the container
-        security.apply() catch {
-            linux.exit_group(1);
-        };
-
-        // exec the command — does not return on success
-        const child_exit = process_config.execCommand(config.command, config.args, config.env);
-        linux.exit_group(child_exit);
+        channels.deinit();
+        const signals = session.foreground.Signals.install(child_pid);
+        _ = signals;
+        const result = process.waitForExit(child_pid) catch linux.exit_group(126);
+        linux.exit_group(exitCode(result.status));
     }
-
-    // parent process — close namespace fds early since we're done with them.
-    // the defer will skip fds already set to -1.
-    for (&ns_fds) |*fd| {
-        if (fd.* >= 0) {
-            linux_platform.posix.close(fd.*);
-            fd.* = -1;
-        }
-    }
-
-    // wait for the child to finish and relay its exit code
-    const result = process.waitForExit(child_pid) catch
-        return ExecError.WaitFailed;
-
-    return exitCode(result.status);
+    channels.closeChild();
+    return session.foreground.run(&channels, helper_pid) catch {
+        process.sendSignal(helper_pid, linux.SIG.TERM) catch {};
+        _ = process.waitForExit(helper_pid) catch {};
+        return ExecError.SessionFailed;
+    };
 }
 
 // -- namespace helpers --
@@ -248,4 +231,5 @@ test "exec preserves signal exit status" {
 
 test {
     _ = process_config;
+    _ = session;
 }
