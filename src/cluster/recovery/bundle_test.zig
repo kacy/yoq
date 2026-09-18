@@ -290,7 +290,9 @@ test "cluster bundle finishes selected snapshot recovery only in its private cop
     {
         var state = try StateMachine.init(state_path);
         defer state.deinit();
-        try state.db.exec("DELETE FROM agents; DELETE FROM cluster_ca; UPDATE state_machine_meta SET last_applied=0;", .{}, .{});
+        try state.db.exec("DELETE FROM agents;", .{}, .{});
+        try state.db.exec("DELETE FROM cluster_ca;", .{}, .{});
+        try state.db.exec("UPDATE state_machine_meta SET last_applied=0;", .{}, .{});
     }
     const token = try joinPath(root, "join_token");
     defer alloc.free(token);
