@@ -83,7 +83,7 @@ const Change = union(enum) {
 };
 
 fn change(alloc: Allocator, operation: Change, apply: Apply) !void {
-    var previous = try loadClaims(alloc);
+    const previous = try loadClaims(alloc);
     if (previous.items.len == 0 and operation != .publish) return;
     try resolveBackends(alloc, previous.items);
     var next: Claims = .empty;
