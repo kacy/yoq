@@ -48,25 +48,33 @@ pub fn renderRules(alloc: Allocator, claims: []const Backend) ![]const u8 {
     return output.toOwnedSlice();
 }
 
-fn run(argv: []const []const u8, input: ?std.Io.File) !void {
-    var child = try std.process.spawn(io, .{ .argv = argv, .stdin = if (input) |file| .{ .file = file } else .ignore, .stdout = .ignore, .stderr = .ignore });
-    const term = try child.wait(io);
+fn run(child_io: std.Io, argv: []const []const u8, input: ?std.Io.File) !void {
+    var child = try std.process.spawn(child_io, .{ .argv = argv, .stdin = if (input) |file| .{ .file = file } else .ignore, .stdout = .ignore, .stderr = .ignore });
+    const term = try child.wait(child_io);
     if (term != .exited or term.exited != 0) return error.FirewallFailed;
 }
 
-fn ensureJump(table: []const u8, source: []const u8, target: []const u8, local_only: bool) !void {
+fn ensureJump(child_io: std.Io, table: []const u8, source: []const u8, target: []const u8, local_only: bool) !void {
     var args: std.ArrayList([]const u8) = .empty;
     defer args.deinit(std.heap.page_allocator);
     try args.appendSlice(std.heap.page_allocator, &.{ "iptables", "--wait", "5", "-t", table, "-C", source });
     if (local_only) try args.appendSlice(std.heap.page_allocator, &.{ "-m", "addrtype", "--dst-type", "LOCAL" });
     try args.appendSlice(std.heap.page_allocator, &.{ "-j", target });
-    run(args.items, null) catch {
+    run(child_io, args.items, null) catch {
         args.items[5] = "-A";
-        try run(args.items, null);
+        try run(child_io, args.items, null);
     };
 }
 
 pub fn apply(alloc: Allocator, claims: []const Backend) !void {
+    // debug_io deliberately has a failing allocator. subprocess startup needs
+    // an owned io instance to allocate argv and inherit the host tool path.
+    const environ: [*:null]const ?[*:0]const u8 = @ptrCast(std.c.environ);
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{
+        .environ = .{ .block = .{ .slice = std.mem.span(environ) } },
+    });
+    defer threaded.deinit();
+    const child_io = threaded.io();
     if (claims.len != 0) try nat.enableRouteLocalnet(@import("bridge.zig").default_bridge);
     const rules = try renderRules(alloc, claims);
     defer alloc.free(rules);
@@ -77,10 +85,10 @@ pub fn apply(alloc: Allocator, claims: []const Backend) !void {
     defer file.close(io);
     try file.writeStreamingAll(io, rules);
     _ = try platform.posix.lseek(file.handle, 0, linux.SEEK.SET);
-    try run(&.{ "iptables-restore", "--wait", "5", "--noflush" }, file);
-    try ensureJump("filter", "FORWARD", "YOQ-PUBLISHED-FWD", false);
-    try ensureJump("filter", "INPUT", "YOQ-PUBLISHED-IN", false);
-    try ensureJump("nat", "POSTROUTING", "YOQ-PUBLISHED-SNAT", false);
-    try ensureJump("nat", "PREROUTING", "YOQ-PUBLISHED", true);
-    try ensureJump("nat", "OUTPUT", "YOQ-PUBLISHED", true);
+    try run(child_io, &.{ "iptables-restore", "--wait", "5", "--noflush" }, file);
+    try ensureJump(child_io, "filter", "FORWARD", "YOQ-PUBLISHED-FWD", false);
+    try ensureJump(child_io, "filter", "INPUT", "YOQ-PUBLISHED-IN", false);
+    try ensureJump(child_io, "nat", "POSTROUTING", "YOQ-PUBLISHED-SNAT", false);
+    try ensureJump(child_io, "nat", "PREROUTING", "YOQ-PUBLISHED", true);
+    try ensureJump(child_io, "nat", "OUTPUT", "YOQ-PUBLISHED", true);
 }
