@@ -5049,3 +5049,52 @@ test "proxy upload forwarding retains framing and strips handled expectations an
         if (std.mem.startsWith(u8, framing, "Transfer-Encoding")) try std.testing.expect(std.mem.indexOf(u8, forwarded, "Content-Length:") == null);
     }
 }
+
+test "proxy upload never replays a consumed body after a server error or disconnect" {
+    for ([_]bool{ false, true }) |disconnect| {
+        proxy_runtime.resetForTest();
+        defer proxy_runtime.resetForTest();
+        const action: TestUpstreamAction = if (disconnect) .close else .{ .respond = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\n\r\nonce" };
+        var backend = try TestUpstreamServer.init(&.{action});
+        defer backend.deinit();
+        try backend.start();
+        var proxy = ReverseProxy.init(std.testing.allocator, &.{});
+        defer proxy.deinit();
+        const plan: ForwardPlan = .{
+            .method = .GET,
+            .path = "/upload",
+            .outbound_path = "/upload",
+            .host = "app.test",
+            .outbound_host = "api",
+            .backend_service = "api",
+            .selection_key = 0,
+            .route = try cloneRouteSnapshot(std.testing.allocator, .{
+                .name = "uploads",
+                .service = "api",
+                .vip_address = "10.43.0.2",
+                .match = .{ .host = "app.test", .path_prefix = "/upload" },
+                .retries = 3,
+            }),
+            .upstream = .{ .service = "api", .endpoint_id = "api-1", .address = "127.0.0.1", .port = backend.port },
+        };
+        defer plan.route.deinit(std.testing.allocator);
+        var sockets: [2]posix.fd_t = undefined;
+        if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &sockets) != 0) return error.SkipZigTest;
+        defer for (sockets) |fd| linux_platform.posix.close(fd);
+        try proxy.forwardStream("GET /upload HTTP/1.1\r\nHost: app.test\r\nContent-Length: 4\r\n\r\nbody", &plan, null, sockets[0]);
+        _ = std.os.linux.shutdown(sockets[0], 1);
+        var bytes: [2048]u8 = undefined;
+        const received = bytes[0..readSocketBytes(sockets[1], &bytes)];
+        if (disconnect) {
+            try std.testing.expect(std.mem.startsWith(u8, received, "HTTP/1.1 502 "));
+        } else {
+            try std.testing.expect(std.mem.startsWith(u8, received, "HTTP/1.1 503 "));
+            try std.testing.expect(std.mem.endsWith(u8, received, "\r\n\r\nonce"));
+        }
+        try std.testing.expect(std.mem.endsWith(u8, backend.request(0), "\r\n\r\nbody"));
+        try std.testing.expectEqual(@as(usize, 1), backend.accepted);
+        var snapshot = try proxy_runtime.snapshot(std.testing.allocator);
+        defer snapshot.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u64, 0), snapshot.retries_total);
+    }
+}
