@@ -6,7 +6,6 @@ const types = @import("../raft_types.zig");
 
 const RequestVoteArgs = types.RequestVoteArgs;
 const RequestVoteReply = types.RequestVoteReply;
-const Term = types.Term;
 
 pub fn tick(self: anytype, heartbeat_interval: u32, min_election_ticks: u32, max_election_ticks: u32) void {
     self.ticks_since_event += 1;
@@ -44,23 +43,30 @@ pub fn handleRequestVote(
         }
     }
 
-    const voted_for = self.persistent_state.voted_for;
-    const can_vote = voted_for == null or voted_for.? == args.candidate_id;
-
-    const our_last_term = self.log.lastTerm();
-    const our_last_index = self.log.lastIndex();
-    const log_ok = (args.last_log_term > our_last_term) or
-        (args.last_log_term == our_last_term and args.last_log_index >= our_last_index);
-
-    if (can_vote and log_ok) {
-        if (!self.persistVote(args.candidate_id)) {
-            return .{ .term = self.persistent_state.current_term, .vote_granted = false };
-        }
-        self.ticks_since_event = 0;
-        return .{ .term = self.persistent_state.current_term, .vote_granted = true };
+    const can_vote = if (self.persistent_state.voted_for) |candidate_id|
+        candidate_id == args.candidate_id
+    else
+        true;
+    const log_is_current = candidateLogIsCurrent(self, args);
+    if (!can_vote or !log_is_current) {
+        return .{ .term = self.persistent_state.current_term, .vote_granted = false };
     }
 
-    return .{ .term = self.persistent_state.current_term, .vote_granted = false };
+    // save the vote before granting it or postponing the next election.
+    if (!self.persistVote(args.candidate_id)) {
+        return .{ .term = self.persistent_state.current_term, .vote_granted = false };
+    }
+    self.ticks_since_event = 0;
+    return .{ .term = self.persistent_state.current_term, .vote_granted = true };
+}
+
+fn candidateLogIsCurrent(self: anytype, args: RequestVoteArgs) bool {
+    const last_term = self.log.lastTerm();
+    const last_index = self.log.lastIndex();
+
+    // compare terms first. length only breaks a tie between equal terms.
+    if (args.last_log_term != last_term) return args.last_log_term > last_term;
+    return args.last_log_index >= last_index;
 }
 
 pub fn handleRequestVoteReply(
@@ -71,11 +77,14 @@ pub fn handleRequestVoteReply(
     max_election_ticks: u32,
 ) void {
     const current_term = self.persistent_state.current_term;
+    // every role must learn a newer term, even from a rejected vote.
     if (reply.term > current_term) {
         _ = common.stepDown(self, reply.term, min_election_ticks, max_election_ticks);
         return;
     }
-    if (reply.term != current_term or self.role != .candidate) return;
+    // only count replies to the election still in progress.
+    if (self.role != .candidate) return;
+    if (reply.term != current_term) return;
 
     if (!reply.vote_granted) return;
 
@@ -108,8 +117,10 @@ pub fn transferLeadership(self: anytype, min_election_ticks: u32, max_election_t
 
 pub fn startElection(self: anytype, min_election_ticks: u32, max_election_ticks: u32) void {
     const new_term = self.persistent_state.current_term + 1;
+    // persist the term and our own vote before changing role or sending requests.
     if (!self.persistTerm(new_term)) return;
     if (!self.persistVote(self.id)) return;
+
     self.role = .candidate;
     @memset(self.votes_granted, false);
     self.votes_received = 1;
@@ -121,18 +132,23 @@ pub fn startElection(self: anytype, min_election_ticks: u32, max_election_ticks:
         return;
     }
 
+    sendVoteRequests(self, new_term);
+}
+
+fn sendVoteRequests(self: anytype, term: types.Term) void {
     const last_index = self.log.lastIndex();
     const last_term = self.log.lastTerm();
+    const args: RequestVoteArgs = .{
+        .term = term,
+        .candidate_id = self.id,
+        .last_log_index = last_index,
+        .last_log_term = last_term,
+    };
     for (self.peers) |peer| {
         self.actions.append(self.alloc, .{
             .send_request_vote = .{
                 .target = peer,
-                .args = .{
-                    .term = new_term,
-                    .candidate_id = self.id,
-                    .last_log_index = last_index,
-                    .last_log_term = last_term,
-                },
+                .args = args,
             },
         }) catch |e| {
             logger.warn("raft: failed to queue vote request: {}", .{e});
@@ -144,10 +160,10 @@ pub fn becomeLeader(self: anytype) void {
     self.role = .leader;
     self.heartbeat_ticks = 0;
 
-    const last = self.log.lastIndex();
-    for (0..self.peers.len) |i| {
-        self.next_index[i] = last + 1;
-        self.match_index[i] = 0;
+    const last_log_index = self.log.lastIndex();
+    for (0..self.peers.len) |peer_index| {
+        self.next_index[peer_index] = last_log_index + 1;
+        self.match_index[peer_index] = 0;
     }
 
     self.actions.append(self.alloc, .become_leader) catch |e| {
