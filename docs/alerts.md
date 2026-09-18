@@ -42,7 +42,7 @@ webhooks receive a json `POST` over http or https. https uses the system trust s
 
 `state` is `firing` or `resolved`. sustained alerts send reminders every 60 seconds. failed deliveries retry after 60 seconds. a new firing or recovery transition can send immediately. only one delivery runs at a time, independently of metric sampling; services take turns when several notifications are due. a transition observed during an older delivery remains pending.
 
-without `webhook`, thresholds are still evaluated and persisted. delivery reports `disabled`. this is a generic json webhook; receivers that require another schema, including slack incoming webhooks, need an adapter.
+without `webhook`, thresholds are still evaluated and persisted. when a notification is due, delivery reports `disabled`. this is a generic json webhook; receivers that require another schema, including slack incoming webhooks, need an adapter.
 
 ## status and limits
 
