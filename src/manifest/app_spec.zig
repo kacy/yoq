@@ -82,6 +82,7 @@ pub const ApplicationSpec = struct {
     workers: []const ApplicationWorkerSpec,
     crons: []const ApplicationCronSpec,
     training_jobs: []const ApplicationTrainingJobSpec,
+    volume_definitions: []const spec.Volume = &.{},
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *ApplicationSpec) void {
@@ -174,6 +175,7 @@ pub const ApplicationSpec = struct {
             .workers = workers,
             .crons = crons,
             .training_jobs = training_jobs,
+            .volume_definitions = self.volume_definitions,
             .alloc = alloc,
         };
     }
@@ -194,6 +196,7 @@ pub const ApplicationSpec = struct {
             .workers = workers,
             .crons = crons,
             .training_jobs = training_jobs,
+            .volume_definitions = self.volume_definitions,
             .alloc = alloc,
         };
     }
@@ -247,6 +250,10 @@ pub const ApplicationSpec = struct {
                 });
             }
 
+            try writer.writeAll(",\"volumes\":");
+            try writeJsonVolumes(writer, svc.volumes);
+            try writer.writeAll(",\"ports\":");
+            try std.json.Stringify.value(svc.ports, .{}, writer);
             try writer.print(",\"replicas\":{d}", .{svc.replicas});
             if (svc.alerts) |alerts| {
                 try writer.writeAll(",\"alerts\":");
@@ -261,7 +268,9 @@ pub const ApplicationSpec = struct {
             try writer.writeByte('}');
         }
 
-        try writer.writeAll("]}");
+        try writer.writeAll("],\"volume_definitions\":");
+        try std.json.Stringify.value(self.volume_definitions, .{}, writer);
+        try writer.writeByte('}');
         return json_buf_writer.toOwnedSlice();
     }
 
@@ -298,7 +307,9 @@ pub const ApplicationSpec = struct {
             try writeJsonTrainingJob(writer, job);
         }
 
-        try writer.writeAll("]}");
+        try writer.writeAll("],\"volume_definitions\":");
+        try std.json.Stringify.value(self.volume_definitions, .{}, writer);
+        try writer.writeByte('}');
         return json_buf_writer.toOwnedSlice();
     }
 };
@@ -386,6 +397,7 @@ pub fn fromManifest(alloc: std.mem.Allocator, app_name: []const u8, manifest: *c
         .workers = workers,
         .crons = crons,
         .training_jobs = training_jobs,
+        .volume_definitions = manifest.volumes,
         .alloc = alloc,
     };
 }

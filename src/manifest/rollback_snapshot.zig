@@ -186,6 +186,7 @@ const JsonApp = struct {
     workers: []const JsonWorker = &.{},
     crons: []const JsonCron = &.{},
     training_jobs: []const JsonTrainingJob = &.{},
+    volume_definitions: []const spec.Volume = &.{},
 };
 
 pub const LoadedRollbackSnapshot = struct {
@@ -268,9 +269,37 @@ fn manifestFromSnapshot(alloc: std.mem.Allocator, parsed: JsonApp) !spec.Manifes
         .workers = workers,
         .crons = crons,
         .training_jobs = training_jobs,
-        .volumes = try alloc.alloc(spec.Volume, 0),
+        .volumes = try cloneVolumeDefinitions(alloc, parsed.volume_definitions),
         .alloc = alloc,
     };
+}
+
+fn cloneVolumeDefinitions(alloc: std.mem.Allocator, definitions: []const spec.Volume) ![]spec.Volume {
+    const result = try alloc.alloc(spec.Volume, definitions.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (result[0..initialized]) |volume| volume.deinit(alloc);
+        alloc.free(result);
+    }
+    for (definitions, 0..) |volume, index| {
+        const name = try alloc.dupe(u8, volume.name);
+        errdefer alloc.free(name);
+        const driver: spec.VolumeDriver = switch (volume.driver) {
+            .local => .{ .local = .{} },
+            .host => |host| .{ .host = .{ .path = try alloc.dupe(u8, host.path) } },
+            .parallel => |parallel| .{ .parallel = .{ .mount_path = try alloc.dupe(u8, parallel.mount_path) } },
+            .nfs => |nfs| blk: {
+                const server = try alloc.dupe(u8, nfs.server);
+                errdefer alloc.free(server);
+                const path = try alloc.dupe(u8, nfs.path);
+                errdefer alloc.free(path);
+                break :blk .{ .nfs = .{ .server = server, .path = path, .options = if (nfs.options) |options| try alloc.dupe(u8, options) else null } };
+            },
+        };
+        result[index] = .{ .name = name, .driver = driver };
+        initialized += 1;
+    }
+    return result;
 }
 
 fn serviceFromSnapshot(alloc: std.mem.Allocator, svc: JsonService) !spec.Service {

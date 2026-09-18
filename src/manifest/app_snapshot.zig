@@ -38,6 +38,10 @@ pub const TrainingJobSpec = struct {
     cpu_limit: i64,
     memory_limit_mb: i64,
     checkpoint_path: ?[]const u8,
+    checkpoint_interval: ?i64 = null,
+    checkpoint_keep: ?i64 = null,
+    auto_restart: bool = true,
+    max_restarts: u32 = 10,
 
     pub fn deinit(self: TrainingJobSpec, alloc: std.mem.Allocator) void {
         alloc.free(self.command);
@@ -69,7 +73,9 @@ pub fn findWorkerRunSpec(alloc: std.mem.Allocator, json: []const u8, name: []con
     const obj = findNamedObject(json, "workers", name) orelse return null;
 
     const image = json_helpers.extractJsonString(obj, "image") orelse return null;
-    const command = try extractCommandString(alloc, obj);
+    const encoded = try extractCommandString(alloc, obj);
+    defer alloc.free(encoded);
+    const command = try @import("../cluster/assignment_spec.zig").withVolumeDefinitions(alloc, encoded, json);
     errdefer alloc.free(command);
 
     const numeric = try numbers.parse(alloc, obj);
@@ -100,7 +106,9 @@ pub fn findTrainingJobSpec(alloc: std.mem.Allocator, json: []const u8, name: []c
     const obj = findNamedObject(json, "training_jobs", name) orelse return null;
 
     const image = json_helpers.extractJsonString(obj, "image") orelse return null;
-    const command = try extractCommandString(alloc, obj);
+    const encoded = try extractCommandString(alloc, obj);
+    defer alloc.free(encoded);
+    const command = try @import("../cluster/assignment_spec.zig").withVolumeDefinitions(alloc, encoded, json);
     errdefer alloc.free(command);
 
     const numeric = try numbers.parse(alloc, obj);
@@ -120,6 +128,10 @@ pub fn findTrainingJobSpec(alloc: std.mem.Allocator, json: []const u8, name: []c
         .cpu_limit = resources.cpu,
         .memory_limit_mb = resources.memory_mb,
         .checkpoint_path = checkpoint_path,
+        .checkpoint_interval = if (numeric.value.object.get("checkpoint")) |ckpt| try numbers.field(i64, ckpt, "interval_secs", 1, std.math.maxInt(i64), 1800) else null,
+        .checkpoint_keep = if (numeric.value.object.get("checkpoint")) |ckpt| try numbers.field(i64, ckpt, "keep", 1, std.math.maxInt(u32), 5) else null,
+        .auto_restart = if (numeric.value.object.get("auto_restart")) |value| if (value == .bool) value.bool else return error.InvalidRequest else true,
+        .max_restarts = try numbers.field(u32, numeric.value, "max_restarts", 0, std.math.maxInt(u32), 10),
     };
 }
 

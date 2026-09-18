@@ -63,7 +63,9 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
         var iter = json_helpers.extractJsonObjects(services_json);
         while (iter.next()) |block| {
             const image = extractJsonString(block, "image") orelse continue;
-            const command = extractCommandString(alloc, block) catch |err| return if (err == error.OutOfMemory) ParseError.OutOfMemory else ParseError.InvalidRequest;
+            const encoded = extractCommandString(alloc, block) catch |err| return if (err == error.OutOfMemory) ParseError.OutOfMemory else ParseError.InvalidRequest;
+            defer alloc.free(encoded);
+            const command = @import("../../../cluster/assignment_spec.zig").withVolumeDefinitions(alloc, encoded, body) catch |err| return if (err == error.OutOfMemory) ParseError.OutOfMemory else ParseError.InvalidRequest;
 
             if (!common.validateClusterInput(image)) {
                 alloc.free(command);
