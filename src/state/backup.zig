@@ -384,7 +384,7 @@ test "restore schema rejects incompatible candidates without replacing live stat
     }
 }
 
-test "restore schema migrates a private legacy candidate and preserves the artifact" {
+test "image reliability restore migrates a private legacy candidate and preserves the artifact" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const source = try restoreTestPath(tmp, "source.db");
@@ -397,6 +397,7 @@ test "restore schema migrates a private legacy candidate and preserves the artif
         var db = try sqlite.Db.init(.{ .mode = .{ .File = source }, .open_flags = .{ .write = true } });
         defer db.deinit();
         try db.exec("ALTER TABLE containers DROP COLUMN startup_outcome;", .{}, .{});
+        try db.exec("DROP TABLE image_references;", .{}, .{});
         try db.exec("DROP TRIGGER delete_local_training_rank;", .{}, .{});
     }
     const original = try readWholeFile(std.testing.allocator, source);
@@ -685,4 +686,29 @@ test "private backup failure leaves prior artifact intact" {
     defer alloc.free(unchanged);
     try std.testing.expectEqualStrings("prior artifact", unchanged);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "missing.db", .{}));
+}
+
+test "image reliability restore preserves registry references and aliases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source = try restoreTestPath(tmp, "source.db");
+    defer std.testing.allocator.free(source);
+    const destination = try restoreTestPath(tmp, "live.db");
+    defer std.testing.allocator.free(destination);
+    try createRestoreTestDb(source, "backup");
+    try createRestoreTestDb(destination, "live");
+    {
+        var db = try sqlite.Db.init(.{ .mode = .{ .File = source }, .open_flags = .{ .write = true } });
+        defer db.deinit();
+        try db.exec("INSERT INTO images (id, repository, tag, manifest_digest, config_digest, created_at) VALUES ('content', 'team/app', 'stable', 'manifest', 'config', 1);", .{}, .{});
+        try db.exec("INSERT INTO image_references VALUES ('first.example:5000', 'team/app', 'stable', 'content'), ('second.example', 'team/app', 'release', 'content');", .{}, .{});
+    }
+    try restoreWithOptions(std.testing.allocator, source, .{ .destination = destination });
+    var restored = try sqlite.Db.init(.{ .mode = .{ .File = destination }, .open_flags = .{ .write = true } });
+    defer restored.deinit();
+    const Count = struct { count: i64 };
+    const count = (try restored.one(Count, "SELECT count(*) AS count FROM image_references WHERE image_id = 'content';", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 2), count.count);
+    const first = (try restored.one(Count, "SELECT count(*) AS count FROM image_references WHERE registry = 'first.example:5000' AND repository = 'team/app' AND tag = 'stable';", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 1), first.count);
 }

@@ -29,12 +29,13 @@ pub fn images(alloc: std.mem.Allocator) !void {
         return;
     }
 
-    write("{s:<30} {s:<15} {s:<14} {s:<10}\n", .{ "REPOSITORY", "TAG", "IMAGE ID", "SIZE" });
+    write("{s:<25} {s:<30} {s:<15} {s:<14} {s:<10}\n", .{ "REGISTRY", "REPOSITORY", "TAG", "IMAGE ID", "SIZE" });
     for (imgs.items) |img| {
         const short_id = if (img.id.len > 19) img.id[7..19] else img.id;
         const size_mb = @divTrunc(img.total_size, 1024 * 1024);
 
-        write("{s:<30} {s:<15} {s:<14} {d} MB\n", .{
+        write("{s:<25} {s:<30} {s:<15} {s:<14} {d} MB\n", .{
+            if (img.registry) |registry| (if (registry.len == 0) "<unknown>" else registry) else "<unknown>",
             img.repository,
             img.tag,
             short_id,
@@ -46,18 +47,18 @@ pub fn images(alloc: std.mem.Allocator) !void {
 pub fn rmi(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const image_str = requireArg(args, "usage: yoq rmi <image>\n");
     const ref = spec.parseImageRef(image_str);
-    const image = store.findImage(alloc, ref.repository, ref.reference) catch |err| {
+    const image = store.findImage(alloc, ref.host, ref.repository, ref.reference) catch |err| {
         writeErr("image not found: {s} ({})", .{ image_str, err });
         return common.ImageCommandsError.ImageNotFound;
     };
     defer image.deinit(alloc);
 
-    store.removeImage(image.id) catch |err| {
+    store.removeImageReference(ref.host, ref.repository, ref.reference) catch |err| {
         writeErr("failed to remove image record: {}\n", .{err});
         return common.ImageCommandsError.StoreFailed;
     };
 
-    write("untagged: {s}:{s}\n", .{ image.repository, image.tag });
+    write("untagged: {s}\n", .{image_str});
 }
 
 pub fn inspect(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
@@ -68,7 +69,7 @@ pub fn inspect(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void
     }
 
     const ref = spec.parseImageRef(image_str);
-    const image = store.findImage(alloc, ref.repository, ref.reference) catch |err| {
+    const image = store.findImage(alloc, ref.host, ref.repository, ref.reference) catch |err| {
         writeErr("image not found: {s} ({})", .{ image_str, err });
         return common.ImageCommandsError.ImageNotFound;
     };
@@ -97,7 +98,7 @@ pub fn inspect(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void
         return;
     }
 
-    write("{s}:{s}\n\n", .{ image.repository, image.tag });
+    write("{s}/{s}:{s}\n\n", .{ image.registry orelse "<unknown>", image.repository, image.tag });
 
     const short_digest = if (image.manifest_digest.len > 19) image.manifest_digest[0..19] else image.manifest_digest;
     write("  digest:       {s}...\n", .{short_digest});
@@ -145,6 +146,7 @@ fn imagesJson(imgs: []const store.ImageRecord) void {
     w.beginArray();
     for (imgs) |img| {
         w.beginObject();
+        w.stringField("registry", img.registry orelse "");
         w.stringField("repository", img.repository);
         w.stringField("tag", img.tag);
         w.stringField("id", img.id);
@@ -161,6 +163,7 @@ fn imagesJson(imgs: []const store.ImageRecord) void {
 fn inspectJson(image: *const store.ImageRecord, config: *const spec.ImageConfig, manifest: *const spec.Manifest) void {
     var w = json_out.JsonWriter{};
     w.beginObject();
+    w.stringField("registry", image.registry orelse "");
     w.stringField("repository", image.repository);
     w.stringField("tag", image.tag);
     w.stringField("manifest_digest", image.manifest_digest);

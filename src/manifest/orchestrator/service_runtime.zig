@@ -60,7 +60,7 @@ pub fn ensureImageAvailable(alloc: std.mem.Allocator, image: []const u8) bool {
 pub fn ensureImageAvailableWithIo(io: std.Io, alloc: std.mem.Allocator, image: []const u8) bool {
     const ref = image_spec.parseImageRef(image);
 
-    const existing = store.findImage(alloc, ref.repository, ref.reference);
+    const existing = store.findImage(alloc, ref.host, ref.repository, ref.reference);
     if (existing) |img| {
         img.deinit(alloc);
         return true;
@@ -98,7 +98,7 @@ pub fn resolveServiceImage(alloc: std.mem.Allocator, image: []const u8) ?Service
 
 pub fn resolveServiceImageWithIo(io: std.Io, alloc: std.mem.Allocator, image: []const u8) ?ServiceImageConfig {
     const ref = image_spec.parseImageRef(image);
-    const img = store.findImage(alloc, ref.repository, ref.reference) catch return null;
+    const img = store.findImage(alloc, ref.host, ref.repository, ref.reference) catch return null;
 
     var result = ServiceImageConfig{ .rootfs = "/", .img_record = img };
     var resolved = false;

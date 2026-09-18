@@ -38,6 +38,8 @@ pub fn writeContainerJson(writer: anytype, record: store.ContainerRecord) !void 
 pub fn writeImageJson(writer: anytype, img: store.ImageRecord) !void {
     try writer.writeAll("{\"id\":\"");
     try json_helpers.writeJsonEscaped(writer, img.id);
+    try writer.writeAll("\",\"registry\":\"");
+    try json_helpers.writeJsonEscaped(writer, img.registry orelse "");
     try writer.writeAll("\",\"repository\":\"");
     try json_helpers.writeJsonEscaped(writer, img.repository);
     try writer.writeAll("\",\"tag\":\"");

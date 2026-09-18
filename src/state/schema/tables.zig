@@ -64,6 +64,17 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    created_at INTEGER NOT NULL
         \\);
     );
+    // references are separate from content so tags can move and share a digest.
+    try exec(db,
+        \\CREATE TABLE IF NOT EXISTS image_references (
+        \\    registry TEXT NOT NULL,
+        \\    repository TEXT NOT NULL,
+        \\    tag TEXT NOT NULL,
+        \\    image_id TEXT NOT NULL,
+        \\    PRIMARY KEY (registry, repository, tag)
+        \\);
+    );
+    try exec(db, "CREATE INDEX IF NOT EXISTS image_references_content ON image_references(image_id);");
     try exec(db,
         \\CREATE TABLE IF NOT EXISTS ip_allocations (
         \\    container_id TEXT PRIMARY KEY,

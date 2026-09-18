@@ -51,7 +51,7 @@ pub fn push(io: std.Io, args: *std.process.Args.Iterator, alloc: std.mem.Allocat
     const target_str = args.next() orelse source_str;
 
     const source_ref = spec.parseImageRef(source_str);
-    const image_record = store.findImage(alloc, source_ref.repository, source_ref.reference) catch |err| {
+    const image_record = store.findImage(alloc, source_ref.host, source_ref.repository, source_ref.reference) catch |err| {
         writeErr("image not found: {s} ({})", .{ source_str, err });
         writeErr("hint: pull or build the image first, then push\n", .{});
         return common.ImageCommandsError.ImageNotFound;

@@ -79,6 +79,7 @@ pub fn saveImageFromPull(
 
     return state_store.saveImage(.{
         .id = manifest_digest,
+        .registry = ref.host,
         .repository = ref.repository,
         .tag = ref.reference,
         .manifest_digest = manifest_digest,
@@ -160,4 +161,37 @@ test "empty falls back to /bin/sh" {
 
     try std.testing.expectEqualStrings("/bin/sh", result.command);
     try std.testing.expectEqual(@as(usize, 0), result.args.items.len);
+}
+
+test "image reliability saved pull references select their own manifest bytes" {
+    try state_store.initTestDb();
+    defer state_store.deinitTestDb();
+    const alloc = std.testing.allocator;
+    const first_ref = image_spec.parseImageRef("localhost:5000/team/app:stable");
+    const second_ref = image_spec.parseImageRef("localhost:5001/team/app:stable");
+    const config_bytes = "{\"architecture\":\"amd64\"}";
+    const config = blob_store.computeDigest(config_bytes);
+    defer blob_store.removeBlob(config);
+    var config_buf: [71]u8 = undefined;
+    const config_str = config.string(&config_buf);
+    const first_bytes = "first registry manifest";
+    const second_bytes = "second registry manifest";
+    const first_digest = blob_store.computeDigest(first_bytes);
+    const second_digest = blob_store.computeDigest(second_bytes);
+    defer blob_store.removeBlob(first_digest);
+    defer blob_store.removeBlob(second_digest);
+    var first_buf: [71]u8 = undefined;
+    var second_buf: [71]u8 = undefined;
+    try saveImageFromPull(first_ref, first_digest.string(&first_buf), first_bytes, config_bytes, config_str, 0);
+    try saveImageFromPull(second_ref, second_digest.string(&second_buf), second_bytes, config_bytes, config_str, 0);
+    const common = @import("cli/common.zig");
+    inline for (.{ .{ first_ref, first_bytes }, .{ second_ref, second_bytes } }) |entry| {
+        const ref = entry[0];
+        const record = try state_store.findImage(alloc, ref.host, ref.repository, ref.reference);
+        defer record.deinit(alloc);
+        const blobs = try common.loadImageBlobs(alloc, record);
+        defer blobs.deinit(alloc);
+        try std.testing.expectEqualStrings(entry[1], blobs.manifest_bytes);
+    }
+    try std.testing.expectError(error.NotFound, state_store.findImage(alloc, "localhost:5002", "team/app", "stable"));
 }

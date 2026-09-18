@@ -66,6 +66,7 @@ pub const saveImage = @import("store/images.zig").saveImage;
 pub const loadImage = @import("store/images.zig").loadImage;
 pub const findImage = @import("store/images.zig").findImage;
 pub const listImages = @import("store/images.zig").listImages;
+pub const removeImageReference = @import("store/images.zig").removeImageReference;
 pub const removeImage = @import("store/images.zig").removeImage;
 
 pub const lookupBuildCache = @import("store/cache.zig").lookupBuildCache;
