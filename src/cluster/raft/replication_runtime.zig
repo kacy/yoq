@@ -322,8 +322,9 @@ test "append entries retries commit notification after queue allocation failure"
     try std.testing.expectEqual(@as(types.LogIndex, 2), raft.commit_index);
     const actions = try raft.drainActions();
     defer alloc.free(actions);
-    try std.testing.expectEqual(@as(usize, 1), actions.len);
-    try std.testing.expectEqual(@as(types.LogIndex, 2), actions[0].commit_entries.up_to);
+    try std.testing.expectEqual(@as(usize, 2), actions.len);
+    try std.testing.expectEqual(@as(types.NodeId, 1), actions[0].become_follower.leader_id);
+    try std.testing.expectEqual(@as(types.LogIndex, 2), actions[1].commit_entries.up_to);
 }
 
 test "leader retries commit notification without another follower acknowledgement" {
