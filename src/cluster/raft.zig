@@ -353,6 +353,13 @@ pub const Raft = struct {
         return true;
     }
 
+    /// election transitions publish term and vote together after one durable write.
+    pub fn persistElectionState(self: *Raft, term: Term, vote: ?NodeId) bool {
+        if (!self.log.setElectionState(term, vote)) return false;
+        self.persistent_state = .{ .current_term = term, .voted_for = vote };
+        return true;
+    }
+
     pub fn persistVote(self: *Raft, vote: ?NodeId) bool {
         if (!self.log.setVotedFor(vote)) return false;
         self.persistent_state.voted_for = vote;
