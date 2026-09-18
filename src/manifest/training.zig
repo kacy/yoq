@@ -54,6 +54,7 @@ pub const TrainingController = struct {
     manifest_volumes: []const spec.Volume = &.{},
     rank_status: []RankStatus,
     job_id: ?[]const u8 = null,
+    execution_mode: store.TrainingExecutionMode = .local,
     resume_path: ?[]const u8 = null,
     restart_count: u32 = 0,
 
@@ -347,7 +348,7 @@ test "training controller rank_status matches gpus" {
     try std.testing.expectEqual(@as(u32, 100), ctrl.job.gpus);
 }
 
-test "cluster-managed job detection follows job id prefix" {
+test "local owner cluster execution mode is explicit" {
     const alloc = std.testing.allocator;
 
     const tj = spec.TrainingJob{
@@ -428,4 +429,58 @@ test "training controller rejects invalid gpu counts before allocation" {
         job.gpus = count;
         try std.testing.expectError(error.InvalidGpuCount, TrainingController.init(std.testing.failing_allocator, &job, "demo"));
     }
+}
+
+test "local owner cluster-prefixed app and job names survive reload and control" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const alloc = std.testing.allocator;
+    const job = spec.TrainingJob{ .name = "cluster-train", .image = "scratch", .command = &.{}, .env = &.{}, .working_dir = null, .volumes = &.{}, .gpus = 1 };
+    var runner = try TrainingController.init(alloc, &job, "cluster-demo");
+    defer runner.deinit();
+    try runner.generateJobId();
+    try std.testing.expect(std.mem.startsWith(u8, runner.job_id.?, "cluster-"));
+    try std.testing.expect(!runner.isClusterManaged());
+    runner.state = .running;
+    try runner.createPersistentRecord();
+    try state_support.stopPriorRanks(&runner);
+
+    var control = try TrainingController.init(alloc, &job, "cluster-demo");
+    defer control.deinit();
+    try std.testing.expect(control.loadFromStore());
+    try std.testing.expect(!control.isClusterManaged());
+    try control.pause();
+    try std.testing.expectEqual(TrainingJobState.paused, control.state);
+    try control.resume_();
+    try std.testing.expectEqual(TrainingJobState.pending, control.state);
+    try control.stop();
+    const record = try store.getTrainingJob(alloc, runner.job_id.?);
+    defer record.deinit(alloc);
+    try std.testing.expectEqual(store.TrainingExecutionMode.local, record.execution_mode);
+    try std.testing.expectEqualStrings("stopped", record.state);
+}
+
+test "local owner persisted cluster mode restricts local control independently of id" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const alloc = std.testing.allocator;
+    const job = spec.TrainingJob{ .name = "train", .image = "scratch", .command = &.{}, .env = &.{}, .working_dir = null, .volumes = &.{}, .gpus = 1 };
+    var source = try TrainingController.init(alloc, &job, "remote-demo");
+    defer source.deinit();
+    source.job_id = try alloc.dupe(u8, "opaque-server-job-id");
+    source.execution_mode = .cluster;
+    source.state = .running;
+    try source.createPersistentRecord();
+    var control = try TrainingController.init(alloc, &job, "remote-demo");
+    defer control.deinit();
+    try std.testing.expect(control.loadFromStore());
+    try std.testing.expect(control.isClusterManaged());
+    try std.testing.expectError(error.RemoteControlRequired, control.pause());
+    try std.testing.expectError(error.RemoteControlRequired, control.resume_());
+    try std.testing.expectError(error.RemoteControlRequired, control.scale(2));
+    try std.testing.expectError(error.RemoteControlRequired, control.stop());
+    try std.testing.expectError(error.RemoteControlRequired, state_support.stopPriorRanks(&control));
+    const record = try store.getTrainingJob(alloc, source.job_id.?);
+    defer record.deinit(alloc);
+    try std.testing.expectEqualStrings("running", record.state);
 }

@@ -6,8 +6,11 @@ const schema = @import("../schema.zig");
 const Allocator = std.mem.Allocator;
 const StoreError = common.StoreError;
 
+pub const ExecutionMode = enum(u8) { local = 0, cluster = 1 };
+
 pub const TrainingJobRecord = struct {
     id: []const u8,
+    execution_mode: ExecutionMode = .local,
     name: []const u8,
     app_name: []const u8,
     state: []const u8,
@@ -51,7 +54,7 @@ pub const TrainingJobSummary = struct {
 };
 
 const training_job_columns =
-    "id, name, app_name, state, image, gpus, checkpoint_path, checkpoint_interval, checkpoint_keep, restart_count, created_at, updated_at";
+    "id, name, app_name, state, image, gpus, checkpoint_path, checkpoint_interval, checkpoint_keep, restart_count, created_at, updated_at, execution_mode";
 
 const TrainingJobRow = struct {
     id: sqlite.Text,
@@ -66,6 +69,7 @@ const TrainingJobRow = struct {
     restart_count: i64,
     created_at: i64,
     updated_at: i64,
+    execution_mode: i64,
 };
 
 const CheckpointRow = struct {
@@ -77,9 +81,20 @@ const CheckpointRow = struct {
     created_at: i64,
 };
 
+// old raft entries omit execution_mode even when replayed into a new schema.
+// resolve only that legacy default; explicit ownership never depends on names.
+fn legacyExecutionMode(id: []const u8, app: []const u8, name: []const u8) ExecutionMode {
+    if (id.len == app.len + name.len + 14 and
+        std.mem.startsWith(u8, id, app) and id[app.len] == '-' and
+        std.mem.eql(u8, id[app.len + 1 ..][0..name.len], name) and
+        id[app.len + name.len + 1] == '-') return .local;
+    return if (std.mem.startsWith(u8, id, "cluster-")) .cluster else .local;
+}
+
 fn trainingJobRowToRecord(row: TrainingJobRow) TrainingJobRecord {
     return .{
         .id = row.id.data,
+        .execution_mode = if (row.execution_mode == -1) legacyExecutionMode(row.id.data, row.app_name.data, row.name.data) else std.enums.fromInt(ExecutionMode, row.execution_mode) orelse .cluster,
         .name = row.name.data,
         .app_name = row.app_name.data,
         .state = row.state.data,
@@ -115,7 +130,7 @@ pub fn saveTrainingJob(record: TrainingJobRecord) StoreError!void {
 pub fn saveTrainingJobInDb(db: *sqlite.Db, record: TrainingJobRecord) StoreError!void {
     db.exec(
         "INSERT OR REPLACE INTO training_jobs (" ++ training_job_columns ++ ")" ++
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         .{},
         .{
             record.id,
@@ -130,6 +145,7 @@ pub fn saveTrainingJobInDb(db: *sqlite.Db, record: TrainingJobRecord) StoreError
             record.restart_count,
             record.created_at,
             record.updated_at,
+            @intFromEnum(record.execution_mode),
         },
     ) catch return StoreError.WriteFailed;
 }
@@ -457,4 +473,42 @@ test "summarizeTrainingJobsByAppInDb keeps only the latest row per job name" {
     try std.testing.expectEqual(@as(usize, 1), summary.active);
     try std.testing.expectEqual(@as(usize, 0), summary.paused);
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
+}
+
+test "local owner migrates legacy names and resolves old replayed training inserts" {
+    const alloc = std.testing.allocator;
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+    try db.exec("ALTER TABLE training_jobs DROP COLUMN execution_mode;", .{}, .{});
+    const cases = [_]struct { id: []const u8, app: []const u8, name: []const u8, mode: ExecutionMode }{
+        .{ .id = "cluster-demo-cluster-train-0123456789ab", .app = "cluster-demo", .name = "cluster-train", .mode = .local },
+        .{ .id = "cluster-cluster-demo-cluster-train-0123456789ab", .app = "cluster-demo", .name = "cluster-train", .mode = .cluster },
+        .{ .id = "demo-train-0123456789ab", .app = "demo", .name = "train", .mode = .local },
+        .{ .id = "cluster-demo-train-0123456789ab", .app = "demo", .name = "train", .mode = .cluster },
+        .{ .id = "cluster-older-server-id", .app = "demo", .name = "train", .mode = .cluster },
+    };
+    for (cases) |case| {
+        try db.exec("INSERT INTO training_jobs (id, app_name, name, state, image, gpus, created_at, updated_at) VALUES (?, ?, ?, 'running', 'scratch', 1, 1, 1);", .{}, .{ case.id, case.app, case.name });
+    }
+    try schema.init(&db);
+    for (cases) |case| {
+        const record = try getTrainingJobInDb(&db, alloc, case.id);
+        defer record.deinit(alloc);
+        try std.testing.expectEqual(case.mode, record.execution_mode);
+        const mode = (try db.one(i64, "SELECT execution_mode FROM training_jobs WHERE id = ?;", .{}, .{case.id})).?;
+        try std.testing.expectEqual(@as(i64, @intFromEnum(case.mode)), mode);
+    }
+    // an older raft entry can arrive after the startup migration has finished.
+    try db.exec("INSERT INTO training_jobs (id, app_name, name, image, gpus, created_at, updated_at) VALUES ('cluster-replay-train-0123456789ab', 'replay', 'train', 'scratch', 1, 1, 1);", .{}, .{});
+    const replayed = try getTrainingJobInDb(&db, alloc, "cluster-replay-train-0123456789ab");
+    defer replayed.deinit(alloc);
+    try std.testing.expectEqual(ExecutionMode.cluster, replayed.execution_mode);
+    try db.exec("UPDATE training_jobs SET execution_mode = 0 WHERE id = 'cluster-older-server-id';", .{}, .{});
+    try schema.init(&db);
+    const explicit = try getTrainingJobInDb(&db, alloc, "cluster-older-server-id");
+    defer explicit.deinit(alloc);
+    try std.testing.expectEqual(ExecutionMode.local, explicit.execution_mode);
+    const migrated = (try db.one(i64, "SELECT execution_mode FROM training_jobs WHERE id = 'cluster-replay-train-0123456789ab';", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 1), migrated);
 }

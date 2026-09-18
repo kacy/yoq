@@ -139,6 +139,7 @@ fn schedule(
     defer batch.deinit();
     appendRecord(&batch.writer, .{
         .id = job_id,
+        .execution_mode = .cluster,
         .name = job_name,
         .app_name = app_name,
         .state = "scheduling",
@@ -314,8 +315,8 @@ fn appendClearAssignments(writer: *std.Io.Writer, app_name: []const u8, job_name
 fn appendRecord(writer: *std.Io.Writer, record: store.TrainingJobRecord) !void {
     try sql.write(writer, "INSERT OR REPLACE INTO training_jobs (" ++
         "id, name, app_name, state, image, gpus, checkpoint_path, checkpoint_interval, " ++
-        "checkpoint_keep, restart_count, created_at, updated_at) " ++
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);", .{
+        "checkpoint_keep, restart_count, created_at, updated_at, execution_mode) " ++
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);", .{
         record.id,
         record.name,
         record.app_name,
@@ -328,6 +329,7 @@ fn appendRecord(writer: *std.Io.Writer, record: store.TrainingJobRecord) !void {
         record.restart_count,
         record.created_at,
         record.updated_at,
+        @intFromEnum(record.execution_mode),
     });
 }
 

@@ -6,11 +6,13 @@ const store = @import("../../state/store.zig");
 pub const cluster_job_prefix = "cluster-";
 
 pub fn generateJobId(self: anytype) !void {
-    return generateJobIdWithPrefix(self, "");
+    try generateJobIdWithPrefix(self, "");
+    self.execution_mode = .local;
 }
 
 pub fn generateClusterJobId(self: anytype) !void {
-    return generateJobIdWithPrefix(self, cluster_job_prefix);
+    try generateJobIdWithPrefix(self, cluster_job_prefix);
+    self.execution_mode = .cluster;
 }
 
 fn generateJobIdWithPrefix(self: anytype, prefix: []const u8) !void {
@@ -24,8 +26,7 @@ fn generateJobIdWithPrefix(self: anytype, prefix: []const u8) !void {
 }
 
 pub fn isClusterManaged(self: anytype) bool {
-    const jid = self.job_id orelse return false;
-    return std.mem.startsWith(u8, jid, cluster_job_prefix);
+    return self.execution_mode == .cluster;
 }
 
 pub fn persistState(self: anytype) !void {
@@ -88,6 +89,7 @@ pub fn createPersistentRecord(self: anytype) !void {
 
     try store.saveTrainingJob(.{
         .id = jid,
+        .execution_mode = self.execution_mode,
         .name = self.job.name,
         .app_name = self.app_name,
         .state = self.state.label(),
@@ -185,6 +187,7 @@ pub fn loadFromStore(self: anytype, state_enum: type) bool {
     };
     if (self.job_id) |previous| self.alloc.free(previous);
     self.job_id = id;
+    self.execution_mode = r.execution_mode;
     self.restart_count = restarts;
     self.state = state;
     return true;
