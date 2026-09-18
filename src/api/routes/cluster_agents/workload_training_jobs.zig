@@ -194,7 +194,7 @@ pub fn reconcileAll(alloc: std.mem.Allocator, node: *@import("../../../cluster/n
     {
         node.mu.lockUncancelable(std.Options.debug_io);
         defer node.mu.unlock(std.Options.debug_io);
-        var query = try node.stateMachineDb().prepare("SELECT id FROM training_jobs WHERE state IN ('pending', 'scheduling', 'running', 'restarting', 'failed');");
+        var query = try node.stateMachineDb().prepare("SELECT id FROM training_jobs WHERE state IN ('pending', 'scheduling', 'running', 'restarting');");
         defer query.deinit();
         var rows = try query.iterator(struct { id: @import("sqlite").Text }, .{});
         while (try rows.nextAlloc(alloc, .{})) |row| {
@@ -205,20 +205,21 @@ pub fn reconcileAll(alloc: std.mem.Allocator, node: *@import("../../../cluster/n
             };
         }
     }
-    for (ids.items) |id| reconcileJob(alloc, node, id) catch |err| switch (err) {
+    if (ids.items.len == 0) return;
+    const session = try mutation.Session.begin(node);
+    try session.synchronize();
+    for (ids.items) |id| reconcileJob(alloc, session, id) catch |err| switch (err) {
         error.NotLeader => return err,
         error.AlreadyLocked => continue,
         else => @import("../../../lib/log.zig").warn("training reconciliation failed for {s}: {}", .{ id, err }),
     };
 }
 
-fn reconcileJob(alloc: std.mem.Allocator, node: *@import("../../../cluster/node.zig").Node, id: []const u8) !void {
-    const session = try mutation.Session.begin(node);
+fn reconcileJob(alloc: std.mem.Allocator, session: mutation.Session, id: []const u8) !void {
     const before = try readRecord(alloc, session, id);
     defer before.deinit(alloc);
     var lock = try apply_lock.acquire(alloc, before.app_name);
     defer lock.release();
-    try session.synchronize();
     const record = try readRecord(alloc, session, id);
     defer record.deinit(alloc);
     if (!isActive(record.state) and !std.mem.eql(u8, record.state, "failed")) return;
@@ -235,16 +236,18 @@ fn reconcileJob(alloc: std.mem.Allocator, node: *@import("../../../cluster/node.
     const counts = try rankCounts(session, record);
     const next = counts.state(record.gpus);
     if (std.mem.eql(u8, next, "failed")) {
-        if (!std.mem.eql(u8, record.state, "failed")) {
-            const response = changeState(alloc, session, record, "failed", "training rank failed");
-            defer if (response.allocated) alloc.free(response.body);
-            if (response.status != .ok) return error.InternalError;
-        }
         const release = try readLatestRelease(alloc, session, record.app_name);
         defer release.deinit(alloc);
         const job = (try app_snapshot.findTrainingJobSpec(alloc, release.config_snapshot, record.name)) orelse return;
         defer job.deinit(alloc);
-        if (!job.auto_restart or record.restart_count >= job.max_restarts) return;
+        const retry = job.auto_restart and record.restart_count < job.max_restarts;
+        const state = if (retry) "pending" else "failed";
+        if (counts.total != 0 or !std.mem.eql(u8, record.state, state)) {
+            const response = changeState(alloc, session, record, state, "training rank failed");
+            defer if (response.allocated) alloc.free(response.body);
+            if (response.status != .ok) return error.InternalError;
+        }
+        if (!retry) return;
         const response = schedule(alloc, session, record.app_name, record.name, .{ .id = record.id, .gpus = record.gpus, .restart_count = record.restart_count + 1, .created_at = record.created_at });
         defer if (response.allocated) alloc.free(response.body);
         if (response.status != .ok and response.status != .conflict) return error.InternalError;

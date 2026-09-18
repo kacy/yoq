@@ -575,10 +575,36 @@ test "training reconciliation retries failed groups once and restores checkpoint
     try std.testing.expectEqualStrings("/work", execution.value.working_dir.?);
     _ = try harness.node.proposeCommitted("UPDATE assignments SET status = 'failed';", 0);
     try jobs.reconcileAll(alloc, harness.node);
+    const terminal_index = harness.node.log.lastIndex();
     try jobs.reconcileAll(alloc, harness.node);
+    try std.testing.expectEqual(terminal_index, harness.node.log.lastIndex());
     const failed = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "retry", "finetune")).?;
     defer failed.deinit(alloc);
     try std.testing.expectEqualStrings("failed", failed.state);
     try std.testing.expectEqual(@as(i64, 1), failed.restart_count);
     try std.testing.expectEqual(@as(usize, 0), try countTrainingAssignments(harness.node.stateMachineDb(), "retry", "finetune"));
+}
+
+test "training reconciliation waits for retry capacity without spending its restart budget" {
+    const alloc = std.testing.allocator;
+    var harness = try RouteFlowHarness.initWithRuntimeStore(alloc);
+    defer harness.deinit();
+    try harness.seedTrainingRelease("waiting", "finetune", 1);
+    const started = try harness.trainingStart("waiting", "finetune");
+    defer freeResponse(alloc, started);
+    try std.testing.expectEqual(http.StatusCode.ok, started.status);
+    _ = try harness.node.proposeCommitted("UPDATE assignments SET status = 'failed'; UPDATE agents SET gpu_used = gpu_count;", 0);
+    const jobs = @import("workload_training_jobs.zig");
+    try jobs.reconcileAll(alloc, harness.node);
+    const pending = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "waiting", "finetune")).?;
+    defer pending.deinit(alloc);
+    try std.testing.expectEqualStrings("pending", pending.state);
+    try std.testing.expectEqual(@as(i64, 0), pending.restart_count);
+    try std.testing.expectEqual(@as(usize, 0), try countTrainingAssignments(harness.node.stateMachineDb(), "waiting", "finetune"));
+    _ = try harness.node.proposeCommitted("UPDATE agents SET gpu_used = 0;", 0);
+    try jobs.reconcileAll(alloc, harness.node);
+    const resumed = (try store.findTrainingJobInDb(harness.node.stateMachineDb(), alloc, "waiting", "finetune")).?;
+    defer resumed.deinit(alloc);
+    try std.testing.expectEqualStrings("scheduling", resumed.state);
+    try std.testing.expectEqual(@as(i64, 1), resumed.restart_count);
 }
