@@ -211,3 +211,34 @@ test "image archive rejects traversal links and oversized metadata" {
         try std.testing.expectError(error.ArchiveLimitExceeded, load_archive.load(io, alloc, &reader));
     }
 }
+
+test "image archive failed save preserves an existing output file" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "images.tar", .{});
+    try file.writeStreamingAll(io, "previous archive");
+    file.close(io);
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/images.tar", .{tmp.sub_path});
+    try std.testing.expectError(error.NotFound, @import("../cli/archive_command.zig").saveFile(io, alloc, path, &.{"missing-archive-image"}));
+    const contents = try tmp.dir.readFileAlloc(io, "images.tar", alloc, .limited(1024));
+    defer alloc.free(contents);
+    try std.testing.expectEqualStrings("previous archive", contents);
+}
+
+test "image archive truncated blob never publishes a reference" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    try fixture.remove();
+    var bytes: std.Io.Writer.Allocating = .init(alloc);
+    defer bytes.deinit();
+    try fixture.archive(&bytes.writer, true, 0);
+    const offset = std.mem.indexOf(u8, bytes.written(), "image archive fixture contents").?;
+    var reader = std.Io.Reader.fixed(bytes.written()[0 .. offset + 1]);
+    try std.testing.expectError(error.EndOfStream, load_archive.load(io, alloc, &reader));
+    try std.testing.expectError(error.NotFound, store.findImage(alloc, "docker.io", "archive-fixture", "latest"));
+}
