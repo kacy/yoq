@@ -95,6 +95,9 @@ fn authorize(raw: ?*anyopaque, action: c_int, first: [*c]const u8, second: [*c]c
             (context.ddl and std.mem.eql(u8, table, "sqlite_master")),
         c.SQLITE_CREATE_TABLE => context.ddl and replicatedTable(table),
         c.SQLITE_CREATE_INDEX => context.ddl and replicatedTable(text(second)),
+        // creating an index also authorizes its initial rebuild. its table
+        // and expressions were checked by the callbacks above.
+        c.SQLITE_REINDEX => context.ddl,
         else => false,
     };
     return if (permitted) c.SQLITE_OK else c.SQLITE_DENY;
