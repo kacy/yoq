@@ -586,14 +586,18 @@ fn runAssignment(
     if (meta.workload_kind != null and meta.workload_name != null and std.mem.eql(u8, meta.workload_kind.?, "service")) {
         manifest_health.unregisterContainer(container_id);
     }
-    if (stopping.load(.acquire) or exit_code == 0) {
+    const is_training = meta.workload_kind != null and std.mem.eql(u8, meta.workload_kind.?, "training");
+    const interrupted = stopping.load(.acquire);
+    if ((interrupted and !is_training) or (!interrupted and exit_code == 0)) {
         setContainerState(self, assignment_id, .stopped);
         reportStatus(self, assignment_id, "stopped", null);
     } else {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "process_failed");
+        // an interrupted rank has not completed its training. operator pause
+        // already removed its assignment; agent shutdown leaves it retryable.
+        reportStatus(self, assignment_id, "failed", if (interrupted) "rank_interrupted" else "process_failed");
     }
-    if (meta.workload_kind != null and std.mem.eql(u8, meta.workload_kind.?, "training")) {
+    if (is_training) {
         // keep the stopped record and logs so remote training logs remain
         // available after a rank exits. its network and filesystem are gone.
         published_ports.removeInstance(self.alloc, container_id) catch |err| {
