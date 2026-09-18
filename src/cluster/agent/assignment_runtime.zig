@@ -522,7 +522,7 @@ fn runAssignment(
     if (gang_info) |gang| {
         if (gang.rank == 0) {
             const ports = [_]manifest_spec.PortMapping{.{ .host_port = gang.master_port, .container_port = gang.master_port }};
-            published_ports.publishInstance(self.alloc, meta.app_name, hostname, container_id, &ports) catch {
+            published_ports.publishInstanceWithBootstrap(self.alloc, meta.app_name, hostname, container_id, &ports, gang.master_port) catch {
                 _ = waitForAssignmentExit(&c, stopping, true);
                 setContainerState(self, assignment_id, .failed);
                 reportStatus(self, assignment_id, "failed", "rendezvous_port_failed");
@@ -566,7 +566,8 @@ fn runAssignment(
             return;
         };
         defer self.alloc.free(ports);
-        published_ports.publishInstance(self.alloc, meta.app_name, hostname, container_id, ports) catch |err| {
+        const bootstrap_port: ?u16 = if (gang_info) |gang| if (gang.rank == 0) gang.master_port else null else null;
+        published_ports.publishInstanceWithBootstrap(self.alloc, meta.app_name, hostname, container_id, ports, bootstrap_port) catch |err| {
             log.warn("assignment {s} could not publish service ports: {}", .{ assignment_id, err });
             _ = waitForAssignmentExit(&c, stopping, true);
             setContainerState(self, assignment_id, .failed);
