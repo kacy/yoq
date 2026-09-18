@@ -166,6 +166,12 @@ then repeat the drill with a hard failure: stop the current leader process or di
 - assignment polling resumes and terminal results reach the surviving leader
 - a late result from an earlier assignment generation cannot stop its replacement
 
+### offline recovery of every voter
+
+on a disposable cluster, stop all voters and agents, capture one `cluster backup` bundle per voter with the same new set ID, and run `cluster verify-set` across all bundles. restore each original voter ID into a fresh data root using the verified fingerprint. follow the [offline recovery procedure](cluster-guide.md#offline-cluster-backup-and-restore) for exact commands and credential handling.
+
+start the restored voters and verify that they elect a leader, retain existing app and agent records, and accept a new committed mutation. then restart an agent with its original enrollment identity and result queue. verify that pending terminal reports are acknowledged and a new assignment can run. also check that a missing voter bundle, changed set ID, corrupt database, and active source are rejected.
+
 ### agent restart and recovery
 
 restart one agent process or reboot one agent node.

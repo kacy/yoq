@@ -378,13 +378,17 @@ the response includes `leader_id` and, on non-leader nodes, a `leader` field wit
 
 ### leader discovery and write forwarding
 
-only the Raft leader can accept write operations (deploy, register, drain, etc.). when a write request hits a non-leader server, the API returns a `400` with the leader's address:
+only the raft leader accepts cluster mutations. deployment, registration, assignment status, and administrative mutation routes return `400` on a follower, with the leader's api address when known:
 
 ```json
 {"error":"not leader","leader":"10.0.0.1:7700"}
 ```
 
-clients can use the `leader` field to redirect their request. agents do this automatically — both during registration and on every heartbeat, agents check for leader hints and update their target server address. this means agents tolerate leadership changes without manual reconfiguration.
+follower heartbeats return `503`, including a leader hint when available, so an agent tries another trusted voter even when the follower does not know the leader. mutation routes also return `503` when they cannot confirm committed application. that response does not prove that the mutation was rejected; operators should inspect current state before retrying.
+
+assignment status replies include `committed: true` and the attempt generation only after committed application. the agent keeps its durable report until it receives that receipt, and generation checks prevent an old attempt from changing its replacement. drain, label, and credential-revocation routes also wait for committed application before reporting success.
+
+agents follow leader hints only when the address belongs to their persisted trusted endpoints. authenticated registration and heartbeat responses update that list. if an endpoint becomes unreachable, agents try the saved alternatives while retaining their enrollment identity; an unsigned hint cannot add a new address. startup registration retries temporary failures for up to 120 seconds, then exits so the operator can restore connectivity and restart it.
 
 point deployment and rollout commands at the current leader. the examples use `10.0.0.1:7700` as that leader; substitute the address reported by cluster status. the app cli does not automatically retry a deployment after a `"not leader"` response. read-only status requests can query other members.
 
@@ -404,7 +408,6 @@ the important read paths are:
 - `GET /apps`
 - `GET /apps/<name>/status`
 - `GET /apps/<name>/history`
-- `POST /apps/<name>/rollback`
 - `GET /apps/<app>/training/<name>/status`
 - `GET /apps/<app>/training/<name>/logs`
 
@@ -459,13 +462,62 @@ do these on a healthy non-production cluster before you trust a new release:
 1. trigger a leader step-down and verify that another server becomes leader
 2. restart one agent and verify it returns to `active`
 3. for routed workloads, restart the listener path and verify traffic recovers
+4. stop one workload unexpectedly and verify the reconciler restores healthy discovery state
 
 use `./scripts/http-routing-recovery-smoke.sh` as the local reference drill before doing the same check on a cluster deployment.
-4. stop one workload unexpectedly and verify the reconciler restores healthy discovery state
 
 for a shorter end-to-end checklist, see [golden-path.md](golden-path.md).
 
 ---
+
+### offline cluster backup and restore
+
+`yoq cluster backup` captures one stopped voter. first, wait until every voter has applied the cluster CA bootstrap; capture requires that persisted identity. then stop **every voter and agent before the first capture**, and keep them stopped until every bundle is complete. use a new set ID for each coordinated stop. the command checks only its local host, so the operator must confirm that all other voters have stopped.
+
+on each voter, use the same set ID and a different destination. keep the effective API token in the data root's private `api_token` file, including when the server used a `--api-token` override. the join-token file must contain the existing cluster join token and have owner-only permissions:
+
+```sh
+sudo -H "$(command -v yoq)" cluster backup /srv/backups/maintenance-2026-voter-1 \
+  --set maintenance-2026 \
+  --join-token-file /root/.config/yoq/join_token
+```
+
+`--data-dir <root>` selects a different source root. the default is `$HOME/.local/share/yoq`, with raft and replicated state under `cluster/`. the source lock rejects a running server; exclusive SQLite locks also reject open database users from older binaries. these checks apply only to the local voter.
+
+bundles contain `raft.db`, `state.db`, `yoq.db` when present, the selected snapshot, the API token, the join token, and `secrets.key` when present. a missing secrets key is rejected if encrypted secrets or locally encrypted certificates exist. files are private, and publication never replaces an existing destination. bundles contain credentials in readable form: preserve their `0700` directory and `0600` file permissions when copying them to protected storage. container filesystems, image blobs, application volumes, agent enrollment files, and agent result queues need their own backup.
+
+collect every voter bundle from that stop on a recovery host, then verify the complete set:
+
+```sh
+sudo -H "$(command -v yoq)" cluster verify-set --set maintenance-2026 \
+  /srv/backups/maintenance-2026-voter-1 \
+  /srv/backups/maintenance-2026-voter-2 \
+  /srv/backups/maintenance-2026-voter-3
+```
+
+verification checks file sizes and hashes, database integrity and schema compatibility, decryption of stored secrets, retained command history, snapshot boundaries, and one bundle for each fixed voter. the set ID and a fingerprint derived from the join token, voter IDs, and replicated CA identity must agree. `cluster verify <bundle>` checks a single voter but does not establish that the complete set is available. neither command authenticates an untrusted backup; use bundles from storage you control.
+
+restore each bundle to its original voter ID and a fresh data root. supply the fingerprint printed by `verify-set`, the same set ID, and the full voter list in ascending order:
+
+```sh
+sudo -H "$(command -v yoq)" cluster restore /srv/backups/maintenance-2026-voter-1 \
+  --data-dir /srv/recovered/voter-1/.local/share/yoq \
+  --node-id 1 --voters 1,2,3 --set maintenance-2026 \
+  --cluster <verified-fingerprint>
+```
+
+create the destination's parent directory first. restore refuses an existing destination, including a symlink. it keeps the original term, vote, log, and snapshot. if a crash selected a snapshot before restoring state, verification completes that restore only in a private copy; it never resets a voter to force an election. do not mix restored voters with live voters or reuse an old set ID for a later capture.
+
+start every restored voter with the original IDs and membership. the server uses `$HOME/.local/share/yoq`; set `HOME` if the restored root is elsewhere. raft peer addresses may change, but the voter IDs must stay fixed. keep at least one API address and port already trusted by the agents reachable so they can learn the new server list. `--token-file` reads the recovered private token without putting its contents in the command line:
+
+```sh
+sudo -H env HOME=/srv/recovered/voter-1 "$(command -v yoq)" init-server \
+  --id 1 --port 9700 --api-port 7700 \
+  --peers 2@10.0.0.2:9700,3@10.0.0.3:9700 \
+  --token-file /srv/recovered/voter-1/.local/share/yoq/join_token
+```
+
+wait for a leader and verify existing app and agent records before restarting agents. preserve their original enrollment files and `agent-cache.db` so terminal results can finish delivery. run this drill on disposable hosts before relying on the bundles for production recovery.
 
 ## troubleshooting
 

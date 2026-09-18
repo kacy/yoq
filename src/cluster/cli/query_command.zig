@@ -15,26 +15,22 @@ const QueryError = error{
 };
 
 pub fn cluster(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
-    var subcommand: ?[]const u8 = null;
-
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--json")) {
-            cli.output_mode = .json;
-        } else {
-            subcommand = arg;
-        }
-    }
-
-    const subcmd = subcommand orelse {
-        writeErr("usage: yoq cluster <status>\n", .{});
+    var subcommand = args.next() orelse {
+        writeErr("usage: yoq cluster <status|backup|verify|verify-set|restore>\n", .{});
         return QueryError.InvalidArgument;
     };
-
-    if (std.mem.eql(u8, subcmd, "status")) {
+    if (std.mem.eql(u8, subcommand, "--json")) {
+        cli.output_mode = .json;
+        subcommand = args.next() orelse return QueryError.InvalidArgument;
+    }
+    if (std.mem.eql(u8, subcommand, "status")) {
+        while (args.next()) |arg| {
+            if (!std.mem.eql(u8, arg, "--json")) return QueryError.InvalidArgument;
+            cli.output_mode = .json;
+        }
         clusterStatus(io, alloc);
     } else {
-        writeErr("unknown cluster subcommand: {s}\n", .{subcmd});
-        return QueryError.InvalidArgument;
+        try @import("recovery_command.zig").run(subcommand, args, alloc);
     }
 }
 
