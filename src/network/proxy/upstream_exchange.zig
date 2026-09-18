@@ -39,11 +39,33 @@ pub const Client = struct {
         timeouts: Options,
         upstream: *const upstream_mod.Upstream,
     ) ![]u8 {
+        var outcome = try self.dialTls(timeouts, upstream);
+
+        switch (outcome) {
+            .bare => |fd| {
+                defer linux_platform.posix.close(fd);
+                const wire = transport.Stream{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(timeouts.request_timeout_ms) };
+                try wire.writeAll(request);
+                return (try readProtocolResponse(self.allocator, wire, self.max_response_bytes, timeouts)).bytes;
+            },
+            .session => |*sess| {
+                defer {
+                    sess.deinit();
+                    linux_platform.posix.close(sess.fd);
+                }
+
+                _ = sess.write(request) catch return error.SendFailed;
+                return (try readProtocolResponse(self.allocator, sess, self.max_response_bytes, timeouts)).bytes;
+            },
+        }
+    }
+
+    fn dialTls(self: *const Client, timeouts: Options, upstream: *const upstream_mod.Upstream) !client_dial.Outcome {
         const ca_rec_opt = store_mod.getClusterCa(self.allocator) catch null;
         const ca_rec = ca_rec_opt orelse {
             if (upstream.peer_mode == .require) return error.ClusterCaMissing;
             log.warn("mtls upstream {s}: cluster CA not seeded, downgrading to plain dial", .{upstream.address});
-            return self.forwardPlain(request, timeouts, upstream);
+            return .{ .bare = try socket_helpers.connectToUpstream(timeouts.connect_timeout_ms, timeouts.request_timeout_ms, upstream) };
         };
         defer ca_rec.deinit(self.allocator);
 
@@ -67,7 +89,7 @@ pub const Client = struct {
         };
         defer if (credentials) |owned| owned.deinit(self.allocator);
 
-        var outcome = client_dial.dial(std.Options.debug_io, self.allocator, .{
+        return client_dial.dial(std.Options.debug_io, self.allocator, .{
             .address = upstream.address,
             .port = upstream.port,
             .connect_timeout_ms = timeouts.connect_timeout_ms,
@@ -79,24 +101,14 @@ pub const Client = struct {
             .client_key_pem = if (credentials) |owned| owned.key_pem else null,
             .now_unix = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
         }) catch |err| return err;
+    }
 
-        switch (outcome) {
-            .bare => |fd| {
-                // dial returned plaintext somehow (shouldn't happen when
-                // ca_cert_pem is set, but be defensive).
-                defer linux_platform.posix.close(fd);
-                return error.HandshakeFailed;
-            },
-            .session => |*sess| {
-                defer {
-                    sess.deinit();
-                    linux_platform.posix.close(sess.fd);
-                }
-
-                _ = sess.write(request) catch return error.SendFailed;
-                return (try readProtocolResponse(self.allocator, sess, self.max_response_bytes, timeouts)).bytes;
-            },
-        }
+    pub fn openStream(self: *const Client, options: Options, upstream: *const upstream_mod.Upstream) !StreamingConnection {
+        const connection: client_dial.Outcome = if (upstream.peer_mode == .off)
+            .{ .bare = try socket_helpers.connectToUpstream(options.connect_timeout_ms, options.request_timeout_ms, upstream) }
+        else
+            try self.dialTls(options, upstream);
+        return .{ .connection = connection, .timeout_ms = options.request_timeout_ms };
     }
 
     /// Primary, mirror, and permissive fallback traffic share one plaintext
@@ -135,6 +147,56 @@ pub const Client = struct {
     }
 };
 
+// a streamed response owns its connection until the body or tunnel ends.
+// each operation has an idle deadline; progress permits long-lived streams.
+pub const StreamingConnection = struct {
+    connection: client_dial.Outcome,
+    timeout_ms: u32,
+    operation_deadline: ?transport.Deadline = null,
+
+    pub fn fd(self: *const StreamingConnection) posix.fd_t {
+        return switch (self.connection) {
+            .bare => |socket| socket,
+            .session => |session| session.fd,
+        };
+    }
+
+    pub fn buffered(self: *const StreamingConnection) bool {
+        return switch (self.connection) {
+            .bare => false,
+            .session => |session| session.rx_pending.items.len > 0,
+        };
+    }
+
+    pub fn deinit(self: *StreamingConnection) void {
+        const socket = self.fd();
+        if (self.connection == .session) self.connection.session.deinit();
+        linux_platform.posix.close(socket);
+    }
+
+    pub fn read(self: *StreamingConnection, bytes: []u8) !usize {
+        const deadline = self.operation_deadline orelse transport.Deadline.afterMilliseconds(self.timeout_ms);
+        return switch (self.connection) {
+            .bare => |socket| (transport.Stream{ .fd = socket, .deadline = deadline }).read(bytes),
+            .session => |*session| blk: {
+                session.deadline = deadline;
+                break :blk session.read(bytes) catch |err| return if (err == error.PeerClosed) 0 else err;
+            },
+        };
+    }
+
+    pub fn writeAll(self: *StreamingConnection, bytes: []const u8) !void {
+        const deadline = self.operation_deadline orelse transport.Deadline.afterMilliseconds(self.timeout_ms);
+        switch (self.connection) {
+            .bare => |socket| try (transport.Stream{ .fd = socket, .deadline = deadline }).writeAll(bytes),
+            .session => |*session| {
+                session.deadline = deadline;
+                _ = try session.write(bytes);
+            },
+        }
+    }
+};
+
 const max_informational_responses = 16;
 
 /// Response accounting and retries use the final status, not an interim hint.
@@ -151,7 +213,7 @@ fn parseUpstreamStatusCode(response: []const u8) !u16 {
     }
 }
 
-fn parseResponseStatusLine(response: []const u8) !u16 {
+pub fn parseResponseStatusLine(response: []const u8) !u16 {
     if (response.len < 12) return error.InvalidResponse;
     if (!std.mem.startsWith(u8, response, "HTTP/")) return error.InvalidResponse;
 
@@ -178,7 +240,7 @@ const UpstreamResponse = struct {
 };
 
 /// how the upstream response body is delimited.
-const BodyFraming = union(enum) {
+pub const BodyFraming = union(enum) {
     /// no body at all (HEAD, interim responses, 204, 304).
     empty,
     /// A protocol switch needs a tunnel, which this buffered path does not own.
@@ -326,7 +388,7 @@ fn shrinkResponse(alloc: std.mem.Allocator, response: []u8, len: usize, reusable
 
 /// apply RFC 9112 section 6.3 before forwarding bytes or reusing the socket.
 /// reject ambiguous lengths before reading a body or returning a response.
-fn responseBodyFraming(headers: []const u8, status: u16, head_request: bool) error{InvalidResponse}!BodyFraming {
+pub fn responseBodyFraming(headers: []const u8, status: u16, head_request: bool) error{InvalidResponse}!BodyFraming {
     if (status == 101) return .upgrade;
     if (status >= 100 and status < 200) return .empty;
     if (head_request or status == 204 or status == 304) return .empty;

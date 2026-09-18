@@ -25,10 +25,41 @@ pub fn extractTarGzFile(gz_path: []const u8, dest_path: []const u8, context: []c
     return extractGzip(gz_path, dest_path, context, false);
 }
 
-/// Image layers carry container identities. Generic ADD archives deliberately
-/// retain the caller's ownership policy instead of adopting archive owners.
-pub fn extractImageLayer(gz_path: []const u8, dest_path: []const u8) !void {
-    return extractGzip(gz_path, dest_path, "image layer", true);
+pub const Compression = enum { tar, gzip, zstd };
+
+pub fn detectLayerCompression(path: []const u8) !Compression {
+    var file = try cwd().openFile(std.Options.debug_io, path, .{});
+    defer file.close(std.Options.debug_io);
+    var buffer: [4]u8 = undefined;
+    var reader = file.reader(std.Options.debug_io, &buffer);
+    const prefix = try reader.interface.peek(4);
+    if (std.mem.startsWith(u8, prefix, "\x1f\x8b")) return .gzip;
+    if (std.mem.eql(u8, prefix, "\x28\xb5\x2f\xfd")) return .zstd;
+    return .tar;
+}
+
+// digest-only cache records predate media descriptors. recognize their format
+// from the blob; manifest-backed callers also verify the declared compression.
+pub fn extractImageLayer(path: []const u8, dest_path: []const u8) !void {
+    return extractImageLayerWithCompression(path, dest_path, try detectLayerCompression(path));
+}
+
+pub fn extractImageLayerWithCompression(path: []const u8, dest_path: []const u8, compression: Compression) !void {
+    if (compression == .gzip) return extractGzip(path, dest_path, "image layer", true);
+    var file = try cwd().openFile(std.Options.debug_io, path, .{});
+    defer file.close(std.Options.debug_io);
+    var read_buffer: [8192]u8 = undefined;
+    var source = file.reader(std.Options.debug_io, &read_buffer);
+    if (compression == .tar) return extractTarReader(&source.interface, dest_path, "image layer", true);
+
+    // bound the decoder window independently of the compressed layer limit.
+    // blob verification supplies integrity; zig's zstd checksum option is not
+    // implemented, so enabling it would panic on checksum-bearing frames.
+    const buffer = try std.heap.page_allocator.alloc(u8, std.compress.zstd.default_window_len + std.compress.zstd.block_size_max);
+    defer std.heap.page_allocator.free(buffer);
+    var decoder = std.compress.zstd.Decompress.init(&source.interface, buffer, .{});
+    try extractTarReader(&decoder.reader, dest_path, "image layer", true);
+    _ = try decoder.reader.discardRemaining();
 }
 
 fn extractGzip(gz_path: []const u8, dest_path: []const u8, context: []const u8, image_layer: bool) !void {

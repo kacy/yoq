@@ -6,6 +6,7 @@ const log = @import("../../lib/log.zig");
 const proxy_helpers = @import("proxy_helpers.zig");
 const socket_helpers = @import("socket_helpers.zig");
 const ip = @import("../ip.zig");
+const http1_stream = @import("http1_stream.zig");
 const h2c_upgrade = @import("h2c_upgrade.zig");
 const http2 = @import("http2.zig");
 const http2_connection_router = @import("http2_connection_router.zig");
@@ -346,24 +347,80 @@ pub const ReverseProxy = struct {
 
                 proxy_runtime.recordRouteRequestStart(plan.route.name, plan.route.service, plan.backend_service);
                 self.startMirrorRequest(request, &plan, client_ip);
-                const response = self.forwardPlanWithClient(request, &plan, client_ip) catch {
-                    proxy_runtime.recordResponse(.internal_server_error);
-                    const internal = formatProxyResponse(self.allocator, .{
-                        .status = .internal_server_error,
-                        .body = "{\"error\":\"proxy request failed\"}",
-                    }) catch return;
-                    defer self.allocator.free(internal);
-                    _ = socket_helpers.writeAll(client_fd, internal) catch |e| {
-                        log.warn("l7 proxy client write failed: {}", .{e});
-                    };
-                    return;
-                };
-                defer self.allocator.free(response);
-                _ = socket_helpers.writeAll(client_fd, response) catch |e| {
-                    log.warn("l7 proxy client write failed: {}", .{e});
+                self.forwardStream(request, &plan, client_ip, client_fd) catch |err| {
+                    log.warn("l7 stream ended: {}", .{err});
                 };
             },
         }
+    }
+
+    fn forwardStream(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan, client_ip: ?[4]u8, client_fd: posix.fd_t) !void {
+        var started = false;
+        var downstream = http1_stream.Downstream{ .fd = client_fd, .timeout_ms = plan.route.request_timeout_ms, .started = &started };
+        self.forwardStreamAttempts(raw_request, plan, client_ip, &downstream) catch |err| {
+            if (err == error.ClientClosed) return;
+            if (started) return err;
+            const failure = proxyFailureResponse(err);
+            proxy_runtime.recordResponse(failure.status);
+            const response = try formatProxyResponse(self.allocator, failure);
+            defer self.allocator.free(response);
+            try downstream.writeAll(response);
+        };
+    }
+
+    fn forwardStreamAttempts(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan, client_ip: ?[4]u8, downstream: *http1_stream.Downstream) !void {
+        const policy = proxy_policy.RequestPolicy{ .retries = plan.route.retries, .retry_on_5xx = plan.route.retry_on_5xx };
+        const circuit = proxy_policy.CircuitBreakerPolicy{ .failure_threshold = plan.route.circuit_breaker_threshold, .open_timeout_ms = plan.route.circuit_breaker_timeout_ms };
+        const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
+        defer self.allocator.free(request);
+        const parsed = (try http.parseRequest(raw_request)) orelse return error.BadRequest;
+        const websocket = http1_stream.isWebSocket(parsed.headers_raw);
+        const http10 = std.mem.indexOf(u8, raw_request[0..(std.mem.indexOf(u8, raw_request, "\r\n") orelse raw_request.len)], "HTTP/1.0") != null;
+        var attempt: u16 = 0;
+        while (true) : (attempt += 1) {
+            var upstream = try resolveAttemptUpstream(self.allocator, plan, @intCast(attempt), circuit);
+            defer upstream.deinit(self.allocator);
+            const status = self.streamAttempt(request, plan, &upstream, downstream, websocket, raw_request[requestEndOffset(raw_request, parsed)..], http10, proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), @intCast(attempt), 503, false)) catch |err| {
+                // downstream cancellation does not describe upstream health.
+                if (err == error.OutOfMemory or err == error.ClientClosed) return err;
+                recordUpstreamError(upstream.endpoint_id, circuit, mapUpstreamFailure(err), plan.route.name, plan.route.service, upstream.service);
+                if (!downstream.started.* and proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), @intCast(attempt), null, true)) {
+                    proxy_runtime.recordRetry();
+                    proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
+                    continue;
+                }
+                proxy_runtime.recordRouteFailure(plan.route.name, mapRouteFailureKind(err));
+                return err;
+            };
+            if (status >= 500 and status <= 599) proxy_runtime.recordEndpointFailure(upstream.endpoint_id, circuit) else proxy_runtime.recordEndpointSuccess(upstream.endpoint_id);
+            if (!downstream.started.* and proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), @intCast(attempt), status, false)) {
+                proxy_runtime.recordRetry();
+                proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
+                continue;
+            }
+            proxy_runtime.recordResponseCode(status);
+            proxy_runtime.recordRouteResponseCode(plan.route.name, plan.route.service, upstream.service, status);
+            proxy_runtime.recordRouteRecovered(plan.route.name);
+            return;
+        }
+    }
+
+    fn streamAttempt(self: *const ReverseProxy, request: []const u8, plan: *const ForwardPlan, upstream: *upstream_mod.Upstream, downstream: *http1_stream.Downstream, websocket: bool, client_prefetched: []const u8, http10: bool, retry_server_error: bool) !u16 {
+        var connection = try self.upstreamClient().openStream(.{ .connect_timeout_ms = plan.route.connect_timeout_ms, .request_timeout_ms = plan.route.request_timeout_ms }, upstream);
+        defer connection.deinit();
+        try connection.writeAll(request);
+        const head = try http1_stream.Head.read(&connection, downstream.fd, plan.method == .HEAD);
+        if (retry_server_error and head.status >= 500 and head.status <= 599) return head.status;
+        if (head.framing == .upgrade and (!websocket or !http1_stream.isWebSocket(head.bytes[0..head.end]))) return error.UnsupportedUpgrade;
+        try http1_stream.writeHead(downstream, &head, http10);
+        if (head.framing == .upgrade) {
+            try connection.writeAll(client_prefetched);
+            try http1_stream.tunnel(&connection, downstream, head.bytes[head.end..head.used]);
+        } else {
+            var reader = http1_stream.Reader{ .connection = &connection, .client_fd = downstream.fd, .prefetched = head.bytes[head.end..head.used] };
+            try http1_stream.copyBody(&reader, downstream, head.framing, !http10);
+        }
+        return head.status;
     }
 
     pub fn buildForwardRequest(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan) ![]u8 {
@@ -488,7 +545,9 @@ pub const ReverseProxy = struct {
         try writeTraceHeaders(writer, inbound_traceparent, inbound_tracestate);
         try writer.print("Content-Length: {d}\r\n", .{parsed.body.len});
         try writer.writeAll(proxy_loop_header ++ ": 1\r\n");
-        if (spec.keep_alive) {
+        if (http1_stream.isWebSocket(parsed.headers_raw)) {
+            try writer.writeAll("Connection: Upgrade\r\n\r\n");
+        } else if (spec.keep_alive) {
             try writer.writeAll("Connection: keep-alive\r\n\r\n");
         } else {
             try writer.writeAll("Connection: close\r\n\r\n");
@@ -963,6 +1022,10 @@ fn peekHttp2StreamId(raw_request: []const u8) ?u32 {
 
 fn proxyFailureResponse(err: anyerror) ProxyResponse {
     return switch (err) {
+        error.NoHealthyUpstream => .{
+            .status = .service_unavailable,
+            .body = "{\"error\":\"no eligible upstream\"}",
+        },
         error.InvalidUpstreamAddress => .{
             .status = .bad_gateway,
             .body = "{\"error\":\"invalid upstream address\"}",
@@ -1030,18 +1093,20 @@ fn mapRouteFailureKind(err: anyerror) proxy_runtime.RouteFailureKind {
 }
 
 fn resolveAttemptUpstream(alloc: std.mem.Allocator, plan: *const ForwardPlan, attempt: u8, cb_policy: proxy_policy.CircuitBreakerPolicy) !upstream_mod.Upstream {
-    if (attempt == 0) {
-        return .{
-            .service = try alloc.dupe(u8, plan.backend_service),
-            .endpoint_id = try alloc.dupe(u8, plan.upstream.endpoint_id),
-            .address = try alloc.dupe(u8, plan.upstream.address),
-            .port = plan.upstream.port,
-            .eligible = plan.upstream.eligible,
-        };
-    }
+    if (attempt == 0) return copyPlannedUpstream(alloc, plan.backend_service, plan.upstream);
 
     const backend_service = proxy_runtime.selectSnapshotBackendService(plan.route, plan.selection_key, attempt);
     return proxy_runtime.resolveUpstreamWithPolicy(alloc, backend_service, cb_policy);
+}
+
+fn copyPlannedUpstream(alloc: std.mem.Allocator, backend_service: []const u8, source: upstream_mod.Upstream) !upstream_mod.Upstream {
+    var copied = source;
+    copied.service = try alloc.dupe(u8, backend_service);
+    errdefer alloc.free(copied.service);
+    copied.endpoint_id = try alloc.dupe(u8, source.endpoint_id);
+    errdefer alloc.free(copied.endpoint_id);
+    copied.address = try alloc.dupe(u8, source.address);
+    return copied;
 }
 
 fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64 {
@@ -1091,6 +1156,7 @@ fn readRequestBytes(fd: linux_platform.posix.socket_t, buf: []u8) ReadRequestErr
             else => error.MalformedRequest,
         };
         if (parsed) |request| {
+            if (http1_stream.isWebSocket(request.headers_raw)) return buf[0..total];
             return buf[0..requestEndOffset(buf[0..total], request)];
         }
     }
@@ -1934,6 +2000,7 @@ test "buildForwardRequest generates traceparent when absent" {
 const TestUpstreamAction = union(enum) {
     close,
     respond: []const u8,
+    websocket: void,
     stream_respond: struct {
         first: []const u8,
         release: *std.Io.Semaphore,
@@ -1953,6 +2020,8 @@ const TestUpstreamServer = struct {
     request_bufs: [4][2048]u8 = undefined,
     request_lens: [4]usize = [_]usize{0} ** 4,
     accepted: usize = 0,
+    websocket_payload: [16]u8 = undefined,
+    websocket_length: usize = 0,
 
     fn init(actions: []const TestUpstreamAction) !TestUpstreamServer {
         const listener = try initTestListenerSocket();
@@ -1996,6 +2065,15 @@ const TestUpstreamServer = struct {
 
             switch (action) {
                 .close => {},
+                .websocket => {
+                    socket_helpers.writeAll(client_fd, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n\x81\x05early") catch {};
+                    while (self.websocket_length < self.websocket_payload.len) {
+                        const count = posix.read(client_fd, self.websocket_payload[self.websocket_length..]) catch break;
+                        if (count == 0) break;
+                        self.websocket_length += count;
+                    }
+                    socket_helpers.writeAll(client_fd, "\x81\x02ok") catch {};
+                },
                 .respond => |response| _ = socket_helpers.writeAll(client_fd, response) catch {},
                 .stream_respond => |resp| {
                     _ = socket_helpers.writeAll(client_fd, resp.first) catch {};
@@ -3179,14 +3257,17 @@ test "resolveAttemptUpstream retries onto a different weighted backend service" 
     try std.testing.expectEqual(@as(u16, 8081), retry_upstream.port);
 }
 
-test "handleConnection proxies a client socket request" {
+test "handleConnection streams a large response through a client socket" {
     const store = @import("../../state/store.zig");
     const service_rollout = @import("../service_rollout.zig");
     const service_registry_runtime = @import("../service_registry_runtime.zig");
 
-    const actions = [_]TestUpstreamAction{
-        .{ .respond = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello" },
-    };
+    const body = try std.testing.allocator.alloc(u8, 2 * 1024 * 1024);
+    defer std.testing.allocator.free(body);
+    @memset(body, 'x');
+    const upstream_response = try std.fmt.allocPrint(std.testing.allocator, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ body.len, body });
+    defer std.testing.allocator.free(upstream_response);
+    const actions = [_]TestUpstreamAction{ .{ .respond = upstream_response }, .{ .respond = upstream_response } };
     var upstream = try TestUpstreamServer.init(&actions);
     defer upstream.deinit();
     try upstream.start();
@@ -3259,11 +3340,36 @@ test "handleConnection proxies a client socket request" {
     try linux_platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
 
     try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
-    var response_buf: [1024]u8 = undefined;
-    const bytes_read = try posix.read(client_fd, &response_buf);
+    const response_buf = try std.testing.allocator.alloc(u8, upstream_response.len + 64);
+    defer std.testing.allocator.free(response_buf);
+    var bytes_read: usize = 0;
+    while (bytes_read < response_buf.len) {
+        const count = try posix.read(client_fd, response_buf[bytes_read..]);
+        if (count == 0) break;
+        bytes_read += count;
+    }
     try std.testing.expect(bytes_read > 0);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "HTTP/1.1 200 OK\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "\r\n\r\nhello") != null);
+    const body_start = (std.mem.indexOf(u8, response_buf[0..bytes_read], "\r\n\r\n") orelse return error.MissingHeaders) + 4;
+    try std.testing.expectEqualSlices(u8, body, response_buf[body_start..bytes_read]);
+    // a client that leaves during a response must not trip the service circuit.
+    var sockets: [2]posix.fd_t = undefined;
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &sockets) != 0) return error.SocketPairFailed;
+    defer linux_platform.posix.close(sockets[0]);
+    linux_platform.posix.close(sockets[1]);
+    const raw = "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n";
+    const planned = try proxy.handleRequest(raw);
+    defer planned.deinit(std.testing.allocator);
+    var started = false;
+    var downstream = http1_stream.Downstream{ .fd = sockets[0], .timeout_ms = 100, .started = &started };
+    switch (planned) {
+        .forward => |plan| try std.testing.expectError(error.ClientClosed, proxy.forwardStreamAttempts(raw, &plan, null, &downstream)),
+        .response => return error.ExpectedForwardPlan,
+    }
+    const snapshot = try proxy_runtime.snapshot(std.testing.allocator);
+    defer snapshot.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.circuit_trips_total);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.upstream_other_failures_total);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-For: 127.0.0.1\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-Host: api.internal\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "X-Forwarded-Proto: http\r\n") != null);
@@ -4497,6 +4603,7 @@ const PeerForwardFixture = struct {
     failure: ?anyerror = null,
     accepted: bool = false,
     require_client: bool = true,
+    streaming: bool = false,
 
     fn exec(sql: []const u8) !void {
         var lease = try @import("../../state/store/common.zig").leaseDb();
@@ -4572,11 +4679,48 @@ const PeerForwardFixture = struct {
         var request: [4096]u8 = undefined;
         const n = try session.read(&request);
         if (!std.mem.startsWith(u8, request[0..n], "GET /")) return error.InvalidRequest;
-        _ = try session.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        if (self.streaming) {
+            _ = try session.write("HTTP/1.1 200 OK\r\nContent-Length: 2097152\r\nConnection: close\r\n\r\n");
+            const chunk = [_]u8{'x'} ** 8192;
+            var sent: usize = 0;
+            while (sent < 2097152) sent += try session.write(&chunk);
+        } else {
+            _ = try session.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        }
         var encrypted: [64]u8 = undefined;
         const size = try record.encryptRecord(session.client_app.key, session.client_app.iv, session.client_seq, &.{ 1, 0 }, .alert, encrypted[5..]);
         try record.writeHeader(encrypted[0..5], .application_data, @intCast(size));
         try socket.writeAll(encrypted[0 .. 5 + size]);
+    }
+
+    fn forwardStreaming(proxy: *ReverseProxy, ca: []const u8, cert: []u8, private_key: []u8, now: i64, allowed: bool) !void {
+        const listener = try listen();
+        defer linux_platform.posix.close(listener.fd);
+        var fixture = PeerForwardFixture{ .fd = listener.fd, .ca = ca, .cert = cert, .private_key = private_key, .now = now, .streaming = true };
+        const worker = try std.Thread.spawn(.{}, serve, .{&fixture});
+        defer worker.join();
+        const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-1", .address = "127.0.0.1", .port = listener.port, .peer_mode = .require };
+        const opened = proxy.upstreamClient().openStream(.{ .connect_timeout_ms = 1000, .request_timeout_ms = 2000 }, &upstream);
+        if (!allowed) {
+            try std.testing.expectError(error.HandshakeFailed, opened);
+            return;
+        }
+        var connection = try opened;
+        defer connection.deinit();
+        try connection.writeAll("GET / HTTP/1.1\r\nHost: untrusted.example\r\n\r\n");
+        const head = try http1_stream.Head.read(&connection, -1, false);
+        try std.testing.expectEqual(@as(u16, 200), head.status);
+        var reader = http1_stream.Reader{ .connection = &connection, .client_fd = -1, .prefetched = head.bytes[head.end..head.used] };
+        const Sink = struct {
+            count: usize = 0,
+            pub fn writeAll(self: *@This(), bytes: []const u8) !void {
+                for (bytes) |byte| try std.testing.expectEqual(@as(u8, 'x'), byte);
+                self.count += bytes.len;
+            }
+        };
+        var sink: Sink = .{};
+        try http1_stream.copyBody(&reader, &sink, head.framing, true);
+        try std.testing.expectEqual(@as(usize, 2097152), sink.count);
     }
 
     fn forward(proxy: *ReverseProxy, ca: []const u8, cert: []u8, private_key: []u8, now: i64, allowed: bool, mode: @import("../../manifest/spec.zig").TlsConfig.PeerMode) !void {
@@ -4630,6 +4774,7 @@ test "upstream peer identity authenticates proxy credentials and observes rotati
     const held = try proxy_credentials.load(alloc, f.key, ca.cert_pem, now);
     defer held.deinit(alloc);
     try f.forward(&proxy, ca.cert_pem, server.cert_pem, server_key, now, true, .require);
+    try f.forwardStreaming(&proxy, ca.cert_pem, server.cert_pem, server_key, now, true);
 
     const rotated = try f.x509.issueLeaf(std.testing.io, alloc, ca.key_pair, "peer-ca", "proxy", peer_identity.proxy_identity, now - 60, now + 86400);
     defer alloc.free(rotated.cert_pem);
@@ -4646,6 +4791,7 @@ test "upstream peer identity authenticates proxy credentials and observes rotati
     const wrong_key = try f.csr.derKeyToPem(alloc, &wrong.key_pair.secret_key.toBytes());
     defer alloc.free(wrong_key);
     try f.forward(&proxy, ca.cert_pem, wrong.cert_pem, wrong_key, now, false, .require);
+    try f.forwardStreaming(&proxy, ca.cert_pem, wrong.cert_pem, wrong_key, now, false);
     proxy.peer_key = null;
     try f.forward(&proxy, ca.cert_pem, wrong.cert_pem, wrong_key, now, false, .warn);
     proxy.peer_key = f.key;
@@ -4704,4 +4850,120 @@ test "proxy mirror ownership cleans up every partial clone allocation" {
     };
     defer plan.route.deinit(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Fixture.clone, .{&plan});
+}
+
+test "handleConnection completes websocket upgrade and relays frames in both directions" {
+    const store = @import("../../state/store.zig");
+    const service_rollout = @import("../service_rollout.zig");
+    const service_registry_runtime = @import("../service_registry_runtime.zig");
+    var upstream = try TestUpstreamServer.init(&.{.websocket});
+    defer upstream.deinit();
+    try upstream.start();
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry_runtime.resetForTest();
+    defer service_registry_runtime.resetForTest();
+    proxy_runtime.resetForTest();
+    defer proxy_runtime.resetForTest();
+    service_rollout.setForTest(.{
+        .service_registry_v2 = true,
+        .l7_proxy_http = true,
+    });
+    defer service_rollout.resetForTest();
+
+    try store.createService(.{
+        .service_name = "api",
+        .vip_address = "10.43.0.2",
+        .lb_policy = "consistent_hash",
+        .http_proxy_host = "api.internal",
+        .http_proxy_path_prefix = "/",
+        .created_at = 1000,
+        .updated_at = 1000,
+    });
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = "api-1",
+        .container_id = "ctr-1",
+        .node_id = null,
+        .ip_address = "127.0.0.1",
+        .port = upstream.port,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1000,
+        .last_seen_at = 1000,
+    });
+    proxy_runtime.bootstrapIfEnabled();
+
+    const routes = [_]router.Route{
+        .{
+            .name = "api:/",
+            .service = "api",
+            .vip_address = "10.43.0.2",
+            .match = .{ .host = "api.internal", .path_prefix = "/" },
+            .eligible_endpoints = 1,
+            .healthy_endpoints = 1,
+        },
+    };
+    var proxy = ReverseProxy.init(std.testing.allocator, &routes);
+    defer proxy.deinit();
+
+    var listener = try TestListener.init();
+    defer listener.deinit();
+
+    const ConnectionHarness = struct {
+        fn serve(proxy_ptr: *const ReverseProxy, listen_fd: posix.fd_t) void {
+            const client_fd = linux_platform.posix.accept(listen_fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            proxy_ptr.handleConnection(client_fd);
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ConnectionHarness.serve, .{ &proxy, listener.fd });
+    defer server_thread.join();
+
+    const client_fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer linux_platform.posix.close(client_fd);
+    const server_addr = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, listener.port);
+    try linux_platform.posix.connect(client_fd, &server_addr.any, server_addr.getOsSockLen());
+
+    socket_helpers.setSocketTimeoutMs(client_fd, 2000);
+    const frame = "\x81\x82\x01\x02\x03\x04ik";
+    try socket_helpers.writeAll(client_fd, "GET /chat HTTP/1.1\r\nHost: api.internal\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n" ++ frame);
+    var response: [2048]u8 = undefined;
+    var used: usize = 0;
+    var head_end: ?usize = null;
+    while (head_end == null or used < head_end.? + 7) {
+        const count = try posix.read(client_fd, response[used..]);
+        if (count == 0) return error.UnexpectedEof;
+        used += count;
+        if (std.mem.indexOf(u8, response[0..used], "\r\n\r\n")) |end| head_end = end + 4;
+    }
+    try std.testing.expect(std.mem.startsWith(u8, response[0..used], "HTTP/1.1 101 Switching Protocols\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, response[0..head_end.?], "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != null);
+    try std.testing.expectEqualStrings("\x81\x05early", response[head_end.?..used]);
+    try socket_helpers.writeAll(client_fd, frame);
+    used = 0;
+    while (true) {
+        const count = try posix.read(client_fd, response[used..]);
+        if (count == 0) break;
+        used += count;
+    }
+    try std.testing.expectEqualStrings("\x81\x02ok", response[0..used]);
+    upstream.wait();
+    try std.testing.expectEqualStrings(frame ++ frame, upstream.websocket_payload[0..upstream.websocket_length]);
+    try std.testing.expect(std.mem.indexOf(u8, upstream.request(0), "Connection: Upgrade\r\n") != null);
+}
+
+test "first upstream attempt preserves required tls and cleans up partial copies" {
+    const Fixture = struct {
+        fn copy(alloc: std.mem.Allocator) !void {
+            const source = upstream_mod.Upstream{ .service = "canary", .endpoint_id = "api-1", .address = "127.0.0.1", .port = 8443, .peer_mode = .require };
+            const copied = try copyPlannedUpstream(alloc, "api", source);
+            defer copied.deinit(alloc);
+            try std.testing.expectEqual(@as(@TypeOf(copied.peer_mode), .require), copied.peer_mode);
+            try std.testing.expectEqualStrings("api", copied.service);
+            try std.testing.expectEqualStrings(source.endpoint_id, copied.endpoint_id);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Fixture.copy, .{});
 }

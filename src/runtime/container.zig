@@ -285,7 +285,7 @@ pub const Container = struct {
         };
         self.state_mutex.unlock(std.Options.debug_io);
 
-        const wait_result = process.wait(pid, false) catch {
+        const wait_result = process.waitForExit(pid) catch {
             self.state_mutex.lockUncancelable(std.Options.debug_io);
             self.status = .stopped;
             self.exit_code = 255;
@@ -299,8 +299,7 @@ pub const Container = struct {
         const exit_code: u8 = switch (wait_result.status) {
             .exited => |code| code,
             .signaled => 128,
-            .running => 0,
-            .stopped => 128, // stopped processes treated as signaled
+            .running, .stopped => unreachable, // waitForExit only returns terminal states
         };
 
         self.state_mutex.lockUncancelable(std.Options.debug_io);
@@ -697,4 +696,49 @@ test "container start rejects host root and aliases before runtime setup" {
         try std.testing.expect(c.pid == null);
         try std.testing.expect(c.runtime.cgroup == null);
     }
+}
+
+test "runtime reliability waits through a stopped child until its actual exit" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const child = linux.fork();
+    if (linux.errno(child) != .SUCCESS) return error.ForkFailed;
+    if (child == 0) {
+        _ = linux.kill(linux.getpid(), linux.SIG.STOP);
+        linux.exit_group(7);
+    }
+    const pid: posix.pid_t = @intCast(child);
+    const opened = linux.pidfd_open(pid, 0);
+    if (linux.errno(opened) != .SUCCESS) {
+        process.kill(pid) catch {};
+        _ = process.wait(pid, false) catch {};
+        return error.PidfdOpenFailed;
+    }
+    const pidfd: posix.fd_t = @intCast(opened);
+    defer _ = linux.close(pidfd);
+    defer {
+        _ = linux.pidfd_send_signal(pidfd, .KILL, null, 0);
+        _ = process.wait(pid, false) catch {};
+    }
+    const ContinueChild = struct {
+        fn run(child_fd: posix.fd_t) void {
+            std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
+            _ = linux.pidfd_send_signal(child_fd, .CONT, null, 0);
+            // bound the test even if the continuation or wait path regresses.
+            std.Io.sleep(std.testing.io, .fromMilliseconds(500), .awake) catch {};
+            _ = linux.pidfd_send_signal(child_fd, .KILL, null, 0);
+        }
+    };
+    const resumer = try std.Thread.spawn(.{}, ContinueChild.run, .{pidfd});
+    defer resumer.join();
+    var instance = Container{
+        .config = .{ .id = "stopped-child", .rootfs = "", .command = "test" },
+        .status = .running,
+        .pid = pid,
+        .exit_code = null,
+        .created_at = 0,
+    };
+    try std.testing.expectEqual(@as(u8, 7), try instance.wait());
+    try std.testing.expect(instance.pid == null);
+    try std.testing.expectEqual(Status.stopped, instance.status);
 }

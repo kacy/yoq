@@ -1,7 +1,9 @@
 const blob_store = @import("../store.zig");
 
 pub const LayerError = error{
-    /// gzip decompression or tar extraction failed
+    /// unsupported layer media type
+    UnsupportedMediaType,
+    /// decompression or tar extraction failed
     ExtractionFailed,
     /// native OverlayFS deletion metadata cannot be prepared by this caller
     WhiteoutRequiresPrivilege,
