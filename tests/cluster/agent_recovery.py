@@ -39,6 +39,7 @@ class Rig:
         self.namespaces = {}
         self.processes = {}
         self.logs = []
+        self.restored_homes = {}
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     @staticmethod
@@ -49,7 +50,7 @@ class Rig:
         return ["nsenter", "--target", str(self.namespaces[node].pid), "--net", "--", *command]
 
     def home(self, node):
-        return self.artifacts / f"node-{node}"
+        return self.restored_homes.get(node, self.artifacts / f"node-{node}")
 
     def data(self, node):
         return self.home(node) / ".local/share/yoq"
@@ -81,14 +82,15 @@ class Rig:
     def start(self, node, *arguments):
         if node in self.processes and self.processes[node].poll() is None:
             raise RuntimeError(f"node {node} already running")
-        log = (self.artifacts / f"node-{node}-{time.monotonic_ns()}.log").open("wb")
+        log = (self.artifacts / f"node-{node}-{time.monotonic_ns()}.log").open("ab")
         self.logs.append(log)
         environment = dict(os.environ, HOME=str(self.home(node)))
         self.processes[node] = subprocess.Popen(self.inside(node, self.binary, *arguments), env=environment, stdout=log, stderr=subprocess.STDOUT)
 
     def start_server(self, node):
         peers = ",".join(f"{other}@10.233.0.{other}:9700" for other in range(1, 4) if other != node)
-        self.start(node, "init-server", "--id", str(node), "--port", "9700", "--api-port", "7700", "--peers", peers, "--token", self.token)
+        credential = ["--token-file", str(self.data(node) / "join_token")] if node in self.restored_homes else ["--token", self.token]
+        self.start(node, "init-server", "--id", str(node), "--port", "9700", "--api-port", "7700", "--peers", peers, *credential)
 
     def stop(self, node):
         process = self.processes.get(node)
@@ -222,6 +224,9 @@ def main():
     rig = Rig(args.binary, args.artifacts)
     try:
         exercise(rig)
+        if os.environ.get("YOQ_RECOVERY_BUNDLES") == "1":
+            from bundle_recovery import exercise_bundles
+            exercise_bundles(rig)
     except Exception:
         for path in sorted(rig.artifacts.glob("*.log")):
             print(f"--- {path.name} ---", flush=True)
