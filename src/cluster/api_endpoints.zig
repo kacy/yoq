@@ -135,7 +135,7 @@ fn saveAt(set: *const Set, dir: std.Io.Dir, seed: Endpoint, token: []const u8) !
     try writer.writeByte('{');
     try writeFields(&writer, set.entries[0..set.len], token);
     try writer.writeByte('}');
-    var pending = try dir.createFileAtomic(std.Options.debug_io, name, .{ .permissions = .fromMode(0o600) });
+    var pending = try dir.createFileAtomic(std.Options.debug_io, name, .{ .permissions = .fromMode(0o600), .replace = true });
     defer pending.deinit(std.Options.debug_io);
     try pending.file.writeStreamingAll(std.Options.debug_io, writer.buffered());
     try pending.file.sync(std.Options.debug_io);
@@ -199,6 +199,7 @@ test "agent recovery endpoint membership requires proof and survives restart" {
     try std.testing.expectError(error.UntrustedEndpoints, set.learn(alloc, text.written(), "wrong-token"));
     try std.testing.expectEqual(@as(usize, 1), set.len);
     try std.testing.expect(try set.learn(alloc, text.written(), "cluster-token"));
+    try saveAt(&set, tmp.dir, seed, "cluster-token");
     try saveAt(&set, tmp.dir, seed, "cluster-token");
     var restored: Set = .{};
     try restored.add(seed);
