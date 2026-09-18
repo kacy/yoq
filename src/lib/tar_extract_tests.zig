@@ -448,3 +448,27 @@ test "tar hard links reject data payloads and archive headers retain checksum va
     output.writer.buffer[0] ^= 1;
     try std.testing.expectError(error.TarHeaderChksum, extractBytes(tmp, output.written()));
 }
+
+test "tar image hard links share the target mode without applying link metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try prepareDest(tmp);
+    const bytes = try archiveBytes(&.{
+        .{ .name = "target", .content = "executable" },
+        .{ .name = "alias", .kind = .hardlink, .content = "target" },
+    });
+    defer alloc.free(bytes);
+    @memcpy(bytes[100..108], "0000755\x00");
+    updateChecksum(bytes[0..512]);
+    try tmp.dir.writeFile(io, .{ .sub_path = "input.tar", .data = bytes });
+    var archive_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const archive_length = try tmp.dir.realPathFile(io, "input.tar", &archive_buffer);
+    var destination_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const destination_length = try tmp.dir.realPathFile(io, "dest", &destination_buffer);
+    try extract.extractImageLayerWithCompression(archive_buffer[0..archive_length], destination_buffer[0..destination_length], .tar);
+    try expectSameInode(tmp.dir, "dest/target", "dest/alias");
+    const target = try tmp.dir.statFile(io, "dest/target", .{});
+    const alias = try tmp.dir.statFile(io, "dest/alias", .{});
+    try std.testing.expectEqual(@as(u32, 0o755), @as(u32, target.permissions.toMode()));
+    try std.testing.expectEqual(target.permissions, alias.permissions);
+}
