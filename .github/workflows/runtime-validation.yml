@@ -113,7 +113,7 @@ jobs:
           cache-prefix: zig-runtime-${{ matrix.lane }}
 
       - name: install scheduled network fixture tools
-        if: matrix.lane == 'network'
+        if: matrix.lane == 'network' || matrix.lane == 'cluster'
         run: |
           sudo apt-get update
           sudo apt-get install --yes iproute2 iptables openssl python3 curl wireguard-tools libsqlite3-dev
@@ -166,6 +166,14 @@ jobs:
           bash scripts/policy-generation-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/policy-generation.log"
           sudo env RUNNER_TEMP="$RUNNER_TEMP" python3 scripts/scheduled-runtime-smoke.py \
             2>&1 | tee "$RUNNER_TEMP/runtime-logs/scheduled-runtime.log"
+
+      - name: verify live agent drain handoff
+        if: matrix.lane == 'cluster'
+        shell: bash
+        run: |
+          set -o pipefail
+          sudo env YOQ_BIN="$PWD/zig-out/bin/yoq" YOQ_SMOKE_DIR="$RUNNER_TEMP/runtime-logs/agent-drain" \
+            bash scripts/agent-drain-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/agent-drain.log"
 
       - name: upload privileged runtime logs
         if: always()

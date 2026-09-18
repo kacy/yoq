@@ -529,7 +529,7 @@ pub fn build(b: *std.Build) void {
                 run_priv.setEnvironmentVariable("YOQ_RUN_PRIVILEGED_TESTS", "1");
             }
             run_priv.step.dependOn(b.getInstallStep());
-            if (lane.needs_network_helpers) {
+            if (lane.needs_network_helpers or lane.step == runtime_cluster_test_step) {
                 run_priv.step.dependOn(&install_test_http_server.step);
                 run_priv.step.dependOn(&install_test_net_probe.step);
             }

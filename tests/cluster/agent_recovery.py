@@ -31,7 +31,8 @@ def wait_for(description, check, seconds=60):
 
 
 class Rig:
-    def __init__(self, binary, artifacts):
+    def __init__(self, binary, artifacts, workers=1):
+        self.workers = workers
         self.binary = str(binary.resolve())
         self.artifacts = artifacts.resolve()
         self.artifacts.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -62,7 +63,7 @@ class Rig:
         self.run("ip", "address", "add", "10.233.0.254/24", "dev", "recovery")
         self.run("ip", "link", "set", "recovery", "up")
         parent_namespace = os.readlink("/proc/self/ns/net")
-        for node in range(1, 5):
+        for node in range(1, 4 + self.workers):
             namespace = subprocess.Popen(["unshare", "--net", "--", "sleep", "infinity"])
             self.namespaces[node] = namespace
             wait_for("network namespace", lambda: os.readlink(f"/proc/{namespace.pid}/ns/net") != parent_namespace)
@@ -248,8 +249,16 @@ def exercise(rig):
         current = rig.request(leader, "/agents")
         if [item["id"] for item in current] != [agent_id]:
             raise RuntimeError("agent restart changed the enrollment identity")
+        # each command exceeds the old stack buffer. the missing voter must
+        # split this backlog by bytes when it rejoins, then commit another write.
+        payload = "x" * (20 * 1024)
+        for sequence in range(65):
+            command = f"UPDATE agents SET labels = 'backlog-{sequence}-{payload}' WHERE id = '{agent_id}';"
+            rig.request(leader, "/cluster/propose", command.encode())
         rig.start_server(first)
         wait_for("restarted voter catches up", lambda: rig.request(first, "/cluster/status")["last_applied"] >= rig.request(leader, "/cluster/status")["commit_index"])
+        rig.request(leader, "/cluster/propose", f"UPDATE agents SET labels = 'caught-up' WHERE id = '{agent_id}';".encode())
+        wait_for("small write after large catch-up", lambda: rig.request(first, "/agents")[0]["labels"] == "caught-up")
         (rig.artifacts / "result.json").write_text(json.dumps({"agent_id": agent_id, "killed_leader": first, "surviving_leader": leader, "terminal_assignment": terminal}, indent=2))
         print("leader loss, assignment delivery, agent restart, and durable result recovery passed")
     finally:
