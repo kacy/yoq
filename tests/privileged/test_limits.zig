@@ -195,11 +195,13 @@ test "container restart policy no prevents restart" {
     std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(200 * std.time.ns_per_ms)), .awake) catch unreachable;
 
     // check status
-    var ps_result = try env.runYoq(&.{"ps"});
+    var ps_result = try env.runYoq(&.{ "ps", "-a" });
     defer ps_result.deinit();
 
     // container should have exited and not be running
     try std.testing.expect(ps_result.exit_code == 0);
+    try helpers.expectContains(ps_result.stdout, name);
+    try helpers.expectContains(ps_result.stdout, "stopped");
 
     // cleanup
     var rm = try env.runYoq(&.{ "rm", name });
