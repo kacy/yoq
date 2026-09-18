@@ -1,40 +1,16 @@
-// port_map — eBPF XDP port mapping
+// port mapping for inbound ipv4 tcp and udp traffic.
 //
-// XDP program that rewrites destination IP and port for inbound
-// traffic based on a port mapping table. replaces iptables DNAT
-// rules for container port forwarding.
-//
-// key: {dst_ip, protocol, port} -> value: {dst_ip, dst_port}
-//
-// destination-specific keys allow steering only VIP traffic into the
-// HTTP proxy listener. wildcard entries with dst_ip=0 preserve the
-// existing host-port forwarding behavior.
-//
-// uses XDP_FLAGS_SKB_MODE for compatibility with virtual interfaces.
-// after rewriting, returns XDP_PASS to let the kernel route the
-// packet to the correct bridge/veth via normal forwarding.
-//
-// SECURITY HARDENING:
-//   - All packet accesses validated against data_end
-//   - IP header length (IHL) validated before use
-//   - Checksum calculations protected against overflow
-//   - Maximum packet size enforced
-//
-// BPF verifier constraints:
-//   - IHL forced to 5 (no IP options) for fixed-offset access
-//   - all packet access uses constant offsets
-//
-// compile: clang -target bpf -O2 -g -c -o port_map.o port_map.c
+// exact destination mappings take precedence over wildcard host ports.
+// after dnat, xdp passes the packet to the kernel for normal routing.
+// ipv4 options and fragments are left unchanged because the transport
+// header is not always present at the fixed offset used here.
 
 #include "common.h"
 
-// XDP return codes
-#define XDP_ABORTED 0
-#define XDP_DROP    1
-#define XDP_PASS    2
-#define XDP_TX      3
+// xdp action used by this program
+#define XDP_PASS 2
 
-// XDP context (different from __sk_buff)
+// xdp context; field order follows the kernel abi
 struct xdp_md {
     __u32 data;
     __u32 data_end;
@@ -46,7 +22,7 @@ struct xdp_md {
 
 // port mapping key
 struct port_key {
-    __u32 dst_ip;    // destination IP to match (network byte order), 0 = wildcard
+    __u32 dst_ip;    // destination ip to match (network byte order), 0 = wildcard
     __u16 port;      // host port (network byte order)
     __u8 protocol;   // IPPROTO_TCP or IPPROTO_UDP
     __u8 _pad;
@@ -54,7 +30,7 @@ struct port_key {
 
 // port mapping value
 struct port_target {
-    __u32 dst_ip;    // container IP (network byte order)
+    __u32 dst_ip;    // container ip (network byte order)
     __u16 dst_port;  // container port (network byte order)
     __u16 _pad;
 };
@@ -67,8 +43,8 @@ struct bpf_map_def SEC("maps") port_map = {
     .map_flags = 0,
 };
 
-// XDP doesn't have bpf_l3_csum_replace / bpf_l4_csum_replace.
-// we need to compute checksums manually.
+// xdp has no checksum replacement helpers. update the affected words
+// directly, using the same byte order as the checksum field.
 static __attribute__((always_inline)) __u16
 csum_fold(__u32 csum)
 {
@@ -80,9 +56,6 @@ csum_fold(__u32 csum)
 static __attribute__((always_inline)) void
 update_csum(__u16 *csum, __u32 old_val, __u32 new_val)
 {
-    // SECURITY: Ensure csum pointer is valid before dereferencing
-    if (!csum) return;
-    
     __u32 s = (~((__u32)*csum) & 0xFFFF);
     s += (~old_val & 0xFFFF) + (new_val & 0xFFFF);
     s += (~(old_val >> 16) & 0xFFFF) + (new_val >> 16);
@@ -92,9 +65,6 @@ update_csum(__u16 *csum, __u32 old_val, __u32 new_val)
 static __attribute__((always_inline)) void
 update_csum16(__u16 *csum, __u16 old_val, __u16 new_val)
 {
-    // SECURITY: Ensure csum pointer is valid before dereferencing
-    if (!csum) return;
-    
     __u32 s = (~((__u32)*csum) & 0xFFFF);
     s += (~((__u32)old_val) & 0xFFFF) + ((__u32)new_val);
     *csum = csum_fold(s);
@@ -106,59 +76,50 @@ int xdp_port_map(struct xdp_md *ctx)
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
 
-    // SECURITY: Enforce reasonable packet size limits
-    __u32 pkt_len = (long)data_end - (long)data;
-    if (pkt_len < 60 || pkt_len > 9000) // Min: eth+ip+tcp/udp headers, Max: jumbo frame
-        return XDP_PASS;
-
-    // parse ethernet
     struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end)
+    if ((void *)(eth + 1) > data_end || eth->h_proto != htons(ETH_P_IP))
         return XDP_PASS;
 
-    if (eth->h_proto != htons(ETH_P_IP))
-        return XDP_PASS;
-
-    // parse IP
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end)
         return XDP_PASS;
 
-    // SECURITY: Validate IP total length
-    __u16 ip_tot_len = ntohs(ip->tot_len);
-    if (ip_tot_len < 40 || ip_tot_len > 9000) // Support jumbo frames
-        return XDP_PASS;
-    
-    // SECURITY: Validate TTL is reasonable
-    if (ip->ttl < 1 || ip->ttl > 128)
-        return XDP_PASS;
-    
-    // SECURITY: Reject obviously spoofed source IPs
-    __u32 src_ip = ip->saddr;
-    if (src_ip == 0 || src_ip == 0xFFFFFFFF ||
-        (src_ip & 0xF0000000) == 0xE0000000 ||
-        (src_ip & 0xFF000000) == 0x7F000000)
-        return XDP_PASS;
+    // require ipv4 without options and a complete, unfragmented datagram.
+    if (ip->ihl_version != 0x45 || (ip->frag_off & htons(0x3fff)))
         return XDP_PASS;
 
-    // require IHL=5 (no options) for fixed-offset transport header access
-    __u8 ihl = ip->ihl_version & 0x0F;
-    if (ihl != 5)
+    __u16 ip_len = ntohs(ip->tot_len);
+    if (ip_len < sizeof(*ip) || (void *)((char *)ip + ip_len) > data_end)
         return XDP_PASS;
 
-    // extract destination IP, port, and protocol
+    if (ip->ttl == 0)
+        return XDP_PASS;
+
+    __u32 src_ip = ntohl(ip->saddr);
+    if (src_ip == 0 || src_ip == 0xffffffff ||
+        (src_ip & 0xf0000000) == 0xe0000000 ||
+        (src_ip & 0xff000000) == 0x7f000000)
+        return XDP_PASS;
+
+    // build the lookup key only after validating the transport header
     struct port_key key = {};
     key.dst_ip = ip->daddr;
     key.protocol = ip->protocol;
 
     if (ip->protocol == IPPROTO_TCP) {
         struct tcphdr *tcp = (void *)((char *)ip + 20);
-        if ((void *)(tcp + 1) > data_end)
+        if (ip_len < sizeof(*ip) + sizeof(*tcp) || (void *)(tcp + 1) > data_end)
+            return XDP_PASS;
+        __u16 tcp_len = (ntohs(tcp->flags) >> 12) * 4;
+        if (tcp_len < sizeof(*tcp) || tcp_len > ip_len - sizeof(*ip))
             return XDP_PASS;
         key.port = tcp->dest;
     } else if (ip->protocol == IPPROTO_UDP) {
         struct udphdr *udp = (void *)((char *)ip + 20);
-        if ((void *)(udp + 1) > data_end)
+        if (ip_len < sizeof(*ip) + sizeof(*udp) || (void *)(udp + 1) > data_end)
+            return XDP_PASS;
+        __u16 udp_len = ntohs(udp->len);
+        if (udp_len < sizeof(*udp) || udp_len > ip_len - sizeof(*ip))
             return XDP_PASS;
         key.port = udp->dest;
     } else {
@@ -174,40 +135,38 @@ int xdp_port_map(struct xdp_md *ctx)
             return XDP_PASS;
     }
 
-    // SECURITY: Validate target IP is not 0.0.0.0 or broadcast
-    if (target->dst_ip == 0 || target->dst_ip == 0xFFFFFFFF)
-        return XDP_PASS;
-    
-    // SECURITY: Validate target port is valid (1-65535)
-    if (target->dst_port == 0)
+    __u32 new_daddr = target->dst_ip;
+    __u16 new_port = target->dst_port;
+    if (new_daddr == 0 || new_daddr == 0xffffffff || new_port == 0)
         return XDP_PASS;
 
-    // rewrite destination IP
     __u32 old_daddr = ip->daddr;
-    ip->daddr = target->dst_ip;
-
-    // update IP checksum (incremental, inline — no helper call)
-    update_csum(&ip->check, old_daddr, target->dst_ip);
-
-    // rewrite destination port and update L4 checksum
     if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = (void *)((char *)ip + 20);
+        struct tcphdr *tcp = (void *)((char *)ip + sizeof(*ip));
         if ((void *)(tcp + 1) > data_end)
             return XDP_PASS;
         __u16 old_port = tcp->dest;
-        tcp->dest = target->dst_port;
-        // update TCP checksum for IP change and port change
-        update_csum(&tcp->check, old_daddr, target->dst_ip);
-        update_csum16(&tcp->check, old_port, target->dst_port);
+        tcp->dest = new_port;
+        update_csum(&tcp->check, old_daddr, new_daddr);
+        update_csum16(&tcp->check, old_port, new_port);
     } else {
-        struct udphdr *udp = (void *)((char *)ip + 20);
+        struct udphdr *udp = (void *)((char *)ip + sizeof(*ip));
         if ((void *)(udp + 1) > data_end)
             return XDP_PASS;
-        udp->dest = target->dst_port;
-        // UDP checksum is optional for IPv4 -- zero it
-        udp->check = 0;
+        __u16 old_port = udp->dest;
+        udp->dest = new_port;
+        // a zero ipv4 udp checksum means disabled. preserve that choice;
+        // a calculated zero checksum is transmitted as all ones instead.
+        if (udp->check != 0) {
+            update_csum(&udp->check, old_daddr, new_daddr);
+            update_csum16(&udp->check, old_port, new_port);
+            if (udp->check == 0)
+                udp->check = 0xffff;
+        }
     }
 
+    ip->daddr = new_daddr;
+    update_csum(&ip->check, old_daddr, new_daddr);
     return XDP_PASS;
 }
 
