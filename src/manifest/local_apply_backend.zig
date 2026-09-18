@@ -289,6 +289,7 @@ fn syncExistingServiceStates(orch: *orchestrator.Orchestrator, release: *const r
         var replica: usize = 0;
         for (records.items) |record| {
             if (!std.mem.eql(u8, record.app_name orelse "", release.app.app_name) or !std.mem.eql(u8, record.hostname, svc.name)) continue;
+            if (!std.mem.eql(u8, record.status, "running")) continue;
             if (replica >= svc.replicas) break;
             const instance = @import("orchestrator/instances.zig").instanceIndex(orch.manifest.services, idx, replica);
             if (record.id.len != 12) continue;
@@ -299,21 +300,60 @@ fn syncExistingServiceStates(orch: *orchestrator.Orchestrator, release: *const r
     }
 }
 
-fn stopPreviousServiceContainers(orch: *orchestrator.Orchestrator, idx: usize) void {
-    // replacement owns the prior release's full group, including scale-down extras.
-    // ordinary supervisor shutdown only stops the instance ids it already tracks.
-    var records = store.listAll(orch.alloc) catch return;
-    defer {
-        for (records.items) |record| record.deinit(orch.alloc);
-        records.deinit(orch.alloc);
-    }
+fn stopPreviousServiceContainers(orch: *orchestrator.Orchestrator, idx: usize) !void {
+    const ownership = @import("orchestrator/ownership.zig");
     const name = orch.manifest.services[idx].name;
-    for (records.items) |record| {
-        if (!std.mem.eql(u8, record.app_name orelse "", orch.app_name) or !std.mem.eql(u8, record.hostname, name)) continue;
-        health.unregisterContainer(record.id);
+    try ownership.claim(orch.app_name, name, &orch.supervisor_token);
+    orch.states[idx].ownership_claimed = true;
+    var previous = try ownership.priorInstances(orch.alloc, orch.app_name, name, &orch.supervisor_token);
+    defer {
+        for (previous.items) |id| orch.alloc.free(id);
+        previous.deinit(orch.alloc);
+    }
+    // only older generations are candidates, even when another replacement
+    // claims the service after this snapshot was read.
+    for (previous.items) |id| {
+        const record = store.load(orch.alloc, id) catch |err| switch (err) {
+            error.NotFound => continue,
+            else => return err,
+        };
+        defer record.deinit(orch.alloc);
+        health.unregisterContainer(id);
         if (record.pid) |pid| @import("../runtime/process.zig").terminate(pid) catch {
             @import("../runtime/process.zig").kill(pid) catch {};
         };
+    }
+    const deadline = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds() + 5 * std.time.ns_per_s;
+    var forced = false;
+    while (true) {
+        var pending = false;
+        for (previous.items) |id| {
+            if (try ownership.instanceExists(id)) {
+                pending = true;
+                continue;
+            }
+            const record = store.load(orch.alloc, id) catch |err| switch (err) {
+                error.NotFound => continue,
+                else => return err,
+            };
+            defer record.deinit(orch.alloc);
+            if (record.pid) |pid| {
+                @import("../runtime/process.zig").sendSignal(pid, 0) catch continue;
+                pending = true;
+            }
+        }
+        if (!pending) break;
+        const now = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
+        if (now >= deadline + 5 * std.time.ns_per_s) return error.PreviousServiceStopTimeout;
+        if (!forced and now >= deadline) {
+            for (previous.items) |id| {
+                const record = store.load(orch.alloc, id) catch continue;
+                defer record.deinit(orch.alloc);
+                if (record.pid) |pid| @import("../runtime/process.zig").kill(pid) catch {};
+            }
+            forced = true;
+        }
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(100), "previous service shutdown")) return error.WaitInterrupted;
     }
 }
 
@@ -458,7 +498,7 @@ fn runReplacementPlan(
         var stopped_any = false;
         for (batch) |idx| {
             if (rollout_progress.isTerminalState(rollout_targets.stateFor(.{ .name = services[idx].name }))) continue;
-            runner.stop(idx);
+            try runner.stop(idx);
             stopped_any = true;
         }
         if (stopped_any) mutated = true;
@@ -865,9 +905,9 @@ const LocalApplyBackend = struct {
                 try runner_self.orch.startServiceByIndex(idx, completed_workers);
             }
 
-            fn stop(runner_self: *@This(), idx: usize) void {
-                stopPreviousServiceContainers(runner_self.orch, idx);
-                runner_self.orch.stopServiceByIndex(idx);
+            fn stop(runner_self: *@This(), idx: usize) !void {
+                try stopPreviousServiceContainers(runner_self.orch, idx);
+                @import("orchestrator/lifecycle_support.zig").stopServiceInstances(runner_self.orch, idx);
             }
 
             fn finish(runner_self: *@This()) void {
@@ -1171,7 +1211,7 @@ test "runReplacementPlan counts started and replaced services" {
             try self.started.append(alloc, idx);
         }
 
-        fn stop(self: *@This(), idx: usize) void {
+        fn stop(self: *@This(), idx: usize) !void {
             self.stopped.append(alloc, idx) catch unreachable;
         }
 
@@ -1224,7 +1264,7 @@ test "runReplacementPlan reports partial failure after mutation" {
             try self.started.append(alloc, idx);
         }
 
-        fn stop(self: *@This(), idx: usize) void {
+        fn stop(self: *@This(), idx: usize) !void {
             self.stopped.append(alloc, idx) catch unreachable;
         }
 
@@ -1280,7 +1320,7 @@ test "runReplacementPlan emits live target progress after each update" {
             try self.started.append(alloc, idx);
         }
 
-        fn stop(_: *@This(), _: usize) void {}
+        fn stop(_: *@This(), _: usize) !void {}
 
         fn finish(_: *@This()) void {}
 
@@ -1321,7 +1361,7 @@ test "runReplacementPlan reports readiness timeout details" {
         control_checks: usize = 0,
 
         fn start(_: *@This(), _: usize, _: *std.StringHashMapUnmanaged(void)) !void {}
-        fn stop(_: *@This(), _: usize) void {}
+        fn stop(_: *@This(), _: usize) !void {}
         fn finish(_: *@This()) void {}
         fn waitHealthy(_: *@This(), _: []const usize, _: u32) ReplacementHealthResult {
             return .timeout;
@@ -1354,7 +1394,7 @@ test "runReplacementPlan tracks mixed per-target readiness outcomes" {
 
     const Runner = struct {
         fn start(_: *@This(), _: usize, _: *std.StringHashMapUnmanaged(void)) !void {}
-        fn stop(_: *@This(), _: usize) void {}
+        fn stop(_: *@This(), _: usize) !void {}
         fn finish(_: *@This()) void {}
         fn waitHealthyResults(_: *@This(), alloc_inner: std.mem.Allocator, _: []const usize, _: u32) ![]ReplacementHealthResult {
             const results = try alloc_inner.alloc(ReplacementHealthResult, 2);
@@ -1400,7 +1440,7 @@ test "runReplacementPlan resumes only unfinished targets from stored rollout sta
             try self.started.append(alloc, idx);
         }
 
-        fn stop(_: *@This(), _: usize) void {}
+        fn stop(_: *@This(), _: usize) !void {}
         fn finish(_: *@This()) void {}
     };
 
@@ -1443,7 +1483,7 @@ test "runReplacementPlan reports canceled rollout before mutation" {
             self.started += 1;
         }
 
-        fn stop(_: *@This(), _: usize) void {}
+        fn stop(_: *@This(), _: usize) !void {}
         fn finish(_: *@This()) void {}
 
         fn awaitControl(self: *@This()) bool {
@@ -1482,7 +1522,7 @@ test "runReplacementPlan reports canceled rollout after mutation" {
             try self.started.append(alloc, idx);
         }
 
-        fn stop(_: *@This(), _: usize) void {}
+        fn stop(_: *@This(), _: usize) !void {}
         fn finish(_: *@This()) void {}
 
         fn awaitControl(self: *@This()) bool {

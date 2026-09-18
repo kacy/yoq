@@ -12,6 +12,7 @@ const service_runtime = @import("service_runtime.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const instances = @import("instances.zig");
+const ownership = @import("ownership.zig");
 
 const writeErr = cli.writeErr;
 
@@ -175,6 +176,13 @@ pub fn startServiceByIndex(
         }
     }
 
+    if (!self.states[idx].ownership_claimed) {
+        ownership.claim(self.app_name, svc.name, &self.supervisor_token) catch return OrchestratorError.StartFailed;
+        self.states[idx].ownership_claimed = true;
+    } else if (!(ownership.isOwner(self.app_name, svc.name, &self.supervisor_token) catch false)) {
+        return OrchestratorError.StartFailed;
+    }
+
     errdefer stopServiceByIndex(self, idx);
     for (0..svc.replicas) |replica| {
         const instance = instances.instanceIndex(self.manifest.services, idx, replica);
@@ -233,6 +241,16 @@ pub fn stopAll(self: anytype) void {
 }
 
 pub fn stopServiceByIndex(self: anytype, idx: usize) void {
+    stopServiceInstances(self, idx);
+    if (self.states[idx].ownership_claimed) {
+        ownership.release(self.app_name, self.manifest.services[idx].name, &self.supervisor_token) catch |err| {
+            log.warn("failed to release supervisor ownership: {}", .{err});
+        };
+        self.states[idx].ownership_claimed = false;
+    }
+}
+
+pub fn stopServiceInstances(self: anytype, idx: usize) void {
     const svc = self.manifest.services[idx];
     // request every replica to stop before joining any supervisor thread.
     for (0..svc.replicas) |replica| {

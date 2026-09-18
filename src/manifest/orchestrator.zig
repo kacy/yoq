@@ -17,6 +17,7 @@
 const std = @import("std");
 
 const cli = @import("../lib/cli.zig");
+const container = @import("../runtime/container.zig");
 const spec = @import("spec.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const health = @import("health.zig");
@@ -42,6 +43,7 @@ pub const OrchestratorError = error{
 pub const ServiceState = struct {
     container_id: [12]u8,
     identity_mutex: std.Io.Mutex = .init,
+    ownership_claimed: bool = false,
     thread: ?std.Thread,
     status: Status,
     health_status: ?health.HealthStatus = null,
@@ -83,6 +85,7 @@ pub const Orchestrator = struct {
     alloc: std.mem.Allocator,
     manifest: *spec.Manifest,
     app_name: []const u8,
+    supervisor_token: [12]u8 = [_]u8{0} ** 12,
     states: []ServiceState,
     dev_mode: bool = false,
     restart_requested: []std.atomic.Value(bool),
@@ -111,6 +114,9 @@ pub const Orchestrator = struct {
             };
         }
 
+        var supervisor_token: [12]u8 = undefined;
+        try container.generateId(&supervisor_token);
+
         const restart_flags = try alloc.alloc(std.atomic.Value(bool), instance_count);
         for (restart_flags) |*f| {
             f.* = std.atomic.Value(bool).init(false);
@@ -120,6 +126,7 @@ pub const Orchestrator = struct {
             .alloc = alloc,
             .manifest = manifest,
             .app_name = app_name,
+            .supervisor_token = supervisor_token,
             .states = states,
             .restart_requested = restart_flags,
         };

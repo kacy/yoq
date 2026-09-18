@@ -16,6 +16,7 @@ const startup_runtime = @import("startup_runtime.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const instances = @import("instances.zig");
+const ownership = @import("ownership.zig");
 
 const published_ports = @import("../../network/published_ports.zig");
 
@@ -66,7 +67,7 @@ const PreparedService = struct {
         errdefer vols.deinit(alloc);
 
         var gpu_lease = if (svc.gpu) |gpu_spec|
-            try @import("../../gpu/lease.zig").Lease.acquire(gpu_spec.count, gpu_spec.model)
+            try @import("../../gpu/lease.zig").Lease.acquireWithMinimum(gpu_spec.count, gpu_spec.model, gpu_spec.vram_min_mb)
         else
             @import("../../gpu/lease.zig").Lease{};
         errdefer gpu_lease.deinit();
@@ -133,6 +134,9 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
     var threaded_io = std.Io.Threaded.init(orch.alloc, .{});
     defer threaded_io.deinit();
 
+    var supervised_id: ?[12]u8 = null;
+    defer if (supervised_id) |id| ownership.removeInstance(&id) catch {};
+
     var prepared = PreparedService.init(threaded_io.io(), orch, idx) catch |err| {
         log.err("failed to prepare service {s}: {}", .{ svc.name, err });
         orch.states[idx].setStatus(.failed);
@@ -143,6 +147,9 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
     var backoff_ms: u64 = initial_backoff_ms;
 
     while (!orch.states[idx].stop_requested.load(.acquire) and !shutdown_requested.load(.acquire)) {
+        if (!(ownership.isOwner(orch.app_name, svc.name, &orch.supervisor_token) catch false)) break;
+        if (supervised_id) |id| ownership.removeInstance(&id) catch {};
+        supervised_id = null;
         orch.states[idx].setStatus(.starting);
         var id_buf: [12]u8 = undefined;
         container.generateId(&id_buf) catch {
@@ -168,6 +175,15 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             return;
         };
 
+        ownership.registerInstance(orch.app_name, svc.name, &orch.supervisor_token, id) catch |err| {
+            log.warn("service {s} lost supervisor ownership: {}", .{ svc.name, err });
+            cleanupContainerArtifacts(id);
+            orch.states[idx].setStatus(.stopped);
+            return;
+        };
+
+        supervised_id = id_buf;
+
         var c = prepared.createContainer(orch, idx, id, svc.name);
         const start_time = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
 
@@ -179,7 +195,9 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
 
         // shutdown can arrive while start is creating the process. recheck here
         // so a stop request cannot join a supervisor waiting on a new child.
-        if (orch.states[idx].stop_requested.load(.acquire) or shutdown_requested.load(.acquire)) {
+        if (orch.states[idx].stop_requested.load(.acquire) or shutdown_requested.load(.acquire) or
+            !(ownership.isOwner(orch.app_name, svc.name, &orch.supervisor_token) catch false))
+        {
             c.forceStop() catch {};
             _ = c.wait() catch 255;
             cleanupContainerArtifacts(id);
@@ -216,7 +234,8 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
         const run_duration_ns = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds() - start_time;
         cleanupContainerArtifacts(id);
 
-        if (shutdown_requested.load(.acquire) or orch.states[idx].stop_requested.load(.acquire)) break;
+        if (shutdown_requested.load(.acquire) or orch.states[idx].stop_requested.load(.acquire) or
+            !(ownership.isOwner(orch.app_name, svc.name, &orch.supervisor_token) catch false)) break;
 
         if (orch.dev_mode) {
             if (!handleDevModeRestart(orch, idx, svc.name, shutdown_requested)) break;
@@ -230,6 +249,8 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             &backoff_ms,
             shutdown_requested,
             &orch.states[idx].stop_requested,
+            orch.app_name,
+            &orch.supervisor_token,
         )) break;
     }
 
@@ -285,6 +306,7 @@ fn handleDevModeRestart(
 
     orch.states[idx].setStatus(.stopped);
     while (!shutdown_requested.load(.acquire) and !orch.states[idx].stop_requested.load(.acquire)) {
+        if (!(ownership.isOwner(orch.app_name, service_name, &orch.supervisor_token) catch false)) return false;
         if (orch.restart_requested[idx].load(.acquire)) {
             orch.restart_requested[idx].store(false, .release);
             writeErr("restarting {s}...\n", .{service_name});
@@ -302,6 +324,8 @@ fn handleRestartPolicyExit(
     backoff_ms: *u64,
     shutdown_requested: *const std.atomic.Value(bool),
     stop_requested: *const std.atomic.Value(bool),
+    app_name: []const u8,
+    supervisor_token: []const u8,
 ) bool {
     const should_restart = switch (svc.restart) {
         .none => false,
@@ -322,7 +346,8 @@ fn handleRestartPolicyExit(
 
     var slept_ms: u64 = 0;
     while (slept_ms < backoff_ms.*) {
-        if (shutdown_requested.load(.acquire) or stop_requested.load(.acquire)) return false;
+        if (shutdown_requested.load(.acquire) or stop_requested.load(.acquire) or
+            !(ownership.isOwner(app_name, svc.name, supervisor_token) catch false)) return false;
         const remaining = backoff_ms.* - slept_ms;
         const sleep_chunk: u64 = @min(remaining, restart_poll_ms);
         if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(@intCast(sleep_chunk)), "restart backoff wait")) return false;
