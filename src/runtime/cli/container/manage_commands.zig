@@ -66,7 +66,10 @@ pub fn inspect(args: *std.process.Args.Iterator, ctx: AppContext) !void {
         else => return err,
     };
     defer if (cfg) |value| value.deinit(ctx.alloc);
+    const name = try control.nameForId(ctx.alloc, record.id);
+    defer if (name) |value| ctx.alloc.free(value);
     const output = try std.json.Stringify.valueAlloc(ctx.alloc, .{
+        .name = name orelse record.hostname,
         .state = record,
         .desired_running = try control.wantsRunning(record.id),
         .config = cfg,
@@ -79,6 +82,7 @@ pub fn containerCommand(args: *std.process.Args.Iterator, ctx: AppContext) !void
     const name = cli.requireArg(args, "usage: yoq container <create|run|start|stop|restart|rm|wait|kill|inspect|exec|logs|ls>\n");
     const commands = @import("../../container_commands.zig");
     const resources = @import("resource_commands.zig");
+    if (std.mem.eql(u8, name, "rename")) return @import("list_commands.zig").rename(args, ctx);
     if (std.mem.eql(u8, name, "top")) return resources.top(args, ctx);
     if (std.mem.eql(u8, name, "stats")) return resources.stats(args, ctx);
     if (std.mem.eql(u8, name, "pause")) return resources.pause(args, ctx);
@@ -97,7 +101,7 @@ pub fn containerCommand(args: *std.process.Args.Iterator, ctx: AppContext) !void
     if (std.mem.eql(u8, name, "rm")) return commands.rm(args, ctx);
     if (std.mem.eql(u8, name, "exec")) return commands.exec_cmd(args, ctx);
     if (std.mem.eql(u8, name, "logs")) return commands.log(args, ctx);
-    if (std.mem.eql(u8, name, "ls")) return commands.ps(ctx.alloc);
+    if (std.mem.eql(u8, name, "ls")) return @import("list_commands.zig").ps(args, ctx);
     cli.writeErr("unknown container command: {s}\n", .{name});
     return error.InvalidArgument;
 }

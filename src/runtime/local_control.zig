@@ -100,6 +100,41 @@ pub fn findName(alloc: std.mem.Allocator, name: []const u8) !?[]const u8 {
     return row.container_id.data;
 }
 
+pub fn nameForId(alloc: std.mem.Allocator, id: []const u8) !?[]const u8 {
+    var lease = try db_store.leaseDb();
+    defer lease.deinit();
+    const row = try lease.db.oneAlloc(struct { name: sqlite.Text }, alloc, "SELECT name FROM local_containers WHERE container_id = ? AND name IS NOT NULL;", .{}, .{id}) orelse return null;
+    return row.name.data;
+}
+
+pub fn rename(id: []const u8, name: []const u8) !void {
+    if (name.len == 0 or name.len > 128) return error.InvalidName;
+    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-' and c != '.') return error.InvalidName;
+    try ensureRegistered(id);
+    var lease = try db_store.leaseDb();
+    defer lease.deinit();
+    // The unique index arbitrates concurrent renames. Legacy hostnames also
+    // reserve their names until those containers are renamed or removed.
+    const row = try lease.db.one(struct { updated: i64 }, "UPDATE OR IGNORE local_containers SET name = ? WHERE container_id = ? AND NOT EXISTS (SELECT 1 FROM containers WHERE hostname = ? AND id != ? AND id NOT IN (SELECT container_id FROM local_containers WHERE name IS NOT NULL)) RETURNING 1 AS updated;", .{}, .{ name, id, name, id });
+    if (row == null) return error.NameInUse;
+}
+
+test "rename resolves legacy duplicate names without changing hostname" {
+    const store = @import("../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    for ([_][]const u8{ "0123456789ab", "abcdef012345" }) |id| {
+        try store.save(.{ .id = id, .rootfs = "", .command = "sh", .hostname = "old", .status = "stopped", .pid = null, .exit_code = 0, .created_at = 0 });
+    }
+    try std.testing.expectError(error.NameInUse, rename("0123456789ab", "old"));
+    try rename("0123456789ab", "first");
+    try rename("abcdef012345", "old");
+    try std.testing.expectError(error.NameInUse, rename("abcdef012345", "first"));
+    const record = try store.load(std.testing.allocator, "0123456789ab");
+    defer record.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("old", record.hostname);
+}
+
 test "local lifecycle generations reject delayed supervisors and stale completion" {
     const store = @import("../state/store.zig");
     try store.initTestDb();

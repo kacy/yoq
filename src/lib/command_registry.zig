@@ -42,6 +42,7 @@ pub const CommandSpec = struct {
 };
 
 pub const command_specs = [_]CommandSpec{
+    .{ .name = "rename", .group = .runtime, .usage = "rename <id|name> <new-name>", .description = "change a container name", .handler = @import("../runtime/cli/container/list_commands.zig").rename },
     .{ .name = "top", .group = .runtime, .usage = "top [opts] <id|name>", .description = "show container processes", .handler = container_resources.top },
     .{ .name = "stats", .group = .runtime, .usage = "stats [opts] <id|name>", .description = "show container resource usage", .handler = container_resources.stats },
     .{ .name = "pause", .group = .runtime, .usage = "pause [opts] <id|name>", .description = "freeze a running container", .handler = container_resources.pause },
@@ -218,10 +219,7 @@ fn helpHandler(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 }
 
 fn psHandler(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
-    }
-    try container_cmds.ps(ctx.alloc);
+    try @import("../runtime/cli/container/list_commands.zig").ps(args, ctx);
 }
 
 fn imagesHandler(args: *std.process.Args.Iterator, ctx: AppContext) !void {

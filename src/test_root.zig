@@ -287,3 +287,7 @@ comptime {
     _ = @import("gpu/mps.zig");
     _ = @import("gpu/commands.zig");
 }
+
+test {
+    _ = @import("runtime/cli/container/list_commands.zig");
+}
