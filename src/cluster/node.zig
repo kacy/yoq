@@ -410,8 +410,14 @@ pub const Node = struct {
     /// buffer a heartbeat for batch proposal. HTTP threads call this
     /// instead of propose() — the tick loop flushes accumulated
     /// heartbeats every ~2s as a single raft entry.
-    pub fn recordHeartbeat(self: *Node, id: []const u8, resources: agent_registry.AgentResources, now: i64) void {
+    pub fn recordHeartbeat(self: *Node, id: []const u8, resources: agent_registry.AgentResources, now: i64) bool {
+        self.mu.lockUncancelable(std.Options.debug_io);
+        defer self.mu.unlock(std.Options.debug_io);
+        // only the leader flushes this buffer. acknowledging a follower's
+        // heartbeat would strand the agent on a server that never records it.
+        if (self.raft.role != .leader) return false;
         self.heartbeat_batcher.record(id, resources, now);
+        return true;
     }
 
     /// get a pointer to the state machine's replicated database.
@@ -1704,4 +1710,49 @@ test "processing actions after snapshot failure releases skipped payloads" {
 
 test {
     _ = @import("static_membership.zig");
+}
+
+test "agent recovery learns leader hints on existing follower append and snapshot messages" {
+    const alloc = std.testing.allocator;
+    for ([_]bool{ false, true }) |use_snapshot| {
+        var node = try Node.initForTests(alloc, .{
+            .id = 1,
+            .port = 0,
+            .api_port = 7700,
+            .peers = &.{.{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 }},
+            .shared_key = [_]u8{7} ** 32,
+            .data_dir = "/unused",
+        });
+        defer node.deinit();
+        node.fixPointers();
+        _ = node.raft.handleRequestVote(.{ .term = 1, .candidate_id = 2, .last_log_index = 0, .last_log_term = 0 });
+        action_loop.processActions(&node);
+        for ([_]u64{ 1, 2 }) |term| {
+            node.leader_id = null;
+            try std.testing.expectEqual(types.Role.follower, node.raft.role);
+            if (use_snapshot) {
+                const reply = node.raft.handleInstallSnapshot(.{
+                    .term = term,
+                    .leader_id = 2,
+                    .last_included_index = 0,
+                    .last_included_term = 0,
+                    .data = &.{},
+                });
+                try std.testing.expectEqual(term, reply.term);
+            } else {
+                const reply = node.raft.handleAppendEntries(.{
+                    .term = term,
+                    .leader_id = 2,
+                    .prev_log_index = 0,
+                    .prev_log_term = 0,
+                    .entries = &.{},
+                    .leader_commit = 0,
+                });
+                try std.testing.expect(reply.success);
+            }
+            action_loop.processActions(&node);
+            var address: [64]u8 = undefined;
+            try std.testing.expectEqualStrings("10.0.0.2:7700", node.leaderAddrBuf(&address) orelse return error.MissingLeaderHint);
+        }
+    }
 }

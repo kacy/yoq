@@ -13,7 +13,7 @@ yoq clusters let you run workloads across multiple machines under one control pl
   - **9800** — gossip protocol (UDP)
   - **51820** — WireGuard overlay (UDP)
 
-run `sudo -H yoq doctor` on each machine to check runtime prerequisites before starting.
+run `sudo -H "$(command -v yoq)" doctor` on each machine to check runtime prerequisites before starting.
 
 ---
 
@@ -48,7 +48,7 @@ use `sudo -H` for these runtime and operator commands so they read the same root
 ### step 2: configure the first voter
 
 ```
-sudo -H yoq init-server \
+sudo -H "$(command -v yoq)" init-server \
   --id 1 \
   --port 9700 \
   --api-port 7700 \
@@ -63,7 +63,7 @@ This starts the first voter, the API server, and gossip. It waits for a majority
 on s2:
 
 ```
-sudo -H yoq init-server \
+sudo -H "$(command -v yoq)" init-server \
   --id 2 \
   --port 9700 \
   --api-port 7700 \
@@ -74,7 +74,7 @@ sudo -H yoq init-server \
 on s3:
 
 ```
-sudo -H yoq init-server \
+sudo -H "$(command -v yoq)" init-server \
   --id 3 \
   --port 9700 \
   --api-port 7700 \
@@ -93,7 +93,7 @@ For existing installations, preserve the original voter configuration on the fir
 Run this locally on each server, using the api token installed above:
 
 ```
-sudo -H yoq cluster status
+sudo -H "$(command -v yoq)" cluster status
 ```
 
 Check that exactly one server reports `role: "leader"` and that all three settle on the same term. After a registration or deployment, compare their `commit_index` and `last_applied`; they should converge with no apply backlog. `yoq nodes` lists registered workers and is not a Raft voter-membership check.
@@ -105,7 +105,7 @@ Check that exactly one server reports `role: "leader"` and that all three settle
 agents are worker nodes that run containers. they don't participate in consensus, so you can add hundreds without affecting Raft performance.
 
 ```
-sudo -H yoq join 10.0.0.1 --token "$TOKEN"
+sudo -H "$(command -v yoq)" join 10.0.0.1 --token "$TOKEN"
 ```
 
 the agent can point at any server — it doesn't have to be the leader. if the agent hits a non-leader server, the server responds with the current leader's address and the agent automatically redirects. this means you can use a load balancer or any server IP for `yoq join`.
@@ -125,12 +125,20 @@ Container setup appends forwarding rules for traffic originating on `yoq0` from 
 
 the agent writes its private enrollment identity under `~/.local/share/yoq/enrollment/` before contacting the server. retrying the same join address, API port and token reuses its credential and WireGuard key, including after a lost response or process restart. updated servers return the same committed agent and node IDs and refresh the worker endpoint; a retry cannot revive a revoked credential or replace the WireGuard key.
 
+`yoq join` retries transport failures, unavailable or rate-limited servers, and elections or uncertain quorum commits for up to 120 seconds. retries start after 250 milliseconds and back off to two seconds. each request is limited to ten seconds within that shared deadline. invalid credentials, malformed responses, and local identity or storage errors fail immediately. `SIGINT` and `SIGTERM` cancel enrollment waits and stop a running agent; undelivered assignment reports stay in its local cache. after the startup deadline, restore connectivity and restart the command.
+
 keep this directory across agent restarts. changing the join address, port or token selects a separate identity. older servers remain compatible but do not deduplicate enrollment; upgrade servers before relying on retry recovery. registrations created without a durable enrollment identity are not matched retroactively.
+
+the same enrollment directory stores trusted api alternatives in a `.api-servers` file. registration and heartbeat responses authenticate this list with the enrollment token. peers use the configured cluster-wide api port. the agent tries up to three trusted endpoints per operation and retains its position for the next retry. a bare leader hint cannot authorize sending credentials to a new address. keep the original join arguments when restarting an agent; failover does not change its identity.
+
+assignment attempts and status reports are durable in `~/.local/share/yoq/agent-cache.db`. keep this file with the enrollment directory. terminal reports remain queued until a server confirms committed application. each reassignment increments a generation, so a late result cannot stop a replacement attempt. after restart, the agent stops any cgroup recorded for an interrupted attempt before reporting it failed; it does not start work from an old cached snapshot. failed cleanup leaves that attempt blocked for a later retry.
+
+the result queue holds at most 8,192 attempts. if reports cannot drain, the agent stops admitting new work instead of deleting results. restore API connectivity or resolve local storage errors; deleting the cache can lose completion records. normal loops process at most eight results, and shutdown attempts one delivery before leaving the remainder for restart.
 
 from a server or operator host with the installed api token, verify the agent appears:
 
 ```
-sudo -H yoq nodes --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" nodes --server 10.0.0.1:7700
 ```
 
 ---
@@ -154,7 +162,7 @@ port = 3000
 ```
 
 ```
-sudo -H yoq up --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" up --server 10.0.0.1:7700
 ```
 
 the `--server` flag tells yoq to submit the manifest to the cluster API instead of running locally. under the hood the CLI sends a single app snapshot to `POST /apps/apply`; `yoq up --server 10.0.0.1:7700 --dry-run` sends the same snapshot to `POST /apps/dry-run` for a non-mutating diff. that snapshot carries services, workers, crons, and training jobs together. the older `/deploy` route remains only for compatibility. the scheduler places containers on agents using bin-packing (scores by free CPU + memory). service discovery and load balancing work transparently across nodes via the WireGuard overlay and eBPF.
@@ -162,13 +170,13 @@ the `--server` flag tells yoq to submit the manifest to the cluster API instead 
 after deploy, use the app-first day-2 commands:
 
 ```
-sudo -H yoq apps --server 10.0.0.1:7700
-sudo -H yoq status --app [name] --server 10.0.0.1:7700
-sudo -H yoq history --app [name] --server 10.0.0.1:7700
-sudo -H yoq rollback --app [name] --server 10.0.0.1:7700 [--release <release-id>] [--print]
-sudo -H yoq rollout pause --app [name] --server 10.0.0.1:7700
-sudo -H yoq rollout resume --app [name] --server 10.0.0.1:7700
-sudo -H yoq rollout cancel --app [name] --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" apps --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" status --app [name] --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" history --app [name] --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" rollback --app [name] --server 10.0.0.1:7700 [--release <release-id>] [--print]
+sudo -H "$(command -v yoq)" rollout pause --app [name] --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" rollout resume --app [name] --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" rollout cancel --app [name] --server 10.0.0.1:7700
 ```
 
 `yoq apps` shows the latest release summary for every app, `status --app` shows the latest release metadata for one app, `history --app` lists prior releases, and remote `rollback --app` re-applies the previous successful app release by default. Add `--release` to target a specific stored release or `--print` to inspect the selected snapshot without applying it. `yoq run-worker --server ...` and `yoq train ... --server ...` resolve workers and training jobs from the current app release on the server. Clustered app applies also register cron schedules from the current app snapshot, and the app summary/status views include live training runtime counts plus previous-successful release context for the app.
@@ -188,7 +196,7 @@ clustered service applies are rollout-aware:
 server membership stays fixed. to tolerate two server failures, start a new cluster with five voters and list the other four on every server. for s1:
 
 ```bash
-sudo -H yoq init-server \
+sudo -H "$(command -v yoq)" init-server \
   --id 1 \
   --port 9700 \
   --api-port 7700 \
@@ -217,7 +225,7 @@ for higher availability, run 3+ servers per region (e.g. 3 regions x 3 servers =
 start servers as normal. then join agents with region labels:
 
 ```
-sudo -H yoq join 10.0.0.1 --token "$TOKEN" --region us-east-1
+sudo -H "$(command -v yoq)" join 10.0.0.1 --token "$TOKEN" --region us-east-1
 ```
 
 the `--region` flag stores the region on the agent record. for more granular placement, set labels via the API:
@@ -267,7 +275,7 @@ keep in mind:
 Configure all nine voters before starting them. For s1, list all eight other servers:
 
 ```
-sudo -H yoq init-server --id 1 --port 9700 --api-port 7700 \
+sudo -H "$(command -v yoq)" init-server --id 1 --port 9700 --api-port 7700 \
   --peers 2@10.0.0.2:9700,3@10.0.0.3:9700,4@10.1.0.1:9700,5@10.1.0.2:9700,6@10.1.0.3:9700,7@10.2.0.1:9700,8@10.2.0.2:9700,9@10.2.0.3:9700 \
   --token "$TOKEN"
 ```
@@ -278,13 +286,13 @@ join agents with region labels:
 
 ```
 # us-east-1 agents
-sudo -H yoq join 10.0.0.1 --token "$TOKEN" --region us-east-1
+sudo -H "$(command -v yoq)" join 10.0.0.1 --token "$TOKEN" --region us-east-1
 
 # eu-west-1 agents
-sudo -H yoq join 10.1.0.1 --token "$TOKEN" --region eu-west-1
+sudo -H "$(command -v yoq)" join 10.1.0.1 --token "$TOKEN" --region eu-west-1
 
 # ap-southeast-1 agents
-sudo -H yoq join 10.2.0.1 --token "$TOKEN" --region ap-southeast-1
+sudo -H "$(command -v yoq)" join 10.2.0.1 --token "$TOKEN" --region ap-southeast-1
 ```
 
 ---
@@ -294,7 +302,7 @@ sudo -H yoq join 10.2.0.1 --token "$TOKEN" --region ap-southeast-1
 ### checking cluster status
 
 ```
-sudo -H yoq nodes
+sudo -H "$(command -v yoq)" nodes
 ```
 
 Lists registered workers and their resource usage and status. Run `yoq cluster status` on each server to inspect its Raft role and apply progress.
@@ -309,9 +317,9 @@ curl http://10.0.0.1:7700/cluster/status \
 for app-first day-2 operations, use:
 
 ```bash
-sudo -H yoq apps --server 10.0.0.1:7700
-sudo -H yoq status --app myapp --server 10.0.0.1:7700 --json
-sudo -H yoq history --app myapp --server 10.0.0.1:7700 --json
+sudo -H "$(command -v yoq)" apps --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" status --app myapp --server 10.0.0.1:7700 --json
+sudo -H "$(command -v yoq)" history --app myapp --server 10.0.0.1:7700 --json
 ```
 
 the JSON responses now carry these nested sections:
@@ -329,10 +337,10 @@ the nested rollout view includes rollout state, control state, target counts, fa
 for a readiness-gated release, the basic operator drill is:
 
 ```bash
-sudo -H yoq rollout pause --app myapp --server 10.0.0.1:7700
-sudo -H yoq status --app myapp --server 10.0.0.1:7700
-sudo -H yoq history --app myapp --server 10.0.0.1:7700
-sudo -H yoq rollout resume --app myapp --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" rollout pause --app myapp --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" status --app myapp --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" history --app myapp --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" rollout resume --app myapp --server 10.0.0.1:7700
 ```
 
 what to verify:
@@ -344,7 +352,7 @@ what to verify:
 to abort instead of continuing:
 
 ```bash
-sudo -H yoq rollout cancel --app myapp --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" rollout cancel --app myapp --server 10.0.0.1:7700
 ```
 
 what to verify:
@@ -407,7 +415,7 @@ the important read paths are:
 before taking a node offline for maintenance:
 
 ```
-sudo -H yoq drain <node-id>
+sudo -H "$(command -v yoq)" drain <node-id>
 ```
 
 this marks the node as draining. the scheduler stops placing new containers there and migrates existing workloads to other nodes. wait for the node to show no running containers before shutting it down.
@@ -423,6 +431,12 @@ curl http://10.0.0.1:7700/metrics \
 
 the api token is the 64-character lowercase hex value installed during credential setup. these commands read `/root/.local/share/yoq/api_token`.
 
+### assignment recovery upgrade
+
+pause workload mutations and rescheduling while upgrading every voting server to the generation-aware schema. older voters cannot apply the new assignment statements consistently. upgrade agents before resuming scheduling, and preserve both enrollment files and `agent-cache.db`.
+
+successful enrollment from an older server remains readable. an older follower cannot introduce a new endpoint through an unsigned leader hint, and an older server's HTTP 200 does not confirm durable status delivery. those reports remain queued until an upgraded server returns a committed receipt. legacy status updates without a generation are accepted only for the original generation zero.
+
 ### rolling upgrades
 
 for a compatible binary upgrade, retain quorum while replacing servers. the replicated-command validation change requires a coordinated voter upgrade instead; see [replicated command recovery](#upgrading-replicated-command-validation). for ordinary compatible upgrades:
@@ -436,7 +450,7 @@ curl -X POST http://10.0.0.1:7700/cluster/step-down \
   -H "Authorization: Bearer $API_TOKEN"
 ```
 
-this gracefully transfers leadership to another server. if the node is not the leader, the response includes a `"leader"` field pointing to the current leader. the old leader can then be drained and upgraded. agents automatically follow the new leader via heartbeat responses.
+this gracefully transfers leadership to another server. if the node is not the leader, the response includes a `"leader"` field pointing to the current leader. the old leader can then be drained and upgraded. agents follow trusted leader hints and try their persisted alternatives if the current server becomes unreachable.
 
 ### routine failure drills
 

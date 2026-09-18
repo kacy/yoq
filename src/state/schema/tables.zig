@@ -232,6 +232,7 @@ pub fn initClusterTables(db: *sqlite.Db) SchemaError!void {
         \\    command TEXT NOT NULL DEFAULT '',
         \\    status TEXT NOT NULL DEFAULT 'pending',
         \\    status_reason TEXT,
+        \\    generation INTEGER NOT NULL DEFAULT 0,
         \\    cpu_limit INTEGER NOT NULL DEFAULT 1000,
         \\    memory_limit_mb INTEGER NOT NULL DEFAULT 256,
         \\    app_name TEXT,

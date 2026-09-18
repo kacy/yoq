@@ -25,6 +25,10 @@ pub fn handleAppendEntries(
         }
     } else if (self.role == .candidate) {
         self.role = .follower;
+    }
+    // an existing follower also learns the leader after an election. publishing
+    // only candidate transitions leaves the api without a usable redirect.
+    if (self.role == .follower) {
         self.actions.append(self.alloc, .{ .become_follower = .{ .leader_id = args.leader_id } }) catch |e| {
             logger.warn("raft: failed to queue become_follower action: {}", .{e});
         };
@@ -318,8 +322,9 @@ test "append entries retries commit notification after queue allocation failure"
     try std.testing.expectEqual(@as(types.LogIndex, 2), raft.commit_index);
     const actions = try raft.drainActions();
     defer alloc.free(actions);
-    try std.testing.expectEqual(@as(usize, 1), actions.len);
-    try std.testing.expectEqual(@as(types.LogIndex, 2), actions[0].commit_entries.up_to);
+    try std.testing.expectEqual(@as(usize, 2), actions.len);
+    try std.testing.expectEqual(@as(types.NodeId, 1), actions[0].become_follower.leader_id);
+    try std.testing.expectEqual(@as(types.LogIndex, 2), actions[1].commit_entries.up_to);
 }
 
 test "leader retries commit notification without another follower acknowledgement" {

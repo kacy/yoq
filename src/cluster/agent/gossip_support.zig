@@ -112,19 +112,11 @@ pub fn initGossip(self: anytype) void {
     log.info("gossip: initialized with {d} seeds on UDP port {}", .{ added, default_gossip_port });
 }
 
-pub fn initCache(_: anytype) void {
-    paths.ensureDataDir("") catch {
-        log.warn("failed to create data dir for agent cache", .{});
-        return;
-    };
+pub fn initCache(_: anytype) !void {
+    try paths.ensureDataDirStrict("");
     var path_buf: [paths.max_path]u8 = undefined;
-    const db_path = paths.dataPath(&path_buf, "agent-cache.db") catch {
-        log.warn("failed to get data path for agent cache", .{});
-        return;
-    };
-    agent_store.initWithPath(db_path) catch |e| {
-        log.warn("failed to init agent cache: {}", .{e});
-    };
+    const db_path = try paths.dataPath(&path_buf, "agent-cache.db");
+    try agent_store.initWithPath(db_path);
 }
 
 pub fn tickGossipLoop(self: anytype) void {

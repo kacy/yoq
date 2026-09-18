@@ -438,13 +438,13 @@ fn reassignGroup(alloc: std.mem.Allocator, session: mutation.Session, orphan_id:
         const port = try reserveGangPort(session, request.gang_master_port, &.{});
         for (ranks) |*rank| rank.master_port = port;
         for (ranks, ids.items) |rank, id| {
-            try sql.write(&batch.writer, "UPDATE assignments SET agent_id = CASE WHEN (SELECT last_applied FROM state_machine_meta WHERE id = 1) = ? THEN ? ELSE NULL END, status = 'pending', status_reason = NULL, gang_master_addr = ?, gang_master_port = ? WHERE id = ?;", .{ snapshot.index, rank.agent_id, rank.master_addr, rank.master_port, id });
+            try sql.write(&batch.writer, "UPDATE assignments SET agent_id = CASE WHEN (SELECT last_applied FROM state_machine_meta WHERE id = 1) = ? THEN ? ELSE NULL END, status = 'pending', status_reason = NULL, generation = generation + 1, gang_master_addr = ?, gang_master_port = ? WHERE id = ?;", .{ snapshot.index, rank.agent_id, rank.master_addr, rank.master_port, id });
         }
     } else {
         const choices = try scheduler.schedule(alloc, &.{request}, snapshot.records);
         defer alloc.free(choices);
         const choice = choices[0] orelse return;
-        try sql.write(&batch.writer, "UPDATE assignments SET agent_id = CASE WHEN (SELECT last_applied FROM state_machine_meta WHERE id = 1) = ? THEN ? ELSE NULL END, status = 'pending', status_reason = NULL WHERE id = ?;", .{ snapshot.index, choice.agent_id, orphan_id });
+        try sql.write(&batch.writer, "UPDATE assignments SET agent_id = CASE WHEN (SELECT last_applied FROM state_machine_meta WHERE id = 1) = ? THEN ? ELSE NULL END, status = 'pending', status_reason = NULL, generation = generation + 1 WHERE id = ?;", .{ snapshot.index, choice.agent_id, orphan_id });
     }
     try lease.commit(batch.written());
 }

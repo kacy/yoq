@@ -377,7 +377,8 @@ test "orphanAssignmentsSql only affects non-terminal assignments" {
         \\    gang_world_size INTEGER,
         \\    gang_master_addr TEXT,
         \\    gang_master_port INTEGER,
-        \\    created_at INTEGER NOT NULL DEFAULT 0
+        \\    created_at INTEGER NOT NULL DEFAULT 0,
+        \\    generation INTEGER NOT NULL DEFAULT 0
         \\);
     , .{}, .{}) catch return;
 
@@ -447,7 +448,8 @@ test "getOrphanedAssignments returns only orphaned pending" {
         \\    gang_world_size INTEGER,
         \\    gang_master_addr TEXT,
         \\    gang_master_port INTEGER,
-        \\    created_at INTEGER NOT NULL DEFAULT 0
+        \\    created_at INTEGER NOT NULL DEFAULT 0,
+        \\    generation INTEGER NOT NULL DEFAULT 0
         \\);
     , .{}, .{}) catch return;
 

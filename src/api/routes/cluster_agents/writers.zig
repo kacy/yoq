@@ -98,7 +98,7 @@ pub fn writeAssignmentJson(writer: anytype, assignment: agent_registry.Assignmen
     try writer.writeAll("\",\"cpu_limit\":");
     try writer.print("{d}", .{assignment.cpu_limit});
     try writer.writeAll(",\"memory_limit_mb\":");
-    try writer.print("{d}", .{assignment.memory_limit_mb});
+    try writer.print("{d},\"generation\":{d}", .{ assignment.memory_limit_mb, assignment.generation });
     if (assignment.app_name) |app_name| {
         try writer.writeAll(",\"app_name\":\"");
         try json_helpers.writeJsonEscaped(writer, app_name);

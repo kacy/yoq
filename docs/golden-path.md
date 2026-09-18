@@ -17,27 +17,27 @@ before running the manual path, `make test-golden-path` checks the same local as
 start with the built-in checks:
 
 ```bash
-sudo -H yoq doctor
-sudo -H yoq doctor -f examples/web-app/manifest.toml
-sudo -H yoq doctor -f examples/http-routing/manifest.toml
-sudo -H yoq validate -f examples/redis/manifest.toml
-sudo -H yoq validate -f examples/web-app/manifest.toml
-sudo -H yoq validate -f examples/http-routing/manifest.toml
+sudo -H "$(command -v yoq)" doctor
+sudo -H "$(command -v yoq)" doctor -f examples/web-app/manifest.toml
+sudo -H "$(command -v yoq)" doctor -f examples/http-routing/manifest.toml
+sudo -H "$(command -v yoq)" validate -f examples/redis/manifest.toml
+sudo -H "$(command -v yoq)" validate -f examples/web-app/manifest.toml
+sudo -H "$(command -v yoq)" validate -f examples/http-routing/manifest.toml
 ```
 
 these commands use root-owned state under `/root/.local/share/yoq`. run the local app in one terminal; `up` stays in the foreground:
 
 ```bash
-sudo -H yoq up -f examples/web-app/manifest.toml
+sudo -H "$(command -v yoq)" up -f examples/web-app/manifest.toml
 ```
 
 in another terminal, inspect the app using the same root-owned state:
 
 ```bash
-sudo -H yoq apps
-sudo -H yoq status --app web-app
-sudo -H yoq history --app web-app
-sudo -H yoq metrics
+sudo -H "$(command -v yoq)" apps
+sudo -H "$(command -v yoq)" status --app web-app
+sudo -H "$(command -v yoq)" history --app web-app
+sudo -H "$(command -v yoq)" metrics
 ```
 
 what to verify:
@@ -52,13 +52,13 @@ what to verify:
 start the API server and HTTP routing listener:
 
 ```bash
-sudo -H yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
+sudo -H "$(command -v yoq)" serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
 ```
 
 keep the server running and start the app in another terminal:
 
 ```bash
-sudo -H yoq up -f examples/http-routing/manifest.toml
+sudo -H "$(command -v yoq)" up -f examples/http-routing/manifest.toml
 ```
 
 from a third terminal, send traffic through the built-in router:
@@ -103,38 +103,38 @@ follow [credential setup](cluster-guide.md#step-1-prepare-credentials) first. it
 run each server command on its matching host, using the same token on all hosts. every server must start with the complete fixed voter set; a peerless server creates a different, single-voter cluster:
 
 ```bash
-sudo -H yoq init-server --id 1 --port 9700 --api-port 7700 --peers 2@10.0.0.2:9700,3@10.0.0.3:9700 --token "$TOKEN"
-sudo -H yoq init-server --id 2 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,3@10.0.0.3:9700 --token "$TOKEN"
-sudo -H yoq init-server --id 3 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,2@10.0.0.2:9700 --token "$TOKEN"
+sudo -H "$(command -v yoq)" init-server --id 1 --port 9700 --api-port 7700 --peers 2@10.0.0.2:9700,3@10.0.0.3:9700 --token "$TOKEN"
+sudo -H "$(command -v yoq)" init-server --id 2 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,3@10.0.0.3:9700 --token "$TOKEN"
+sudo -H "$(command -v yoq)" init-server --id 3 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,2@10.0.0.2:9700 --token "$TOKEN"
 ```
 
 join agents:
 
 ```bash
-sudo -H yoq join 10.0.0.1:7700 --token "$TOKEN"
+sudo -H "$(command -v yoq)" join 10.0.0.1:7700 --token "$TOKEN"
 ```
 
-query `sudo -H yoq cluster status` on the servers to identify the current leader. the following operator commands assume it is `10.0.0.1:7700`; substitute the actual leader address. app deployment does not retry automatically after a leader hint.
+query `sudo -H "$(command -v yoq)" cluster status` on the servers to identify the current leader. the following operator commands assume it is `10.0.0.1:7700`; substitute the actual leader address. app deployment does not retry automatically after a leader hint.
 
 deploy the cluster example:
 
 ```bash
-sudo -H env DB_PASSWORD=supersecret yoq up --server 10.0.0.1:7700 -f examples/cluster/manifest.toml
+sudo -H env DB_PASSWORD=supersecret "$(command -v yoq)" up --server 10.0.0.1:7700 -f examples/cluster/manifest.toml
 ```
 
 verify cluster state:
 
 ```bash
-sudo -H yoq nodes --server 10.0.0.1:7700
-sudo -H yoq apps --server 10.0.0.1:7700
-sudo -H yoq status --app cluster --server 10.0.0.1:7700
-sudo -H yoq history --app cluster --server 10.0.0.1:7700
-sudo -H yoq metrics --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" nodes --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" apps --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" status --app cluster --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" history --app cluster --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" metrics --server 10.0.0.1:7700
 ```
 
 what to verify:
 
-- `sudo -H yoq cluster status` on each server shows one leader and the same term; `nodes` lists agents, not voters
+- `sudo -H "$(command -v yoq)" cluster status` on each server shows one leader and the same term; `nodes` lists agents, not voters
 - joined agents heartbeat and receive work
 - service discovery works across nodes
 - the clustered manifest deploys through `yoq up --server`
@@ -159,6 +159,13 @@ what to verify:
 - `yoq nodes --server ...` and `yoq status --server ...` still work
 - joined agents keep heartbeating without manual reconfiguration
 
+then repeat the drill with a hard failure: stop the current leader process or disconnect its API port while leaving a voting quorum available. leave that endpoint unavailable while checking recovery; graceful step-down alone does not test a broken connection.
+
+- agents reach a surviving server without changing their join arguments
+- agent and node IDs stay unchanged
+- assignment polling resumes and terminal results reach the surviving leader
+- a late result from an earlier assignment generation cannot stop its replacement
+
 ### agent restart and recovery
 
 restart one agent process or reboot one agent node.
@@ -167,16 +174,20 @@ what to verify:
 
 - the agent returns to `active`
 - cross-node service discovery still works after recovery
-- workloads either stay reachable or reconcile back to healthy state
+- interrupted assignment cgroups are stopped before their attempts are reported failed
+- a queued terminal result survives the restart and reaches committed state after API connectivity returns
+- a stale cached assignment does not launch a second copy
+
+preserve the enrollment directory and `agent-cache.db` throughout this drill. temporarily interrupt the API connection when a short worker exits, restart the agent, restore connectivity, and verify that the original attempt becomes terminal without a duplicate launch.
 
 ### rollout pause and resume
 
 for a readiness-gated service release:
 
 ```bash
-sudo -H yoq rollout pause --app cluster --server 10.0.0.1:7700
-sudo -H yoq status --app cluster --server 10.0.0.1:7700
-sudo -H yoq rollout resume --app cluster --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" rollout pause --app cluster --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" status --app cluster --server 10.0.0.1:7700
+sudo -H "$(command -v yoq)" rollout resume --app cluster --server 10.0.0.1:7700
 ```
 
 what to verify:

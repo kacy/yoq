@@ -12,7 +12,24 @@ const linux_platform = @import("linux_platform");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
+pub const RequestOptions = struct {
+    deadline_ms: ?i64 = null,
+    canceled: ?*const std.atomic.Value(bool) = null,
+
+    pub fn check(self: RequestOptions) HttpClientError!void {
+        if (self.canceled) |flag| if (flag.load(.acquire)) return error.Canceled;
+        if (self.deadline_ms) |deadline| if (nowMilliseconds() >= deadline) return error.RequestTimeout;
+    }
+};
+
+fn nowMilliseconds() i64 {
+    return std.Io.Clock.awake.now(std.Options.debug_io).toMilliseconds();
+}
+
 pub const HttpClientError = error{
+    Canceled,
+    RequestTimeout,
+    OutOfMemory,
     /// TCP connection to the server could not be established
     ConnectFailed,
     /// failed to write the HTTP request to the socket
@@ -46,15 +63,19 @@ pub fn get(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8) HttpClien
 
 /// send an HTTP GET request with optional bearer token auth.
 pub fn getWithAuth(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, auth_token: ?[]const u8) HttpClientError!Response {
+    return getWithOptions(alloc, addr, port, path, auth_token, .{});
+}
+
+pub fn getWithOptions(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, auth_token: ?[]const u8, options: RequestOptions) HttpClientError!Response {
     var req_buf: [1024]u8 = undefined;
     const request = if (auth_token) |token|
         std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {s}\r\n\r\n", .{ path, token }) catch
-            return HttpClientError.SendFailed
+            return HttpClientError.RequestTooLarge
     else
         std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", .{path}) catch
-            return HttpClientError.SendFailed;
+            return HttpClientError.RequestTooLarge;
 
-    return doRequest(alloc, addr, port, request);
+    return doRequest(alloc, addr, port, request, options);
 }
 
 /// send an HTTP POST request with a body and return the response.
@@ -64,9 +85,14 @@ pub fn post(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, body: []
 
 /// send an HTTP POST request with optional bearer token auth.
 pub fn postWithAuth(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, body: []const u8, auth_token: ?[]const u8) HttpClientError!Response {
+    return postWithOptions(alloc, addr, port, path, body, auth_token, .{});
+}
+
+pub fn postWithOptions(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, body: []const u8, auth_token: ?[]const u8, options: RequestOptions) HttpClientError!Response {
+    try options.check();
     const request = try buildPostRequest(alloc, path, body, auth_token);
     defer alloc.free(request);
-    return doRequest(alloc, addr, port, request);
+    return doRequest(alloc, addr, port, request, options);
 }
 
 // ordinary api endpoints accept bodies up to one mebibyte.
@@ -89,57 +115,92 @@ fn buildPostRequest(alloc: Allocator, path: []const u8, body: []const u8, auth_t
         ) catch return HttpClientError.RequestTooLarge;
 
     // both lengths are bounded before allocation; the body keeps its exact bytes.
-    const request = alloc.alloc(u8, headers.len + body.len) catch return HttpClientError.SendFailed;
+    const request = alloc.alloc(u8, headers.len + body.len) catch return HttpClientError.OutOfMemory;
     @memcpy(request[0..headers.len], headers);
     @memcpy(request[headers.len..], body);
     return request;
 }
 
-fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) HttpClientError!Response {
-    const fd = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch
-        return HttpClientError.ConnectFailed;
+fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8, options: RequestOptions) HttpClientError!Response {
+    const started = nowMilliseconds();
+    const budget: RequestOptions = .{
+        .deadline_ms = @min(options.deadline_ms orelse std.math.maxInt(i64), started + 10_000),
+        .canceled = options.canceled,
+    };
+    try budget.check();
+    const fd = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, 0) catch return error.ConnectFailed;
     defer linux_platform.posix.close(fd);
-
-    // set timeouts — send timeout must be set before connect() because
-    // Linux uses SO_SNDTIMEO as the connect timeout
-    const timeout = posix.timeval{ .sec = 5, .usec = 0 };
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
-    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
-
-    // connect
-    const sock_addr = linux_platform.net.Address.initIp4(addr, port);
-    linux_platform.posix.connect(fd, &sock_addr.any, sock_addr.getOsSockLen()) catch
-        return HttpClientError.ConnectFailed;
-
-    // send
-    writeAll(fd, request) catch return HttpClientError.SendFailed;
-
-    // read response
-    const max_size: usize = 64 * 1024;
-    var buf = alloc.alloc(u8, max_size) catch return HttpClientError.ReceiveFailed;
-    errdefer alloc.free(buf);
-
-    var total: usize = 0;
-    while (total < buf.len) {
-        const bytes_read = posix.read(fd, buf[total..]) catch break;
-        if (bytes_read == 0) break;
-        total += bytes_read;
+    const address = linux_platform.net.Address.initIp4(addr, port);
+    linux_platform.posix.connect(fd, &address.any, address.getOsSockLen()) catch |err| switch (err) {
+        error.ConnectionPending, error.WouldBlock => {
+            var connect_budget = budget;
+            connect_budget.deadline_ms = @min(budget.deadline_ms.?, started + 5_000);
+            try waitReady(fd, posix.POLL.OUT, connect_budget);
+            linux_platform.posix.getsockoptError(fd) catch return error.ConnectFailed;
+        },
+        else => return error.ConnectFailed,
+    };
+    var sent: usize = 0;
+    while (sent < request.len) {
+        try budget.check();
+        const count = linux_platform.posix.send(fd, request[sent..], posix.MSG.NOSIGNAL) catch |err| switch (err) {
+            error.WouldBlock => {
+                try waitReady(fd, posix.POLL.OUT, budget);
+                continue;
+            },
+            else => return error.SendFailed,
+        };
+        if (count == 0) return error.SendFailed;
+        sent += count;
     }
-
-    if (total == buf.len) {
-        var overflow_buf: [1]u8 = undefined;
-        const extra = posix.read(fd, &overflow_buf) catch 0;
-        if (extra > 0) return HttpClientError.ResponseTooLarge;
+    const max_size = 64 * 1024;
+    var buffer = alloc.alloc(u8, max_size) catch return error.OutOfMemory;
+    errdefer alloc.free(buffer);
+    var used: usize = 0;
+    while (used < buffer.len) {
+        const count = try readBytes(fd, buffer[used..], budget);
+        if (count == 0) break;
+        used += count;
     }
-
-    if (total == 0) return HttpClientError.ReceiveFailed;
-
-    // shrink to actual size
-    if (alloc.resize(buf, total)) {
-        buf = buf[0..total];
+    if (used == buffer.len) {
+        var extra: [1]u8 = undefined;
+        if (try readBytes(fd, &extra, budget) != 0) return error.ResponseTooLarge;
     }
+    if (used == 0) return error.ReceiveFailed;
+    if (alloc.resize(buffer, used)) buffer = buffer[0..used];
+    return parseResponse(buffer[0..used], buffer) catch return error.InvalidResponse;
+}
 
-    return parseResponse(buf[0..total], buf) catch return HttpClientError.InvalidResponse;
+fn readBytes(fd: posix.fd_t, buffer: []u8, options: RequestOptions) HttpClientError!usize {
+    while (true) {
+        try options.check();
+        return linux_platform.posix.recv(fd, buffer, 0) catch |err| switch (err) {
+            error.WouldBlock => {
+                try waitReady(fd, posix.POLL.IN, options);
+                continue;
+            },
+            else => error.ReceiveFailed,
+        };
+    }
+}
+
+fn waitReady(fd: posix.fd_t, events: i16, options: RequestOptions) HttpClientError!void {
+    while (true) {
+        try options.check();
+        const remaining = options.deadline_ms.? - nowMilliseconds();
+        if (remaining <= 0) return error.RequestTimeout;
+        // short waits observe shutdown even when the remote server stays silent.
+        const milliseconds = @min(remaining, 100);
+        const timeout: posix.timespec = .{ .sec = 0, .nsec = milliseconds * std.time.ns_per_ms };
+        var fds = [_]posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+        const ready = posix.ppoll(&fds, &timeout, null) catch |err| switch (err) {
+            error.SignalInterrupt => continue,
+            else => return error.ReceiveFailed,
+        };
+        if (ready == 0) continue;
+        if (fds[0].revents & posix.POLL.NVAL != 0) return error.ReceiveFailed;
+        if (fds[0].revents & (events | posix.POLL.HUP | posix.POLL.ERR) != 0) return;
+    }
 }
 
 fn writeAll(fd: linux_platform.posix.socket_t, data: []const u8) !void {
@@ -331,4 +392,53 @@ test "http client rejects oversized posts before connecting" {
     try std.testing.expectEqualSlices(u8, body[0..max_post_body_bytes], largest[body_start..]);
     const oversized_path = [_]u8{'x'} ** 2048;
     try std.testing.expectError(error.RequestTooLarge, post(std.testing.allocator, .{ 127, 0, 0, 1 }, 0, &oversized_path, ""));
+}
+
+test "agent enrollment cancels silent responses and shares an absolute request deadline" {
+    const socket = linux_platform.posix;
+    const listener = try socket.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer socket.close(listener);
+    var address = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    try socket.bind(listener, &address.any, address.getOsSockLen());
+    try socket.listen(listener, 2);
+    const timeout = posix.timeval{ .sec = 3, .usec = 0 };
+    try socket.setsockopt(listener, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+    var len = address.getOsSockLen();
+    try socket.getsockname(listener, &address.any, &len);
+    const Peer = struct {
+        canceled: ?*std.atomic.Value(bool),
+        closed: bool = false,
+        received: bool = false,
+        fn serve(self: *@This(), fd: posix.fd_t) void {
+            const client = linux_platform.posix.accept(fd, null, null, 0) catch return;
+            defer linux_platform.posix.close(client);
+            const read_timeout = posix.timeval{ .sec = 3, .usec = 0 };
+            linux_platform.posix.setsockopt(client, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&read_timeout)) catch return;
+            var buffer: [2048]u8 = undefined;
+            if ((linux_platform.posix.read(client, &buffer) catch return) == 0) return;
+            self.received = true;
+            if (self.canceled) |flag| flag.store(true, .release);
+            // keep the response silent until the client cancels or times out.
+            while (true) {
+                if ((linux_platform.posix.read(client, &buffer) catch return) == 0) {
+                    self.closed = true;
+                    return;
+                }
+            }
+        }
+    };
+    for ([_]bool{ true, false }) |cancel| {
+        var canceled: std.atomic.Value(bool) = .init(false);
+        var peer: Peer = .{ .canceled = if (cancel) &canceled else null };
+        const thread = try std.Thread.spawn(.{}, Peer.serve, .{ &peer, listener });
+        const started = nowMilliseconds();
+        const response = getWithOptions(std.testing.allocator, .{ 127, 0, 0, 1 }, std.mem.bigToNative(u16, address.in.port), "/agents", "dummy", .{
+            .deadline_ms = started + if (cancel) @as(i64, 2000) else 100,
+            .canceled = &canceled,
+        });
+        thread.join();
+        try std.testing.expectError(if (cancel) error.Canceled else error.RequestTimeout, response);
+        try std.testing.expect(peer.received and peer.closed);
+        try std.testing.expect(nowMilliseconds() - started < 1500);
+    }
 }
