@@ -2049,7 +2049,7 @@ test "http2 compression fragments a small indexed block after literal expansion"
     defer block.deinit(alloc);
     try block.append(alloc, 0x88);
     try block.appendSlice(alloc, indexed_literal);
-    try block.appendNTimes(alloc, 0xbe, 20);
+    try block.appendSlice(alloc, &([_]u8{0xbe} ** 20));
     try std.testing.expect(block.items.len < flow.max_frame_payload);
     const frame = try http2.buildFrame(alloc, .{ .length = @intCast(block.items.len), .frame_type = .headers, .flags = 5, .stream_id = 1 }, block.items);
     defer alloc.free(frame);
