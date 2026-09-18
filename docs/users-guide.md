@@ -138,7 +138,7 @@ HTTP, TCP, gRPC, or exec probes run at configurable intervals. gRPC probes use t
 
 ### gRPC routing
 
-http/1 responses stream large downloads and server-sent events, and websocket upgrades switch to bidirectional forwarding. request bodies still share a 64 kib buffer. see [proxy streaming](proxy-streaming.md) for deadlines and framing limits.
+http/1 responses stream large downloads and server-sent events, and websocket upgrades switch to bidirectional forwarding. fixed-length and chunked request bodies stream with backpressure up to 256 mib of decoded body data. request headers have a separate 16 kib limit. uploads are not retried or mirrored because the proxy does not retain their bytes. see [proxy streaming](proxy-streaming.md) for deadlines and framing limits.
 
 gRPC services can use the HTTP routing listener through plaintext HTTP/2 passthrough, either with prior-knowledge `h2c` or HTTP/1.1 `Upgrade: h2c`. unary requests and streaming RPC traffic are forwarded end to end, including client `DATA` frames, server `DATA` frames, and trailing `HEADERS`. if the routed host also has a matching `tls.domain`, the TLS terminator can negotiate ALPN `h2` and forward that HTTPS traffic into the same routing path.
 

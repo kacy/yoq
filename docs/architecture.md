@@ -324,7 +324,7 @@ certificate management and TLS termination.
 
 **ACME:** Let's Encrypt-compatible client implementing HTTP-01 and DNS-01 challenge validation. HTTP-01 serves challenge tokens on port 80. DNS-01 computes `_acme-challenge` TXT values, updates records through built-in providers (`cloudflare`, `route53`, `gcloud`) or an exec hook, polls DNS visibility, and then finalizes the order.
 
-**http/1 response streaming:** bounded header parsing and body buffers support large responses, event streams, and websocket tunnels. backpressure and socket deadlines bound forwarding; retries stop after response output begins. request bodies still share a 64 kib input buffer. see [proxy streaming](proxy-streaming.md).
+**http/1 streaming:** bounded header parsing and body buffers support uploads, large responses, event streams, and websocket tunnels. request headers have a 16 kib limit; fixed-length and chunked uploads have a 256 mib decoded body limit. backpressure and socket deadlines bound forwarding. requests with a body cannot be retried or mirrored; bodyless retries stop after response output begins. see [proxy streaming](proxy-streaming.md).
 
 **upstream request policy:** buffered HTTP/1 and HTTP/2 share a single upstream exchange for deadlines, response framing, connection ownership, and service identity verification. Routing owns retries and circuit accounting; the transport never silently replays a failed pooled write. Both buffered protocols use the same method and status retry policy. Mirror tasks use bounded, joined workers and the same exchange.
 
