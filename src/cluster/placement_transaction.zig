@@ -149,6 +149,7 @@ fn placeOnce(alloc: std.mem.Allocator, session: mutation.Session, request: sched
     if (release_id) |id| {
         if (try resumePlacement(alloc, lease, request, id, replicas)) |existing| return existing;
     }
+    if (metadata_sql == null and !try serviceSurgeFits(lease, request, replicas)) return null;
     const prior = if (metadata_sql != null) try workloadIds(alloc, session, request) else Placement{ .assignment_ids = &.{} };
     defer prior.deinit(alloc);
     const agents = lease.agents(alloc, prior.assignment_ids) catch return error.InternalError;
@@ -208,6 +209,26 @@ fn placeOnce(alloc: std.mem.Allocator, session: mutation.Session, request: sched
     }
     try lease.commit(batch.written());
     return .{ .assignment_ids = owned };
+}
+
+pub fn replicaSurgeFits(session: mutation.Session, request: scheduler.PlacementRequest, replicas: u32) mutation.Error!bool {
+    const lease = try Lease.begin(session);
+    defer lease.deinit();
+    return serviceSurgeFits(lease, request, replicas);
+}
+
+fn serviceSurgeFits(lease: Lease, request: scheduler.PlacementRequest, replicas: u32) mutation.Error!bool {
+    if (!std.mem.eql(u8, request.workload_kind orelse "", "service")) return true;
+    const app_name = request.app_name orelse return true;
+    const workload_name = request.workload_name orelse return true;
+    const node = lease.session.node;
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
+    try lease.session.checkLocked();
+    const row = node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignments WHERE app_name = ? AND workload_kind = 'service' AND workload_name = ?;", .{}, .{ app_name, workload_name }) catch return error.InternalError;
+    const prior: u64 = @intCast(@max(0, row.?.count));
+    const desired = @as(u64, replicas) * @max(@as(u64, 1), request.gang_world_size);
+    return prior +| desired <= @import("../manifest/spec.zig").max_service_replicas;
 }
 
 fn workloadIds(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest) mutation.Error!Placement {
@@ -619,4 +640,23 @@ test "replica capacity rejection commits no partial group" {
     try std.testing.expect((try placeReplicas(alloc, session, request, "too-large", 3)) == null);
     try std.testing.expectEqual(@as(i64, 0), try countRows(node.stateMachineDb(), "assignments"));
     try std.testing.expectEqual(@as(i64, 0), try countRows(node.stateMachineDb(), "assignment_claims"));
+}
+
+test "replica surge limit preserves the prior group and permits resume" {
+    const alloc = std.testing.allocator;
+    var node = try testNode();
+    defer node.deinit();
+    const session = try mutation.Session.begin(&node);
+    var request = test_request;
+    request.cpu_limit = 10;
+    request.memory_limit_mb = 1;
+    const prior = (try placeReplicas(alloc, session, request, "prior", 33)).?;
+    defer prior.deinit(alloc);
+    try std.testing.expect(!try replicaSurgeFits(session, request, 32));
+    try std.testing.expect((try placeReplicas(alloc, session, request, "replacement", 32)) == null);
+    try std.testing.expectEqual(@as(i64, 33), try countRows(node.stateMachineDb(), "assignments"));
+    try std.testing.expectEqual(@as(i64, 33), try countRows(node.stateMachineDb(), "assignment_claims"));
+    const resumed = (try placeReplicas(alloc, session, request, "prior", 33)).?;
+    defer resumed.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 33), resumed.assignment_ids.len);
 }
