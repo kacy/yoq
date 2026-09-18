@@ -12,6 +12,9 @@ const store = @import("../../state/store.zig");
 const logs = @import("../../runtime/logs.zig");
 const agent_store = @import("../agent_store.zig");
 const assignment_spec = @import("../assignment_spec.zig");
+const gpu_leases = @import("../../gpu/lease.zig");
+const gpu_runtime = @import("../../manifest/gpu_runtime.zig");
+const published_ports = @import("../../network/published_ports.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const extractJsonString = json_helpers.extractJsonString;
@@ -397,36 +400,56 @@ fn runAssignment(
     var hostname_buf: [128]u8 = undefined;
     const hostname = buildAssignmentHostname(&hostname_buf, meta, gang_info);
 
-    const gpu_mesh = @import("../../gpu/mesh.zig");
-    var mesh_env: std.ArrayListUnmanaged([]const u8) = .empty;
+    const gpu_count = if (execution.value.gpu_count == 0 and gang_info != null) 1 else execution.value.gpu_count;
+    var gpus = gpu_leases.Lease.acquire(gpu_count, execution.value.gpu_model) catch {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "gpu_unavailable");
+        return;
+    };
+    defer gpus.deinit();
+    var mesh_env: std.ArrayList([]const u8) = .empty;
     defer {
         for (mesh_env.items) |entry| self.alloc.free(entry);
         mesh_env.deinit(self.alloc);
     }
-    if (gang_info) |gang| {
-        const ib_result = gpu_mesh.detectInfiniband();
-        var mesh_env_buf: [1024]u8 = undefined;
-        if (gpu_mesh.generateMeshEnv(
-            &mesh_env_buf,
-            ib_result,
-            gang.master_addr,
-            gang.master_port,
-            gang.world_size,
-            gang.rank,
-            gang.rank,
-            null,
-        )) |env_data| {
-            var env_pos: usize = 0;
-            while (env_pos < env_data.len) {
-                const end = std.mem.indexOfScalarPos(u8, env_data, env_pos, 0) orelse env_data.len;
-                if (end > env_pos) {
-                    if (self.alloc.dupe(u8, env_data[env_pos..end])) |duped| {
-                        mesh_env.append(self.alloc, duped) catch {};
-                    } else |_| {}
-                }
-                env_pos = end + 1;
+    prepareGpuEnv(self.alloc, &mesh_env, &gpus, gang_info) catch {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "gpu_environment_failed");
+        return;
+    };
+    var mounts_arena = std.heap.ArenaAllocator.init(self.alloc);
+    defer mounts_arena.deinit();
+    const mount_runtime = @import("../../manifest/orchestrator/service_runtime.zig");
+    const mounts = mount_runtime.resolveServiceVolumes(mounts_arena.allocator(), execution.value.volumes, execution.value.volume_definitions, meta.app_name orelse "") catch {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "volume_mount_failed");
+        return;
+    };
+    if (mounts.bind_mounts.items.len != execution.value.volumes.len) {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "volume_mount_failed");
+        return;
+    }
+    if (execution.value.ib_required and @import("../../gpu/mesh.zig").detectInfiniband().count == 0) {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "infiniband_unavailable");
+        return;
+    }
+    if (execution.value.checkpoint) |ckpt| {
+        const checkpoints = @import("../../manifest/checkpoint.zig");
+        const resume_path = if (execution.value.resume_checkpoint)
+            checkpoints.latestMountedCheckpoint(mounts_arena.allocator(), ckpt.path, mounts.bind_mounts.items) catch {
+                setContainerState(self, assignment_id, .failed);
+                reportStatus(self, assignment_id, "failed", "checkpoint_path_invalid");
+                return;
             }
-        } else |_| {}
+        else
+            null;
+        checkpoints.buildCheckpointEnv(self.alloc, &mesh_env, ckpt, resume_path) catch {
+            setContainerState(self, assignment_id, .failed);
+            reportStatus(self, assignment_id, "failed", "checkpoint_environment_failed");
+            return;
+        };
     }
 
     var resolved = assignment_spec.resolve(self.alloc, execution.value, config_parsed.value.config, mesh_env.items) catch {
@@ -469,6 +492,8 @@ fn runAssignment(
             .user = image_user,
             .limits = limits,
             .network = .{ .node_id = self.node_id },
+            .mounts = mounts.bind_mounts.items,
+            .gpu_indices = gpus.indices[0..gpus.count],
             .hostname = hostname,
             .lower_dirs = layer_paths,
             .env = resolved.env.items,
@@ -493,6 +518,19 @@ fn runAssignment(
         cleanup(container_id);
         return;
     };
+
+    if (gang_info) |gang| {
+        if (gang.rank == 0) {
+            const ports = [_]manifest_spec.PortMapping{.{ .host_port = gang.master_port, .container_port = gang.master_port }};
+            published_ports.publishInstance(self.alloc, meta.app_name, hostname, container_id, &ports) catch {
+                _ = waitForAssignmentExit(&c, stopping, true);
+                setContainerState(self, assignment_id, .failed);
+                reportStatus(self, assignment_id, "failed", "rendezvous_port_failed");
+                cleanup(container_id);
+                return;
+            };
+        }
+    }
 
     const readiness_result = waitForServiceReadiness(stopping, self.alloc, container_id, meta);
     switch (readiness_result) {
@@ -688,6 +726,22 @@ fn parseJsonStringArray(alloc: std.mem.Allocator, json: []const u8, key: []const
     return items.toOwnedSlice(alloc) catch null;
 }
 
+fn prepareGpuEnv(alloc: std.mem.Allocator, env: *std.ArrayList([]const u8), gpus: *const gpu_leases.Lease, gang_info: ?GangInfo) !void {
+    if (gpus.count > 0) {
+        var gpu_buf: [4096]u8 = undefined;
+        const data = try @import("../../gpu/passthrough.zig").generateGpuEnv(gpus.indices[0..gpus.count], &gpu_buf);
+        try gpu_runtime.appendRequiredEnv(alloc, env, data);
+    }
+    if (gang_info) |gang| {
+        const mesh = @import("../../gpu/mesh.zig");
+        var mesh_buf: [1024]u8 = undefined;
+        const address = if (gang.rank == 0) "0.0.0.0" else gang.master_addr;
+        const data = try mesh.generateMeshEnv(&mesh_buf, mesh.detectInfiniband(), address, gang.master_port, gang.world_size, gang.rank, 0, null);
+        try gpu_runtime.appendRequiredEnv(alloc, env, data);
+        try gpu_runtime.appendRequiredEnv(alloc, env, "NCCL_SHM_DISABLE=1");
+    }
+}
+
 fn buildAssignmentHostname(buf: []u8, meta: AssignmentMeta, gang_info: ?GangInfo) []const u8 {
     if (meta.workload_kind != null and meta.workload_name != null and std.mem.eql(u8, meta.workload_kind.?, "training")) {
         if (gang_info) |gang| {
@@ -725,6 +779,9 @@ fn setContainerState(self: anytype, assignment_id: []const u8, state: anytype) v
 }
 
 fn cleanup(container_id: []const u8) void {
+    published_ports.removeInstance(std.heap.page_allocator, container_id) catch |err| {
+        log.warn("failed to release published ports for {s}: {}", .{ container_id, err });
+    };
     logs.deleteLogFile(container_id);
     container.cleanupContainerDirs(container_id);
     store.remove(container_id) catch {};

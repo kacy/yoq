@@ -10,6 +10,7 @@ const gpu_lease = @import("../../gpu/lease.zig");
 const checkpoint = @import("../checkpoint.zig");
 const gpu_mesh = @import("../../gpu/mesh.zig");
 const gpu_env = @import("../../gpu/passthrough.zig");
+const appendEnv = @import("../gpu_runtime.zig").appendRequiredEnv;
 
 pub const Group = struct {
     arena: *std.heap.ArenaAllocator,
@@ -118,15 +119,3 @@ pub const Group = struct {
         };
     }
 };
-
-pub fn appendEnv(alloc: std.mem.Allocator, env: *std.ArrayList([]const u8), data: []const u8) !void {
-    var entries = std.mem.splitScalar(u8, data, 0);
-    while (entries.next()) |entry| {
-        if (entry.len == 0) continue;
-        const owned = try alloc.dupe(u8, entry);
-        env.append(alloc, owned) catch |err| {
-            alloc.free(owned);
-            return err;
-        };
-    }
-}

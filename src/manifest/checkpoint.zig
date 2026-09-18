@@ -172,6 +172,33 @@ pub fn buildCheckpointEnv(
     if (resume_path) |path| try appendEnv(alloc, env, "YOQ_RESUME_FROM={s}", .{path});
 }
 
+// checkpoint paths belong to the container. scan the longest matching bind
+// mount on the host and return a path the resumed process can actually open.
+pub fn latestMountedCheckpoint(alloc: std.mem.Allocator, checkpoint_path: []const u8, mounts: []const @import("../runtime/container.zig").BindMount) !?[]const u8 {
+    const host = try mountedDirectory(alloc, checkpoint_path, mounts) orelse return null;
+    defer alloc.free(host);
+    var entries: [64]CheckpointEntry = undefined;
+    const count = scanCheckpointDir(&entries, host);
+    if (count == 0) return null;
+    return std.fs.path.join(alloc, &.{ checkpoint_path, std.fs.path.basename(entries[count - 1].pathSlice()) });
+}
+
+pub fn mountedDirectory(alloc: std.mem.Allocator, path: []const u8, mounts: []const @import("../runtime/container.zig").BindMount) !?[]const u8 {
+    if (!std.fs.path.isAbsolute(path)) return error.InvalidCheckpointPath;
+    var components = std.mem.splitScalar(u8, path, '/');
+    while (components.next()) |component| if (std.mem.eql(u8, component, "..")) return error.InvalidCheckpointPath;
+    var selected: ?@import("../runtime/container.zig").BindMount = null;
+    for (mounts) |mount| {
+        const target = std.mem.trimEnd(u8, mount.target, "/");
+        if (!std.mem.startsWith(u8, path, target)) continue;
+        if (path.len > target.len and path[target.len] != '/') continue;
+        if (selected == null or target.len > std.mem.trimEnd(u8, selected.?.target, "/").len) selected = mount;
+    }
+    const mount = selected orelse return null;
+    const suffix = std.mem.trimStart(u8, path[std.mem.trimEnd(u8, mount.target, "/").len..], "/");
+    return std.fs.path.join(alloc, &.{ mount.source, suffix });
+}
+
 fn appendEnv(alloc: std.mem.Allocator, env: *std.ArrayListUnmanaged([]const u8), comptime format: []const u8, args: anytype) !void {
     const entry = try std.fmt.allocPrint(alloc, format, args);
     errdefer alloc.free(entry);
