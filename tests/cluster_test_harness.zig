@@ -513,7 +513,11 @@ fn stopNodes(nodes: []ClusterNode, grace_ms: i64) void {
     // begin shutdown together so a five-node fixture pays one grace period.
     for (nodes) |*node| {
         if (node.process) |*child| {
-            if (child.id) |pid| std.posix.kill(pid, .TERM) catch {};
+            switch (childState(child)) {
+                .pending => if (child.id) |pid| std.posix.kill(pid, .TERM) catch {},
+                .exited => finishChild(node),
+                .unowned => releaseUnownedChild(node),
+            }
         }
     }
     const deadline = std.Io.Clock.awake.now(std.testing.io).toMilliseconds() + grace_ms;
@@ -521,33 +525,66 @@ fn stopNodes(nodes: []ClusterNode, grace_ms: i64) void {
         var pending = false;
         for (nodes) |*node| {
             if (node.process) |*child| {
-                if (childExited(child)) {
-                    _ = child.wait(std.testing.io) catch {};
-                    node.process = null;
-                } else pending = true;
+                switch (childState(child)) {
+                    .pending => pending = true,
+                    .exited => finishChild(node),
+                    .unowned => releaseUnownedChild(node),
+                }
             }
         }
         if (!pending) return;
         std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(10 * std.time.ns_per_ms), .awake) catch {};
     }
-    // unreaped children still own their pids, so escalation cannot target a
-    // reused process id. wait also releases pipes owned by the child handle.
+    // check ownership again before escalation; an externally reaped child may
+    // have left a stale pid that must never receive a signal.
     for (nodes) |*node| {
         if (node.process) |*child| {
-            if (child.id) |pid| std.posix.kill(pid, .KILL) catch {};
-            _ = child.wait(std.testing.io) catch {};
-            node.process = null;
+            switch (childState(child)) {
+                .pending => {
+                    if (child.id) |pid| std.posix.kill(pid, .KILL) catch {};
+                    finishChild(node);
+                },
+                .exited => finishChild(node),
+                .unowned => releaseUnownedChild(node),
+            }
         }
     }
 }
 
-fn childExited(child: *const std.process.Child) bool {
-    const pid = child.id orelse return true;
+const ChildState = enum { pending, exited, unowned };
+
+fn childState(child: *const std.process.Child) ChildState {
+    const pid = child.id orelse return .unowned;
     const linux = std.os.linux;
     var info: linux.siginfo_t = std.mem.zeroes(linux.siginfo_t);
     // observe exit without reaping; Child.wait must perform its own cleanup.
-    const result = linux.waitid(.PID, pid, &info, linux.W.EXITED | linux.W.NOHANG | linux.W.NOWAIT, null);
-    return linux.errno(result) == .SUCCESS and info.fields.common.first.piduid.pid != 0;
+    while (true) {
+        const result = linux.waitid(.PID, pid, &info, linux.W.EXITED | linux.W.NOHANG | linux.W.NOWAIT, null);
+        switch (linux.errno(result)) {
+            .SUCCESS => return if (info.fields.common.first.piduid.pid == 0) .pending else .exited,
+            .CHILD => return .unowned,
+            .INTR => continue,
+            else => return .pending,
+        }
+    }
+}
+
+fn finishChild(node: *ClusterNode) void {
+    if (node.process) |*child| _ = child.wait(std.testing.io) catch {};
+    node.process = null;
+}
+
+fn releaseUnownedChild(node: *ClusterNode) void {
+    // Child.wait treats ECHILD as a programming error. close only our pipe
+    // handles when another reaper has already released process ownership.
+    if (node.process) |*child| {
+        inline for (.{ "stdin", "stdout", "stderr" }) |name| {
+            if (@field(child, name)) |file| file.close(std.testing.io);
+            @field(child, name) = null;
+        }
+        child.id = null;
+    }
+    node.process = null;
 }
 
 fn spawnUncooperativeChild() !std.process.Child {
@@ -597,5 +634,31 @@ test "cluster fixture teardown reaps owned children within one grace period" {
         const result = linux.waitid(.PID, pid, &info, linux.W.EXITED | linux.W.NOHANG, null);
         try std.testing.expectEqual(linux.E.CHILD, linux.errno(result));
     }
-    try std.testing.expect(!childExited(&unrelated));
+    try std.testing.expectEqual(ChildState.pending, childState(&unrelated));
+}
+
+test "cluster fixture teardown releases externally reaped children without signalling" {
+    var nodes = [_]ClusterNode{
+        .{ .id = 1, .raft_port = 0, .api_port = 0, .data_dir = "", .alloc = std.testing.allocator },
+    };
+    defer stopNodes(&nodes, 0);
+    nodes[0].process = try std.process.spawn(std.testing.io, .{
+        .argv = &.{ "/bin/sh", "-c", "exit 0" },
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    const linux = std.os.linux;
+    var info: linux.siginfo_t = std.mem.zeroes(linux.siginfo_t);
+    const result = linux.waitid(.PID, nodes[0].process.?.id.?, &info, linux.W.EXITED, null);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(result));
+    try std.testing.expectEqual(ChildState.unowned, childState(&nodes[0].process.?));
+    var unrelated = try spawnUncooperativeChild();
+    defer {
+        if (unrelated.id) |pid| std.posix.kill(pid, .KILL) catch {};
+        _ = unrelated.wait(std.testing.io) catch {};
+    }
+    stopNodes(&nodes, 0);
+    try std.testing.expect(nodes[0].process == null);
+    try std.testing.expectEqual(ChildState.pending, childState(&unrelated));
 }
