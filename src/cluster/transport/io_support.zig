@@ -76,3 +76,104 @@ fn readMessage(self: anytype, alloc: std.mem.Allocator, client_fd: linux_platfor
         .message = msg,
     };
 }
+
+fn readTestFrame(transport: anytype, alloc: std.mem.Allocator, frame: []const u8) !ReceivedMessage {
+    var sockets: [2]posix.fd_t = undefined;
+    if (std.c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &sockets) != 0) return error.SocketPairFailed;
+    defer linux_platform.posix.close(sockets[1]);
+    {
+        defer linux_platform.posix.close(sockets[0]);
+        var sent: usize = 0;
+        while (sent < frame.len) {
+            const count = try linux_platform.posix.write(sockets[0], frame[sent..]);
+            if (count == 0) return error.WriteFailed;
+            sent += count;
+        }
+    }
+    // closing the writer lets truncated frames reach eof without a timeout.
+    return readMessage(transport, alloc, sockets[1], linux_platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 43210));
+}
+
+test "tcp frame receive rejects invalid lengths and distinguishes truncated input" {
+    const Transport = @import("../transport.zig").Transport;
+    const alloc = std.testing.allocator;
+    var transport = try Transport.initForTests(alloc);
+    defer transport.deinit();
+    const cases = [_]struct { frame: []const u8, expected: TransportError }{
+        .{ .frame = &.{}, .expected = error.ReceiveFailed },
+        .{ .frame = &.{ 1, 0 }, .expected = error.ReceiveFailed },
+        .{ .frame = &.{ 0, 0, 0, 0 }, .expected = error.InvalidMessage },
+        .{ .frame = &.{ 1, 0, 0, 4 }, .expected = error.InvalidMessage },
+        .{ .frame = &.{ 1, 0, 0, 0 }, .expected = error.ReceiveFailed },
+        .{ .frame = &.{ 1, 0, 0, 0, 0xff }, .expected = error.InvalidMessage },
+    };
+    for (cases) |case| {
+        try std.testing.expectError(case.expected, readTestFrame(&transport, alloc, case.frame));
+    }
+}
+
+test "tcp frame receive owns snapshot data across the stack buffer boundary" {
+    const Transport = @import("../transport.zig").Transport;
+    const alloc = std.testing.allocator;
+    var transport = try Transport.initForTests(alloc);
+    defer transport.deinit();
+    // a snapshot body has 37 header bytes before its data.
+    for ([_]usize{ 8192, 8193 }) |body_len| {
+        const data = try alloc.alloc(u8, body_len - 37);
+        defer alloc.free(data);
+        @memset(data, 0x5a);
+        const frame = try codec_support.encodeSnapshot(alloc, .{
+            .term = 3,
+            .leader_id = 7,
+            .last_included_index = 12,
+            .last_included_term = 2,
+            .data = data,
+        });
+        defer alloc.free(frame);
+        try std.testing.expectEqual(body_len, frame.len - 4);
+
+        const received = try readTestFrame(&transport, alloc, frame);
+        defer alloc.free(received.message.install_snapshot.data);
+        try std.testing.expect(received.sender_id == null);
+        try std.testing.expectEqual(@as(u64, 12), received.message.install_snapshot.last_included_index);
+        try std.testing.expectEqualSlices(u8, data, received.message.install_snapshot.data);
+        try std.testing.expect(received.message.install_snapshot.data.ptr != frame[41..].ptr);
+
+        if (body_len > 8192) {
+            for (0..2) |fail_index| {
+                var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = fail_index });
+                const expected: TransportError = if (fail_index == 0) error.ReceiveFailed else error.InvalidMessage;
+                try std.testing.expectError(expected, readTestFrame(&transport, failing.allocator(), frame));
+                try std.testing.expect(failing.has_induced_failure);
+                try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            }
+            try std.testing.expectError(error.ReceiveFailed, readTestFrame(&transport, alloc, frame[0 .. frame.len - 1]));
+        }
+    }
+}
+
+test "tcp frame receive verifies authentication before decoding and permits ephemeral source ports" {
+    const Transport = @import("../transport.zig").Transport;
+    const alloc = std.testing.allocator;
+    var transport = try Transport.initForTests(alloc);
+    defer transport.deinit();
+    const key = [_]u8{7} ** 32;
+    transport.shared_key = key;
+    try transport.addPeer(7, .{ 127, 0, 0, 1 }, 9700);
+
+    var buf: [32]u8 = undefined;
+    const len = try codec_support.encode(&buf, .{ .install_snapshot_reply = .{ .term = 3 } });
+    const signed = try auth_support.applyHmac(alloc, key, 7, buf[0..len]);
+    defer alloc.free(signed);
+    const received = try readTestFrame(&transport, alloc, signed);
+    try std.testing.expectEqual(@as(?u64, 7), received.sender_id);
+    try std.testing.expectEqual(@as(u64, 3), received.message.install_snapshot_reply.term);
+
+    const malformed = [_]u8{ 1, 0, 0, 0, 0xff };
+    const bad_signature = try auth_support.applyHmac(alloc, [_]u8{8} ** 32, 7, &malformed);
+    defer alloc.free(bad_signature);
+    try std.testing.expectError(error.AuthenticationFailed, readTestFrame(&transport, alloc, bad_signature));
+    const bad_message = try auth_support.applyHmac(alloc, key, 7, &malformed);
+    defer alloc.free(bad_message);
+    try std.testing.expectError(error.InvalidMessage, readTestFrame(&transport, alloc, bad_message));
+}
