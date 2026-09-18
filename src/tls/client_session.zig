@@ -98,10 +98,13 @@ pub const ClientSession = struct {
     /// raw bytes pulled off the wire but not yet decrypted (partial
     /// record). drained on the next record read.
     rx_wire: std.ArrayList(u8) = .empty,
+    tx_wire: std.ArrayList(u8) = .empty,
+    tx_offset: usize = 0,
 
     pub fn deinit(self: *ClientSession) void {
         self.rx_pending.deinit(self.alloc);
         self.rx_wire.deinit(self.alloc);
+        self.tx_wire.deinit(self.alloc);
     }
 
     /// encrypt and send `data` as one or more TLS application_data records.
@@ -109,50 +112,116 @@ pub const ClientSession = struct {
     pub fn write(self: *ClientSession, data: []const u8) ClientError!usize {
         if (self.failed) return error.SessionFailed;
         errdefer self.failed = true;
+        while (!try self.flushAvailable()) {
+            (transport.Stream{ .fd = self.fd, .deadline = self.deadline }).wait(posix.POLL.OUT) catch |err| return mapRecordError(err);
+        }
         try writeOneRecord(self, .application_data, data);
         return data.len;
     }
 
-    /// fill `buf` with up to `buf.len` bytes of decrypted application data.
-    /// blocks on read() until at least one byte arrives or the peer closes.
-    pub fn read(self: *ClientSession, buf: []u8) ClientError!usize {
+    pub fn pendingWrite(self: *const ClientSession) bool {
+        return self.tx_offset < self.tx_wire.items.len;
+    }
+
+    /// accept at most one record. accepted plaintext must not be submitted
+    /// again; pendingWrite tracks any ciphertext still waiting for the socket.
+    pub fn writeAvailable(self: *ClientSession, bytes: []const u8) ClientError!usize {
         if (self.failed) return error.SessionFailed;
         errdefer self.failed = true;
-        if (self.deadline) |d| _ = try d.remaining();
+        if (!try self.flushAvailable()) return 0;
+        if (bytes.len == 0) return 0;
+        if (self.client_seq == std.math.maxInt(u64)) return error.EncryptFailed;
+        const count = @min(bytes.len, record.max_record_size);
+        self.tx_wire.resize(self.alloc, record.record_header_size + count + 1 + record.aead_tag_size) catch return error.AllocFailed;
+        const length = record.encryptRecord(self.client_app.key, self.client_app.iv, self.client_seq, bytes[0..count], .application_data, self.tx_wire.items[record.record_header_size..]) catch return error.EncryptFailed;
+        record.writeHeader(self.tx_wire.items, .application_data, @intCast(length)) catch return error.EncryptFailed;
+        self.tx_offset = 0;
+        _ = try self.flushAvailable();
+        return count;
+    }
+
+    /// true means all accepted plaintext has reached the socket. false means
+    /// the caller should poll for writability while still servicing reads.
+    pub fn flushAvailable(self: *ClientSession) ClientError!bool {
+        if (self.failed) return error.SessionFailed;
+        errdefer self.failed = true;
+        if (self.deadline) |deadline| _ = try deadline.remaining();
+        if (!self.pendingWrite()) return true;
+        while (self.pendingWrite()) {
+            const count = linux_platform.posix.send(self.fd, self.tx_wire.items[self.tx_offset..], posix.MSG.DONTWAIT | posix.MSG.NOSIGNAL) catch |err| switch (err) {
+                error.WouldBlock => return false,
+                else => return error.WriteFailed,
+            };
+            if (count == 0) return error.WriteFailed;
+            self.tx_offset += count;
+        }
+        self.client_seq += 1;
+        self.tx_wire.clearRetainingCapacity();
+        self.tx_offset = 0;
+        return true;
+    }
+
+    /// wait for plaintext while retaining partial records across reads.
+    pub fn read(self: *ClientSession, buf: []u8) ClientError!usize {
+        while (true) {
+            if (try self.readAvailable(buf)) |count| return count;
+            (transport.Stream{ .fd = self.fd, .deadline = self.deadline }).wait(posix.POLL.IN) catch |err| {
+                self.failed = true;
+                return mapRecordError(err);
+            };
+        }
+    }
+
+    /// null means the next record is incomplete. never wait for socket input:
+    /// multiplexed callers must remain able to service their other streams.
+    pub fn readAvailable(self: *ClientSession, buf: []u8) ClientError!?usize {
+        if (self.failed) return error.SessionFailed;
+        errdefer self.failed = true;
+        if (self.deadline) |deadline| _ = try deadline.remaining();
+        if (buf.len == 0) return 0;
         if (self.rx_pending.items.len > 0) {
-            const n = @min(buf.len, self.rx_pending.items.len);
-            @memcpy(buf[0..n], self.rx_pending.items[0..n]);
-            self.rx_pending.replaceRangeAssumeCapacity(0, n, &.{});
-            return n;
+            const count = @min(buf.len, self.rx_pending.items.len);
+            @memcpy(buf[0..count], self.rx_pending.items[0..count]);
+            self.rx_pending.replaceRangeAssumeCapacity(0, count, &.{});
+            return count;
         }
 
+        // consume exactly one bounded record. coalesced records remain in the
+        // socket, so polling still observes them after this call returns.
+        self.rx_wire.ensureTotalCapacity(self.alloc, record.record_header_size + record.max_ciphertext_size) catch return error.AllocFailed;
+        var needed: usize = record.record_header_size;
         while (true) {
-            const decrypted = try readOneRecordAlloc(self);
-            defer self.alloc.free(decrypted.plaintext);
-            switch (decrypted.content_type) {
-                .application_data => {
-                    const n = @min(buf.len, decrypted.plaintext.len);
-                    @memcpy(buf[0..n], decrypted.plaintext[0..n]);
-                    if (decrypted.plaintext.len > n) {
-                        self.rx_pending.appendSlice(self.alloc, decrypted.plaintext[n..]) catch return ClientError.AllocFailed;
-                    }
-                    return n;
-                },
-                .alert => {
-                    // close_notify (level=warning, desc=close_notify) is the
-                    // only alert we treat as orderly EOF; everything else is
-                    // an error.
-                    if (decrypted.plaintext.len >= 2 and decrypted.plaintext[1] == 0x00) {
-                        return ClientError.PeerClosed;
-                    }
-                    return ClientError.PeerClosed;
-                },
-                .handshake => {
-                    // post-handshake messages (e.g. NewSessionTicket); ignore.
-                    continue;
-                },
-                else => continue,
+            if (self.rx_wire.items.len >= record.record_header_size) {
+                const header = record.parseHeader(self.rx_wire.items[0..record.record_header_size]) catch return error.DecryptFailed;
+                if (header.content_type != .application_data) return error.DecryptFailed;
+                needed = record.record_header_size + @as(usize, header.length);
             }
+            if (self.rx_wire.items.len == needed) break;
+            const count = linux_platform.posix.recv(self.fd, self.rx_wire.allocatedSlice()[self.rx_wire.items.len..needed], posix.MSG.DONTWAIT) catch |err| switch (err) {
+                error.WouldBlock => return null,
+                else => return error.ReadFailed,
+            };
+            if (count == 0) {
+                if (self.rx_wire.items.len != 0) return error.UnexpectedEof;
+                return 0;
+            }
+            self.rx_wire.items.len += count;
+        }
+        defer self.rx_wire.clearRetainingCapacity();
+        if (self.server_seq == std.math.maxInt(u64)) return error.DecryptFailed;
+        const decrypted = record.decryptRecord(self.server_app.key, self.server_app.iv, self.server_seq, self.rx_wire.items[record.record_header_size..], self.rx_wire.items[0..record.record_header_size].*) catch return error.DecryptFailed;
+        self.server_seq += 1;
+        switch (decrypted.content_type) {
+            .application_data => {
+                if (decrypted.plaintext.len == 0) return null;
+                const count = @min(buf.len, decrypted.plaintext.len);
+                @memcpy(buf[0..count], decrypted.plaintext[0..count]);
+                if (count < decrypted.plaintext.len) self.rx_pending.appendSlice(self.alloc, decrypted.plaintext[count..]) catch return error.AllocFailed;
+                return count;
+            },
+            .alert => return error.PeerClosed,
+            .handshake => return null,
+            else => return error.DecryptFailed,
         }
     }
 };
@@ -389,15 +458,6 @@ fn readEncryptedRecord(
 
 fn writeOneRecord(self: *ClientSession, ct: record.ContentType, data: []const u8) ClientError!void {
     record_transport.write(.{ .fd = self.fd, .deadline = self.deadline }, self.client_app, &self.client_seq, ct, data) catch |err| return mapRecordError(err);
-}
-
-fn readOneRecordAlloc(self: *ClientSession) ClientError!struct { plaintext: []u8, content_type: record.ContentType } {
-    var buffer: record_transport.Buffer = undefined;
-    const dec = record_transport.readEncrypted(.{ .fd = self.fd, .deadline = self.deadline }, &buffer, self.server_app, &self.server_seq, false) catch |err| return mapRecordError(err);
-    return .{
-        .plaintext = self.alloc.dupe(u8, dec.plaintext) catch return ClientError.AllocFailed,
-        .content_type = dec.content_type,
-    };
 }
 
 /// verify the server's CertificateVerify by recomputing the signed prefix
@@ -856,4 +916,89 @@ test "TLS deadline on a partially written record preserves sequence and poisons 
     var received: [8192]u8 = undefined;
     const n = try linux_platform.posix.recv(fds[1], &received, posix.MSG.DONTWAIT);
     try std.testing.expect(n > 0 and n < data.len);
+}
+
+test "TLS incremental reads retain fragments and drain plaintext without another socket event" {
+    const fds = try deadlineTestPair();
+    defer linux_platform.posix.close(fds[0]);
+    defer linux_platform.posix.close(fds[1]);
+    const keys = handshake.deriveTrafficKeys([_]u8{7} ** hash_len);
+    var session = ClientSession{ .fd = fds[0], .alloc = std.testing.allocator, .client_app = keys, .server_app = keys };
+    defer session.deinit();
+    var encrypted: [128]u8 = undefined;
+    const length = try record.encryptRecord(keys.key, keys.iv, 0, "abcdef", .application_data, encrypted[5..]);
+    try record.writeHeader(&encrypted, .application_data, @intCast(length));
+    var output: [3]u8 = undefined;
+    const wire = transport.Stream{ .fd = fds[1] };
+    for (encrypted[0 .. 5 + length - 1]) |byte| {
+        try wire.writeAll(&.{byte});
+        try std.testing.expectEqual(@as(?usize, null), try session.readAvailable(&output));
+        try std.testing.expectEqual(@as(u64, 0), session.server_seq);
+    }
+    try wire.writeAll(encrypted[5 + length - 1 .. 5 + length]);
+    try std.testing.expectEqual(@as(?usize, 3), try session.readAvailable(&output));
+    try std.testing.expectEqualStrings("abc", &output);
+    try std.testing.expectEqual(@as(u64, 1), session.server_seq);
+    try std.testing.expectEqual(@as(?usize, 3), try session.readAvailable(&output));
+    try std.testing.expectEqualStrings("def", &output);
+    try std.testing.expectEqual(@as(?usize, null), try session.readAvailable(&output));
+    try std.testing.expectEqual(@as(usize, 0), session.rx_wire.items.len);
+}
+
+test "TLS incremental reads reject oversized records and partial eof" {
+    for ([_]bool{ false, true }) |oversized| {
+        const fds = try deadlineTestPair();
+        defer linux_platform.posix.close(fds[0]);
+        defer linux_platform.posix.close(fds[1]);
+        var session = ClientSession{ .fd = fds[0], .alloc = std.testing.allocator, .client_app = undefined, .server_app = undefined };
+        defer session.deinit();
+        const wire = transport.Stream{ .fd = fds[1] };
+        try wire.writeAll(if (oversized) &.{ 23, 3, 3, 255, 255 } else &.{ 23, 3 });
+        _ = std.os.linux.shutdown(fds[1], 1);
+        var output: [16]u8 = undefined;
+        if (oversized) {
+            try std.testing.expectError(error.DecryptFailed, session.readAvailable(&output));
+        } else {
+            try std.testing.expectError(error.UnexpectedEof, session.readAvailable(&output));
+        }
+        try std.testing.expectError(error.SessionFailed, session.readAvailable(&output));
+        try std.testing.expect(session.rx_wire.items.len <= record.record_header_size);
+    }
+}
+
+test "TLS queued writes preserve sequence and allow reads while the socket is full" {
+    const fds = try deadlineTestPair();
+    defer linux_platform.posix.close(fds[0]);
+    defer linux_platform.posix.close(fds[1]);
+    const small_buffer: i32 = 1024;
+    try posix.setsockopt(fds[0], posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&small_buffer));
+    const keys = handshake.deriveTrafficKeys([_]u8{8} ** hash_len);
+    var sender = ClientSession{ .fd = fds[0], .alloc = std.testing.allocator, .client_app = keys, .server_app = keys };
+    defer sender.deinit();
+    var receiver = ClientSession{ .fd = fds[1], .alloc = std.testing.allocator, .client_app = keys, .server_app = keys };
+    defer receiver.deinit();
+    const body = [_]u8{'x'} ** record.max_record_size;
+    try std.testing.expectEqual(body.len, try sender.writeAvailable(&body));
+    try std.testing.expect(sender.pendingWrite());
+    try std.testing.expectEqual(@as(usize, 0), try sender.writeAvailable("must wait"));
+    try std.testing.expectEqual(@as(u64, 0), sender.client_seq);
+
+    _ = try receiver.write("early rejection");
+    var response: [32]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, 15), try sender.readAvailable(&response));
+    try std.testing.expectEqualStrings("early rejection", response[0..15]);
+
+    var received: usize = 0;
+    var output: [record.max_record_size]u8 = undefined;
+    for (0..1000) |_| {
+        if (try receiver.readAvailable(&output)) |count| {
+            for (output[0..count]) |byte| try std.testing.expectEqual(@as(u8, 'x'), byte);
+            received += count;
+        }
+        _ = try sender.flushAvailable();
+        if (received == body.len and !sender.pendingWrite()) break;
+    } else return error.TransferStalled;
+    try std.testing.expectEqual(body.len, received);
+    try std.testing.expectEqual(@as(u64, 1), sender.client_seq);
+    try std.testing.expectEqual(@as(u64, 1), receiver.server_seq);
 }

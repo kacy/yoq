@@ -37,6 +37,7 @@ pub const Options = struct {
     connect_timeout_ms: u32 = 5_000,
     /// Total budget for handshake, request writes, and response reads.
     request_timeout_ms: u32 = 30_000,
+    deadline: ?transport.Deadline = null,
     /// trust root for the server cert chain. when null, the dial stays
     /// plaintext (returns `.bare`).
     ca_cert_pem: ?[]const u8 = null,
@@ -64,7 +65,9 @@ pub const Outcome = union(enum) {
 /// open the connection and (when `ca_cert_pem` is set) run the TLS
 /// handshake. on any failure the fd is closed before returning.
 pub fn dial(io: std.Io, alloc: std.mem.Allocator, opts: Options) DialError!Outcome {
-    const fd = openTcp(opts.address, opts.port, opts.connect_timeout_ms) catch |err| return mapDialError(err);
+    const deadline = opts.deadline orelse transport.Deadline.afterMilliseconds(opts.request_timeout_ms);
+    const remaining = deadline.remaining() catch return error.TimedOut;
+    const fd = openTcp(opts.address, opts.port, @min(opts.connect_timeout_ms, @as(u32, @intCast(remaining)))) catch |err| return mapDialError(err);
     errdefer linux_platform.posix.close(fd);
 
     const ca_pem = opts.ca_cert_pem orelse {
@@ -74,7 +77,6 @@ pub fn dial(io: std.Io, alloc: std.mem.Allocator, opts: Options) DialError!Outco
         return .{ .bare = fd };
     };
 
-    const deadline = transport.Deadline.afterMilliseconds(opts.request_timeout_ms);
     const sess = client_session.doHandshake(io, alloc, fd, .{
         .deadline = deadline,
         .server_name = opts.server_name,
