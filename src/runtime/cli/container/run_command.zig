@@ -643,3 +643,30 @@ test "run accepts equals values and rejects values on switches" {
     var invalid: TestArgs = .{ .values = &.{ "--detach=false", "image" } };
     try std.testing.expectError(ContainerError.InvalidArgument, parseRunFlags(&invalid, std.testing.allocator, std.testing.io));
 }
+
+test "saved run configuration inherits the image user and working directory" {
+    const alloc = std.testing.allocator;
+    var flags: RunFlags = .{ .container_name = "named-container" };
+    defer flags.deinit(alloc);
+    const img: image_cmds.ImageResolution = .{ .rootfs = "/rootfs", .user = "app:staff", .working_dir = "/work", .default_cmd = &.{ "echo", "hello" } };
+    var resolved = try resolveRunCommand(alloc, &flags, &img);
+    defer resolved.args.deinit(alloc);
+    const saved = try buildSavedRunConfig(alloc, &flags, &img, &resolved);
+    defer saved.deinit(alloc);
+    try std.testing.expectEqualStrings("app:staff", saved.user.?);
+    try std.testing.expectEqualStrings("/work", saved.working_dir);
+    try std.testing.expectEqualStrings("container", saved.hostname);
+}
+
+test "environment passthrough copies the current host value" {
+    const value = std.c.getenv("PATH") orelse return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var env: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (env.items) |entry| alloc.free(entry);
+        env.deinit(alloc);
+    }
+    try appendEnv(alloc, &env, "PATH");
+    try std.testing.expect(std.mem.startsWith(u8, env.items[0], "PATH="));
+    try std.testing.expectEqualStrings(std.mem.span(value), env.items[0][5..]);
+}
