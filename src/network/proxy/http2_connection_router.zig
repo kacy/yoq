@@ -1272,7 +1272,9 @@ test "http2 peer tls verifies upstream identity and streams data and trailers" {
     defer alloc.free(preamble);
     const expected_request = try std.mem.concat(alloc, u8, &.{ preamble, request });
     defer alloc.free(expected_request);
-    for ([_]bool{ true, false }) |matching_identity| {
+    const Case = enum { primary, mirror, wrong_identity };
+    for ([_]Case{ .primary, .mirror, .wrong_identity }) |case| {
+        const matching_identity = case != .wrong_identity;
         const server_cert = try fixture.x509.issueLeaf(std.testing.io, alloc, ca.key_pair, "h2-ca", "api", if (matching_identity) "spiffe://yoq-cluster/service/api" else "spiffe://yoq-cluster/service/other", now - 60, now + 86400);
         defer alloc.free(server_cert.cert_pem);
         const server_key = try fixture.csr.derKeyToPem(alloc, &server_cert.key_pair.secret_key.toBytes());
@@ -1302,6 +1304,34 @@ test "http2 peer tls verifies upstream identity and streams data and trailers" {
         defer linux_platform.posix.close(downstream[1]);
         var routing = ConnectionRouter{ .allocator = alloc, .routes = &.{}, .client_fd = downstream[0], .client_ip = null, .sent_settings = true };
         defer routing.deinit();
+        if (case == .mirror) {
+            try routing.streams.append(alloc, .{
+                .downstream_stream_id = 3,
+                .route = route,
+                .backend_service = try alloc.dupe(u8, "api"),
+                .upstream = try ownedTestUpstream(alloc, upstream),
+                .connection = .{ .connection = .{ .bare = try linux_platform.posix.dup(downstream[0]) }, .timeout_ms = 2000 },
+                .request_deadline_at_ms = nowMs() + 2000,
+                .response_started = true,
+                .mirror = .{ .backend_service = try alloc.dupe(u8, "api"), .upstream = try ownedTestUpstream(alloc, upstream), .connection = connection, .request_deadline_at_ms = nowMs() + 1000 },
+            });
+            transferred = true;
+            // a primary response must not hide its mirror's earlier deadline.
+            try std.testing.expect(routing.nextPendingDeadlineMs(nowMs()).? <= 1000);
+            while (routing.streams.items[0].mirror != null) {
+                const active = &routing.streams.items[0].mirror.?;
+                if (!active.connection.buffered()) try (transport.Stream{ .fd = active.connection.fd(), .deadline = transport.Deadline.afterMilliseconds(2000) }).wait(posix.POLL.IN);
+                try routing.readMirrorUpstream(0);
+            }
+            try std.testing.expectEqual(@as(usize, 1), routing.streams.items.len);
+            var unexpected: [1]u8 = undefined;
+            try std.testing.expectError(error.WouldBlock, linux_platform.posix.recv(downstream[1], &unexpected, posix.MSG.DONTWAIT));
+            thread.join();
+            joined = true;
+            try std.testing.expect(server.accepted and server.saw_request);
+            try std.testing.expect(server.failure == null);
+            continue;
+        }
         try routing.streams.append(alloc, .{ .downstream_stream_id = 3, .route = route, .backend_service = try alloc.dupe(u8, "api"), .upstream = try ownedTestUpstream(alloc, upstream), .connection = connection, .request_deadline_at_ms = nowMs() + 2000 });
         transferred = true;
         while (routing.streams.items.len > 0) {
@@ -1336,4 +1366,56 @@ test "http2 peer tls verifies upstream identity and streams data and trailers" {
         try std.testing.expect(server.accepted and server.saw_request);
         try std.testing.expect(server.failure == null);
     }
+}
+
+test "http2 partial tls record does not block another stream or its timeout" {
+    const alloc = std.testing.allocator;
+    const tls = @import("../../tls/client_session.zig");
+    const framing = @import("../../tls/record_transport.zig");
+    const handshake = @import("../../tls/handshake.zig");
+    const keys = handshake.deriveTrafficKeys([_]u8{13} ** handshake.hash_len);
+    var downstream: [2]i32 = undefined;
+    var partial: [2]i32 = undefined;
+    var ready: [2]i32 = undefined;
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &downstream) != 0) return error.SocketFailed;
+    defer linux_platform.posix.close(downstream[0]);
+    defer linux_platform.posix.close(downstream[1]);
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &partial) != 0) return error.SocketFailed;
+    defer linux_platform.posix.close(partial[1]);
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &ready) != 0) return error.SocketFailed;
+    defer linux_platform.posix.close(ready[1]);
+    var routing = ConnectionRouter{ .allocator = alloc, .routes = &.{}, .client_fd = downstream[0], .client_ip = null, .sent_settings = true };
+    defer routing.deinit();
+    const deadline = nowMs() + 1000;
+    const route = router.Route{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" } };
+    const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-h2", .address = "127.0.0.1", .port = 1 };
+    for ([_]i32{ partial[0], ready[0] }, 0..) |fd, index| {
+        try routing.streams.append(alloc, .{
+            .downstream_stream_id = @intCast(index * 2 + 1),
+            .route = route,
+            .backend_service = try alloc.dupe(u8, "api"),
+            .upstream = try ownedTestUpstream(alloc, upstream),
+            .connection = .{ .connection = .{ .session = tls.ClientSession{ .fd = fd, .alloc = alloc, .client_app = keys, .server_app = keys } }, .timeout_ms = 1000 },
+            .request_deadline_at_ms = deadline,
+        });
+    }
+    try (transport.Stream{ .fd = partial[1] }).writeAll(&.{ 23, 3 });
+    const response = try peerTestResponse(alloc);
+    defer alloc.free(response);
+    var sequence: u64 = 0;
+    try framing.write(.{ .fd = ready[1] }, keys, &sequence, .application_data, response);
+    try routing.readUpstream(0);
+    // the incomplete peer stays live; a blocking TLS read would instead wait
+    // for its deadline and fail it before the ready peer gets a turn.
+    try std.testing.expectEqual(@as(usize, 2), routing.streams.items.len);
+    try std.testing.expectEqual(@as(usize, 2), routing.streams.items[0].connection.connection.session.rx_wire.items.len);
+    try routing.readUpstream(1);
+    try std.testing.expectEqual(@as(usize, 1), routing.streams.items.len);
+    var header: [9]u8 = undefined;
+    var offset: usize = 0;
+    const socket = transport.Stream{ .fd = downstream[1], .deadline = transport.Deadline.afterMilliseconds(1000) };
+    while (offset < header.len) offset += try socket.read(header[offset..]);
+    try std.testing.expectEqual(@as(u32, 3), http2.parseFrameHeader(&header).?.stream_id);
+    try std.testing.expect(try routing.expireTimedOutStreams(deadline));
+    try std.testing.expectEqual(@as(usize, 0), routing.streams.items.len);
 }
