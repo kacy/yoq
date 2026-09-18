@@ -1,13 +1,8 @@
-// raft — pure state machine implementation of the raft consensus protocol
+// raft consensus state and queued node actions.
 //
-// this module implements the core raft algorithm without any I/O.
-// all side effects are expressed as Actions that the caller (node.zig)
-// must process. this separation makes the algorithm fully testable
-// without networking or disk access.
-//
-// follows the raft paper closely: leader election, log replication,
-// commit advancement via majority agreement, and InstallSnapshot RPC
-// for bringing far-behind followers up to date.
+// term, vote, and log changes are persisted synchronously. networking,
+// command application, and snapshot data handling are queued as actions
+// for the node to process. tests use an in-memory log.
 //
 // usage:
 //   var raft = try Raft.init(alloc, 1, &.{2, 3}, &log);
@@ -15,6 +10,7 @@
 //   raft.tick(); // call periodically (every ~100ms)
 //   const reply = raft.handleRequestVote(args);
 //   const actions = try raft.drainActions();
+//   defer raft.freeActions(actions);
 //   // process actions (send messages, apply committed entries)
 
 const std = @import("std");
@@ -161,6 +157,7 @@ pub const Raft = struct {
     }
 
     pub fn deinit(self: *Raft) void {
+        self.discardActions();
         self.alloc.free(self.next_index);
         self.alloc.free(self.match_index);
         self.alloc.free(self.votes_granted);
@@ -212,9 +209,8 @@ pub const Raft = struct {
         replication_runtime.handleAppendEntriesReply(self, from, reply, min_election_ticks, max_election_ticks);
     }
 
-    /// handle a reply to our InstallSnapshot RPC.
-    /// if the follower's term is higher, step down. otherwise,
-    /// update next_index and match_index for that peer.
+    /// a snapshot reply carries no index. probe the current snapshot boundary
+    /// with append entries before counting it toward replicated progress.
     pub fn handleInstallSnapshotReply(self: *Raft, from: NodeId, reply: InstallSnapshotReply) void {
         if (!self.refreshPersistentState()) return;
         snapshot_runtime.handleInstallSnapshotReply(self, from, reply, min_election_ticks, max_election_ticks);
@@ -235,7 +231,7 @@ pub const Raft = struct {
             .data = data,
         });
 
-        // The durable local append counts toward the same quorum as peer replies.
+        // the durable local append counts toward the same quorum as peer replies.
         self.advanceCommitIndex();
 
         // replicate to all peers
@@ -246,35 +242,30 @@ pub const Raft = struct {
         return index;
     }
 
-    /// return all pending actions and clear the queue.
-    /// caller owns the returned slice and must free it with self.alloc.free(actions).
+    /// transfer pending actions and their payloads to the caller.
+    /// release the result with freeActions after processing it.
     /// on allocation failure, queued actions remain pending for a later drain.
     pub fn drainActions(self: *Raft) ![]Action {
         if (!self.refreshPersistentState()) return error.ReadFailed;
         return action_queue.drainOwned(Action, self.alloc, &self.actions);
     }
 
-    /// called by the node after a successful snapshot. updates the
-    /// in-memory snapshot metadata so the leader knows it can send
-    /// snapshots to lagging followers.
+    /// release a drained action slice and the payloads owned by its actions.
+    pub fn freeActions(self: *Raft, actions: []const Action) void {
+        self.freeActionPayloads(actions);
+        self.alloc.free(actions);
+    }
+
+    /// persist completed snapshot metadata before updating the cached boundary.
+    /// the snapshot artifact must already be durable.
     pub fn onSnapshotComplete(self: *Raft, meta: SnapshotMeta) bool {
         if (!self.refreshPersistentState()) return false;
         return snapshot_runtime.onSnapshotComplete(self, meta);
     }
 
-    /// graceful leader step-down for rolling upgrades.
-    ///
-    /// the leader voluntarily relinquishes leadership by:
-    /// 1. incrementing its term (forces a new election)
-    /// 2. transitioning to follower role
-    /// 3. clearing its vote (allows it to vote in the next election)
-    ///
-    /// this avoids the election timeout delay that would occur if the
-    /// leader were simply killed. the remaining nodes will start a new
-    /// election immediately when they receive the higher term.
-    ///
-    /// returns true if the node was leader and stepped down,
-    /// false if the node was not leader.
+    /// advance the term and clear the vote before becoming a follower.
+    /// returns false for a non-leader or a persistence/action queue failure.
+    /// peers start their next election when their own timeouts expire.
     pub fn transferLeadership(self: *Raft) bool {
         if (!self.refreshPersistentState()) return false;
         return election_runtime.transferLeadership(self, min_election_ticks, max_election_ticks);
@@ -310,9 +301,8 @@ pub const Raft = struct {
         replication_runtime.sendAppendEntries(self, peer_idx);
     }
 
-    /// queue an InstallSnapshot action for a lagging peer.
-    /// the actual snapshot data loading happens in node.zig when
-    /// it processes this action — the raft module stays I/O-free.
+    /// queue snapshot metadata for a lagging peer. the node loads the
+    /// snapshot bytes when it sends the action.
     fn sendInstallSnapshot(self: *Raft, peer_idx: usize, meta: SnapshotMeta) void {
         snapshot_runtime.sendInstallSnapshot(self, peer_idx, meta);
     }
@@ -329,8 +319,8 @@ pub const Raft = struct {
         common.resetElectionTimeout(self, min_election_ticks, max_election_ticks);
     }
 
-    /// Load term and vote together before participating. A fault demotes the
-    /// node and discards pending outbound work; later events retry the read.
+    /// read term and vote together before participating. a read failure
+    /// demotes the node and discards pending actions; later events retry.
     fn refreshPersistentState(self: *Raft) bool {
         self.persistent_state = self.log.readState() catch {
             self.storage_failed = true;
@@ -343,7 +333,12 @@ pub const Raft = struct {
     }
 
     fn discardActions(self: *Raft) void {
-        for (self.actions.items) |action| switch (action) {
+        self.freeActionPayloads(self.actions.items);
+        self.actions.clearRetainingCapacity();
+    }
+
+    fn freeActionPayloads(self: *Raft, actions: []const Action) void {
+        for (actions) |action| switch (action) {
             .send_append_entries => |send| {
                 for (send.args.entries) |entry| self.alloc.free(entry.data);
                 if (send.args.entries.len > 0) self.alloc.free(send.args.entries);
@@ -351,7 +346,6 @@ pub const Raft = struct {
             .apply_snapshot => |snapshot| self.alloc.free(snapshot.data),
             else => {},
         };
-        self.actions.clearRetainingCapacity();
     }
 
     pub fn persistTerm(self: *Raft, term: Term) bool {
@@ -902,10 +896,8 @@ test "reply term snapshot verifies the current boundary before counting progress
     try testing.expect(follower_log.setCurrentTerm(3));
     var leader = try setupTestRaft(alloc, 1, &.{ 2, 3 }, &leader_log);
     defer leader.deinit();
-    defer freeActionEntries(alloc, leader.actions.items);
     var follower = try setupTestRaft(alloc, 2, &.{ 1, 3 }, &follower_log);
     defer follower.deinit();
-    defer freeActionEntries(alloc, follower.actions.items);
     leader.role = .leader;
     const old_meta = SnapshotMeta{ .last_included_index = 50, .last_included_term = 2, .data_len = 0 };
     const new_meta = SnapshotMeta{ .last_included_index = 100, .last_included_term = 2, .data_len = 0 };
@@ -2977,7 +2969,6 @@ test "reply term isolates votes across elections and higher terms override the r
     defer log.deinit();
     var raft = try setupTestRaft(testing.allocator, 1, &.{ 2, 3 }, &log);
     defer raft.deinit();
-    defer freeActionEntries(testing.allocator, raft.actions.items);
     raft.startElection();
     const old_term = raft.currentTerm();
     try discardReplyTestActions(&raft);
@@ -3009,7 +3000,6 @@ test "reply term isolates append successes and failures after reelection" {
     defer log.deinit();
     var raft = try setupTestRaft(testing.allocator, 1, &.{ 2, 3 }, &log);
     defer raft.deinit();
-    defer freeActionEntries(testing.allocator, raft.actions.items);
     try electReplyTestLeader(&raft);
     const old_term = raft.currentTerm();
     const old_index = try raft.propose("old leader command");
@@ -3056,7 +3046,6 @@ test "reply term isolates snapshot completion after reelection and still probes 
     defer log.deinit();
     var raft = try setupTestRaft(testing.allocator, 1, &.{ 2, 3 }, &log);
     defer raft.deinit();
-    defer freeActionEntries(testing.allocator, raft.actions.items);
     try electReplyTestLeader(&raft);
     const old_term = raft.currentTerm();
     const snapshot_index = try raft.propose("snapshot command");
