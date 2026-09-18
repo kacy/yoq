@@ -350,13 +350,39 @@ test "http1 upload accepts early rejection without waiting for a stalled client 
     defer for (client) |fd| platform.posix.close(fd);
     const upstream = try UploadFixture.pair();
     defer for (upstream) |fd| platform.posix.close(fd);
-    var connection: exchange.StreamingConnection = .{ .connection = .{ .bare = upstream[0] }, .timeout_ms = 100 };
+    var connection: exchange.StreamingConnection = .{ .connection = .{ .bare = upstream[0] }, .timeout_ms = 2000 };
     var started = false;
-    var downstream: response.Downstream = .{ .fd = client[0], .timeout_ms = 100, .started = &started };
+    var downstream: response.Downstream = .{ .fd = client[0], .timeout_ms = 2000, .started = &started };
     const headers = "POST /upload HTTP/1.1\r\nHost: app.test\r\nContent-Length: 2097152\r\n\r\n";
     const parsed = (try http.parseRequestHead(headers)).?;
-    try UploadFixture.wire(upstream[1]).writeAll("HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\n\r\n");
+    const Reject = struct {
+        fn serve(fd: posix.fd_t, failure: *?anyerror) void {
+            reject(fd) catch |err| {
+                failure.* = err;
+                _ = std.os.linux.shutdown(fd, 2);
+            };
+        }
+        fn reject(fd: posix.fd_t) !void {
+            const socket = UploadFixture.wire(fd);
+            var buffer: [1024]u8 = undefined;
+            var used: usize = 0;
+            while (std.mem.indexOf(u8, buffer[0..used], "\r\n\r\n") == null) {
+                const count = try socket.read(buffer[used..]);
+                if (count == 0) return error.UnexpectedEof;
+                used += count;
+            }
+            try std.testing.expectEqualStrings(headers, buffer[0..used]);
+            try socket.writeAll("HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\n\r\n");
+        }
+    };
+    var failure: ?anyerror = null;
+    const server = try std.Thread.spawn(.{}, Reject.serve, .{ upstream[1], &failure });
+    var joined = false;
+    defer if (!joined) server.join();
     const head = try sendAndReadHead(&connection, &downstream, headers, "", parsed);
+    server.join();
+    joined = true;
+    if (failure) |err| return err;
     try std.testing.expectEqual(@as(u16, 413), head.status);
     try std.testing.expect(!started);
 }
