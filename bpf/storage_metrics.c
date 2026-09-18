@@ -1,22 +1,12 @@
-// storage_metrics.c — per-cgroup block I/O tracking
+// block read/write completion events, grouped by the current task's cgroup.
 //
-// attached to tracepoint block:block_rq_complete to count read/write
-// bytes and IOPS per cgroup ID. passive observer — never modifies or
-// drops requests.
-//
-// the userspace StorageMetricsCollector reads the map to report
-// per-container I/O stats via /v1/metrics?mode=storage_io.
-//
-// compile with:
-//   clang -target bpf -O2 -g -c bpf/storage_metrics.c -o bpf/storage_metrics.o
+// completion can run in an interrupt or worker context. that cgroup may
+// differ from the request's origin, so these counters cannot identify the
+// originating container reliably. partial completions count as separate events.
 
 #include "common.h"
 
-// -- BPF helpers not in common.h --
-
 static __u64 (*bpf_get_current_cgroup_id)(void) = (void *)80;
-
-// -- per-cgroup I/O metrics --
 
 struct io_metrics {
     __u64 read_bytes;
@@ -24,8 +14,6 @@ struct io_metrics {
     __u64 read_ops;
     __u64 write_ops;
 };
-
-// -- BPF map: cgroup_id -> io_metrics --
 
 struct bpf_map_def SEC("maps") storage_metrics_map = {
     .type        = BPF_MAP_TYPE_LRU_HASH,
@@ -35,72 +23,57 @@ struct bpf_map_def SEC("maps") storage_metrics_map = {
     .map_flags   = 0,
 };
 
-// -- tracepoint context for block:block_rq_complete --
-//
-// fields from /sys/kernel/debug/tracing/events/block/block_rq_complete/format:
-//   dev, sector, nr_sector, errors, rwbs
-// we use a raw tracepoint context (array of __u64) to access these fields.
-
+// layout of the formatted block:block_rq_complete tracepoint event.
+// offsets must match tracing/events/block/block_rq_complete/format.
 struct tp_block_rq_complete {
-    // common fields (padding)
-    __u64 __pad;
-    // dev_t
+    __u64 common_fields;
     __u32 dev;
-    // sector
+    __u32 alignment_padding;
     __u64 sector;
-    // nr_sectors
     __u32 nr_sector;
-    // errors
     __s32 errors;
-    // rwbs[8] — R/W/D/F/S flags
     char rwbs[8];
 };
+
+_Static_assert(__builtin_offsetof(struct tp_block_rq_complete, nr_sector) == 24,
+               "block completion sector count offset changed");
+_Static_assert(__builtin_offsetof(struct tp_block_rq_complete, rwbs) == 32,
+               "block completion operation flags offset changed");
 
 SEC("tracepoint/block/block_rq_complete")
 int storage_metrics_count(struct tp_block_rq_complete *ctx)
 {
-    // get cgroup ID for the current task
+    // discard, flush, and other operations have no read/write counters.
+    char operation = ctx->rwbs[0];
+    // blk_fill_rwbs places an optional preflush flag before the operation.
+    if (operation == 'F')
+        operation = ctx->rwbs[1];
+    if (operation != 'R' && operation != 'W')
+        return 0;
+
     __u64 cgroup_id = bpf_get_current_cgroup_id();
     if (cgroup_id == 0)
         return 0;
 
-    // determine if read or write from rwbs flags
-    // R = read, W = write, D = discard (ignore), F = flush (ignore)
-    char rw = ctx->rwbs[0];
-    __u8 is_read = (rw == 'R') ? 1 : 0;
-    __u8 is_write = (rw == 'W') ? 1 : 0;
-
-    if (!is_read && !is_write)
-        return 0;
-
-    // calculate bytes (nr_sector * 512)
+    // widen before converting 512-byte sectors to bytes.
     __u64 bytes = (__u64)ctx->nr_sector * 512;
-
-    // cap at reasonable maximum to prevent overflow abuse
-    if (bytes > 1073741824) // 1 GiB max per request
-        return 0;
-
-    struct io_metrics *existing = bpf_map_lookup_elem(&storage_metrics_map, &cgroup_id);
-    if (existing) {
-        if (is_read) {
-            __sync_fetch_and_add(&existing->read_bytes, bytes);
-            __sync_fetch_and_add(&existing->read_ops, 1);
-        } else {
-            __sync_fetch_and_add(&existing->write_bytes, bytes);
-            __sync_fetch_and_add(&existing->write_ops, 1);
-        }
-    } else {
-        struct io_metrics new_entry = {};
-        if (is_read) {
-            new_entry.read_bytes = bytes;
-            new_entry.read_ops = 1;
-        } else {
-            new_entry.write_bytes = bytes;
-            new_entry.write_ops = 1;
-        }
-        bpf_map_update_elem(&storage_metrics_map, &cgroup_id, &new_entry, 0);
+    struct io_metrics *metrics = bpf_map_lookup_elem(&storage_metrics_map, &cgroup_id);
+    if (!metrics) {
+        // preserve a counter inserted by another cpu after the lookup.
+        struct io_metrics empty = {};
+        bpf_map_update_elem(&storage_metrics_map, &cgroup_id, &empty, BPF_NOEXIST);
+        metrics = bpf_map_lookup_elem(&storage_metrics_map, &cgroup_id);
+        if (!metrics)
+            return 0;
     }
 
+    if (operation == 'R') {
+        __sync_fetch_and_add(&metrics->read_bytes, bytes);
+        __sync_fetch_and_add(&metrics->read_ops, 1);
+    } else {
+        __sync_fetch_and_add(&metrics->write_bytes, bytes);
+        __sync_fetch_and_add(&metrics->write_ops, 1);
+    }
     return 0;
 }
 

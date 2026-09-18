@@ -1,27 +1,6 @@
-// policy.c — network policy enforcement (allow/deny between services)
-//
-// attached to the bridge ingress at priority 10 (before DNS interceptor,
-// load balancer, and metrics). enforces per-IP pair allow/deny rules
-// set by `yoq policy`. drops denied packets before any other processing.
-//
-// two BPF maps:
-//   policy_map  — (src_ip, dst_ip) → action (0=deny, 1=allow)
-//   isolation_map — src_ip → flag (1=isolated, only allow-listed destinations)
-//
-// logic:
-//   1. parse eth → IP, extract src/dst
-//   2. if (src, dst) has a deny entry → drop
-//   3. if src is isolated and (src, dst) has no allow entry → drop
-//   4. default: pass
-//
-// SECURITY HARDENING:
-//   - All packet accesses validated against data_end
-//   - IP header length (IHL) validated before use
-//   - Policy lookup keys fully initialized
-//   - Maximum packet size enforced
-//
-// compile with:
-//   clang -target bpf -O2 -g -c bpf/policy.c -o bpf/policy.o
+// enforce source/destination ipv4 policy at bridge ingress, before dns and nat.
+// an explicit deny always drops the packet. isolated sources need an explicit
+// allow; other sources pass when no rule matches. fragments use the same ip pair.
 
 #include "common.h"
 
@@ -44,8 +23,7 @@ struct bpf_map_def SEC("maps") policy_map = {
     .map_flags   = 0,
 };
 
-// IPs in "isolated" mode (have allow-only rules).
-// if an IP is in this map, only explicitly allowed destinations are reachable.
+// an entry marks a source as isolated. only explicit allow rules can pass.
 struct bpf_map_def SEC("maps") isolation_map = {
     .type        = BPF_MAP_TYPE_HASH,
     .key_size    = sizeof(__u32),
@@ -61,10 +39,6 @@ int policy_enforce(struct __sk_buff *skb)
 {
     void *data     = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
-    
-    // SECURITY: Enforce minimum packet size for parsing
-    if (data + 34 > data_end) // eth(14) + ip(20)
-        return TC_ACT_UNSPEC;
 
     // parse ethernet header
     struct ethhdr *eth = data;
@@ -78,16 +52,18 @@ int policy_enforce(struct __sk_buff *skb)
     // parse IP header
     struct iphdr *iph = (void *)(eth + 1);
     if ((void *)(iph + 1) > data_end)
-        return TC_ACT_UNSPEC;
-    
-    // Policies apply to every valid IPv4 TTL and source address. Source
-    // filtering belongs to the routing layer, never a policy lookup bypass.
-    __u8 ihl = iph->ihl_version & 0x0F;
-    if ((iph->ihl_version >> 4) != 4 || ihl < 5 ||
-        data + 14 + ihl * 4 > data_end || ntohs(iph->tot_len) < ihl * 4)
         return TC_ACT_SHOT;
 
-    // SECURITY: Fully initialize the key to prevent info leaks
+    // apply policy regardless of ttl or source address. malformed ipv4 headers
+    // must not bypass rules, but payload bytes may be outside the linear skb.
+    __u32 header_len = (iph->ihl_version & 0x0f) * 4;
+    __u32 total_len = ntohs(iph->tot_len);
+    if ((iph->ihl_version >> 4) != 4 || header_len < sizeof(*iph) ||
+        (void *)iph + header_len > data_end || total_len < header_len ||
+        sizeof(*eth) + total_len > skb->len)
+        return TC_ACT_SHOT;
+
+    // addresses stay in network byte order, matching the userspace map keys.
     struct policy_key key = {
         .src_ip = iph->saddr,
         .dst_ip = iph->daddr,
@@ -101,7 +77,7 @@ int policy_enforce(struct __sk_buff *skb)
     // check if source is isolated (allow-only mode)
     __u8 *isolated = bpf_map_lookup_elem(&isolation_map, &key.src_ip);
     if (isolated) {
-        // source is isolated — only pass if there's an explicit allow entry
+        // only action 1 allows traffic from an isolated source.
         if (!action || *action != 1)
             return TC_ACT_SHOT;
     }

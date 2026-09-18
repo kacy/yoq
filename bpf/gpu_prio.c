@@ -1,63 +1,71 @@
-// gpu_prio.c — TC egress classifier for GPU mesh traffic prioritization
+// prioritize gpu mesh traffic on wg-yoq egress.
 //
-// marks packets destined for GPU mesh ports (29500-29600) with
-// TC_PRIO_INTERACTIVE (6) so the kernel qdisc schedules them ahead
-// of bulk traffic. attached to the wg-yoq interface when training
-// jobs start, detached when they stop.
-//
-// compile with:
-//   clang -target bpf -O2 -g -c bpf/gpu_prio.c -o bpf/gpu_prio.o
+// destination ports 29500 through 29600 receive interactive priority.
+// wireguard carries raw ip packets, so there is no ethernet header here.
 
 #include "common.h"
 
-// TC priority class for interactive traffic
 #define TC_PRIO_INTERACTIVE 6
-
-// GPU mesh port range (NCCL default)
 #define GPU_PORT_MIN 29500
 #define GPU_PORT_MAX 29600
 
 SEC("classifier/gpu_prio")
 int gpu_prio_mark(struct __sk_buff *skb)
 {
-    void *data     = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-
-    // ethernet header
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end)
+    if (skb->protocol != htons(ETH_P_IP))
         return TC_ACT_OK;
 
-    // only handle IPv4
-    if (eth->h_proto != htons(ETH_P_IP))
-        return TC_ACT_OK;
-
-    // IP header
-    struct iphdr *iph = (void *)(eth + 1);
+    void *data     = (void *)(__u64)skb->data;
+    void *data_end = (void *)(__u64)skb->data_end;
+    struct iphdr *iph = data;
     if ((void *)(iph + 1) > data_end)
         return TC_ACT_OK;
+    if ((iph->ihl_version >> 4) != 4)
+        return TC_ACT_OK;
 
-    __u16 dst_port = 0;
+    __u32 ip_header_len = (iph->ihl_version & 0x0f) * 4;
+    if (ip_header_len < sizeof(*iph))
+        return TC_ACT_OK;
+    if ((void *)iph + ip_header_len > data_end)
+        return TC_ACT_OK;
 
+    __u32 ip_total_len = ntohs(iph->tot_len);
+    if (ip_total_len < ip_header_len || ip_total_len > skb->len)
+        return TC_ACT_OK;
+    if (ntohs(iph->frag_off) & IPV4_FRAGMENT_MASK)
+        return TC_ACT_OK;
+
+    // use the declared ip payload length so padding cannot supply a port.
+    __u32 payload_len = ip_total_len - ip_header_len;
+    __u16 dst_port;
     if (iph->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = (void *)iph + sizeof(*iph);
+        if (payload_len < sizeof(struct tcphdr))
+            return TC_ACT_OK;
+        struct tcphdr *tcp = (void *)iph + ip_header_len;
         if ((void *)(tcp + 1) > data_end)
+            return TC_ACT_OK;
+        __u32 tcp_header_len = (ntohs(tcp->flags) >> 12) * 4;
+        if (tcp_header_len < sizeof(*tcp) || tcp_header_len > payload_len)
+            return TC_ACT_OK;
+        if ((void *)tcp + tcp_header_len > data_end)
             return TC_ACT_OK;
         dst_port = ntohs(tcp->dest);
     } else if (iph->protocol == IPPROTO_UDP) {
-        struct udphdr *udp = (void *)iph + sizeof(*iph);
+        if (payload_len < sizeof(struct udphdr))
+            return TC_ACT_OK;
+        struct udphdr *udp = (void *)iph + ip_header_len;
         if ((void *)(udp + 1) > data_end)
+            return TC_ACT_OK;
+        __u32 udp_len = ntohs(udp->len);
+        if (udp_len < sizeof(*udp) || udp_len > payload_len)
             return TC_ACT_OK;
         dst_port = ntohs(udp->dest);
     } else {
         return TC_ACT_OK;
     }
 
-    // mark GPU mesh traffic with interactive priority
-    if (dst_port >= GPU_PORT_MIN && dst_port <= GPU_PORT_MAX) {
+    if (dst_port >= GPU_PORT_MIN && dst_port <= GPU_PORT_MAX)
         skb->priority = TC_PRIO_INTERACTIVE;
-    }
-
     return TC_ACT_OK;
 }
 

@@ -45,6 +45,9 @@ jobs:
               - 'bpf/**'
               - 'tools/bpf_gen.zig'
               - 'src/test_bpf_load_balancer.zig'
+              - 'src/test_bpf_packets.zig'
+              - 'tests/bpf/**'
+              - 'scripts/bpf-host-tests.sh'
               - 'scripts/bpf-load-balancer-smoke.sh'
               - 'scripts/tc-policy-smoke.sh'
               - 'src/test_tc_policy_chain.zig'
@@ -238,6 +241,7 @@ jobs:
       - name: regenerate checked-in bpf bytecode
         shell: bash
         run: |
+          clang-19 --version
           zig build bpf
           zig fmt src/network/bpf/
 
@@ -252,7 +256,10 @@ jobs:
             exit 1
           fi
 
-      - name: verify load balancer with the kernel
+      - name: verify bpf helper failures and packet parsing
+        run: bash scripts/bpf-host-tests.sh
+
+      - name: verify bpf packet handling with the kernel
         run: bash scripts/bpf-load-balancer-smoke.sh
 
       - name: verify shared TC policy enforcement with the kernel
