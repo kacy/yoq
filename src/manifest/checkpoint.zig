@@ -196,7 +196,7 @@ pub fn mountedDirectory(alloc: std.mem.Allocator, path: []const u8, mounts: []co
     }
     const mount = selected orelse return null;
     const suffix = std.mem.trimStart(u8, path[std.mem.trimEnd(u8, mount.target, "/").len..], "/");
-    return std.fs.path.join(alloc, &.{ mount.source, suffix });
+    return try std.fs.path.join(alloc, &.{ mount.source, suffix });
 }
 
 fn appendEnv(alloc: std.mem.Allocator, env: *std.ArrayListUnmanaged([]const u8), comptime format: []const u8, args: anytype) !void {
