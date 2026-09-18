@@ -346,3 +346,60 @@ test "standalone policy owners reject unenforced configured workloads" {
     if (result.exit_code != 0) std.debug.print("required policy fixture failed:\n{s}\n{s}\n", .{ result.stdout, result.stderr });
     try std.testing.expectEqual(@as(u8, 0), result.exit_code);
 }
+
+fn removeNamedNetwork(env: *helpers.TestEnv, name: []const u8) void {
+    if (env.runYoq(&.{ "network", "rm", name })) |result| {
+        var removed = result;
+        removed.deinit();
+    } else |_| {}
+}
+
+test "named networks scope DNS aliases and retain stopped attachments" {
+    var fixture = try initNetworkingFixture();
+    defer fixture.env.deinit();
+    defer fixture.rootfs.deinit();
+    const first_network = try helpers.uniqueName(alloc, "named-one");
+    defer alloc.free(first_network);
+    const second_network = try helpers.uniqueName(alloc, "named-two");
+    defer alloc.free(second_network);
+    defer removeNamedNetwork(&fixture.env, first_network);
+    defer removeNamedNetwork(&fixture.env, second_network);
+    const first_server = try helpers.uniqueName(alloc, "server-one");
+    defer alloc.free(first_server);
+    const second_server = try helpers.uniqueName(alloc, "server-two");
+    defer alloc.free(second_server);
+    defer stopAndRemoveContainer(&fixture.env, first_server);
+    defer stopAndRemoveContainer(&fixture.env, second_server);
+
+    for ([_][]const u8{ first_network, second_network }, [_][]const u8{ first_server, second_server }, [_][]const u8{ "first-scope", "second-scope" }) |network, server, body| {
+        var created = try fixture.env.runYoq(&.{ "network", "create", network });
+        defer created.deinit();
+        try created.expectExitCode(0);
+        var started = try fixture.env.runYoq(&.{ "run", "-d", "--name", server, "--network", network, "--network-alias", "shared", fixture.rootfs.rootfs_path, "/bin/yoq-test-http-server", "8080", body });
+        defer started.deinit();
+        try started.expectExitCode(0);
+        try waitForContainerRunning(&fixture.env, server);
+    }
+    for ([_][]const u8{ first_network, second_network }, [_][]const u8{ "first-scope", "second-scope" }) |network, body| {
+        var response = try fixture.env.runYoq(&.{ "run", "--rm", "--network", network, fixture.rootfs.rootfs_path, "/bin/yoq-test-net-probe", "http-get", "shared", "8080", "/" });
+        defer response.deinit();
+        try response.expectExitCode(0);
+        try helpers.expectContains(response.stdout, body);
+    }
+    var other_scope = try fixture.env.runYoq(&.{ "run", "--rm", "--network", second_network, fixture.rootfs.rootfs_path, "/bin/yoq-test-net-probe", "resolve", first_server });
+    defer other_scope.deinit();
+    try std.testing.expect(other_scope.exit_code != 0);
+    var stopped = try fixture.env.runYoq(&.{ "stop", first_server });
+    defer stopped.deinit();
+    try stopped.expectExitCode(0);
+    var refused = try fixture.env.runYoq(&.{ "network", "rm", first_network });
+    defer refused.deinit();
+    try std.testing.expect(refused.exit_code != 0);
+    try helpers.expectContains(refused.stderr, "referenced");
+    var removed = try fixture.env.runYoq(&.{ "rm", first_server });
+    defer removed.deinit();
+    try removed.expectExitCode(0);
+    var network_removed = try fixture.env.runYoq(&.{ "network", "rm", first_network });
+    defer network_removed.deinit();
+    try network_removed.expectExitCode(0);
+}
