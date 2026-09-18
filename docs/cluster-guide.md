@@ -421,7 +421,13 @@ before taking a node offline for maintenance:
 sudo -H "$(command -v yoq)" drain <node-id>
 ```
 
-this marks the node as draining. the scheduler stops placing new containers there and migrates existing workloads to other nodes. wait for the node to show no running containers before shutting it down.
+the agent enters `drain_pending` and stops receiving new placements. it keeps heartbeating and reconciling its existing assignments. each service gets a durable replacement on another eligible agent; the original is stopped only after that replacement reports ready. replacement capacity includes the original workload until handoff completes.
+
+`drain_blocked` means the agent must stay online. insufficient capacity is retried as capacity becomes available. a failed replacement, a missing saved placement request, or a local or host volume requires an operator to correct or redeploy the workload. active rollouts finish before their services can move. jobs and training ranks finish in place, or must be stopped explicitly. drain does not copy node-local data. inspect assignment status and placement constraints before retrying a blocked drain.
+
+wait for `drained` and no running containers before shutting down the host. updated agents exit their worker loop only after `drained`; older agents may remain online with no work until stopped by the operator. handoff records survive coordinator snapshots and restarts. drain one service host at a time so a replacement is not itself being drained.
+
+upgrade every server before using these drain transitions: older servers do not understand the handoff table. the in-progress status is `drain_pending` because older agents interpret `draining` as an immediate shutdown request.
 
 ### monitoring
 
@@ -444,16 +450,18 @@ successful enrollment from an older server remains readable. an older follower c
 
 for a compatible binary upgrade, retain quorum while replacing servers. the replicated-command validation change requires a coordinated voter upgrade instead; see [replicated command recovery](#upgrading-replicated-command-validation). for ordinary compatible upgrades:
 
-1. drain and upgrade agents one at a time (or in batches)
-2. upgrade non-leader servers one at a time
-3. trigger a leader step-down, then upgrade the old leader:
+1. upgrade non-leader servers one at a time
+2. trigger a leader step-down, then upgrade the old leader
+3. drain and upgrade agents one at a time; wait for `drained` before stopping each agent
+
+request a leader transfer with:
 
 ```
 curl -X POST http://10.0.0.1:7700/cluster/step-down \
   -H "Authorization: Bearer $API_TOKEN"
 ```
 
-this gracefully transfers leadership to another server. if the node is not the leader, the response includes a `"leader"` field pointing to the current leader. the old leader can then be drained and upgraded. agents follow trusted leader hints and try their persisted alternatives if the current server becomes unreachable.
+this gracefully transfers leadership to another server. if the node is not the leader, the response includes a `"leader"` field pointing to the current leader. the old leader can then be upgraded. agents follow trusted leader hints and try their persisted alternatives if the current server becomes unreachable.
 
 ### routine failure drills
 
@@ -583,3 +591,7 @@ windowed queries, floating-point aggregates, and identity-changing updates are
 rejected. these restrictions keep results independent of sqlite's scan order.
 new query forms need a deterministic implementation and replay coverage before
 being added to admission.
+
+### raft proposal sizes
+
+one replicated command may contain at most 1 mib of sql, including an atomic placement transaction. oversized commands are rejected before entering the log. append messages include framing overhead in addition to this limit, and follower catch-up splits its backlog at both the byte limit and 64 entries. heartbeat bursts are flushed in complete, bounded sql batches. these limits do not change the separate snapshot receive limit.

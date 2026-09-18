@@ -176,7 +176,10 @@ multi-node orchestration via Raft consensus and SWIM gossip.
 
 **log replication:** the Raft log is persisted in SQLite (WAL mode for crash safety). committed entries are applied to a replicated state machine that updates the shared SQLite database. lagging followers receive snapshots via InstallSnapshot RPC.
 
-**scheduler:** bin-packing placement as a pure function: given resource requests and agent capacities, it scores agents by free resources (CPU + memory) and assigns containers. draining and offline agents are skipped.
+**scheduler:** bin-packing placement as a pure function: given resource requests and agent capacities, it scores agents by free resources (CPU + memory) and assigns containers. only active agents receive new placements. draining, blocked, drained, and offline agents are skipped.
+
+agent drain keeps the worker's reconcile loop alive. replicated handoff rows link each original service assignment to a replacement placed with its saved constraints. the original stops after replacement readiness; insufficient capacity or work that cannot move leaves a blocked drain. finite jobs finish in place, and node-local data is not copied. a completed drain uses `drained`; `drain_pending` avoids the immediate shutdown behavior of older agents that receive `draining`.
+
 
 **replicated commands:** admission and replay prepare generated sql against an empty canonical schema. only replicated tables, deterministic functions, and documented query forms are accepted. valid mutations and their applied index commit together. permanently invalid committed commands receive a durable rejection so later entries can apply; storage failures and unexpected live schema differences stop replay. all voters must use the same validation rules. see [upgrade and recovery requirements](cluster-guide.md#upgrading-replicated-command-validation).
 

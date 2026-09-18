@@ -284,7 +284,7 @@ the implementation is a pure state machine like Raft: `tick()`, `handleMessage()
 
 ### scheduler
 
-bin-packing placement: scores agents by free CPU + memory, assigns containers to the best-fit agent. draining and offline agents are skipped.
+bin-packing placement: scores agents by free CPU + memory, assigns containers to the best-fit agent. only active agents receive new placements. drain-pending, blocked, drained, and offline agents are skipped.
 
 ### agents
 
@@ -309,12 +309,19 @@ the cluster API also exposes app-scoped day-2 reads and rollback:
 The app status surfaces (`GET /apps`, `GET /apps/<name>/status`, `yoq apps`, and `yoq status --app`) also report live training runtime counts for the app: active, paused, and failed jobs. Their JSON output now includes nested `current_release`, `previous_successful_release`, `workloads`, and `training_runtime` sections while keeping the older top-level fields for compatibility.
 For `GET /apps/<app>/training/<name>/logs`, the control plane now proxies the request to the hosting agent for the selected rank. If that agent is unreachable or does not expose the log endpoint, the route returns an explicit hosting-agent error.
 
+### agent drain
+
+`yoq drain <agent-id>` starts a durable handoff. the agent stays online in `drain_pending` while replacements start on other workers. a service's original assignment is stopped only after its replacement passes readiness. `drain_blocked` keeps existing work running: add capacity, correct a failed replacement, or finish work that cannot move. jobs and training ranks finish in place; local volumes and bind mounts require an explicit migration plan. drain does not copy their data.
+
+wait for `drained` and no running containers before stopping the host. coordinator restarts retain the handoff state. older agents may need to be stopped manually once empty. every voter must understand the new handoff table before drain is used; see the [cluster guide](cluster-guide.md#draining-a-node).
+
 ### rolling upgrades
 
 for compatible versions, retain quorum while upgrading a cluster. the new replicated-command validation requires all voters to be upgraded together before writes resume; follow the [installation and recovery guide](install-and-recovery.md). for an ordinary compatible rolling upgrade:
-1. drain and upgrade agents (one at a time or in batches)
-2. upgrade non-leader servers one at a time
-3. trigger leader step-down (`POST /cluster/step-down`), then upgrade the old leader
+
+1. upgrade non-leader servers one at a time
+2. trigger leader step-down (`POST /cluster/step-down`), then upgrade the old leader
+3. drain and upgrade agents one at a time; wait for `drained` before stopping an agent
 
 agents automatically follow the new leader.
 
