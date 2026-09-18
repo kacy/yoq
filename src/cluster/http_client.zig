@@ -17,6 +17,8 @@ pub const HttpClientError = error{
     ConnectFailed,
     /// failed to write the HTTP request to the socket
     SendFailed,
+    /// request headers or body exceed the client limit
+    RequestTooLarge,
     /// failed to read any response bytes from the server
     ReceiveFailed,
     /// response body exceeds the 64KB read buffer
@@ -62,21 +64,35 @@ pub fn post(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, body: []
 
 /// send an HTTP POST request with optional bearer token auth.
 pub fn postWithAuth(alloc: Allocator, addr: [4]u8, port: u16, path: []const u8, body: []const u8, auth_token: ?[]const u8) HttpClientError!Response {
-    var req_buf: [2048]u8 = undefined;
-    const request = if (auth_token) |token|
+    const request = try buildPostRequest(alloc, path, body, auth_token);
+    defer alloc.free(request);
+    return doRequest(alloc, addr, port, request);
+}
+
+// ordinary api endpoints accept bodies up to one mebibyte.
+const max_post_body_bytes: usize = 1024 * 1024;
+
+fn buildPostRequest(alloc: Allocator, path: []const u8, body: []const u8, auth_token: ?[]const u8) HttpClientError![]u8 {
+    if (body.len > max_post_body_bytes) return HttpClientError.RequestTooLarge;
+    var header_buf: [2048]u8 = undefined;
+    const headers = if (auth_token) |token|
         std.fmt.bufPrint(
-            &req_buf,
-            "POST {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {d}\r\nContent-Type: application/json\r\nAuthorization: Bearer {s}\r\n\r\n{s}",
-            .{ path, body.len, token, body },
-        ) catch return HttpClientError.SendFailed
+            &header_buf,
+            "POST {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {d}\r\nContent-Type: application/json\r\nAuthorization: Bearer {s}\r\n\r\n",
+            .{ path, body.len, token },
+        ) catch return HttpClientError.RequestTooLarge
     else
         std.fmt.bufPrint(
-            &req_buf,
-            "POST {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {d}\r\nContent-Type: application/json\r\n\r\n{s}",
-            .{ path, body.len, body },
-        ) catch return HttpClientError.SendFailed;
+            &header_buf,
+            "POST {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {d}\r\nContent-Type: application/json\r\n\r\n",
+            .{ path, body.len },
+        ) catch return HttpClientError.RequestTooLarge;
 
-    return doRequest(alloc, addr, port, request);
+    // both lengths are bounded before allocation; the body keeps its exact bytes.
+    const request = alloc.alloc(u8, headers.len + body.len) catch return HttpClientError.SendFailed;
+    @memcpy(request[0..headers.len], headers);
+    @memcpy(request[headers.len..], body);
+    return request;
 }
 
 fn doRequest(alloc: Allocator, addr: [4]u8, port: u16, request: []const u8) HttpClientError!Response {
@@ -249,4 +265,70 @@ test "http client frees failed responses once and handles the next request" {
         try std.testing.expectEqual(@as(u16, 200), response.status_code);
         try std.testing.expectEqualStrings("ok", response.body);
     }
+}
+
+test "http client posts a multiline manifest larger than the header buffer over tcp" {
+    const socket = linux_platform.posix;
+    const listener = try socket.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer socket.close(listener);
+    var address = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    try socket.bind(listener, &address.any, address.getOsSockLen());
+    try socket.listen(listener, 1);
+    const timeout = posix.timeval{ .sec = 3, .usec = 0 };
+    try socket.setsockopt(listener, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+    var address_len = address.getOsSockLen();
+    try socket.getsockname(listener, &address.any, &address_len);
+
+    const body = "{\n  \"app_name\": \"demo\",\n  \"notes\": \"" ++ ("manifest payload " ** 512) ++ "\"\n}\n";
+    const Peer = struct {
+        received: [16 * 1024]u8 = undefined,
+        len: usize = 0,
+
+        fn serve(self: *@This(), fd: posix.fd_t, body_len: usize) void {
+            const client = linux_platform.posix.accept(fd, null, null, posix.SOCK.CLOEXEC) catch return;
+            defer linux_platform.posix.close(client);
+            const read_timeout = posix.timeval{ .sec = 3, .usec = 0 };
+            posix.setsockopt(client, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&read_timeout)) catch return;
+            while (self.len < self.received.len) {
+                const count = posix.read(client, self.received[self.len..]) catch return;
+                if (count == 0) return;
+                self.len += count;
+                if (std.mem.indexOf(u8, self.received[0..self.len], "\r\n\r\n")) |end| {
+                    if (self.len >= end + 4 + body_len) break;
+                }
+            }
+            writeAll(client, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok") catch return;
+        }
+    };
+    var peer: Peer = .{};
+    const thread = try std.Thread.spawn(.{}, Peer.serve, .{ &peer, listener, body.len });
+    var response = postWithAuth(std.testing.allocator, .{ 127, 0, 0, 1 }, std.mem.bigToNative(u16, address.in.port), "/apps/apply", body, "operator-token") catch |err| {
+        thread.join();
+        return err;
+    };
+    defer response.deinit(std.testing.allocator);
+    thread.join();
+    try std.testing.expectEqual(@as(u16, 200), response.status_code);
+    try std.testing.expectEqualStrings("ok", response.body);
+    const request = peer.received[0..peer.len];
+    const end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return error.MissingRequestHeaders;
+    try std.testing.expect(std.mem.startsWith(u8, request, "POST /apps/apply HTTP/1.1\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, request[0..end], "Authorization: Bearer operator-token") != null);
+    var length_buf: [64]u8 = undefined;
+    const expected_length = try std.fmt.bufPrint(&length_buf, "Content-Length: {d}\r\n", .{body.len});
+    try std.testing.expect(std.mem.indexOf(u8, request[0 .. end + 2], expected_length) != null);
+    try std.testing.expectEqualStrings(body, request[end + 4 ..]);
+}
+
+test "http client rejects oversized posts before connecting" {
+    const body = try std.testing.allocator.alloc(u8, max_post_body_bytes + 1);
+    defer std.testing.allocator.free(body);
+    @memset(body, 'x');
+    try std.testing.expectError(error.RequestTooLarge, post(std.testing.allocator, .{ 127, 0, 0, 1 }, 0, "/apps/apply", body));
+    const largest = try buildPostRequest(std.testing.allocator, "/apps/apply", body[0..max_post_body_bytes], null);
+    defer std.testing.allocator.free(largest);
+    const body_start = (std.mem.indexOf(u8, largest, "\r\n\r\n") orelse return error.MissingRequestHeaders) + 4;
+    try std.testing.expectEqualSlices(u8, body[0..max_post_body_bytes], largest[body_start..]);
+    const oversized_path = [_]u8{'x'} ** 2048;
+    try std.testing.expectError(error.RequestTooLarge, post(std.testing.allocator, .{ 127, 0, 0, 1 }, 0, &oversized_path, ""));
 }
