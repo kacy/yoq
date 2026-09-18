@@ -185,10 +185,9 @@ pub const Raft = struct {
         return replication_runtime.handleAppendEntries(self, args, min_election_ticks, max_election_ticks);
     }
 
-    /// validate an InstallSnapshot RPC from the leader and update only
-    /// term/role state needed to accept it. the caller must restore the
-    /// snapshot bytes synchronously and then call finishInstallSnapshot()
-    /// before acknowledging success back to the leader.
+    /// update term and role for a snapshot request. this does not install data.
+    /// the node must restore the artifact and publish its durable boundary
+    /// before acknowledging a new snapshot to the leader.
     pub fn handleInstallSnapshot(self: *Raft, args: InstallSnapshotArgs) InstallSnapshotReply {
         if (!self.refreshPersistentState()) return .{ .term = self.persistent_state.current_term };
         return snapshot_runtime.handleInstallSnapshot(self, args, min_election_ticks, max_election_ticks);
@@ -3120,4 +3119,60 @@ test "durable state read faults suspend consensus until the persisted vote is re
     try testing.expect(restored.vote_granted);
     try testing.expect(!raft.storage_failed);
     try testing.expectEqual(@as(?NodeId, 2), try log.getVotedFor());
+}
+
+test "raft releases queued payloads on shutdown and transfers drained payloads to the caller" {
+    const alloc = testing.allocator;
+    for ([_]bool{ false, true }) |drain| {
+        var log = try Log.initMemory();
+        defer log.deinit();
+        var raft = try Raft.init(alloc, 1, &.{2}, &log);
+        defer raft.deinit();
+        try log.append(.{ .index = 1, .term = 1, .data = "replicated command" });
+        raft.sendAppendEntries(0);
+        try testing.expectEqual(@as(usize, 1), raft.actions.items.len);
+        {
+            const data = try alloc.dupe(u8, "snapshot bytes");
+            errdefer alloc.free(data);
+            try raft.actions.append(alloc, .{ .apply_snapshot = .{
+                .data = data,
+                .meta = .{ .last_included_index = 1, .last_included_term = 1, .data_len = data.len },
+            } });
+        }
+
+        if (drain) {
+            const actions = try raft.drainActions();
+            defer raft.freeActions(actions);
+            try testing.expectEqual(@as(usize, 0), raft.actions.items.len);
+            try testing.expectEqualStrings("replicated command", actions[0].send_append_entries.args.entries[0].data);
+            try testing.expectEqualStrings("snapshot bytes", actions[1].apply_snapshot.data);
+        }
+    }
+}
+
+test "snapshot metadata write failure preserves cached and applied progress" {
+    var log = try Log.initMemory();
+    defer log.deinit();
+    var raft = try Raft.init(testing.allocator, 1, &.{}, &log);
+    defer raft.deinit();
+    const previous: SnapshotMeta = .{ .last_included_index = 3, .last_included_term = 1, .data_len = 30 };
+    const next: SnapshotMeta = .{ .last_included_index = 8, .last_included_term = 2, .data_len = 80 };
+    try testing.expect(raft.finishInstallSnapshot(previous));
+    try log.db.exec("CREATE TRIGGER reject_snapshot BEFORE UPDATE ON snapshot_meta BEGIN SELECT RAISE(FAIL, 'snapshot write failed'); END;", .{}, .{});
+
+    try testing.expect(!raft.onSnapshotComplete(next));
+    try testing.expect(!raft.finishInstallSnapshot(next));
+    try testing.expectEqualDeep(previous, raft.snapshot_meta.?);
+    try testing.expectEqualDeep(previous, (try log.readSnapshotMeta()).?);
+    try testing.expectEqual(@as(LogIndex, 3), raft.commit_index);
+    try testing.expectEqual(@as(LogIndex, 3), raft.last_applied);
+
+    try log.db.exec("DROP TRIGGER reject_snapshot;", .{}, .{});
+    try testing.expect(raft.onSnapshotComplete(next));
+    try testing.expectEqualDeep(next, raft.snapshot_meta.?);
+    try testing.expectEqual(@as(LogIndex, 3), raft.commit_index);
+    try testing.expectEqual(@as(LogIndex, 3), raft.last_applied);
+    try testing.expect(raft.finishInstallSnapshot(next));
+    try testing.expectEqual(@as(LogIndex, 8), raft.commit_index);
+    try testing.expectEqual(@as(LogIndex, 8), raft.last_applied);
 }
