@@ -594,4 +594,4 @@ being added to admission.
 
 ### raft proposal sizes
 
-one replicated command may contain at most 1 mib of sql, including an atomic placement transaction. oversized commands are rejected before entering the log. append messages include framing overhead in addition to this limit, and follower catch-up splits its backlog at both the byte limit and 64 entries. heartbeat bursts are flushed in complete, bounded sql batches. these limits do not change the separate snapshot receive limit.
+one replicated command may contain at most 1 mib of sql, including an atomic placement transaction. oversized commands are rejected before entering the log. append messages include framing overhead in addition to this limit, and follower catch-up splits its backlog at both the byte limit and 64 entries. heartbeat bursts are flushed in complete, bounded sql batches. an inherited entry from an older leader may be sent alone up to the existing receiver frame limit, so an already persisted larger command does not strand catch-up. these limits do not change the separate snapshot receive limit.

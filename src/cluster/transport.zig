@@ -121,7 +121,7 @@ pub const Transport = struct {
         }
 
         const size = codec_support.encodedSize(msg) catch return TransportError.SendFailed;
-        if (size > @import("replication_limits.zig").max_append_frame_bytes)
+        if (size > @import("replication_limits.zig").max_inherited_frame_bytes)
             return TransportError.SendFailed;
         var stack_buf: [8192]u8 = undefined;
         const buf = if (size <= stack_buf.len) stack_buf[0..size] else self.alloc.alloc(u8, size) catch return TransportError.SendFailed;

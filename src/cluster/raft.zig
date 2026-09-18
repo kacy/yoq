@@ -3239,3 +3239,36 @@ test "cluster reliability: replication budget carries a full command and splits 
     raft.handleAppendEntriesReply(2, final_reply);
     try std.testing.expectEqual(@as(u64, 2), raft.commit_index);
 }
+
+test "cluster reliability: inherited oversized entries remain replicable" {
+    const limits = @import("replication_limits.zig");
+    const codec = @import("transport/codec_support.zig");
+    const alloc = std.testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+    const payload = try alloc.alloc(u8, limits.max_command_bytes + 1);
+    defer alloc.free(payload);
+    @memset(payload, 'x');
+    // this entry was persisted by a previous binary, before proposal admission.
+    try log.append(.{ .index = 1, .term = 1, .data = payload });
+    try log.append(.{ .index = 2, .term = 1, .data = "next" });
+    var raft = try Raft.init(alloc, 1, &.{2}, &log);
+    defer raft.deinit();
+    replication_runtime.sendAppendEntries(&raft, 0);
+    const actions = try raft.drainActions();
+    defer raft.freeActions(actions);
+    const args = actions[0].send_append_entries.args;
+    try std.testing.expectEqual(@as(usize, 1), args.entries.len);
+    const size = try codec.encodedSize(.{ .append_entries = args });
+    try std.testing.expect(size > limits.max_append_frame_bytes);
+    try std.testing.expect(size <= limits.max_inherited_frame_bytes);
+    const frame = try alloc.alloc(u8, size);
+    defer alloc.free(frame);
+    _ = try codec.encode(frame, .{ .append_entries = args });
+    const decoded = try codec.decode(alloc, frame[4..]);
+    defer {
+        for (decoded.append_entries.entries) |entry| alloc.free(entry.data);
+        alloc.free(decoded.append_entries.entries);
+    }
+    try std.testing.expectEqualStrings(payload, decoded.append_entries.entries[0].data);
+}

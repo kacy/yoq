@@ -141,8 +141,10 @@ pub fn sendAppendEntries(self: anytype, peer_idx: usize) void {
     if (next <= last) {
         var idx = next;
         while (idx <= last and count < entries_buf.len) : (idx += 1) {
+            if (frame_bytes >= limits.max_append_frame_bytes) break;
             const entry = (self.log.getEntry(self.alloc, idx) catch return) orelse break;
-            const available = limits.max_append_frame_bytes - frame_bytes;
+            const frame_limit = if (count == 0) limits.max_inherited_frame_bytes else limits.max_append_frame_bytes;
+            const available = frame_limit - frame_bytes;
             if (available < limits.entry_header_bytes or entry.data.len > available - limits.entry_header_bytes) {
                 self.alloc.free(entry.data);
                 break;

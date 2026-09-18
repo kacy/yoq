@@ -1218,3 +1218,26 @@ test "replicated admission rejects scan-order-dependent reads and key updates" {
     }
     try first.validator.validate("UPDATE agents SET id = id WHERE 0;");
 }
+
+test "cluster reliability: inherited larger commands still apply and validate as history" {
+    const alloc = std.testing.allocator;
+    const payload = try alloc.alloc(u8, @import("replication_limits.zig").max_command_bytes);
+    defer alloc.free(payload);
+    @memset(payload, 'x');
+    const sql = try std.fmt.allocPrint(alloc, "UPDATE agents SET labels = '{s}' WHERE id = 'abcdef000001'; UPDATE agents SET cpu_used = 2 WHERE id = 'abcdef000002';", .{payload});
+    defer alloc.free(sql);
+    var log = try @import("log.zig").Log.initMemory();
+    defer log.deinit();
+    try log.append(.{ .index = 1, .term = 1, .data = sql });
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+    try seedBatchTestAgents(&sm);
+    sm.applyUpTo(&log, alloc, 1);
+    try std.testing.expectEqual(@as(u64, 1), sm.last_applied);
+    try std.testing.expect(!try command.wasRejected(&sm.db, 1, 1));
+    const row = (try sm.db.one(struct { size: i64 }, "SELECT length(labels) AS size FROM agents WHERE id = 'abcdef000001';", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, @intCast(payload.len)), row.size);
+    const second = (try sm.db.one(struct { cpu_used: i64 }, "SELECT cpu_used FROM agents WHERE id = 'abcdef000002';", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 2), second.cpu_used);
+    try sm.validateAppliedHistory(&log, alloc);
+}
