@@ -9,7 +9,6 @@ const log = @import("../../lib/log.zig");
 const common = @import("common.zig");
 const cluster_runtime = @import("cluster_runtime.zig");
 const file_support = @import("file_support.zig");
-const ebpf = @import("ebpf_module.zig").ebpf;
 const ebpf_support = @import("ebpf_support.zig");
 const service_registry_bridge = @import("../service_registry_bridge.zig");
 const service_reconciler = @import("../service_reconciler.zig");
@@ -123,35 +122,20 @@ pub fn setupContainer(
     return info;
 }
 
-pub fn teardownContainer(
-    container_id: []const u8,
-    net_info: *const common.NetworkInfo,
-    config: common.NetworkConfig,
-    db: *sqlite.Db,
-) void {
-    service_registry_bridge.unregisterContainerService(container_id);
+pub fn teardownContainer(container_id: []const u8, net_info: *const common.NetworkInfo, config: common.NetworkConfig, db: *sqlite.Db) void {
+    teardownContainerChecked(container_id, net_info, config, db) catch |err| {
+        log.warn("setup: network teardown incomplete for {s}: {}", .{ container_id, err });
+    };
+}
 
+pub fn teardownContainerChecked(container_id: []const u8, net_info: *const common.NetworkInfo, config: common.NetworkConfig, db: *sqlite.Db) common.SetupError!void {
+    service_registry_bridge.unregisterContainerService(container_id);
     var ip_str_buf: [16]u8 = undefined;
     const ip_str = ip.formatIp(net_info.ip, &ip_str_buf);
-
-    for (config.port_maps) |pm| {
-        if (ebpf.getPortMapper()) |mapper| {
-            const proto: u8 = switch (pm.protocol) {
-                .tcp => 6,
-                .udp => 17,
-            };
-            mapper.removeMapping(pm.host_port, proto);
-        }
-        nat.removePortMap(pm.host_port, ip_str, pm.container_port, pm.protocol.toNat());
-    }
-
-    bridge.deleteVeth(net_info.vethName()) catch |e| {
-        log.warn("setup: failed to delete veth for {s}: {}", .{ container_id, e });
-    };
-
-    ip.release(db, container_id) catch |e| {
-        log.warn("setup: failed to release IP for {s}: {}", .{ container_id, e });
-    };
+    const mapping: port_mappings.Mapping = .{ .address = net_info.ip, .address_text = ip_str };
+    for (config.port_maps) |pm| mapping.removeChecked(pm) catch return error.NatFailed;
+    bridge.deleteVethChecked(net_info.vethName()) catch return error.VethFailed;
+    ip.release(db, container_id) catch return error.IpAllocationFailed;
 }
 
 pub const writeNetworkFiles = file_support.writeNetworkFiles;

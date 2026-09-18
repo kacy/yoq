@@ -36,9 +36,15 @@ pub const NetworkConfig = struct {
 };
 
 pub const PortMap = struct {
+    host_ip: ?[4]u8 = null,
     host_port: u16,
     container_port: u16,
     protocol: Protocol = .tcp,
+
+    pub fn bindIp(self: PortMap) ?[4]u8 {
+        const address = self.host_ip orelse return null;
+        return if (std.mem.eql(u8, &address, &.{ 0, 0, 0, 0 })) null else address;
+    }
 };
 
 pub const Protocol = enum {

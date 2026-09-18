@@ -126,7 +126,8 @@ pub fn isValidContainerName(name: []const u8) bool {
     return true;
 }
 
-/// parse host:container[/tcp|udp]. both ports must be nonzero.
+/// parse [host_ip:][host_port:]container_port[/tcp|udp]. zero or omitted
+/// host ports request an assigned port; container ports must be nonzero.
 pub fn parsePortMap(str: []const u8) ?net_setup.PortMap {
     var protocol: net_setup.Protocol = .tcp;
     const ports = if (std.mem.indexOfScalar(u8, str, '/')) |slash| blk: {
@@ -136,11 +137,22 @@ pub fn parsePortMap(str: []const u8) ?net_setup.PortMap {
         } else if (!std.mem.eql(u8, suffix, "tcp")) return null;
         break :blk str[0..slash];
     } else str;
-    const colon = std.mem.indexOfScalar(u8, ports, ':') orelse return null;
-    const host_port = std.fmt.parseUnsigned(u16, ports[0..colon], 10) catch return null;
-    const container_port = std.fmt.parseUnsigned(u16, ports[colon + 1 ..], 10) catch return null;
-    if (host_port == 0 or container_port == 0) return null;
-    return .{ .host_port = host_port, .container_port = container_port, .protocol = protocol };
+    var parts = std.mem.splitScalar(u8, ports, ':');
+    const first = parts.next() orelse return null;
+    const second = parts.next();
+    const third = parts.next();
+    if (parts.next() != null) return null;
+    var host_ip: ?[4]u8 = null;
+    const host_text = if (third != null) blk: {
+        host_ip = ip.parseIp(first) orelse return null;
+        break :blk second.?;
+    } else if (second != null) first else "";
+    const container_text = third orelse second orelse first;
+    const host_port = if (host_text.len == 0) 0 else std.fmt.parseUnsigned(u16, host_text, 10) catch return null;
+    const container_port = std.fmt.parseUnsigned(u16, container_text, 10) catch return null;
+    if (container_port == 0) return null;
+    const mapping: net_setup.PortMap = .{ .host_ip = host_ip, .host_port = host_port, .container_port = container_port, .protocol = protocol };
+    return .{ .host_ip = mapping.bindIp(), .host_port = host_port, .container_port = container_port, .protocol = protocol };
 }
 
 pub const VolumeMountSpec = struct {
@@ -470,7 +482,7 @@ test "parse port map" {
 
 test "parse port map invalid" {
     try std.testing.expect(parsePortMap("invalid") == null);
-    try std.testing.expect(parsePortMap(":80") == null);
+    try std.testing.expectEqual(@as(u16, 0), parsePortMap(":80").?.host_port);
     try std.testing.expect(parsePortMap("8080:") == null);
     try std.testing.expect(parsePortMap("99999:80") == null);
 }
@@ -664,7 +676,7 @@ test "output failure tracking" {
 test "port protocols and invalid ports" {
     try std.testing.expectEqual(net_setup.Protocol.udp, parsePortMap("5353:53/udp").?.protocol);
     try std.testing.expectEqual(net_setup.Protocol.tcp, parsePortMap("8080:80/tcp").?.protocol);
-    for ([_][]const u8{ "0:80", "80:0", "80:80/sctp", "80:80/udp/udp", "127.0.0.1:80:80", "-1:80" }) |value| {
+    for ([_][]const u8{ "80:0", "80:80/sctp", "80:80/udp/udp", "999.0.0.1:80:80", "-1:80" }) |value| {
         try std.testing.expect(parsePortMap(value) == null);
     }
 }
@@ -698,4 +710,17 @@ test "structured managed volumes support named and anonymous storage" {
     try std.testing.expectEqualStrings("", anonymous.source);
     try std.testing.expect(anonymous.volume_nocopy);
     try std.testing.expect(parseStructuredMount("type=bind,source=/tmp,target=/data,volume-nocopy") == null);
+}
+
+test "published ports accept host addresses and assigned ports" {
+    const bound = parsePortMap("127.0.0.1:8080:80/tcp").?;
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, bound.host_ip.?);
+    try std.testing.expectEqual(@as(u16, 8080), bound.host_port);
+    for ([_][]const u8{ "80", ":80", "0:80", "127.0.0.1::80", "127.0.0.1:0:80/udp" }) |value| {
+        try std.testing.expectEqual(@as(u16, 0), parsePortMap(value).?.host_port);
+    }
+    try std.testing.expect(parsePortMap("0.0.0.0:80:80").?.host_ip == null);
+    for ([_][]const u8{ "[::1]:80:80", "localhost:80:80", "1.2.3.4:80:80:80", "80-90:80", "0" }) |value| {
+        try std.testing.expect(parsePortMap(value) == null);
+    }
 }

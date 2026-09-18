@@ -269,10 +269,14 @@ pub fn moveToNamespace(if_name: []const u8, pid: posix.pid_t) BridgeError!void {
 /// delete a veth pair by removing the host-side interface.
 /// the kernel automatically removes the peer when one end is deleted.
 pub fn deleteVeth(host_name: []const u8) BridgeError!void {
+    return deleteVethChecked(host_name);
+}
+
+pub fn deleteVethChecked(host_name: []const u8) BridgeError!void {
     const fd = nl.openSocket() catch return BridgeError.VethDeleteFailed;
     defer linux_platform.posix.close(fd);
 
-    const idx = nl.getIfIndex(fd, host_name) catch return;
+    const idx = nl.getIfIndexChecked(fd, host_name) catch return BridgeError.VethDeleteFailed;
     if (idx == 0) return; // already gone
 
     var buf: [nl.buf_size]u8 align(4) = undefined;
@@ -287,7 +291,10 @@ pub fn deleteVeth(host_name: []const u8) BridgeError!void {
     const info = mb.getPayload(hdr, linux.ifinfomsg);
     info.index = @bitCast(idx);
 
-    nl.sendAndCheck(fd, mb.message()) catch return BridgeError.VethDeleteFailed;
+    nl.sendAndCheck(fd, mb.message()) catch {
+        // A concurrent cleanup can delete the link after lookup.
+        if ((nl.getIfIndexChecked(fd, host_name) catch return BridgeError.VethDeleteFailed) != 0) return BridgeError.VethDeleteFailed;
+    };
 }
 
 // -- container namespace operations --

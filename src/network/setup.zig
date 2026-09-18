@@ -28,6 +28,7 @@ pub const teardownClusterNetworking = cluster_runtime.teardownClusterNetworking;
 
 pub const setupContainer = container_runtime.setupContainer;
 pub const teardownContainer = container_runtime.teardownContainer;
+pub const teardownContainerChecked = container_runtime.teardownContainerChecked;
 pub const writeNetworkFiles = file_support.writeNetworkFiles;
 
 const wg_interface = common.wg_interface;
