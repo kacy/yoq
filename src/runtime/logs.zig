@@ -40,6 +40,10 @@ pub fn readTailWithIo(io: std.Io, alloc: std.mem.Allocator, container_id: []cons
     return storage.readTailWithIo(io, alloc, container_id, n);
 }
 
+pub fn streamLogsWithIo(io: std.Io, container_id: []const u8, tail_lines: ?usize) LogError!void {
+    return storage.streamLogsWithIo(io, container_id, tail_lines);
+}
+
 pub fn deleteLogFile(container_id: []const u8) void {
     storage.deleteLogFile(container_id);
 }
@@ -59,15 +63,16 @@ pub fn captureStream(
     capture.captureStream(log_file, pipe_fd, stream_label, dev_service, dev_color, mirror_output);
 }
 
-pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?std.posix.pid_t) LogError!void {
+pub fn followLogs(container_id: []const u8, tail_lines: ?usize, pid: ?std.posix.pid_t) LogError!void {
     return followLogsWithIo(std.Options.debug_io, container_id, tail_lines, pid);
 }
 
-pub fn followLogsWithIo(io: std.Io, container_id: []const u8, tail_lines: usize, pid: ?std.posix.pid_t) LogError!void {
+pub fn followLogsWithIo(io: std.Io, container_id: []const u8, tail_lines: ?usize, pid: ?std.posix.pid_t) LogError!void {
     return follow.followLogsWithIo(io, container_id, tail_lines, pid);
 }
 
 test {
+    _ = storage;
     _ = @import("logs/sink.zig");
     _ = @import("logs/capture.zig");
     _ = @import("logs/follow.zig");

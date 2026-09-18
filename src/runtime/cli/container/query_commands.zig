@@ -134,7 +134,7 @@ pub fn log(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocato
     const record = try state_support.resolveContainerRef(alloc, ref);
     defer record.deinit(alloc);
 
-    var tail_lines: usize = 0;
+    var tail_lines: ?usize = null;
     var follow = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--tail")) {
@@ -148,6 +148,9 @@ pub fn log(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocato
             };
         } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--follow")) {
             follow = true;
+        } else {
+            writeErr("unknown logs option: {s}\n", .{arg});
+            return ContainerError.InvalidArgument;
         }
     }
 
@@ -159,21 +162,8 @@ pub fn log(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocato
         return;
     }
 
-    const content = if (tail_lines > 0)
-        logs.readTailWithIo(io, alloc, record.id, tail_lines)
-    else
-        logs.readLogsWithIo(io, alloc, record.id);
-
-    const data = content catch |err| {
-        writeErr("no logs found for container: {s} ({})\n", .{ record.id, err });
-        std.process.exit(1);
+    logs.streamLogsWithIo(io, record.id, tail_lines) catch |err| {
+        writeErr("failed to read logs for container: {s} ({})\n", .{ record.id, err });
+        return ContainerError.StoreError;
     };
-    defer alloc.free(data);
-
-    if (data.len == 0) {
-        write("(no output)\n", .{});
-        return;
-    }
-
-    write("{s}", .{data});
 }

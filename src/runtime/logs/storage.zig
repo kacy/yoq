@@ -33,7 +33,7 @@ pub fn readLogsWithIo(io: std.Io, alloc: std.mem.Allocator, container_id: []cons
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try logPath(&path_buf, container_id);
 
-    return std.Io.Dir.cwd().readFileAlloc(io, file_path, alloc, .limited(10 * 1024 * 1024)) catch |err| switch (err) {
+    return std.Io.Dir.cwd().readFileAlloc(io, file_path, alloc, .limited(common.max_log_size)) catch |err| switch (err) {
         error.FileNotFound => return LogError.NotFound,
         else => return LogError.ReadFailed,
     };
@@ -45,82 +45,75 @@ pub fn readTail(alloc: std.mem.Allocator, container_id: []const u8, n: usize) Lo
 
 pub fn readTailWithIo(io: std.Io, alloc: std.mem.Allocator, container_id: []const u8, n: usize) LogError![]const u8 {
     if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
-    if (n == 0) return readLogsWithIo(io, alloc, container_id);
-
     var path_buf: [paths.max_path]u8 = undefined;
     const file_path = try logPath(&path_buf, container_id);
-
-    var file = std.Io.Dir.cwd().openFile(io, file_path, .{}) catch
-        return LogError.NotFound;
+    const file = std.Io.Dir.cwd().openFile(io, file_path, .{}) catch return LogError.NotFound;
     defer file.close(io);
-
-    const file_size = file.length(io) catch return LogError.ReadFailed;
-    if (file_size == 0) {
-        return alloc.dupe(u8, "") catch return LogError.ReadFailed;
-    }
-
-    const tail_chunk_size: u64 = 64 * 1024;
-    const read_size = @min(file_size, tail_chunk_size);
-    const seek_pos = file_size - read_size;
-
-    var file_reader = file.reader(io, &.{});
-    file_reader.seekTo(seek_pos) catch return LogError.ReadFailed;
-
-    const buf = alloc.alloc(u8, @intCast(read_size)) catch return LogError.ReadFailed;
-    const bytes_read = file_reader.interface.readSliceShort(buf) catch {
-        alloc.free(buf);
-        return LogError.ReadFailed;
-    };
-    const chunk = buf[0..bytes_read];
-
-    const tail = extractLastNLines(chunk, n);
-    if (tail.ptr != chunk.ptr) {
-        const result = alloc.dupe(u8, tail) catch {
-            alloc.free(buf);
-            return LogError.ReadFailed;
-        };
-        alloc.free(buf);
-        return result;
-    }
-
-    if (seek_pos == 0) return buf;
-
-    alloc.free(buf);
-    return readTailFullWithIo(io, alloc, container_id, n);
+    const end = file.length(io) catch return LogError.ReadFailed;
+    const start = try tailStart(io, file, end, n);
+    const data = alloc.alloc(u8, @intCast(end - start)) catch return LogError.ReadFailed;
+    errdefer alloc.free(data);
+    var reader = file.reader(io, &.{});
+    reader.seekTo(start) catch return LogError.ReadFailed;
+    reader.interface.readSliceAll(data) catch return LogError.ReadFailed;
+    return data;
 }
 
-fn readTailFull(alloc: std.mem.Allocator, container_id: []const u8, n: usize) LogError![]const u8 {
-    return readTailFullWithIo(std.Options.debug_io, alloc, container_id, n);
+/// Stream one snapshot of the current log generation with bounded memory.
+/// A missing tail count means all lines; zero means no history.
+pub fn streamLogsWithIo(io: std.Io, container_id: []const u8, tail_lines: ?usize) LogError!void {
+    var path_buf: [paths.max_path]u8 = undefined;
+    const file_path = try logPath(&path_buf, container_id);
+    const file = std.Io.Dir.cwd().openFile(io, file_path, .{}) catch return LogError.NotFound;
+    defer file.close(io);
+    const end = file.length(io) catch return LogError.ReadFailed;
+    const start = if (tail_lines) |n| try tailStart(io, file, end, n) else 0;
+    var reader = file.reader(io, &.{});
+    reader.seekTo(start) catch return LogError.ReadFailed;
+    var remaining = end - start;
+    var buffer: [64 * 1024]u8 = undefined;
+    while (remaining > 0) {
+        const count = reader.interface.readSliceShort(buffer[0..@min(buffer.len, remaining)]) catch return LogError.ReadFailed;
+        if (count == 0) return LogError.ReadFailed;
+        try common.writeToStdoutWithIo(io, buffer[0..count]);
+        remaining -= count;
+    }
 }
 
-fn readTailFullWithIo(io: std.Io, alloc: std.mem.Allocator, container_id: []const u8, n: usize) LogError![]const u8 {
-    if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
-
-    const full = try readLogsWithIo(io, alloc, container_id);
-
-    const tail = extractLastNLines(full, n);
-    if (tail.ptr != full.ptr) {
-        const result = alloc.dupe(u8, tail) catch {
-            alloc.free(full);
-            return LogError.ReadFailed;
-        };
-        alloc.free(full);
-        return result;
+/// Scan backwards on the same open file used by the reader. This avoids a
+/// second pathname lookup racing with rotation and works for arbitrarily long lines.
+pub fn tailStart(io: std.Io, file: std.Io.File, end: u64, n: usize) LogError!u64 {
+    if (n == 0) return end;
+    var position = end;
+    var lines: usize = 0;
+    var buffer: [64 * 1024]u8 = undefined;
+    var reader = file.reader(io, &.{});
+    while (position > 0) {
+        const count: usize = @intCast(@min(position, buffer.len));
+        position -= count;
+        reader.seekTo(position) catch return LogError.ReadFailed;
+        reader.interface.readSliceAll(buffer[0..count]) catch return LogError.ReadFailed;
+        var i = count;
+        while (i > 0) {
+            i -= 1;
+            if (buffer[i] == '\n' and position + i + 1 != end) {
+                lines += 1;
+                if (lines == n) return position + i + 1;
+            }
+        }
     }
-
-    return full;
+    return 0;
 }
 
 pub fn extractLastNLines(data: []const u8, n: usize) []const u8 {
+    if (n == 0) return data[data.len..];
     var count: usize = 0;
-    var pos: usize = data.len;
+    var pos = data.len;
     while (pos > 0) {
         pos -= 1;
-        if (data[pos] == '\n') {
+        if (data[pos] == '\n' and pos + 1 != data.len) {
             count += 1;
-            if (count == n + 1) {
-                return data[pos + 1 ..];
-            }
+            if (count == n) return data[pos + 1 ..];
         }
     }
     return data;
@@ -169,4 +162,29 @@ test "readTail validates container ID" {
 test "deleteLogFile validates container ID" {
     deleteLogFile("../etc/passwd");
     deleteLogFile("invalid");
+}
+
+test "log tail handles zero, unterminated lines, empty lines, and maximum count" {
+    try std.testing.expectEqualStrings("", extractLastNLines("one\ntwo\n", 0));
+    try std.testing.expectEqualStrings("two\n", extractLastNLines("one\ntwo\n", 1));
+    try std.testing.expectEqualStrings("two", extractLastNLines("one\ntwo", 1));
+    try std.testing.expectEqualStrings("\n", extractLastNLines("one\n\n", 1));
+    try std.testing.expectEqualStrings("one\ntwo", extractLastNLines("one\ntwo", std.math.maxInt(usize)));
+}
+
+test "log tail scans past 64 KiB and the former whole-log size limit" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "large.log", .{ .read = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, "first\n");
+    const block = "x" ** (64 * 1024);
+    for (0..161) |_| try file.writeStreamingAll(io, block);
+    try file.writeStreamingAll(io, "\nlast");
+    const end = try file.length(io);
+    try std.testing.expectEqual(end, try tailStart(io, file, end, 0));
+    try std.testing.expectEqual(end - 4, try tailStart(io, file, end, 1));
+    try std.testing.expectEqual(@as(u64, 6), try tailStart(io, file, end, 2));
+    try std.testing.expectEqual(@as(u64, 0), try tailStart(io, file, end, 3));
 }
