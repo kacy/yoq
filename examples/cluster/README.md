@@ -6,11 +6,9 @@ this example follows the same cluster workflow as the main [cluster guide](../..
 
 ## 1. bootstrap the control plane
 
-generate the token once and copy it securely to all three server hosts. run each command on its matching host. each command lists the other two voters; membership cannot be expanded by starting a peerless server first:
+complete the [credential setup](../../docs/cluster-guide.md#step-1-prepare-credentials) first, including the api token files. use the same join token on all three hosts. run each command on its matching host. each command lists the other two voters; membership cannot be expanded by starting a peerless server first:
 
 ```bash
-TOKEN=$(openssl rand -hex 32)
-
 sudo -H yoq init-server --id 1 --port 9700 --api-port 7700 --peers 2@10.0.0.2:9700,3@10.0.0.3:9700 --token "$TOKEN"
 sudo -H yoq init-server --id 2 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,3@10.0.0.3:9700 --token "$TOKEN"
 sudo -H yoq init-server --id 3 --port 9700 --api-port 7700 --peers 1@10.0.0.1:9700,2@10.0.0.2:9700 --token "$TOKEN"

@@ -98,11 +98,7 @@ current limits:
 
 follow one cluster bootstrap path. use `init-server` for servers and `join` for agents.
 
-generate a shared token:
-
-```bash
-TOKEN=$(openssl rand -hex 32)
-```
+follow [credential setup](cluster-guide.md#step-1-prepare-credentials) first. it creates separate join and api tokens and installs the api token on each server and operator host. use that shared join token below; do not generate a different value on each host.
 
 run each server command on its matching host, using the same token on all hosts. every server must start with the complete fixed voter set; a peerless server creates a different, single-voter cluster:
 
@@ -136,7 +132,7 @@ sudo -H yoq metrics --server 10.0.0.1:7700
 
 what to verify:
 
-- all three servers appear and one is leader
+- `sudo -H yoq cluster status` on each server shows one leader and the same term; `nodes` lists agents, not voters
 - joined agents heartbeat and receive work
 - service discovery works across nodes
 - the clustered manifest deploys through `yoq up --server`

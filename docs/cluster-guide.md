@@ -13,7 +13,7 @@ yoq clusters let you run workloads across multiple machines under one control pl
   - **9800** — gossip protocol (UDP)
   - **51820** — WireGuard overlay (UDP)
 
-run `yoq doctor` on each machine to verify kernel version, permissions, and port availability before starting.
+run `sudo -H yoq doctor` on each machine to check runtime prerequisites before starting.
 
 ---
 
@@ -27,27 +27,33 @@ A single server can commit writes but cannot tolerate a server failure. For one-
 | s2 | 10.0.0.2 | server |
 | s3 | 10.0.0.3 | server |
 
-### step 1: generate a join token
+### step 1: prepare credentials
 
-the join token is a shared secret used to authenticate all cluster communication (HMAC-SHA256). generate one on any machine:
+on one machine, generate separate credentials for cluster transport and the operator api:
 
-```
+```bash
 TOKEN=$(openssl rand -hex 32)
-echo $TOKEN
-# e.g. a1b2c3d4e5f6...  (64 hex chars)
+API_TOKEN=$(openssl rand -hex 32)
 ```
 
-use the same token on every node.
+copy the same values securely to the three server hosts. agents need the join token; operator hosts need the api token. `init-server` requires an existing api token and does not create one automatically. for this fresh installation, install the api token on each server and operator host before starting commands:
+
+```bash
+sudo install -d -m 0700 /root/.local/share/yoq
+printf '%s' "$API_TOKEN" | sudo install -m 0600 /dev/stdin /root/.local/share/yoq/api_token
+```
+
+use `sudo -H` for these runtime and operator commands so they read the same root-owned state directory. preserve existing credentials when restarting an established cluster. the join token authenticates cluster communication; it does not replace the operator api token.
 
 ### step 2: configure the first voter
 
 ```
-yoq init-server \
+sudo -H yoq init-server \
   --id 1 \
   --port 9700 \
   --api-port 7700 \
   --peers 2@10.0.0.2:9700,3@10.0.0.3:9700 \
-  --token $TOKEN
+  --token "$TOKEN"
 ```
 
 This starts the first voter, the API server, and gossip. It waits for a majority of the configured three voters before electing a leader and committing writes. Start all servers from fresh data directories with the same voter set.
@@ -57,23 +63,23 @@ This starts the first voter, the API server, and gossip. It waits for a majority
 on s2:
 
 ```
-yoq init-server \
+sudo -H yoq init-server \
   --id 2 \
   --port 9700 \
   --api-port 7700 \
   --peers 1@10.0.0.1:9700,3@10.0.0.3:9700 \
-  --token $TOKEN
+  --token "$TOKEN"
 ```
 
 on s3:
 
 ```
-yoq init-server \
+sudo -H yoq init-server \
   --id 3 \
   --port 9700 \
   --api-port 7700 \
   --peers 1@10.0.0.1:9700,2@10.0.0.2:9700 \
-  --token $TOKEN
+  --token "$TOKEN"
 ```
 
 The `--peers` flag lists **every other Raft voter**, including servers that have not started yet. Its format is `id@host:port`, comma-separated. Each server's own ID plus its peer IDs must describe the same set. Do not include its own ID in `--peers`.
@@ -84,10 +90,10 @@ For existing installations, preserve the original voter configuration on the fir
 
 ### step 4: verify
 
-Run this locally on each server, using the API token saved during its startup:
+Run this locally on each server, using the api token installed above:
 
 ```
-yoq cluster status
+sudo -H yoq cluster status
 ```
 
 Check that exactly one server reports `role: "leader"` and that all three settle on the same term. After a registration or deployment, compare their `commit_index` and `last_applied`; they should converge with no apply backlog. `yoq nodes` lists registered workers and is not a Raft voter-membership check.
@@ -99,7 +105,7 @@ Check that exactly one server reports `role: "leader"` and that all three settle
 agents are worker nodes that run containers. they don't participate in consensus, so you can add hundreds without affecting Raft performance.
 
 ```
-yoq join 10.0.0.1 --token $TOKEN
+yoq join 10.0.0.1 --token "$TOKEN"
 ```
 
 the agent can point at any server — it doesn't have to be the leader. if the agent hits a non-leader server, the server responds with the current leader's address and the agent automatically redirects. this means you can use a load balancer or any server IP for `yoq join`.
@@ -185,7 +191,7 @@ this is a typical small team setup. no special tuning needed — defaults work w
 
 ```
 # on each agent machine:
-yoq join 10.0.0.1 --token $TOKEN
+yoq join 10.0.0.1 --token "$TOKEN"
 ```
 
 gossip converges in under a second. all 10 nodes can run workloads (agents run containers, servers can too if needed).
@@ -195,14 +201,14 @@ gossip converges in under a second. all 10 nodes can run workloads (agents run c
 For a new cluster at this scale, configure five voters from the start to tolerate two failures. Each server lists the other four; for s1:
 
 ```
-yoq init-server \
+sudo -H yoq init-server \
   --id 1 \
   --port 9700 \
   --api-port 7700 \
   --peers 2@10.0.0.2:9700,3@10.0.0.3:9700,4@10.0.0.4:9700,5@10.0.0.5:9700 \
   --gossip-fanout 5 \
   --gossip-suspicion-multiplier 6 \
-  --token $TOKEN
+  --token "$TOKEN"
 ```
 
 - `--gossip-fanout 5` — each gossip round, each node forwards to 5 peers (default auto-scales with log2(N), but explicit values give you control)
@@ -216,7 +222,7 @@ SERVERS="10.0.0.1"
 TOKEN="a1b2c3d4..."
 
 for host in $(cat agent-hosts.txt); do
-  ssh $host "yoq join $SERVERS --token $TOKEN" &
+  ssh $host "yoq join $SERVERS --token "$TOKEN"" &
 done
 wait
 ```
@@ -249,7 +255,7 @@ for higher availability, run 3+ servers per region (e.g. 3 regions x 3 servers =
 start servers as normal. then join agents with region labels:
 
 ```
-yoq join 10.0.0.1 --token $TOKEN --region us-east-1
+yoq join 10.0.0.1 --token "$TOKEN" --region us-east-1
 ```
 
 the `--region` flag stores the region on the agent record. for more granular placement, set labels via the API:
@@ -299,9 +305,9 @@ keep in mind:
 Configure all nine voters before starting them. For s1, list all eight other servers:
 
 ```
-yoq init-server --id 1 --port 9700 --api-port 7700 \
+sudo -H yoq init-server --id 1 --port 9700 --api-port 7700 \
   --peers 2@10.0.0.2:9700,3@10.0.0.3:9700,4@10.1.0.1:9700,5@10.1.0.2:9700,6@10.1.0.3:9700,7@10.2.0.1:9700,8@10.2.0.2:9700,9@10.2.0.3:9700 \
-  --token $TOKEN
+  --token "$TOKEN"
 ```
 
 For each remaining server, use its own ID and list the other eight, including s1. This configuration needs five reachable voters for writes. It is a new nine-voter cluster, not an expansion of an existing three-voter cluster.
@@ -310,13 +316,13 @@ join agents with region labels:
 
 ```
 # us-east-1 agents
-yoq join 10.0.0.1 --token $TOKEN --region us-east-1
+yoq join 10.0.0.1 --token "$TOKEN" --region us-east-1
 
 # eu-west-1 agents
-yoq join 10.1.0.1 --token $TOKEN --region eu-west-1
+yoq join 10.1.0.1 --token "$TOKEN" --region eu-west-1
 
 # ap-southeast-1 agents
-yoq join 10.2.0.1 --token $TOKEN --region ap-southeast-1
+yoq join 10.2.0.1 --token "$TOKEN" --region ap-southeast-1
 ```
 
 ---
