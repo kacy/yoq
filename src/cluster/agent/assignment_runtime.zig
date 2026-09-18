@@ -532,6 +532,7 @@ fn runAssignment(
         }
     }
 
+    defer manifest_health.unregisterContainer(container_id);
     const readiness_result = waitForServiceReadiness(stopping, self.alloc, container_id, meta);
     switch (readiness_result) {
         .healthy => {},
@@ -556,6 +557,25 @@ fn runAssignment(
         },
     }
 
+    if (meta.workload_kind != null and std.mem.eql(u8, meta.workload_kind.?, "service")) {
+        const ports = servicePublishedPorts(self.alloc, execution.value.ports, gang_info) catch {
+            _ = waitForAssignmentExit(&c, stopping, true);
+            setContainerState(self, assignment_id, .failed);
+            reportStatus(self, assignment_id, "failed", "invalid_published_ports");
+            cleanup(container_id);
+            return;
+        };
+        defer self.alloc.free(ports);
+        published_ports.publishInstance(self.alloc, meta.app_name, hostname, container_id, ports) catch |err| {
+            log.warn("assignment {s} could not publish service ports: {}", .{ assignment_id, err });
+            _ = waitForAssignmentExit(&c, stopping, true);
+            setContainerState(self, assignment_id, .failed);
+            reportStatus(self, assignment_id, "failed", "published_port_failed");
+            cleanup(container_id);
+            return;
+        };
+    }
+
     reportStatus(self, assignment_id, "running", null);
     setContainerState(self, assignment_id, .running);
 
@@ -573,6 +593,24 @@ fn runAssignment(
         reportStatus(self, assignment_id, "failed", "process_failed");
     }
     cleanup(container_id);
+}
+
+// one publication replaces every claim owned by this container. retain the
+// rank-zero rendezvous port when adding the service's public ports.
+fn servicePublishedPorts(alloc: std.mem.Allocator, service_ports: []const manifest_spec.PortMapping, gang: ?GangInfo) ![]manifest_spec.PortMapping {
+    const rendezvous = if (gang) |group| if (group.rank == 0) group.master_port else null else null;
+    if (rendezvous) |port| {
+        for (service_ports) |existing| {
+            if (existing.host_port != port) continue;
+            if (existing.container_port != port) return error.PortCollision;
+            return alloc.dupe(manifest_spec.PortMapping, service_ports);
+        }
+        const ports = try alloc.alloc(manifest_spec.PortMapping, service_ports.len + 1);
+        @memcpy(ports[0..service_ports.len], service_ports);
+        ports[service_ports.len] = .{ .host_port = port, .container_port = port };
+        return ports;
+    }
+    return alloc.dupe(manifest_spec.PortMapping, service_ports);
 }
 
 /// Stop and reap the process on its assignment thread before releasing resources.
@@ -1075,4 +1113,24 @@ test "placement numbers reject malformed gang and health metadata" {
     const health = parseHealthCheckJson(alloc, "{\"kind\":\"tcp\",\"port\":65535,\"interval\":4294967295,\"timeout\":4294967295,\"retries\":4294967295,\"start_period\":4294967295}").?;
     defer health.deinit(alloc);
     try std.testing.expect(estimateHealthStartupWindowSeconds(health) > std.math.maxInt(u64));
+}
+
+test "service publication retains the assigned rank zero rendezvous port" {
+    const alloc = std.testing.allocator;
+    const service_ports = [_]manifest_spec.PortMapping{.{ .host_port = 8080, .container_port = 80 }};
+    var gang: GangInfo = .{ .rank = 0, .world_size = 3, .master_addr = "10.0.0.1", .master_port = 29501 };
+    const leader = try servicePublishedPorts(alloc, &service_ports, gang);
+    defer alloc.free(leader);
+    try std.testing.expectEqual(@as(usize, 2), leader.len);
+    try std.testing.expectEqual(@as(u16, 29501), leader[1].host_port);
+    gang.rank = 1;
+    const follower = try servicePublishedPorts(alloc, &service_ports, gang);
+    defer alloc.free(follower);
+    try std.testing.expectEqual(@as(usize, 1), follower.len);
+    gang.rank = 0;
+    gang.master_port = 8080;
+    try std.testing.expectError(error.PortCollision, servicePublishedPorts(alloc, &service_ports, gang));
+    const duplicate = try servicePublishedPorts(alloc, &.{.{ .host_port = 8080, .container_port = 8080 }}, gang);
+    defer alloc.free(duplicate);
+    try std.testing.expectEqual(@as(usize, 1), duplicate.len);
 }
