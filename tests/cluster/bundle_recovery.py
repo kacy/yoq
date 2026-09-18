@@ -1,6 +1,8 @@
 """restore the stopped process fixture into fresh fixed-voter data roots."""
 
+from contextlib import closing
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -27,6 +29,13 @@ def exercise_bundles(rig):
     if active.exists():
         raise RuntimeError("active-voter rejection published a bundle")
 
+    def ca_ready(node):
+        path = rig.data(node) / "cluster/state.db"
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
+            return database.execute("SELECT COUNT(*) FROM cluster_ca").fetchone()[0] == 1
+
+    for node in range(1, 4):
+        wait_for(f"voter {node} applied ca bootstrap", lambda node=node: ca_ready(node))
     rig.stop(4)
     leader = wait_for("leader before coordinated capture", rig.leader)
     target = rig.request(leader, "/cluster/status")["commit_index"]
