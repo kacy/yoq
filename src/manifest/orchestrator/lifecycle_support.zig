@@ -142,6 +142,7 @@ pub fn startServiceByIndex(
     serviceThreadFn: anytype,
 ) OrchestratorError!void {
     const svc = self.manifest.services[idx];
+    self.startAlerts() catch return OrchestratorError.StartFailed;
 
     for (svc.depends_on) |dep_name| {
         if (self.manifest.workerByName(dep_name)) |worker| {
