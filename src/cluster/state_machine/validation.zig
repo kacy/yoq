@@ -5,6 +5,7 @@ const sqlite = @import("sqlite");
 const schema = @import("../../state/schema.zig");
 const db_runtime = @import("db_runtime.zig");
 const sql_guard = @import("sql_guard.zig");
+const query_shape = @import("query_shape.zig");
 const c = sqlite.c;
 
 pub const Error = error{ InvalidCommand, ValidationUnavailable };
@@ -32,7 +33,9 @@ pub const Validator = struct {
 
         var statements = sql_guard.StatementIterator{ .sql = sql };
         while (statements.next()) |statement| {
+            if (!query_shape.allowed(statement)) return error.InvalidCommand;
             context.ddl = std.mem.startsWith(u8, statement, "CREATE ");
+            context.barrier = query_shape.isBarrier(statement);
             var prepared: ?*c.sqlite3_stmt = null;
             defer {
                 if (prepared) |handle| _ = c.sqlite3_finalize(handle);
@@ -55,7 +58,7 @@ pub const Validator = struct {
     }
 };
 
-const Authorization = struct { ddl: bool = false };
+const Authorization = struct { ddl: bool = false, barrier: bool = false };
 
 fn replicatedTable(name: []const u8) bool {
     const tables = [_][]const u8{
@@ -71,8 +74,33 @@ fn replicatedTable(name: []const u8) bool {
 fn deterministicFunction(name: []const u8) bool {
     // keep this list limited to functions used by replicated mutations.
     // date/time, random, changes and version functions depend on the node.
-    const functions = [_][]const u8{ "coalesce", "ifnull", "nullif", "min", "max", "sum", "count", "printf" };
+    const functions = [_][]const u8{ "coalesce", "ifnull", "nullif", "min", "printf" };
     for (functions) |function| if (std.ascii.eqlIgnoreCase(name, function)) return true;
+    return false;
+}
+
+// changing keys across several rows can fail or succeed depending on which
+// unique value sqlite visits first. identities are established by inserts.
+fn identityColumn(table: []const u8, column: []const u8) bool {
+    if (!replicatedTable(table)) return false;
+    if (std.mem.eql(u8, column, "id") or std.ascii.eqlIgnoreCase(column, "ROWID")) return true;
+    const fields = [_]struct { table: []const u8, column: []const u8 }{
+        .{ .table = "assignment_claims", .column = "assignment_id" },
+        .{ .table = "wireguard_peers", .column = "node_id" },
+        .{ .table = "services", .column = "service_name" },
+        .{ .table = "services", .column = "vip_address" },
+        .{ .table = "service_endpoints", .column = "service_name" },
+        .{ .table = "service_endpoints", .column = "endpoint_id" },
+        .{ .table = "volumes", .column = "name" },
+        .{ .table = "volumes", .column = "app_name" },
+        .{ .table = "cron_schedules", .column = "name" },
+        .{ .table = "cron_schedules", .column = "app_name" },
+        .{ .table = "certificates", .column = "domain" },
+        .{ .table = "s3_multipart_uploads", .column = "upload_id" },
+        .{ .table = "s3_upload_parts", .column = "upload_id" },
+        .{ .table = "s3_upload_parts", .column = "part_number" },
+    };
+    for (fields) |field| if (std.mem.eql(u8, table, field.table) and std.mem.eql(u8, column, field.column)) return true;
     return false;
 }
 
@@ -85,6 +113,8 @@ fn authorize(raw: ?*anyopaque, action: c_int, first: [*c]const u8, second: [*c]c
     if (trigger != null) return c.SQLITE_DENY;
     if (database != null and !std.mem.eql(u8, text(database), "main")) return c.SQLITE_DENY;
     const table = text(first);
+    if (action == c.SQLITE_READ and std.ascii.eqlIgnoreCase(text(second), "ROWID") and !context.ddl) return c.SQLITE_DENY;
+    if (action == c.SQLITE_UPDATE and identityColumn(table, text(second)) and !context.barrier) return c.SQLITE_DENY;
     const permitted = switch (action) {
         c.SQLITE_SELECT => true,
         c.SQLITE_FUNCTION => deterministicFunction(text(second)),

@@ -1073,7 +1073,7 @@ test "replicated admission rejects node-dependent expressions and local reads" {
         "UPDATE agents SET cpu_used = ;",
     };
     for (invalid) |sql| try std.testing.expectError(error.InvalidCommand, sm.validator.validate(sql));
-    try sm.validator.validate("UPDATE agents SET cpu_used = COALESCE((SELECT SUM(cpu_used) FROM agents), 0);");
+    try sm.validator.validate("UPDATE agents SET cpu_used = COALESCE(cpu_used, 0);");
 }
 
 test "replicated poison rejection is independent of local schema and connection history" {
@@ -1168,7 +1168,7 @@ test "replicated admission and restored snapshots share the complete current sch
     var old = try StateMachine.initMemory();
     defer old.deinit();
     try seedBatchTestAgents(&old);
-    const read_claims = "UPDATE agents SET cpu_used = (SELECT COUNT(*) FROM assignment_claims);";
+    const read_claims = "INSERT OR REPLACE INTO assignment_claims (assignment_id, gpu_count) VALUES ('probe', 1);";
     old.apply(.{ .index = 1, .term = 1, .data = read_claims });
     try expectBatchTestState(&old, 1, 0, 0);
     // reproduce a snapshot from before these schema additions.
@@ -1182,4 +1182,34 @@ test "replicated admission and restored snapshots share the complete current sch
     restored.apply(.{ .index = 2, .term = 1, .data = read_claims ++ " UPDATE agents SET credential_hash = 'restored';" });
     try expectBatchTestState(&restored, 2, 0, 0);
     try std.testing.expect(!try command.wasRejected(&restored.db, 2, 1));
+}
+
+test "replicated admission rejects scan-order-dependent reads and key updates" {
+    var first = try StateMachine.initMemory();
+    defer first.deinit();
+    var second = try StateMachine.initMemory();
+    defer second.deinit();
+    try seedBatchTestAgents(&first);
+    try seedBatchTestAgents(&second);
+    try second.db.exec("PRAGMA reverse_unordered_selects = ON;", .{}, .{});
+    const invalid = [_][]const u8{
+        "UPDATE agents SET address = (SELECT address FROM agents LIMIT 1);",
+        "UPDATE agents SET address = (SELECT address FROM agents);",
+        "UPDATE agents SET cpu_used = (SELECT COUNT(*) FROM agents WHERE cpu_used = 0);",
+        "UPDATE agents SET cpu_used = (SELECT SUM(cpu_used) FROM agents);",
+        "UPDATE agents SET cpu_used = (SELECT MIN(cpu_used) FROM agents GROUP BY status);",
+        "UPDATE agents SET cpu_used = other.cpu_used FROM agents other;",
+        "UPDATE agents SET cpu_used = rowid;",
+        "UPDATE agents SET id = id || 'x';",
+        "INSERT OR REPLACE INTO training_jobs (id, name, app_name, state, image, gpus, created_at, updated_at) SELECT 'same', id, 'app', 'running', 'image', 1, 0, 0 FROM agents;",
+    };
+    for (invalid, 1..) |sql, index| {
+        for ([_]*StateMachine{ &first, &second }) |sm| {
+            try std.testing.expectError(error.InvalidCommand, sm.validator.validate(sql));
+            sm.apply(.{ .index = index, .term = 3, .data = sql });
+            try expectBatchTestState(sm, index, 0, 0);
+            try std.testing.expect(try command.wasRejected(&sm.db, index, 3));
+        }
+    }
+    try first.validator.validate("UPDATE agents SET id = id WHERE 0;");
 }
