@@ -381,3 +381,35 @@ test "registry layer byte policy applies to length chunked and close-delimited t
         }
     }
 }
+
+test "registry blob redirects drop dummy credentials while anonymous requests still follow" {
+    const Server = @import("test_support.zig").Server;
+    for ([_][]const u8{ "", "dummy-token" }) |token| {
+        var target = try Server.init(&.{.{ .body = "blob bytes" }});
+        defer target.deinit();
+        try target.start();
+        var target_host: [64]u8 = undefined;
+        var location_buffer: [160]u8 = undefined;
+        const location = try std.fmt.bufPrint(&location_buffer, "Location: http://{s}/blob\r\n", .{try target.host(&target_host)});
+        var source = try Server.init(&.{.{ .status = "302 Found", .headers = location }});
+        defer source.deinit();
+        try source.start();
+        var source_host: [64]u8 = undefined;
+        var url_buffer: [160]u8 = undefined;
+        const host = try source.host(&source_host);
+        const url = try std.fmt.bufPrint(&url_buffer, "http://{s}/blob", .{host});
+        var client: std.http.Client = .{ .io = std.testing.io, .allocator = std.testing.allocator };
+        defer client.deinit();
+        const body = try fetchBlobFromUrl(std.testing.allocator, &client, host, url, .{ .value = token }, true, 0);
+        defer std.testing.allocator.free(body);
+        try std.testing.expectEqualStrings("blob bytes", body);
+        source.worker.?.join();
+        source.worker = null;
+        target.worker.?.join();
+        target.worker = null;
+        const findHeader = @import("../../api/http.zig").findHeaderValue;
+        const source_auth = findHeader(source.last_request[0..source.last_request_length], "Authorization");
+        if (token.len == 0) try std.testing.expect(source_auth == null) else try std.testing.expectEqualStrings("Bearer dummy-token", source_auth.?);
+        try std.testing.expect(findHeader(target.last_request[0..target.last_request_length], "Authorization") == null);
+    }
+}

@@ -10,6 +10,7 @@ pub const ParseError = error{
     MissingPath,
     InvalidFrameSequence,
     InvalidHeadersFrame,
+    DuplicatePseudoheader,
 } || http2.Error || hpack.Error || std.mem.Allocator.Error;
 
 pub const RequestHead = struct {
@@ -180,21 +181,28 @@ pub fn parseRequestHeaderSequence(
     var method: ?[]u8 = null;
     var authority: ?[]u8 = null;
     var path: ?[]u8 = null;
-
-    for (headers.items) |header| {
-        if (std.mem.eql(u8, header.name, ":method")) {
-            method = try alloc.dupe(u8, header.value);
-        } else if (std.mem.eql(u8, header.name, ":authority")) {
-            authority = try alloc.dupe(u8, header.value);
-        } else if (std.mem.eql(u8, header.name, ":path")) {
-            path = try alloc.dupe(u8, header.value);
-        }
-    }
-
+    var saw_scheme = false;
+    // each allocation is owned as soon as it succeeds, including while later
+    // pseudoheaders are validated or duplicated into the request head.
     errdefer {
         if (method) |value| alloc.free(value);
         if (authority) |value| alloc.free(value);
         if (path) |value| alloc.free(value);
+    }
+    for (headers.items) |header| {
+        if (std.mem.eql(u8, header.name, ":method")) {
+            if (method != null) return error.DuplicatePseudoheader;
+            method = try alloc.dupe(u8, header.value);
+        } else if (std.mem.eql(u8, header.name, ":authority")) {
+            if (authority != null) return error.DuplicatePseudoheader;
+            authority = try alloc.dupe(u8, header.value);
+        } else if (std.mem.eql(u8, header.name, ":path")) {
+            if (path != null) return error.DuplicatePseudoheader;
+            path = try alloc.dupe(u8, header.value);
+        } else if (std.mem.eql(u8, header.name, ":scheme")) {
+            if (saw_scheme) return error.DuplicatePseudoheader;
+            saw_scheme = true;
+        }
     }
 
     return .{
@@ -708,4 +716,47 @@ test "parseClientConnectionPreface rejects header block without authority" {
     try request_bytes.appendSlice(alloc, headers);
 
     try std.testing.expectError(error.MissingAuthority, parseClientConnectionPreface(alloc, request_bytes.items));
+}
+
+fn pseudoheaderFixture(alloc: std.mem.Allocator, duplicate: ?[]const u8) ![]u8 {
+    var fields: std.ArrayList(hpack.HeaderField) = .empty;
+    defer fields.deinit(alloc);
+    for ([_]hpack.HeaderField{
+        .{ .name = @constCast(":method"), .value = @constCast("GET") },
+        .{ .name = @constCast(":scheme"), .value = @constCast("http") },
+        .{ .name = @constCast(":authority"), .value = @constCast("example.test") },
+        .{ .name = @constCast(":path"), .value = @constCast("/") },
+    }) |field| {
+        try fields.append(alloc, field);
+        if (duplicate) |name| if (std.mem.eql(u8, name, field.name)) try fields.append(alloc, field);
+    }
+    const block = try hpack.encodeHeaderBlockLiteral(alloc, fields.items);
+    defer alloc.free(block);
+    return http2.buildFrame(alloc, .{
+        .length = @intCast(block.len),
+        .frame_type = .headers,
+        .flags = Flag.end_headers | Flag.end_stream,
+        .stream_id = 1,
+    }, block);
+}
+
+test "http2 request rejects duplicate pseudoheaders without losing earlier allocations" {
+    for ([_][]const u8{ ":method", ":scheme", ":authority", ":path" }) |name| {
+        const frame = try pseudoheaderFixture(std.testing.allocator, name);
+        defer std.testing.allocator.free(frame);
+        try std.testing.expectError(error.DuplicatePseudoheader, parseRequestHeaderSequence(std.testing.allocator, frame, 0));
+    }
+}
+
+test "http2 request releases partial pseudoheader allocations on every allocation failure" {
+    const frame = try pseudoheaderFixture(std.testing.allocator, null);
+    defer std.testing.allocator.free(frame);
+    const Probe = struct {
+        fn parse(alloc: std.mem.Allocator, bytes: []const u8) !void {
+            const result = try parseRequestHeaderSequence(alloc, bytes, 0);
+            defer result.deinit(alloc);
+            try std.testing.expectEqualStrings("example.test", result.request.authority);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.parse, .{frame});
 }

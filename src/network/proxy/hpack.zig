@@ -14,6 +14,12 @@ pub const HeaderField = struct {
     name: []u8,
     value: []u8,
 
+    fn duplicate(alloc: std.mem.Allocator, name: []const u8, value: []const u8) !HeaderField {
+        const owned_name = try alloc.dupe(u8, name);
+        errdefer alloc.free(owned_name);
+        return .{ .name = owned_name, .value = try alloc.dupe(u8, value) };
+    }
+
     pub fn deinit(self: HeaderField, alloc: std.mem.Allocator) void {
         alloc.free(self.name);
         alloc.free(self.value);
@@ -178,10 +184,9 @@ pub fn decodeHeaderBlock(alloc: std.mem.Allocator, block: []const u8) Error!std.
             const field = lookupHeader(index_info.value, &dynamic_table) orelse return error.InvalidIndex;
             decoded_bytes += field.name.len + field.value.len;
             if (decoded_bytes > max_decoded_header_bytes) return error.IntegerOverflow;
-            try headers.append(alloc, .{
-                .name = try alloc.dupe(u8, field.name),
-                .value = try alloc.dupe(u8, field.value),
-            });
+            const owned = try HeaderField.duplicate(alloc, field.name, field.value);
+            errdefer owned.deinit(alloc);
+            try headers.append(alloc, owned);
             pos += index_info.consumed;
             continue;
         }
@@ -218,10 +223,9 @@ pub fn decodeHeaderBlock(alloc: std.mem.Allocator, block: []const u8) Error!std.
         decoded_bytes += name.len + value.len;
         if (decoded_bytes > max_decoded_header_bytes) return error.IntegerOverflow;
 
+        if (incremental_indexing) try dynamic_table.add(alloc, name, value);
+        // ownership moves only after every other fallible operation succeeds.
         try headers.append(alloc, .{ .name = name, .value = value });
-        if (incremental_indexing) {
-            try dynamic_table.add(alloc, name, value);
-        }
     }
 
     return headers;
@@ -277,10 +281,7 @@ const DynamicTable = struct {
             return;
         }
 
-        const entry: HeaderField = .{
-            .name = try alloc.dupe(u8, name),
-            .value = try alloc.dupe(u8, value),
-        };
+        const entry = try HeaderField.duplicate(alloc, name, value);
         errdefer entry.deinit(alloc);
 
         try self.entries.append(alloc, entry);
@@ -551,4 +552,20 @@ test "updateMaxSize clamps a peer's oversized table-size update" {
     defer table.deinit(std.testing.allocator);
     table.updateMaxSize(std.testing.allocator, 1 << 30); // 1 GiB request
     try std.testing.expectEqual(max_dynamic_table_size, table.max_size);
+}
+
+test "hpack header and dynamic table ownership survive every allocation failure" {
+    const Probe = struct {
+        fn decode(alloc: std.mem.Allocator) !void {
+            // indexed static field, literal insertion, then a dynamic reference.
+            var headers = try decodeHeaderBlock(alloc, &.{ 0x82, 0x40, 0x01, 'x', 0x01, 'y', 0xbe });
+            defer {
+                for (headers.items) |header| header.deinit(alloc);
+                headers.deinit(alloc);
+            }
+            try std.testing.expectEqual(@as(usize, 3), headers.items.len);
+            try std.testing.expectEqualStrings("x", headers.items[2].name);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.decode, .{});
 }

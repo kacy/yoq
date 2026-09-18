@@ -11,6 +11,14 @@ pub fn requestWithTimeout(
     options: std.http.Client.RequestOptions,
 ) !std.http.Client.Request {
     var request_options = options;
+    // zig's redirect handler does not clear authorization overrides. registry
+    // credentials therefore never follow an automatic redirect, even on the
+    // same host: a changed port or scheme is a different origin. manual blob
+    // redirects remain visible to the caller, which drops credentials first.
+    if (request_options.redirect_behavior != .unhandled and
+        request_options.headers.authorization == .override and
+        request_options.headers.authorization.override.len > 0)
+        request_options.redirect_behavior = .not_allowed;
     // registry callers consume raw body readers and verify blob digests.
     // do not advertise transport encodings that these readers do not decode.
     if (request_options.headers.accept_encoding == .default)
@@ -143,4 +151,78 @@ test "parseLocationHeader rejects locations that do not fit caller storage" {
         var buf: [4]u8 = undefined;
         try std.testing.expect(parseLocationHeader("registry.example.io", head, &buf) == null);
     }
+}
+
+test "registry authenticated request methods refuse redirects before contacting another origin" {
+    const Server = @import("test_support.zig").Server;
+    const alloc = std.testing.allocator;
+    for ([_]std.http.Method{ .GET, .HEAD, .POST, .PUT }) |method| {
+        for ([_][]const u8{ "Basic ZHVtbXk6cGFzcw==", "Bearer dummy-token" }) |authorization| {
+            var target = try Server.init(&.{.{}});
+            defer target.deinit();
+            try target.start();
+            var target_host: [64]u8 = undefined;
+            var location_buffer: [160]u8 = undefined;
+            const location = try std.fmt.bufPrint(&location_buffer, "Location: http://{s}/foreign\r\n", .{try target.host(&target_host)});
+            var source = try Server.init(&.{.{ .status = "302 Found", .headers = location }});
+            defer source.deinit();
+            try source.start();
+            var source_host: [64]u8 = undefined;
+            var url_buffer: [160]u8 = undefined;
+            const uri = try std.Uri.parse(try std.fmt.bufPrint(&url_buffer, "http://{s}/registry", .{try source.host(&source_host)}));
+            var client: std.http.Client = .{ .io = std.testing.io, .allocator = alloc };
+            defer client.deinit();
+            var request = try requestWithTimeout(&client, method, uri, .{
+                .redirect_behavior = @enumFromInt(3),
+                .keep_alive = false,
+                .headers = .{ .authorization = .{ .override = authorization } },
+            });
+            defer request.deinit();
+            if (method == .POST or method == .PUT) try request.sendBodyComplete(&.{}) else try request.sendBodiless();
+            var redirects: [1024]u8 = undefined;
+            // HEAD exposes the status directly; other methods reject following it.
+            if (method == .HEAD) {
+                const response = try request.receiveHead(&redirects);
+                try std.testing.expectEqual(std.http.Status.found, response.head.status);
+            } else try std.testing.expectError(error.TooManyHttpRedirects, request.receiveHead(&redirects));
+            source.worker.?.join();
+            source.worker = null;
+            const received = source.last_request[0..source.last_request_length];
+            try std.testing.expectEqualStrings(authorization, @import("../../api/http.zig").findHeaderValue(received, "Authorization").?);
+            _ = std.os.linux.shutdown(target.fd, 2);
+            target.worker.?.join();
+            target.worker = null;
+            try std.testing.expectEqual(@as(usize, 0), target.requests);
+        }
+    }
+}
+
+test "registry anonymous requests retain automatic redirect handling" {
+    const Server = @import("test_support.zig").Server;
+    var target = try Server.init(&.{.{}});
+    defer target.deinit();
+    try target.start();
+    var target_host: [64]u8 = undefined;
+    var location_buffer: [160]u8 = undefined;
+    const location = try std.fmt.bufPrint(&location_buffer, "Location: http://{s}/anonymous\r\n", .{try target.host(&target_host)});
+    var source = try Server.init(&.{.{ .status = "302 Found", .headers = location }});
+    defer source.deinit();
+    try source.start();
+    var source_host: [64]u8 = undefined;
+    var url_buffer: [160]u8 = undefined;
+    const uri = try std.Uri.parse(try std.fmt.bufPrint(&url_buffer, "http://{s}/registry", .{try source.host(&source_host)}));
+    var client: std.http.Client = .{ .io = std.testing.io, .allocator = std.testing.allocator };
+    defer client.deinit();
+    var request = try requestWithTimeout(&client, .GET, uri, .{ .redirect_behavior = @enumFromInt(3), .keep_alive = false });
+    defer request.deinit();
+    try request.sendBodiless();
+    var redirects: [1024]u8 = undefined;
+    const response = try request.receiveHead(&redirects);
+    try std.testing.expectEqual(std.http.Status.ok, response.head.status);
+    source.worker.?.join();
+    source.worker = null;
+    target.worker.?.join();
+    target.worker = null;
+    try std.testing.expectEqual(@as(usize, 1), target.requests);
+    try std.testing.expect(@import("../../api/http.zig").findHeaderValue(target.last_request[0..target.last_request_length], "Authorization") == null);
 }

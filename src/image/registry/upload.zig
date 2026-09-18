@@ -151,17 +151,20 @@ pub fn uploadManifest(
 
     _ = alloc;
 
-    const result = client.fetch(.{
-        .location = .{ .url = url },
-        .method = .PUT,
-        .payload = manifest_bytes,
-        .extra_headers = &.{
-            .{ .name = "Content-Type", .value = spec.media_type.oci_manifest },
-            .{ .name = "Authorization", .value = auth_value },
+    const uri = std.Uri.parse(url) catch return common.RegistryError.UploadFailed;
+    var request = http_helpers.requestWithTimeout(client, .PUT, uri, .{
+        .redirect_behavior = .not_allowed,
+        .keep_alive = false,
+        .headers = .{
+            .content_type = .{ .override = spec.media_type.oci_manifest },
+            .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .omit,
         },
     }) catch return common.RegistryError.UploadFailed;
-
-    if (result.status != .created) return common.RegistryError.UploadFailed;
+    defer request.deinit();
+    request.sendBodyComplete(@constCast(manifest_bytes)) catch return common.RegistryError.UploadFailed;
+    var response_buffer: [8192]u8 = undefined;
+    const response = request.receiveHead(&response_buffer) catch return common.RegistryError.UploadFailed;
+    if (response.head.status != .created) return common.RegistryError.UploadFailed;
 }
 
 fn resolveUploadTarget(registry_host: []const u8, location: []const u8) ?UploadTarget {
