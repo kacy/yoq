@@ -1,107 +1,143 @@
-// backend — domain-to-container routing for TLS proxy
-//
-// maps domain names to container backends (IP:port pairs). updated
-// when containers start and stop. the TLS proxy uses this to route
-// decrypted traffic after completing the TLS handshake.
-//
-// thread-safe: protected by a mutex since the proxy accept loop
-// and the orchestrator lifecycle run on different threads.
+// tls routes retain either a fixed listener address or a logical service name.
+// service endpoints are selected when a connection arrives, so health changes
+// and container restarts do not leave the proxy pinned to an old replica.
 
 const std = @import("std");
 const spec = @import("../manifest/spec.zig");
+const service_registry = @import("../network/service_registry_runtime.zig");
 
 pub const Backend = struct {
     ip: []const u8,
     port: u16,
-    /// service-to-service mTLS posture for inbound traffic to this
-    /// backend's service. `.off` keeps the legacy (TLS-terminate only)
-    /// behavior; `.warn` and `.require` flip the listener to mTLS.
     peer_mode: spec.TlsConfig.PeerMode = .off,
 };
 
+const Route = struct {
+    target: union(enum) { address: []const u8, service: []const u8 },
+    port: u16,
+    peer_mode: spec.TlsConfig.PeerMode,
+    next_endpoint: usize = 0,
+
+    fn deinit(self: Route, alloc: std.mem.Allocator) void {
+        switch (self.target) {
+            inline else => |value| alloc.free(value),
+        }
+    }
+};
+
 pub const BackendRegistry = struct {
-    mutex: std.Io.Mutex,
-    backends: std.StringHashMapUnmanaged(Backend),
+    mutex: std.Io.Mutex = .init,
+    backends: std.StringHashMapUnmanaged(Route) = .empty,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) BackendRegistry {
-        return .{
-            .mutex = .init,
-            .backends = .empty,
-            .allocator = allocator,
-        };
+        return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *BackendRegistry) void {
         var iter = self.backends.iterator();
         while (iter.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.ip);
+            entry.value_ptr.deinit(self.allocator);
         }
         self.backends.deinit(self.allocator);
     }
 
-    /// register a backend for a domain. overwrites any existing mapping.
-    pub fn register(
-        self: *BackendRegistry,
-        domain: []const u8,
-        ip: []const u8,
-        port: u16,
-        peer_mode: spec.TlsConfig.PeerMode,
-    ) !void {
+    /// register a fixed address, such as the local http route listener.
+    pub fn register(self: *BackendRegistry, domain: []const u8, ip: []const u8, port: u16, peer_mode: spec.TlsConfig.PeerMode) !void {
+        try self.replace(domain, .{ .target = .{ .address = ip }, .port = port, .peer_mode = peer_mode });
+    }
+
+    /// preserve raw tls traffic while choosing an eligible service replica.
+    pub fn registerService(self: *BackendRegistry, domain: []const u8, service_name: []const u8, port: u16, peer_mode: spec.TlsConfig.PeerMode) !void {
+        try self.replace(domain, .{ .target = .{ .service = service_name }, .port = port, .peer_mode = peer_mode });
+    }
+
+    fn replace(self: *BackendRegistry, domain: []const u8, route: Route) !void {
         self.mutex.lockUncancelable(std.Options.debug_io);
         defer self.mutex.unlock(std.Options.debug_io);
 
-        // Allocate before replacing the owned address so failure preserves routing.
+        var owned = route;
+        owned.target = switch (route.target) {
+            .address => |ip| .{ .address = try self.allocator.dupe(u8, ip) },
+            .service => |name| .{ .service = try self.allocator.dupe(u8, name) },
+        };
+        errdefer owned.deinit(self.allocator);
+
+        // keep the prior route usable if allocating its replacement fails.
         if (self.backends.getEntry(domain)) |entry| {
-            const new_ip = try self.allocator.dupe(u8, ip);
-            const old_ip = entry.value_ptr.ip;
-            entry.value_ptr.* = .{ .ip = new_ip, .port = port, .peer_mode = peer_mode };
-            self.allocator.free(old_ip);
+            entry.value_ptr.deinit(self.allocator);
+            entry.value_ptr.* = owned;
             return;
         }
-
         const owned_domain = try self.allocator.dupe(u8, domain);
         errdefer self.allocator.free(owned_domain);
-        const owned_ip = try self.allocator.dupe(u8, ip);
-        errdefer self.allocator.free(owned_ip);
-
-        try self.backends.put(self.allocator, owned_domain, .{ .ip = owned_ip, .port = port, .peer_mode = peer_mode });
+        try self.backends.put(self.allocator, owned_domain, owned);
     }
 
-    /// remove a backend for a domain.
     pub fn unregister(self: *BackendRegistry, domain: []const u8) void {
         self.mutex.lockUncancelable(std.Options.debug_io);
         defer self.mutex.unlock(std.Options.debug_io);
-
         if (self.backends.fetchRemove(domain)) |kv| {
             self.allocator.free(kv.key);
-            self.allocator.free(kv.value.ip);
+            kv.value.deinit(self.allocator);
         }
     }
 
-    /// look up the backend for a domain. returns null if not registered.
-    /// the returned Backend is only valid while the mutex is not held —
-    /// callers should copy what they need.
+    /// borrowed fixed-address lookup for callers that exclude concurrent updates.
+    /// service routes require lookupOwned to retain the selected endpoint safely.
     pub fn lookup(self: *BackendRegistry, domain: []const u8) ?Backend {
         self.mutex.lockUncancelable(std.Options.debug_io);
         defer self.mutex.unlock(std.Options.debug_io);
-
-        return self.backends.get(domain);
+        const route = self.backends.get(domain) orelse return null;
+        return switch (route.target) {
+            .address => |ip| .{ .ip = ip, .port = route.port, .peer_mode = route.peer_mode },
+            .service => null,
+        };
     }
 
     pub fn lookupOwned(self: *BackendRegistry, alloc: std.mem.Allocator, domain: []const u8) !?Backend {
         self.mutex.lockUncancelable(std.Options.debug_io);
         defer self.mutex.unlock(std.Options.debug_io);
-
-        const backend = self.backends.get(domain) orelse return null;
-        return .{
-            .ip = try alloc.dupe(u8, backend.ip),
-            .port = backend.port,
-            .peer_mode = backend.peer_mode,
-        };
+        const route = self.backends.getPtr(domain) orelse return null;
+        switch (route.target) {
+            .address => |ip| return .{ .ip = try alloc.dupe(u8, ip), .port = route.port, .peer_mode = route.peer_mode },
+            .service => |name| {
+                var endpoints = try service_registry.snapshotServiceEndpoints(alloc, name);
+                defer {
+                    for (endpoints.items) |endpoint| endpoint.deinit(alloc);
+                    endpoints.deinit(alloc);
+                }
+                return selectEndpoint(alloc, route, endpoints.items);
+            },
+        }
     }
 };
+
+fn selectEndpoint(alloc: std.mem.Allocator, route: *Route, endpoints: []const service_registry.EndpointSnapshot) !?Backend {
+    var eligible_count: usize = 0;
+    for (endpoints) |endpoint| {
+        if (endpoint.eligible) eligible_count += 1;
+    }
+    if (eligible_count == 0) return null;
+
+    var remaining = route.next_endpoint % eligible_count;
+    for (endpoints) |endpoint| {
+        if (!endpoint.eligible) continue;
+        if (remaining > 0) {
+            remaining -= 1;
+            continue;
+        }
+        const backend: Backend = .{
+            .ip = try alloc.dupe(u8, endpoint.ip_address),
+            .port = route.port,
+            .peer_mode = route.peer_mode,
+        };
+        route.next_endpoint +%= 1;
+        return backend;
+    }
+    unreachable;
+}
 
 // -- tests --
 
@@ -229,4 +265,90 @@ test "backend replacement allocation failure preserves original routing" {
     try std.testing.expectEqualStrings("10.0.0.1", backend.ip);
     try std.testing.expectEqual(@as(u16, 8443), backend.port);
     try std.testing.expectEqual(spec.TlsConfig.PeerMode.require, backend.peer_mode);
+}
+
+test "tls service routes select every eligible replica and fail closed" {
+    const store = @import("../state/store.zig");
+    const rollout = @import("../network/service_rollout.zig");
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    service_registry.resetForTest();
+    defer service_registry.resetForTest();
+    rollout.setForTest(.{ .service_registry_v2 = true });
+    defer rollout.resetForTest();
+
+    try store.createService(.{ .service_name = "api", .vip_address = "10.43.0.2", .lb_policy = "round_robin", .created_at = 1, .updated_at = 1 });
+    const ids = [_][]const u8{ "replica-one", "replica-two", "replica-three" };
+    const addresses = [_][]const u8{ "10.42.0.2", "10.42.0.3", "10.42.0.4" };
+    for (ids, addresses) |id, address| try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = id,
+        .container_id = id,
+        .node_id = null,
+        .ip_address = address,
+        .port = 0,
+        .weight = 1,
+        .admin_state = "active",
+        .generation = 1,
+        .registered_at = 1,
+        .last_seen_at = 1,
+    });
+    service_registry.syncServiceFromStore("api");
+
+    var registry = BackendRegistry.init(alloc);
+    defer registry.deinit();
+    try registry.registerService("api.example", "api", 5432, .require);
+    var seen = [_]bool{false} ** 3;
+    for (0..3) |_| {
+        const backend = (try registry.lookupOwned(alloc, "api.example")).?;
+        defer alloc.free(backend.ip);
+        for (addresses, 0..) |address, index| {
+            if (std.mem.eql(u8, address, backend.ip)) seen[index] = true;
+        }
+        try std.testing.expectEqual(@as(u16, 5432), backend.port);
+        try std.testing.expectEqual(spec.TlsConfig.PeerMode.require, backend.peer_mode);
+    }
+    for (seen) |was_seen| try std.testing.expect(was_seen);
+
+    service_registry.noteProbeResult("api", ids[0], false);
+    try store.upsertServiceEndpoint(.{
+        .service_name = "api",
+        .endpoint_id = ids[1],
+        .container_id = ids[1],
+        .node_id = null,
+        .ip_address = addresses[1],
+        .port = 0,
+        .weight = 1,
+        .admin_state = "draining",
+        .generation = 1,
+        .registered_at = 1,
+        .last_seen_at = 1,
+    });
+    service_registry.syncServiceFromStore("api");
+    for (0..3) |_| {
+        const backend = (try registry.lookupOwned(alloc, "api.example")).?;
+        defer alloc.free(backend.ip);
+        try std.testing.expectEqualStrings(addresses[2], backend.ip);
+    }
+
+    const retained = (try registry.lookupOwned(alloc, "api.example")).?;
+    defer alloc.free(retained.ip);
+    service_registry.noteProbeResult("api", ids[2], false);
+    try std.testing.expect((try registry.lookupOwned(alloc, "api.example")) == null);
+    registry.unregister("api.example");
+    try std.testing.expectEqualStrings(addresses[2], retained.ip);
+}
+
+test "tls service registration failure preserves a fixed route" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var registry = BackendRegistry.init(failing.allocator());
+    defer registry.deinit();
+    try registry.register("api.example", "127.0.0.1", 8080, .off);
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, registry.registerService("api.example", "api", 5432, .require));
+    const backend = (try registry.lookupOwned(std.testing.allocator, "api.example")).?;
+    defer std.testing.allocator.free(backend.ip);
+    try std.testing.expectEqualStrings("127.0.0.1", backend.ip);
+    try std.testing.expectEqual(@as(u16, 8080), backend.port);
 }
