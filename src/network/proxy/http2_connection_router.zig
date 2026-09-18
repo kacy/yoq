@@ -8,6 +8,8 @@ const h2c_upgrade = @import("h2c_upgrade.zig");
 const proxy_helpers = @import("proxy_helpers.zig");
 const socket_helpers = @import("socket_helpers.zig");
 const transport = @import("../../tls/client_transport.zig");
+const exchange = @import("upstream_exchange.zig");
+const PeerKey = @import("../../tls/proxy_credentials.zig").Key;
 const http2_request = @import("http2_request.zig");
 const http2_response = @import("http2_response.zig");
 const proxy_policy = @import("policy.zig");
@@ -29,12 +31,14 @@ pub fn proxyConnection(
     client_fd: linux_platform.posix.socket_t,
     initial_request: []const u8,
     client_ip: ?[4]u8,
+    peer_key: ?PeerKey,
 ) !void {
     var connection = ConnectionRouter{
         .allocator = alloc,
         .routes = routes,
         .client_fd = client_fd,
         .client_ip = client_ip,
+        .peer_key = peer_key,
     };
     defer connection.deinit();
 
@@ -48,12 +52,14 @@ pub fn proxyUpgradedConnection(
     client_fd: linux_platform.posix.socket_t,
     upgraded: h2c_upgrade.ParsedUpgrade,
     client_ip: ?[4]u8,
+    peer_key: ?PeerKey,
 ) !void {
     var connection = ConnectionRouter{
         .allocator = alloc,
         .routes = routes,
         .client_fd = client_fd,
         .client_ip = client_ip,
+        .peer_key = peer_key,
         .sent_settings = true,
     };
     defer connection.deinit();
@@ -67,6 +73,7 @@ const ConnectionRouter = struct {
     routes: []const router.Route,
     client_fd: linux_platform.posix.socket_t,
     client_ip: ?[4]u8,
+    peer_key: ?PeerKey = null,
     downstream_buf: std.ArrayList(u8) = .empty,
     streams: std.ArrayList(StreamSession) = .empty,
     saw_client_preface: bool = false,
@@ -74,6 +81,7 @@ const ConnectionRouter = struct {
     last_activity_ms: i64 = 0,
 
     fn deinit(self: *ConnectionRouter) void {
+        if (self.peer_key) |*key| std.crypto.secureZero(u8, key);
         self.downstream_buf.deinit(self.allocator);
         for (self.streams.items) |*session| session.deinit(self.allocator);
         self.streams.deinit(self.allocator);
@@ -102,25 +110,28 @@ const ConnectionRouter = struct {
                 .events = posix.POLL.IN,
                 .revents = 0,
             });
+            var buffered_input = false;
             for (self.streams.items, 0..) |session, idx| {
+                buffered_input = buffered_input or session.connection.buffered();
                 try poll_fds.append(self.allocator, .{
-                    .fd = session.upstream_fd,
+                    .fd = session.connection.fd(),
                     .events = posix.POLL.IN,
                     .revents = 0,
                 });
-                try session_targets.append(self.allocator, .{ .stream_idx = idx, .kind = .primary });
+                try session_targets.append(self.allocator, .{ .stream_idx = idx, .kind = .primary, .buffered = session.connection.buffered() });
                 if (session.mirror) |mirror| {
+                    buffered_input = buffered_input or mirror.connection.buffered();
                     try poll_fds.append(self.allocator, .{
-                        .fd = mirror.upstream_fd,
+                        .fd = mirror.connection.fd(),
                         .events = posix.POLL.IN,
                         .revents = 0,
                     });
-                    try session_targets.append(self.allocator, .{ .stream_idx = idx, .kind = .mirror });
+                    try session_targets.append(self.allocator, .{ .stream_idx = idx, .kind = .mirror, .buffered = mirror.connection.buffered() });
                 }
             }
 
-            const ready = posix.poll(poll_fds.items, socket_helpers.clampPollTimeout(timeout_ms)) catch return error.ReceiveFailed;
-            if (ready == 0) {
+            const ready = posix.poll(poll_fds.items, if (buffered_input) 0 else socket_helpers.clampPollTimeout(timeout_ms)) catch return error.ReceiveFailed;
+            if (ready == 0 and !buffered_input) {
                 if (try self.expireTimedOutStreams(nowMs())) continue;
                 break;
             }
@@ -141,9 +152,9 @@ const ConnectionRouter = struct {
 
             var ready_sessions: std.ArrayList(usize) = .empty;
             defer ready_sessions.deinit(self.allocator);
-            for (session_targets.items, 0..) |_, poll_idx| {
+            for (session_targets.items, 0..) |target, poll_idx| {
                 const revents = poll_fds.items[poll_idx + 1].revents;
-                if (revents & posix.POLL.IN != 0) {
+                if (target.buffered or revents & posix.POLL.IN != 0) {
                     try ready_sessions.append(self.allocator, poll_idx);
                 } else if (revents & (posix.POLL.ERR | posix.POLL.HUP) != 0) {
                     try ready_sessions.append(self.allocator, poll_idx);
@@ -207,7 +218,8 @@ const ConnectionRouter = struct {
                 },
                 else => return err,
             };
-            errdefer upstream.deinit(self.allocator);
+            var transferred = false;
+            defer if (!transferred) upstream.deinit(self.allocator);
 
             const outbound_path = try proxy_helpers.buildOutboundPath(
                 self.allocator,
@@ -229,12 +241,11 @@ const ConnectionRouter = struct {
             defer self.allocator.free(request_bytes);
 
             const request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms));
-            const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, request_bytes, request_deadline_at_ms) catch |connect_err| {
+            var connection = connectAndSendUpstream(self.allocator, self.peer_key, route, &upstream, request_bytes, request_deadline_at_ms) catch |connect_err| {
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
                 const failure_kind: proxy_runtime.UpstreamFailureKind = if (connect_err == error.ConnectFailed or connect_err == error.ConnectTimedOut) .connect else .send;
                 proxy_runtime.recordUpstreamFailure(failure_kind);
                 proxy_runtime.recordRouteUpstreamFailure(route.name, route.service, backend_service);
-                upstream.deinit(self.allocator);
                 if (proxy_policy.shouldRetry(request_policy, upgraded.method, attempt, null, true)) {
                     proxy_runtime.recordRetry();
                     proxy_runtime.recordRouteRetry(route.name, route.service, backend_service);
@@ -249,17 +260,21 @@ const ConnectionRouter = struct {
                 return;
             };
 
+            defer if (!transferred) connection.deinit();
+            const owned_backend = try self.allocator.dupe(u8, backend_service);
+            defer if (!transferred) self.allocator.free(owned_backend);
             try self.streams.append(self.allocator, .{
                 .downstream_stream_id = 1,
                 .route = route,
-                .backend_service = try self.allocator.dupe(u8, backend_service),
+                .backend_service = owned_backend,
                 .upstream = upstream,
-                .upstream_fd = upstream_fd,
+                .connection = connection,
                 .request_deadline_at_ms = request_deadline_at_ms,
                 .observation_started_ns = observation_started_ns,
-                .mirror = self.startMirrorSessionForUpgrade(route, upgraded),
                 .downstream_end_stream = true,
             });
+            transferred = true;
+            self.streams.items[self.streams.items.len - 1].mirror = self.startMirrorSessionForUpgrade(route, upgraded);
             return;
         }
     }
@@ -338,7 +353,7 @@ const ConnectionRouter = struct {
                 .stream_id = 1,
             });
             defer rewritten.deinit(self.allocator);
-            try socket_helpers.writeAllUntil(self.streams.items[stream_idx].upstream_fd, rewritten.bytes, deadlineAt(self.streams.items[stream_idx].request_deadline_at_ms));
+            try writeSession(&self.streams.items[stream_idx], rewritten.bytes);
             try self.consumeDownstreamBytes(rewritten.consumed);
             self.last_activity_ms = nowMs();
             return;
@@ -389,7 +404,8 @@ const ConnectionRouter = struct {
                 },
                 else => return err,
             };
-            errdefer upstream.deinit(self.allocator);
+            var transferred = false;
+            defer if (!transferred) upstream.deinit(self.allocator);
 
             const outbound_path = try proxy_helpers.buildOutboundPath(self.allocator, parsed.request.path, route.match.path_prefix, route.rewrite_prefix);
             defer self.allocator.free(outbound_path);
@@ -404,12 +420,11 @@ const ConnectionRouter = struct {
             defer rewritten.deinit(self.allocator);
 
             const request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms));
-            const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, rewritten.bytes, request_deadline_at_ms) catch |connect_err| {
+            var connection = connectAndSendUpstream(self.allocator, self.peer_key, route, &upstream, rewritten.bytes, request_deadline_at_ms) catch |connect_err| {
                 proxy_runtime.recordEndpointFailure(upstream.endpoint_id, cb_policy);
                 const failure_kind: proxy_runtime.UpstreamFailureKind = if (connect_err == error.ConnectFailed or connect_err == error.ConnectTimedOut) .connect else .send;
                 proxy_runtime.recordUpstreamFailure(failure_kind);
                 proxy_runtime.recordRouteUpstreamFailure(route.name, route.service, backend_service);
-                upstream.deinit(self.allocator);
                 if (proxy_policy.shouldRetry(request_policy, parsed.request.method, attempt, null, true)) {
                     proxy_runtime.recordRetry();
                     proxy_runtime.recordRouteRetry(route.name, route.service, backend_service);
@@ -425,16 +440,20 @@ const ConnectionRouter = struct {
                 return;
             };
 
+            defer if (!transferred) connection.deinit();
+            const owned_backend = try self.allocator.dupe(u8, backend_service);
+            defer if (!transferred) self.allocator.free(owned_backend);
             try self.streams.append(self.allocator, .{
                 .downstream_stream_id = parsed.request.stream_id,
                 .route = route,
-                .backend_service = try self.allocator.dupe(u8, backend_service),
+                .backend_service = owned_backend,
                 .upstream = upstream,
-                .upstream_fd = upstream_fd,
+                .connection = connection,
                 .request_deadline_at_ms = request_deadline_at_ms,
                 .observation_started_ns = observation_started_ns,
-                .mirror = self.startMirrorSession(route, parsed),
             });
+            transferred = true;
+            self.streams.items[self.streams.items.len - 1].mirror = self.startMirrorSession(route, parsed);
             try self.consumeDownstreamBytes(parsed.consumed);
             self.last_activity_ms = nowMs();
             return;
@@ -452,7 +471,7 @@ const ConnectionRouter = struct {
         };
         const rewritten = try rewriteFrameSequenceStreamId(self.allocator, self.downstream_buf.items, 0, 1);
         defer rewritten.deinit(self.allocator);
-        try socket_helpers.writeAllUntil(self.streams.items[stream_idx].upstream_fd, rewritten.bytes, deadlineAt(self.streams.items[stream_idx].request_deadline_at_ms));
+        try writeSession(&self.streams.items[stream_idx], rewritten.bytes);
         if (self.streams.items[stream_idx].mirror) |*mirror| {
             self.forwardMirrorFrame(mirror, rewritten.bytes) catch {
                 proxy_runtime.recordMirrorRouteUpstreamFailure(
@@ -474,10 +493,11 @@ const ConnectionRouter = struct {
     fn readUpstream(self: *ConnectionRouter, session_idx: usize) !void {
         var buf: [16 * 1024]u8 = undefined;
         const session = &self.streams.items[session_idx];
-        const bytes_read = posix.read(session.upstream_fd, &buf) catch |err| {
+        session.connection.operation_deadline = if (session.response_started) null else deadlineAt(session.request_deadline_at_ms);
+        const bytes_read = (session.connection.readAvailable(&buf) catch {
             try self.failSession(session_idx, .receive, "{\"error\":\"upstream receive failed\"}");
-            return err;
-        };
+            return;
+        }) orelse return;
         if (bytes_read == 0) {
             if (!session.response_started) {
                 try self.failSession(session_idx, .receive, "{\"error\":\"upstream closed before response\"}");
@@ -508,13 +528,14 @@ const ConnectionRouter = struct {
 
     fn readMirrorUpstream(self: *ConnectionRouter, session_idx: usize) !void {
         const session = &self.streams.items[session_idx];
-        const mirror = &(session.mirror orelse return);
+        const mirror = if (session.mirror) |*value| value else return;
         var buf: [16 * 1024]u8 = undefined;
-        const bytes_read = posix.read(mirror.upstream_fd, &buf) catch {
+        mirror.connection.operation_deadline = if (mirror.response_started) null else deadlineAt(mirror.request_deadline_at_ms);
+        const bytes_read = (mirror.connection.readAvailable(&buf) catch {
             proxy_runtime.recordMirrorRouteUpstreamFailure(session.route.name, session.route.service, mirror.backend_service);
             self.closeMirrorSession(session_idx);
             return;
-        };
+        }) orelse return;
         if (bytes_read == 0) {
             if (!mirror.response_started) {
                 proxy_runtime.recordMirrorRouteUpstreamFailure(session.route.name, session.route.service, mirror.backend_service);
@@ -573,7 +594,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, "");
             defer self.allocator.free(ack);
-            try socket_helpers.writeAllUntil(self.streams.items[session_idx].upstream_fd, ack, deadlineAt(self.streams.items[session_idx].request_deadline_at_ms));
+            try writeSession(&self.streams.items[session_idx], ack);
         }
         try self.discardUpstreamFrame(session_idx);
     }
@@ -588,7 +609,7 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, payload);
             defer self.allocator.free(ack);
-            try socket_helpers.writeAllUntil(self.streams.items[session_idx].upstream_fd, ack, deadlineAt(self.streams.items[session_idx].request_deadline_at_ms));
+            try writeSession(&self.streams.items[session_idx], ack);
         }
         try self.discardUpstreamFrame(session_idx);
     }
@@ -670,7 +691,7 @@ const ConnectionRouter = struct {
         while (idx > 0) {
             idx -= 1;
             const session = &self.streams.items[idx];
-            const mirror = &(session.mirror orelse continue);
+            const mirror = if (session.mirror) |*value| value else continue;
             if (mirror.response_started) continue;
             if (now < mirror.request_deadline_at_ms) continue;
             proxy_runtime.recordMirrorRouteUpstreamFailure(session.route.name, session.route.service, mirror.backend_service);
@@ -683,10 +704,11 @@ const ConnectionRouter = struct {
     fn nextPendingDeadlineMs(self: *ConnectionRouter, now: i64) ?u32 {
         var next: ?u32 = null;
         for (self.streams.items) |session| {
-            if (session.response_started) continue;
-            if (now >= session.request_deadline_at_ms) return 0;
-            const remaining: u32 = @intCast(session.request_deadline_at_ms - now);
-            next = if (next) |current| @min(current, remaining) else remaining;
+            if (!session.response_started) {
+                if (now >= session.request_deadline_at_ms) return 0;
+                const remaining: u32 = @intCast(session.request_deadline_at_ms - now);
+                next = if (next) |current| @min(current, remaining) else remaining;
+            }
             if (session.mirror) |mirror| {
                 if (!mirror.response_started) {
                     if (now >= mirror.request_deadline_at_ms) return 0;
@@ -787,7 +809,8 @@ const ConnectionRouter = struct {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
-        errdefer upstream.deinit(self.allocator);
+        var transferred = false;
+        defer if (!transferred) upstream.deinit(self.allocator);
 
         const outbound_path = proxy_helpers.buildOutboundPath(self.allocator, parsed.request.path, route.match.path_prefix, route.rewrite_prefix) catch {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
@@ -809,19 +832,20 @@ const ConnectionRouter = struct {
         defer rewritten.deinit(self.allocator);
 
         const request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms));
-        const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, rewritten.bytes, request_deadline_at_ms) catch {
+        var connection = connectAndSendUpstream(self.allocator, self.peer_key, route, &upstream, rewritten.bytes, request_deadline_at_ms) catch {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
-        errdefer linux_platform.posix.close(upstream_fd);
-
+        defer if (!transferred) connection.deinit();
+        const owned_backend = self.allocator.dupe(u8, mirror_service) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+        transferred = true;
         return .{
-            .backend_service = self.allocator.dupe(u8, mirror_service) catch {
-                proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
-                return null;
-            },
+            .backend_service = owned_backend,
             .upstream = upstream,
-            .upstream_fd = upstream_fd,
+            .connection = connection,
             .request_deadline_at_ms = request_deadline_at_ms,
         };
     }
@@ -834,7 +858,8 @@ const ConnectionRouter = struct {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
-        errdefer upstream.deinit(self.allocator);
+        var transferred = false;
+        defer if (!transferred) upstream.deinit(self.allocator);
 
         const outbound_path = proxy_helpers.buildOutboundPath(
             self.allocator,
@@ -862,26 +887,27 @@ const ConnectionRouter = struct {
         defer self.allocator.free(request_bytes);
 
         const request_deadline_at_ms = nowMs() + @as(i64, @intCast(route.request_timeout_ms));
-        const upstream_fd = connectAndSendUpstream(self.allocator, route, &upstream, request_bytes, request_deadline_at_ms) catch {
+        var connection = connectAndSendUpstream(self.allocator, self.peer_key, route, &upstream, request_bytes, request_deadline_at_ms) catch {
             proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
             return null;
         };
-        errdefer linux_platform.posix.close(upstream_fd);
-
+        defer if (!transferred) connection.deinit();
+        const owned_backend = self.allocator.dupe(u8, mirror_service) catch {
+            proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
+            return null;
+        };
+        transferred = true;
         return .{
-            .backend_service = self.allocator.dupe(u8, mirror_service) catch {
-                proxy_runtime.recordMirrorRouteUpstreamFailure(route.name, route.service, mirror_service);
-                return null;
-            },
+            .backend_service = owned_backend,
             .upstream = upstream,
-            .upstream_fd = upstream_fd,
+            .connection = connection,
             .request_deadline_at_ms = request_deadline_at_ms,
         };
     }
 
     fn forwardMirrorFrame(self: *ConnectionRouter, mirror: *MirrorSession, frame_bytes: []const u8) !void {
         _ = self;
-        socket_helpers.writeAllUntil(mirror.upstream_fd, frame_bytes, deadlineAt(mirror.request_deadline_at_ms)) catch {
+        writeSession(mirror, frame_bytes) catch {
             return error.WriteFailed;
         };
     }
@@ -901,7 +927,7 @@ const ConnectionRouter = struct {
     }
 
     fn handleMirrorSettings(self: *ConnectionRouter, session_idx: usize, frame: http2.FrameHeader) !void {
-        const mirror = &(self.streams.items[session_idx].mirror orelse return);
+        const mirror = if (self.streams.items[session_idx].mirror) |*value| value else return;
         const payload = mirror.upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
         if ((frame.flags & 0x1) == 0) {
             const ack = try http2.buildFrame(self.allocator, .{
@@ -911,14 +937,14 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, "");
             defer self.allocator.free(ack);
-            try socket_helpers.writeAllUntil(mirror.upstream_fd, ack, deadlineAt(mirror.request_deadline_at_ms));
+            try writeSession(mirror, ack);
         }
         _ = payload;
         try self.discardMirrorFrame(session_idx);
     }
 
     fn handleMirrorPing(self: *ConnectionRouter, session_idx: usize, frame: http2.FrameHeader) !void {
-        const mirror = &(self.streams.items[session_idx].mirror orelse return);
+        const mirror = if (self.streams.items[session_idx].mirror) |*value| value else return;
         const payload = mirror.upstream_buf.items[http2.frame_header_len .. http2.frame_header_len + frame.length];
         if ((frame.flags & 0x1) == 0 and payload.len == 8) {
             const ack = try http2.buildFrame(self.allocator, .{
@@ -928,14 +954,14 @@ const ConnectionRouter = struct {
                 .stream_id = 0,
             }, payload);
             defer self.allocator.free(ack);
-            try socket_helpers.writeAllUntil(mirror.upstream_fd, ack, deadlineAt(mirror.request_deadline_at_ms));
+            try writeSession(mirror, ack);
         }
         try self.discardMirrorFrame(session_idx);
     }
 
     fn handleMirrorHeaders(self: *ConnectionRouter, session_idx: usize) !void {
         const session = &self.streams.items[session_idx];
-        const mirror = &(session.mirror orelse return);
+        const mirror = if (session.mirror) |*value| value else return;
         if (!mirror.response_started) {
             const status = parseResponseStatus(mirror.upstream_buf.items) catch {
                 proxy_runtime.recordMirrorRouteUpstreamFailure(session.route.name, session.route.service, mirror.backend_service);
@@ -949,7 +975,7 @@ const ConnectionRouter = struct {
     }
 
     fn discardMirrorStreamFrame(self: *ConnectionRouter, session_idx: usize) !void {
-        const mirror = &(self.streams.items[session_idx].mirror orelse return);
+        const mirror = if (self.streams.items[session_idx].mirror) |*value| value else return;
         const frame = http2.parseFrameHeader(mirror.upstream_buf.items[0..http2.frame_header_len]).?;
         try self.consumeMirrorBytes(session_idx, http2.frame_header_len + frame.length);
         if (frame.frame_type == .rst_stream or (frame.flags & 0x1) != 0) {
@@ -958,13 +984,13 @@ const ConnectionRouter = struct {
     }
 
     fn discardMirrorFrame(self: *ConnectionRouter, session_idx: usize) !void {
-        const mirror = &(self.streams.items[session_idx].mirror orelse return);
+        const mirror = if (self.streams.items[session_idx].mirror) |*value| value else return;
         const frame = http2.parseFrameHeader(mirror.upstream_buf.items[0..http2.frame_header_len]).?;
         try self.consumeMirrorBytes(session_idx, http2.frame_header_len + frame.length);
     }
 
     fn consumeMirrorBytes(self: *ConnectionRouter, session_idx: usize, consumed: usize) !void {
-        const mirror = &(self.streams.items[session_idx].mirror orelse return);
+        const mirror = if (self.streams.items[session_idx].mirror) |*value| value else return;
         try mirror.upstream_buf.replaceRange(self.allocator, 0, consumed, "");
     }
 };
@@ -974,7 +1000,7 @@ const StreamSession = struct {
     route: router.Route,
     backend_service: []u8,
     upstream: upstream_mod.Upstream,
-    upstream_fd: linux_platform.posix.socket_t,
+    connection: exchange.StreamingConnection,
     upstream_buf: std.ArrayList(u8) = .empty,
     mirror: ?MirrorSession = null,
     response_started: bool = false,
@@ -984,7 +1010,7 @@ const StreamSession = struct {
     observation_started_ns: u64 = 0,
 
     fn deinit(self: *StreamSession, alloc: std.mem.Allocator) void {
-        linux_platform.posix.close(self.upstream_fd);
+        self.connection.deinit();
         alloc.free(self.backend_service);
         self.upstream.deinit(alloc);
         self.upstream_buf.deinit(alloc);
@@ -995,13 +1021,13 @@ const StreamSession = struct {
 const MirrorSession = struct {
     backend_service: []u8,
     upstream: upstream_mod.Upstream,
-    upstream_fd: linux_platform.posix.socket_t,
+    connection: exchange.StreamingConnection,
     upstream_buf: std.ArrayList(u8) = .empty,
     response_started: bool = false,
     request_deadline_at_ms: i64,
 
     fn deinit(self: *MirrorSession, alloc: std.mem.Allocator) void {
-        linux_platform.posix.close(self.upstream_fd);
+        self.connection.deinit();
         alloc.free(self.backend_service);
         self.upstream.deinit(alloc);
         self.upstream_buf.deinit(alloc);
@@ -1011,6 +1037,7 @@ const MirrorSession = struct {
 const SessionPollTarget = struct {
     stream_idx: usize,
     kind: Kind,
+    buffered: bool = false,
 
     const Kind = enum {
         primary,
@@ -1152,23 +1179,21 @@ fn routeSelectionKey(method: []const u8, host: []const u8, path: []const u8) u64
     return hasher.final();
 }
 
-fn connectAndSendUpstream(alloc: std.mem.Allocator, route: router.Route, upstream: *const upstream_mod.Upstream, request_bytes: []const u8, request_deadline_at_ms: i64) !linux_platform.posix.socket_t {
-    // Streaming sessions currently own bare sockets. Never send a required
-    // peer-TLS request until this path can own and poll a verified TLS session.
-    if (upstream.peer_mode == .require) return error.StreamingPeerTlsUnsupported;
-    if (upstream.peer_mode == .warn) {
-        @import("../../lib/log.zig").warn("http2 streaming upstream {s}: peer TLS unavailable, using permissive plaintext mode", .{upstream.service});
-    }
-    const deadline = deadlineAt(request_deadline_at_ms);
-    const upstream_fd = try socket_helpers.connectToUpstreamUntil(route.connect_timeout_ms, deadline, upstream);
-    errdefer linux_platform.posix.close(upstream_fd);
+fn writeSession(session: anytype, bytes: []const u8) !void {
+    session.connection.operation_deadline = if (session.response_started) null else deadlineAt(session.request_deadline_at_ms);
+    try session.connection.writeAll(bytes);
+}
+
+fn connectAndSendUpstream(alloc: std.mem.Allocator, peer_key: ?PeerKey, route: router.Route, upstream: *const upstream_mod.Upstream, request_bytes: []const u8, request_deadline_at_ms: i64) !exchange.StreamingConnection {
+    var client = exchange.Client{ .allocator = alloc, .peer_key = peer_key };
+    defer if (client.peer_key) |*key| std.crypto.secureZero(u8, key);
+    var connection = try client.openStream(.{ .connect_timeout_ms = route.connect_timeout_ms, .request_timeout_ms = route.request_timeout_ms, .protocol = .http2, .deadline = deadlineAt(request_deadline_at_ms) }, upstream);
+    errdefer connection.deinit();
     const preface_and_settings = try buildInitialUpstreamPreamble(alloc);
     defer alloc.free(preface_and_settings);
-    try socket_helpers.writeAllUntil(upstream_fd, preface_and_settings, deadline);
-    try socket_helpers.writeAllUntil(upstream_fd, request_bytes, deadline);
-    try socket_helpers.setSocketBlocking(upstream_fd);
-    socket_helpers.setSocketTimeoutMs(upstream_fd, route.request_timeout_ms);
-    return upstream_fd;
+    try connection.writeAll(preface_and_settings);
+    try connection.writeAll(request_bytes);
+    return connection;
 }
 
 fn deadlineAt(milliseconds: i64) transport.Deadline {
@@ -1179,7 +1204,9 @@ fn nowMs() i64 {
     return std.Io.Clock.awake.now(std.Options.debug_io).toMilliseconds();
 }
 
-test "proxy transport policy refuses required streaming peer TLS before dialing" {
+test "proxy transport policy refuses missing required peer credentials before dialing" {
+    try @import("../../state/store.zig").initTestDb();
+    defer @import("../../state/store.zig").deinitTestDb();
     const listener = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
     defer linux_platform.posix.close(listener);
     var address = linux_platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
@@ -1189,6 +1216,124 @@ test "proxy transport policy refuses required streaming peer TLS before dialing"
     try linux_platform.posix.getsockname(listener, &address.any, &length);
     const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-1", .address = "127.0.0.1", .port = std.mem.bigToNative(u16, address.in.port), .peer_mode = .require };
     const route = router.Route{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" } };
-    try std.testing.expectError(error.StreamingPeerTlsUnsupported, connectAndSendUpstream(std.testing.allocator, route, &upstream, "request must not be sent", nowMs() + 1000));
+    try std.testing.expectError(error.ClusterCaMissing, connectAndSendUpstream(std.testing.allocator, null, route, &upstream, "request must not be sent", nowMs() + 1000));
     try std.testing.expectError(error.WouldBlock, linux_platform.posix.accept(listener, null, null, posix.SOCK.CLOEXEC));
+}
+
+fn peerTestResponse(alloc: std.mem.Allocator) ![]u8 {
+    const headers = try hpack.encodeHeaderBlockLiteral(alloc, &.{.{ .name = ":status", .value = "200" }});
+    defer alloc.free(headers);
+    const trailers = try hpack.encodeHeaderBlockLiteral(alloc, &.{.{ .name = "grpc-status", .value = "0" }});
+    defer alloc.free(trailers);
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(alloc);
+    for ([_]struct { kind: http2.FrameType, flags: u8, payload: []const u8 }{
+        .{ .kind = .headers, .flags = 4, .payload = headers },
+        .{ .kind = .data, .flags = 0, .payload = "streamed body" },
+        .{ .kind = .headers, .flags = 5, .payload = trailers },
+    }) |part| {
+        const frame = try http2.buildFrame(alloc, .{ .length = @intCast(part.payload.len), .frame_type = part.kind, .flags = part.flags, .stream_id = 1 }, part.payload);
+        defer alloc.free(frame);
+        try bytes.appendSlice(alloc, frame);
+    }
+    return bytes.toOwnedSlice(alloc);
+}
+
+fn ownedTestUpstream(alloc: std.mem.Allocator, upstream: upstream_mod.Upstream) !upstream_mod.Upstream {
+    const service = try alloc.dupe(u8, upstream.service);
+    errdefer alloc.free(service);
+    const endpoint = try alloc.dupe(u8, upstream.endpoint_id);
+    errdefer alloc.free(endpoint);
+    const address = try alloc.dupe(u8, upstream.address);
+    return .{ .service = service, .endpoint_id = endpoint, .address = address, .port = upstream.port, .peer_mode = upstream.peer_mode };
+}
+
+test "http2 peer tls verifies upstream identity and streams data and trailers" {
+    const fixture = @import("http2_peer_fixture.zig");
+    const store = @import("../../state/store.zig");
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+    const ca = try fixture.x509.generateCa(std.testing.io, alloc, "h2-ca", now - 60, now + 86400);
+    defer alloc.free(ca.cert_pem);
+    const ca_sql = try store.buildClusterCaInsertSql(alloc, ca.cert_pem, "unused", "", "", now, now + 86400);
+    defer alloc.free(ca_sql);
+    try fixture.exec(ca_sql);
+    const proxy = try fixture.x509.issueLeaf(std.testing.io, alloc, ca.key_pair, "h2-ca", "proxy", @import("../../tls/peer_identity.zig").proxy_identity, now - 60, now + 86400);
+    defer alloc.free(proxy.cert_pem);
+    try fixture.publish(proxy.cert_pem, &proxy.key_pair.secret_key.toBytes(), now);
+
+    const response = try peerTestResponse(alloc);
+    defer alloc.free(response);
+    const request = try h2c_upgrade.buildStream1HeadersFrame(alloc, "api", "GET", "/stream", &.{}, "http");
+    defer alloc.free(request);
+    const preamble = try buildInitialUpstreamPreamble(alloc);
+    defer alloc.free(preamble);
+    const expected_request = try std.mem.concat(alloc, u8, &.{ preamble, request });
+    defer alloc.free(expected_request);
+    for ([_]bool{ true, false }) |matching_identity| {
+        const server_cert = try fixture.x509.issueLeaf(std.testing.io, alloc, ca.key_pair, "h2-ca", "api", if (matching_identity) "spiffe://yoq-cluster/service/api" else "spiffe://yoq-cluster/service/other", now - 60, now + 86400);
+        defer alloc.free(server_cert.cert_pem);
+        const server_key = try fixture.csr.derKeyToPem(alloc, &server_cert.key_pair.secret_key.toBytes());
+        defer alloc.free(server_key);
+        const listener = try fixture.listen();
+        defer linux_platform.posix.close(listener.fd);
+        var server = fixture.Server{ .fd = listener.fd, .ca = ca.cert_pem, .cert = server_cert.cert_pem, .private_key = server_key, .now = now, .request = expected_request, .response = response };
+        const thread = try std.Thread.spawn(.{}, fixture.Server.run, .{&server});
+        var joined = false;
+        defer if (!joined) thread.join();
+        const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-h2", .address = "127.0.0.1", .port = listener.port, .peer_mode = .require };
+        const route = router.Route{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" }, .request_timeout_ms = 2000 };
+        const opened = connectAndSendUpstream(alloc, fixture.key, route, &upstream, request, nowMs() + 2000);
+        if (!matching_identity) {
+            try std.testing.expectError(error.HandshakeFailed, opened);
+            thread.join();
+            joined = true;
+            try std.testing.expect(!server.accepted and !server.saw_request);
+            continue;
+        }
+        var connection = try opened;
+        var transferred = false;
+        defer if (!transferred) connection.deinit();
+        var downstream: [2]i32 = undefined;
+        if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &downstream) != 0) return error.SocketFailed;
+        defer linux_platform.posix.close(downstream[0]);
+        defer linux_platform.posix.close(downstream[1]);
+        var routing = ConnectionRouter{ .allocator = alloc, .routes = &.{}, .client_fd = downstream[0], .client_ip = null, .sent_settings = true };
+        defer routing.deinit();
+        try routing.streams.append(alloc, .{ .downstream_stream_id = 3, .route = route, .backend_service = try alloc.dupe(u8, "api"), .upstream = try ownedTestUpstream(alloc, upstream), .connection = connection, .request_deadline_at_ms = nowMs() + 2000 });
+        transferred = true;
+        while (routing.streams.items.len > 0) {
+            const active = &routing.streams.items[0];
+            if (!active.connection.buffered()) try (transport.Stream{ .fd = active.connection.fd(), .deadline = transport.Deadline.afterMilliseconds(2000) }).wait(posix.POLL.IN);
+            try routing.readUpstream(0);
+        }
+        const output = try alloc.alloc(u8, response.len);
+        defer alloc.free(output);
+        var count: usize = 0;
+        const socket = transport.Stream{ .fd = downstream[1], .deadline = transport.Deadline.afterMilliseconds(2000) };
+        while (count < output.len) {
+            const got = try socket.read(output[count..]);
+            if (got == 0) return error.UnexpectedEof;
+            count += got;
+        }
+        var offset: usize = 0;
+        var frames: usize = 0;
+        while (offset < output.len) {
+            const header = http2.parseFrameHeader(output[offset..]).?;
+            try std.testing.expectEqual(@as(u32, 3), header.stream_id);
+            const expected = http2.parseFrameHeader(response[offset..]).?;
+            try std.testing.expectEqual(expected.frame_type, header.frame_type);
+            try std.testing.expectEqual(expected.flags, header.flags);
+            try std.testing.expectEqualSlices(u8, response[offset + 9 ..][0..header.length], output[offset + 9 ..][0..header.length]);
+            offset += 9 + header.length;
+            frames += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 3), frames);
+        thread.join();
+        joined = true;
+        try std.testing.expect(server.accepted and server.saw_request);
+        try std.testing.expect(server.failure == null);
+    }
 }

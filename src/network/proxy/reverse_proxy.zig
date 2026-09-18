@@ -290,6 +290,7 @@ pub const ReverseProxy = struct {
                 client_fd,
                 upgrade,
                 client_ip,
+                self.peer_key,
             ) catch {
                 proxy_runtime.recordResponse(.internal_server_error);
                 const internal = http2_response.formatSimpleStreamResponse(
@@ -337,6 +338,7 @@ pub const ReverseProxy = struct {
                         client_fd,
                         request,
                         client_ip,
+                        self.peer_key,
                     ) catch {
                         proxy_runtime.recordResponse(.internal_server_error);
                         const internal = http2_response.formatSimpleResponse(
