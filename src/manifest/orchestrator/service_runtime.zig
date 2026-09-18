@@ -248,8 +248,11 @@ pub fn runOneShotWithIo(
 }
 
 pub fn runCron(alloc: std.mem.Allocator, cron: spec.Cron, manifest_volumes: []const spec.Volume, app_name: []const u8, running: *const std.atomic.Value(bool)) bool {
+    if (!running.load(.acquire)) return false;
     var threaded_io = std.Io.Threaded.init(alloc, .{});
     defer threaded_io.deinit();
+    if (!ensureImageAvailableWithIo(threaded_io.io(), alloc, cron.image)) return false;
+    if (!running.load(.acquire)) return false;
     return runOneShotWithGpu(threaded_io.io(), alloc, cron.image, cron.command, cron.env, cron.volumes, cron.working_dir, cron.name, manifest_volumes, app_name, null, .{ .flag = running, .when = false });
 }
 
