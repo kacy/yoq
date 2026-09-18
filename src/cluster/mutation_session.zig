@@ -8,7 +8,7 @@ pub fn mapError(err: anyerror) Error {
     return switch (err) {
         error.NotLeader, error.LeadershipLost => error.NotLeader,
         error.CommitTimeout, error.CommitUnknown => error.CommitUnknown,
-        error.CommandRejected, error.Conflict => error.Conflict,
+        error.CommandRejected, error.CommandTooLarge, error.Conflict => error.Conflict,
         else => error.InternalError,
     };
 }

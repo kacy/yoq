@@ -1,8 +1,8 @@
-// batch agent heartbeats into one raft proposal
+// batch agent heartbeats into bounded raft proposals
 //
 // http threads call record() for each heartbeat. the buffer keeps the last
 // recorded entry for each agent, regardless of its timestamp. the tick loop
-// calls flush() to drain those entries into one sql string for raft.
+// calls flush() to consume one bounded sql string for raft.
 //
 // a separate mutex protects the buffer without taking the raft lock.
 
@@ -54,57 +54,47 @@ pub const HeartbeatBatcher = struct {
         }) catch return;
     }
 
-    /// drain the buffer and build sql outside the lock. returns null if empty.
-    /// caller must free the returned slice with alloc. if sql construction
-    /// fails after the drain, the entries are not restored.
+    /// remove one bounded batch after its sql has been allocated. later calls
+    /// consume the remainder; allocation failures leave every heartbeat queued.
     pub fn flush(self: *HeartbeatBatcher, alloc: Allocator) !?[]const u8 {
-        const entries = (try self.drainEntries(alloc)) orelse return null;
-        defer alloc.free(entries);
-        return formatEntries(alloc, entries);
+        return self.flushBounded(alloc, @import("replication_limits.zig").max_command_bytes);
     }
 
-    fn drainEntries(self: *HeartbeatBatcher, alloc: Allocator) !?[]Entry {
+    fn flushBounded(self: *HeartbeatBatcher, alloc: Allocator, max_bytes: usize) !?[]const u8 {
         self.mu.lockUncancelable(std.Options.debug_io);
         defer self.mu.unlock(std.Options.debug_io);
-
         if (self.buffer.count() == 0) return null;
 
-        // copy before clearing so allocation failure leaves the buffer intact.
-        const entries = try alloc.dupe(Entry, self.buffer.values());
-        self.buffer.clearRetainingCapacity();
-        return entries;
-    }
-
-    fn formatEntries(alloc: Allocator, entries: []const Entry) !?[]const u8 {
         var result: std.ArrayList(u8) = .empty;
-        errdefer result.deinit(alloc);
-
+        defer result.deinit(alloc);
+        var count: usize = 0;
         var sql_buf: [512]u8 = undefined;
-        for (entries) |entry| {
-            const sql = try registry.heartbeatSql(
-                &sql_buf,
-                &entry.id,
-                entry.resources,
-                entry.timestamp,
-            );
-            if (result.items.len > 0) {
-                try result.append(alloc, ' ');
+        for (self.buffer.values()) |entry| {
+            const sql = try registry.heartbeatSql(&sql_buf, &entry.id, entry.resources, entry.timestamp);
+            const separator: usize = if (count > 0) 1 else 0;
+            if (sql.len + separator > max_bytes - result.items.len) {
+                if (count == 0) return error.CommandTooLarge;
+                break;
             }
+            if (count > 0) try result.append(alloc, ' ');
             try result.appendSlice(alloc, sql);
+            count += 1;
         }
-
-        if (result.items.len == 0) {
-            result.deinit(alloc);
-            return null;
+        const sql = try result.toOwnedSlice(alloc);
+        // remove only the consumed entries. swapping avoids repeatedly moving
+        // the unconsumed tail when a large burst spans several batches.
+        var index = count;
+        while (index > 0) {
+            index -= 1;
+            self.buffer.swapRemoveAt(index);
         }
-
-        return try result.toOwnedSlice(alloc);
+        return sql;
     }
 };
 
 // -- tests --
 
-test "record and flush single entry" {
+test "cluster reliability: record and flush single entry" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -125,7 +115,7 @@ test "record and flush single entry" {
     try std.testing.expect(std.mem.indexOf(u8, sql.?, "UPDATE agents") != null);
 }
 
-test "flush returns null when empty" {
+test "cluster reliability: flush returns null when empty" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -134,7 +124,7 @@ test "flush returns null when empty" {
     try std.testing.expect(sql == null);
 }
 
-test "record replaces an agent heartbeat even with an older timestamp" {
+test "cluster reliability: record replaces an agent heartbeat even with an older timestamp" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -175,7 +165,7 @@ test "record replaces an agent heartbeat even with an older timestamp" {
     try std.testing.expectEqual(@as(usize, 1), count);
 }
 
-test "batches multiple agents" {
+test "cluster reliability: batches multiple agents" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -213,7 +203,7 @@ test "batches multiple agents" {
     try std.testing.expectEqual(@as(usize, 2), count);
 }
 
-test "flush clears buffer" {
+test "cluster reliability: flush clears buffer" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -231,7 +221,7 @@ test "flush clears buffer" {
     try std.testing.expect(sql2 == null);
 }
 
-test "ignores invalid id length" {
+test "cluster reliability: ignores invalid id length" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -245,7 +235,7 @@ test "ignores invalid id length" {
     try std.testing.expect(sql == null);
 }
 
-test "flush preserves heartbeats when the snapshot allocation fails" {
+test "cluster reliability: flush preserves heartbeats when sql allocation fails" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -260,19 +250,18 @@ test "flush preserves heartbeats when the snapshot allocation fails" {
     try std.testing.expect((try batcher.flush(alloc)) == null);
 }
 
-test "flush leaves heartbeats drained when sql allocation fails" {
+test "cluster reliability: heartbeat batches preserve complete statements across the size limit" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
-    batcher.record("agent1234567", .{ .cpu_cores = 4, .memory_mb = 8192 }, 1000);
-
-    // allow the snapshot allocation, then fail the sql buffer allocation.
-    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 1 });
-    try std.testing.expectError(error.OutOfMemory, batcher.flush(failing.allocator()));
+    batcher.record("aaaa11112222", .{ .cpu_cores = 2, .memory_mb = 1024 }, 1000);
+    batcher.record("bbbb33334444", .{ .cpu_cores = 2, .memory_mb = 1024 }, 1000);
+    const first = (try batcher.flushBounded(alloc, 300)).?;
+    defer alloc.free(first);
+    try std.testing.expect(std.mem.indexOf(u8, first, "aaaa11112222") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "bbbb33334444") == null);
+    const second = (try batcher.flushBounded(alloc, 300)).?;
+    defer alloc.free(second);
+    try std.testing.expect(std.mem.indexOf(u8, second, "bbbb33334444") != null);
     try std.testing.expect((try batcher.flush(alloc)) == null);
-
-    batcher.record("agent1234567", .{ .cpu_cores = 4, .memory_mb = 8192 }, 2000);
-    const sql = (try batcher.flush(alloc)) orelse return error.TestUnexpectedResult;
-    defer alloc.free(sql);
-    try std.testing.expect(std.mem.indexOf(u8, sql, "last_heartbeat = 2000") != null);
 }

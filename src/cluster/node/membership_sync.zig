@@ -2,6 +2,7 @@ const std = @import("std");
 const agent_registry = @import("../registry.zig");
 const placement = @import("../placement_transaction.zig");
 const mutation_session = @import("../mutation_session.zig");
+const agent_drain = @import("../agent_drain.zig");
 const gossip_mod = @import("../gossip.zig");
 const gossip_sender_validation = @import("../gossip_sender_validation.zig");
 const ip_mod = @import("../../network/ip.zig");
@@ -28,25 +29,34 @@ pub fn checkAgentHealth(self: anytype, agents: []const agent_registry.AgentRecor
     const timeout: i64 = base_timeout * multiplier;
 
     for (agents) |agent| {
-        if (!std.mem.eql(u8, agent.status, "active")) continue;
+        if (!std.mem.eql(u8, agent.status, "active") and !agent_drain.isDraining(agent.status)) continue;
         if (now - agent.last_heartbeat <= timeout) continue;
 
-        var sql_buf: [256]u8 = undefined;
-        const sql = agent_registry.markOfflineSql(&sql_buf, agent.id) catch continue;
-        _ = proposeUnderLock(self, sql) catch |e| {
-            logger.warn("failed to propose agent offline status: {}", .{e});
-            continue;
-        };
-        if (agent.node_id) |node_id| {
-            service_reconciler.noteNodeLost(node_id);
-        }
-
-        var orphan_buf: [256]u8 = undefined;
-        const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent.id) catch continue;
-        _ = proposeUnderLock(self, orphan_sql) catch |e| {
-            logger.warn("failed to propose assignment orphaning for agent {s}: {}", .{ agent.id, e });
-        };
+        self.mu.lockUncancelable(std.Options.debug_io);
+        markOfflineAndOrphanLocked(self, agent.id);
+        self.mu.unlock(std.Options.debug_io);
+        if (agent.node_id) |node_id| service_reconciler.noteNodeLost(node_id);
     }
+}
+
+fn markOfflineAndOrphanLocked(self: anytype, agent_id: []const u8) void {
+    const agent = (agent_registry.getAgent(self.alloc, &self.state_machine.db, agent_id) catch return) orelse return;
+    defer agent.deinit(self.alloc);
+    // blocked host data and unfinished jobs stay with drain reconciliation,
+    // even when no replacement has been created yet.
+    if (agent_drain.isDraining(agent.status) or std.mem.eql(u8, agent.status, "drained")) return;
+    const command = @import("../sql_command.zig").render(
+        self.alloc,
+        "UPDATE assignments SET agent_id = CASE WHEN (SELECT last_applied FROM state_machine_meta WHERE id = 1) = ? THEN '' ELSE NULL END, status = 'pending' WHERE agent_id = ? AND status IN ('pending', 'running'); UPDATE agents SET status = CASE WHEN status IN ('draining', 'drain_pending', 'drain_blocked', 'drained') THEN status ELSE 'offline' END WHERE id = ?;",
+        .{ self.state_machine.last_applied, agent_id, agent_id },
+    ) catch return;
+    defer self.alloc.free(command);
+    // an unapplied drain request may precede this proposal. the placement
+    // index guard rejects both updates together, so the next health pass can
+    // retry an ordinary worker instead of leaving it offline with stranded work.
+    _ = self.proposeLocked(command) catch |err| {
+        logger.warn("failed to propose assignment orphaning for agent {s}: {}", .{ agent_id, err });
+    };
 }
 
 pub fn reconcileOrphanedAssignments(
@@ -60,6 +70,16 @@ pub fn reconcileOrphanedAssignments(
     placement.reconcileOrphans(self.alloc, session) catch |err| {
         logger.warn("failed to reconcile assignment capacity: {}", .{err});
     };
+}
+
+pub fn reconcileDrainingAgents(self: anytype, agents: []const agent_registry.AgentRecord) void {
+    for (agents) |agent| {
+        if (!agent_drain.isDraining(agent.status)) continue;
+        const session = mutation_session.Session.begin(self) catch return;
+        agent_drain.reconcile(self.alloc, session, agent.id) catch |err| {
+            logger.warn("failed to advance drain for agent {s}: {}", .{ agent.id, err });
+        };
+    }
 }
 
 pub fn cleanupDeadAgents(self: anytype, agents: []const agent_registry.AgentRecord) void {
@@ -187,19 +207,8 @@ pub fn handleGossipMemberDead(self: anytype, member_id: u64) void {
 
     logger.info("gossip: member {} dead, marking agent {s} offline", .{ member_id, agent_id });
 
-    var sql_buf: [256]u8 = undefined;
-    const sql = agent_registry.markOfflineSql(&sql_buf, agent_id) catch return;
-    _ = self.proposeLocked(sql) catch |e| {
-        logger.warn("gossip: failed to propose offline for agent {s}: {}", .{ agent_id, e });
-        return;
-    };
+    markOfflineAndOrphanLocked(self, agent_id);
     service_reconciler.noteNodeLost(@intCast(member_id));
-
-    var orphan_buf: [256]u8 = undefined;
-    const orphan_sql = agent_registry.orphanAssignmentsSql(&orphan_buf, agent_id) catch return;
-    _ = self.proposeLocked(orphan_sql) catch |e| {
-        logger.warn("gossip: failed to orphan assignments for agent {s}: {}", .{ agent_id, e });
-    };
 
     if (member_id >= 1 and member_id <= 65534) {
         var wg_buf: [256]u8 = undefined;

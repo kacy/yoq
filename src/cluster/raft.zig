@@ -221,6 +221,8 @@ pub const Raft = struct {
         if (!self.refreshPersistentState()) return error.ReadFailed;
         if (self.role != .leader) return error.NotLeader;
 
+        if (data.len > @import("replication_limits.zig").max_command_bytes) return error.CommandTooLarge;
+
         const index = self.log.lastIndex() + 1;
         const term = self.persistent_state.current_term;
 
@@ -3183,4 +3185,90 @@ test "snapshot metadata write failure preserves cached and applied progress" {
     try testing.expect(raft.finishInstallSnapshot(next));
     try testing.expectEqual(@as(LogIndex, 8), raft.commit_index);
     try testing.expectEqual(@as(LogIndex, 8), raft.last_applied);
+}
+
+test "cluster reliability: replication budget carries a full command and splits follower catchup" {
+    const codec = @import("transport/codec_support.zig");
+    const limits = @import("replication_limits.zig");
+    const alloc = std.testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+    try std.testing.expect(log.setCurrentTerm(1));
+    var raft = try Raft.init(alloc, 1, &.{2}, &log);
+    defer raft.deinit();
+    raft.role = .leader;
+    const payload = try alloc.alloc(u8, limits.max_command_bytes + 1);
+    defer alloc.free(payload);
+    @memset(payload, 'x');
+    try std.testing.expectError(error.CommandTooLarge, raft.propose(payload));
+    try std.testing.expectEqual(@as(u64, 0), log.lastIndex());
+    _ = try raft.propose(payload[0..limits.max_command_bytes]);
+    const first = try raft.drainActions();
+    defer raft.freeActions(first);
+    try std.testing.expectEqual(limits.max_append_frame_bytes, try codec.encodedSize(.{ .append_entries = first[0].send_append_entries.args }));
+    try log.append(.{ .index = 2, .term = 1, .data = "later command" });
+    replication_runtime.sendAppendEntries(&raft, 0);
+    const catchup = try raft.drainActions();
+    defer raft.freeActions(catchup);
+    const args = catchup[0].send_append_entries.args;
+    try std.testing.expectEqual(@as(usize, 1), args.entries.len);
+    const frame = try alloc.alloc(u8, try codec.encodedSize(.{ .append_entries = args }));
+    defer alloc.free(frame);
+    _ = try codec.encode(frame, .{ .append_entries = args });
+    const decoded = try codec.decode(alloc, frame[4..]);
+    defer {
+        for (decoded.append_entries.entries) |entry| alloc.free(entry.data);
+        alloc.free(decoded.append_entries.entries);
+    }
+    var follower_log = try Log.initMemory();
+    defer follower_log.deinit();
+    var follower = try Raft.init(alloc, 2, &.{1}, &follower_log);
+    defer follower.deinit();
+    const reply = follower.handleAppendEntries(decoded.append_entries);
+    try std.testing.expect(reply.success);
+    raft.handleAppendEntriesReply(2, reply);
+    replication_runtime.sendAppendEntries(&raft, 0);
+    const remainder = try raft.drainActions();
+    defer raft.freeActions(remainder);
+    const next = remainder[remainder.len - 1].send_append_entries.args;
+    try std.testing.expectEqual(@as(u64, 1), next.prev_log_index);
+    try std.testing.expectEqual(@as(usize, 1), next.entries.len);
+    try std.testing.expectEqualStrings("later command", next.entries[0].data);
+    const final_reply = follower.handleAppendEntries(next);
+    try std.testing.expect(final_reply.success);
+    raft.handleAppendEntriesReply(2, final_reply);
+    try std.testing.expectEqual(@as(u64, 2), raft.commit_index);
+}
+
+test "cluster reliability: inherited oversized entries remain replicable" {
+    const limits = @import("replication_limits.zig");
+    const codec = @import("transport/codec_support.zig");
+    const alloc = std.testing.allocator;
+    var log = try Log.initMemory();
+    defer log.deinit();
+    const payload = try alloc.alloc(u8, limits.max_command_bytes + 1);
+    defer alloc.free(payload);
+    @memset(payload, 'x');
+    // this entry was persisted by a previous binary, before proposal admission.
+    try log.append(.{ .index = 1, .term = 1, .data = payload });
+    try log.append(.{ .index = 2, .term = 1, .data = "next" });
+    var raft = try Raft.init(alloc, 1, &.{2}, &log);
+    defer raft.deinit();
+    replication_runtime.sendAppendEntries(&raft, 0);
+    const actions = try raft.drainActions();
+    defer raft.freeActions(actions);
+    const args = actions[0].send_append_entries.args;
+    try std.testing.expectEqual(@as(usize, 1), args.entries.len);
+    const size = try codec.encodedSize(.{ .append_entries = args });
+    try std.testing.expect(size > limits.max_append_frame_bytes);
+    try std.testing.expect(size <= limits.max_inherited_frame_bytes);
+    const frame = try alloc.alloc(u8, size);
+    defer alloc.free(frame);
+    _ = try codec.encode(frame, .{ .append_entries = args });
+    const decoded = try codec.decode(alloc, frame[4..]);
+    defer {
+        for (decoded.append_entries.entries) |entry| alloc.free(entry.data);
+        alloc.free(decoded.append_entries.entries);
+    }
+    try std.testing.expectEqualStrings(payload, decoded.append_entries.entries[0].data);
 }

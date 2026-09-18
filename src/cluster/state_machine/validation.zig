@@ -62,10 +62,9 @@ const Authorization = struct { ddl: bool = false, barrier: bool = false };
 
 fn replicatedTable(name: []const u8) bool {
     const tables = [_][]const u8{
-        "training_jobs",        "assignment_claims", "deployments",     "cron_schedules",
-        "agents",               "assignments",       "wireguard_peers", "volumes",
-        "s3_multipart_uploads", "s3_upload_parts",   "services",        "service_endpoints",
-        "cluster_ca",           "certificates",
+        "assignment_handoffs", "training_jobs", "assignment_claims", "deployments", "cron_schedules",
+        "agents",              "assignments",   "wireguard_peers",   "volumes",     "s3_multipart_uploads",
+        "s3_upload_parts",     "services",      "service_endpoints", "cluster_ca",  "certificates",
     };
     for (tables) |table| if (std.mem.eql(u8, name, table)) return true;
     return false;
@@ -86,6 +85,8 @@ fn identityColumn(table: []const u8, column: []const u8) bool {
     if (std.mem.eql(u8, column, "id") or std.ascii.eqlIgnoreCase(column, "ROWID")) return true;
     const fields = [_]struct { table: []const u8, column: []const u8 }{
         .{ .table = "assignment_claims", .column = "assignment_id" },
+        .{ .table = "assignment_handoffs", .column = "assignment_id" },
+        .{ .table = "assignment_handoffs", .column = "replacement_id" },
         .{ .table = "wireguard_peers", .column = "node_id" },
         .{ .table = "services", .column = "service_name" },
         .{ .table = "services", .column = "vip_address" },

@@ -113,7 +113,7 @@ jobs:
           cache-prefix: zig-runtime-${{ matrix.lane }}
 
       - name: install scheduled network fixture tools
-        if: matrix.lane == 'network'
+        if: matrix.lane == 'network' || matrix.lane == 'cluster'
         run: |
           sudo apt-get update
           sudo apt-get install --yes iproute2 iptables openssl python3 curl wireguard-tools libsqlite3-dev
@@ -166,6 +166,24 @@ jobs:
           bash scripts/policy-generation-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/policy-generation.log"
           sudo env RUNNER_TEMP="$RUNNER_TEMP" python3 scripts/scheduled-runtime-smoke.py \
             2>&1 | tee "$RUNNER_TEMP/runtime-logs/scheduled-runtime.log"
+
+      - name: verify live agent drain handoff
+        if: matrix.lane == 'cluster'
+        shell: bash
+        run: |
+          set -o pipefail
+          sudo env YOQ_BIN="$PWD/zig-out/bin/yoq" YOQ_SMOKE_DIR="$RUNNER_TEMP/agent-drain-fixture" \
+            bash scripts/agent-drain-smoke.sh 2>&1 | tee "$RUNNER_TEMP/runtime-logs/agent-drain.log"
+
+      - name: retain agent drain process logs
+        if: always() && matrix.lane == 'cluster'
+        shell: bash
+        run: |
+          sudo install -d -m 0755 "$RUNNER_TEMP/runtime-logs/agent-drain"
+          if [ -d "$RUNNER_TEMP/agent-drain-fixture" ]; then
+            sudo find "$RUNNER_TEMP/agent-drain-fixture" -maxdepth 1 -type f \( -name '*.log' -o -name drain-result.json \) \
+              -exec install -m 0644 -t "$RUNNER_TEMP/runtime-logs/agent-drain" {} +
+          fi
 
       - name: upload privileged runtime logs
         if: always()

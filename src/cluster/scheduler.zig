@@ -113,21 +113,21 @@ test "schedule capacity exceeded returns null" {
     try std.testing.expect(results[0] == null);
 }
 
-test "schedule skips draining agent" {
+test "cluster reliability: schedule skips every stage of agent drain" {
     const alloc = std.testing.allocator;
-    const agents = &[_]AgentRecord{
-        makeAgent("agent1", "draining", 4, 8192, 0, 0),
-        makeAgent("agent2", "active", 2, 4096, 0, 0),
-    };
-    const requests = &[_]PlacementRequest{
-        .{ .image = "nginx", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256 },
-    };
-
-    const results = try schedule(alloc, requests, agents);
-    defer alloc.free(results);
-
-    try std.testing.expect(results[0] != null);
-    try std.testing.expectEqualStrings("agent2", results[0].?.agent_id);
+    for ([_][]const u8{ "draining", "drain_pending", "drain_blocked", "drained" }) |status| {
+        const agents = &[_]AgentRecord{
+            makeAgent("agent1", status, 4, 8192, 0, 0),
+            makeAgent("agent2", "active", 2, 4096, 0, 0),
+        };
+        const requests = &[_]PlacementRequest{
+            .{ .image = "nginx", .command = "", .cpu_limit = 1000, .memory_limit_mb = 256 },
+        };
+        const results = try schedule(alloc, requests, agents);
+        defer alloc.free(results);
+        try std.testing.expect(results[0] != null);
+        try std.testing.expectEqualStrings("agent2", results[0].?.agent_id);
+    }
 }
 
 test "schedule skips offline agent" {

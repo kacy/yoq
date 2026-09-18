@@ -137,7 +137,7 @@ pub fn heartbeatSql(
 pub fn drainSql(buf: []u8, id: []const u8) ![]const u8 {
     var id_esc_buf: [64]u8 = undefined;
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
-    return std.fmt.bufPrint(buf, "UPDATE agents SET status = 'draining' WHERE id = '{s}';", .{id_esc});
+    return std.fmt.bufPrint(buf, "UPDATE agents SET status = 'drain_pending' WHERE id = '{s}';", .{id_esc});
 }
 
 pub fn updateAssignmentStatusSql(buf: []u8, assignment_id: []const u8, new_status: []const u8, reason: ?[]const u8) ![]const u8 {
@@ -156,7 +156,7 @@ pub fn updateAssignmentStatusSql(buf: []u8, assignment_id: []const u8, new_statu
 pub fn markOfflineSql(buf: []u8, id: []const u8) ![]const u8 {
     var id_esc_buf: [64]u8 = undefined;
     const id_esc = try sql_escape.escapeSqlString(&id_esc_buf, id);
-    return std.fmt.bufPrint(buf, "UPDATE agents SET status = 'offline' WHERE id = '{s}';", .{id_esc});
+    return std.fmt.bufPrint(buf, "UPDATE agents SET status = CASE WHEN status IN ('draining', 'drain_pending', 'drain_blocked', 'drained') THEN status ELSE 'offline' END WHERE id = '{s}';", .{id_esc});
 }
 
 pub fn markActiveSql(buf: []u8, id: []const u8) ![]const u8 {

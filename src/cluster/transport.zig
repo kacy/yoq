@@ -120,9 +120,13 @@ pub const Transport = struct {
             return;
         }
 
-        var buf: [8192]u8 = undefined;
-        const len = encode(&buf, msg) catch return TransportError.SendFailed;
-
+        const size = codec_support.encodedSize(msg) catch return TransportError.SendFailed;
+        if (size > @import("replication_limits.zig").max_inherited_frame_bytes)
+            return TransportError.SendFailed;
+        var stack_buf: [8192]u8 = undefined;
+        const buf = if (size <= stack_buf.len) stack_buf[0..size] else self.alloc.alloc(u8, size) catch return TransportError.SendFailed;
+        defer if (size > stack_buf.len) self.alloc.free(buf);
+        const len = encode(buf, msg) catch return TransportError.SendFailed;
         try self.sendEncoded(peer, buf[0..len]);
     }
 
@@ -824,4 +828,29 @@ test "udp gossip: wrong key rejected" {
 
     var buf: [1500]u8 = undefined;
     try waitForGossipError(&receiver, &buf);
+}
+
+test "cluster reliability: replication budget sends append entries beyond the stack buffer" {
+    const alloc = std.testing.allocator;
+    var transport = try Transport.init(alloc, 0);
+    defer transport.deinit();
+    var address: posix.sockaddr.in = undefined;
+    var address_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+    try linux_platform.posix.getsockname(transport.listen_fd, @ptrCast(&address), &address_len);
+    try transport.addPeer(7, .{ 127, 0, 0, 1 }, std.mem.bigToNative(u16, address.port));
+    const payload = [_]u8{'x'} ** 9000;
+    try transport.send(7, .{ .append_entries = .{
+        .term = 1,
+        .leader_id = 7,
+        .prev_log_index = 0,
+        .prev_log_term = 0,
+        .entries = &.{.{ .index = 1, .term = 1, .data = &payload }},
+        .leader_commit = 0,
+    } });
+    const received = (try transport.receive(alloc)).?;
+    defer {
+        for (received.message.append_entries.entries) |entry| alloc.free(entry.data);
+        alloc.free(received.message.append_entries.entries);
+    }
+    try std.testing.expectEqualStrings(&payload, received.message.append_entries.entries[0].data);
 }

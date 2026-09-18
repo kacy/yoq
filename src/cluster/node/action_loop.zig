@@ -76,7 +76,10 @@ pub fn tickLoop(self: anytype) void {
         if (still_leader) {
             if (agents) |records| {
                 if (do_health) membership_sync.checkAgentHealth(self, records);
-                if (do_reconcile) membership_sync.reconcileOrphanedAssignments(self, reconcile_orphans orelse &.{}, records);
+                if (do_reconcile) {
+                    membership_sync.reconcileOrphanedAssignments(self, reconcile_orphans orelse &.{}, records);
+                    membership_sync.reconcileDrainingAgents(self, records);
+                }
                 if (do_cleanup) membership_sync.cleanupDeadAgents(self, records);
             }
             if (heartbeat_batch) |batch| {

@@ -158,6 +158,7 @@ pub fn handleClusterPropose(alloc: std.mem.Allocator, request: http.Request, ctx
     _ = node.propose(request.body) catch |err| {
         return switch (err) {
             error.InvalidCommand => common.badRequest("invalid replicated command"),
+            error.CommandTooLarge => common.badRequest("replicated command exceeds 1 mib"),
             error.NotLeader => common.notLeader(alloc, node),
             else => common.internalError(),
         };

@@ -1157,7 +1157,7 @@ test "replicated poison rejection survives restart and validates retained histor
     try expectBatchTestState(&sm, 2, 1, 2);
 }
 
-test "replicated admission and restored snapshots share the complete current schema" {
+test "cluster reliability: replicated admission and restored snapshots share the complete current schema" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const alloc = std.testing.allocator;
@@ -1173,6 +1173,7 @@ test "replicated admission and restored snapshots share the complete current sch
     try expectBatchTestState(&old, 1, 0, 0);
     // reproduce a snapshot from before these schema additions.
     try old.db.exec("DROP TABLE assignment_claims;", .{}, .{});
+    try old.db.exec("DROP TABLE assignment_handoffs;", .{}, .{});
     try old.db.exec("ALTER TABLE agents DROP COLUMN credential_hash;", .{}, .{});
     try old.takeSnapshot(path, .{ .last_included_index = 1, .last_included_term = 1, .data_len = 0 });
 
@@ -1182,6 +1183,10 @@ test "replicated admission and restored snapshots share the complete current sch
     restored.apply(.{ .index = 2, .term = 1, .data = read_claims ++ " UPDATE agents SET credential_hash = 'restored';" });
     try expectBatchTestState(&restored, 2, 0, 0);
     try std.testing.expect(!try command.wasRejected(&restored.db, 2, 1));
+    restored.apply(.{ .index = 3, .term = 1, .data = "INSERT INTO assignment_handoffs (assignment_id, replacement_id, generation) VALUES ('original', 'replacement', 4);" });
+    try std.testing.expect(!try command.wasRejected(&restored.db, 3, 1));
+    const handoff = (try restored.db.one(struct { generation: i64 }, "SELECT generation FROM assignment_handoffs WHERE assignment_id = 'original';", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 4), handoff.generation);
 }
 
 test "replicated admission rejects scan-order-dependent reads and key updates" {
@@ -1212,4 +1217,27 @@ test "replicated admission rejects scan-order-dependent reads and key updates" {
         }
     }
     try first.validator.validate("UPDATE agents SET id = id WHERE 0;");
+}
+
+test "cluster reliability: inherited larger commands still apply and validate as history" {
+    const alloc = std.testing.allocator;
+    const payload = try alloc.alloc(u8, @import("replication_limits.zig").max_command_bytes);
+    defer alloc.free(payload);
+    @memset(payload, 'x');
+    const sql = try std.fmt.allocPrint(alloc, "UPDATE agents SET labels = '{s}' WHERE id = 'abcdef000001'; UPDATE agents SET cpu_used = 2 WHERE id = 'abcdef000002';", .{payload});
+    defer alloc.free(sql);
+    var log = try @import("log.zig").Log.initMemory();
+    defer log.deinit();
+    try log.append(.{ .index = 1, .term = 1, .data = sql });
+    var sm = try StateMachine.initMemory();
+    defer sm.deinit();
+    try seedBatchTestAgents(&sm);
+    sm.applyUpTo(&log, alloc, 1);
+    try std.testing.expectEqual(@as(u64, 1), sm.last_applied);
+    try std.testing.expect(!try command.wasRejected(&sm.db, 1, 1));
+    const row = (try sm.db.one(struct { size: i64 }, "SELECT length(labels) AS size FROM agents WHERE id = 'abcdef000001';", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, @intCast(payload.len)), row.size);
+    const second = (try sm.db.one(struct { cpu_used: i64 }, "SELECT cpu_used FROM agents WHERE id = 'abcdef000002';", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 2), second.cpu_used);
+    try sm.validateAppliedHistory(&log, alloc);
 }

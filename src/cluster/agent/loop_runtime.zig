@@ -77,7 +77,7 @@ pub fn doHeartbeat(self: anytype) void {
     if (resp.status_code != 200) return;
 
     if (extractJsonString(resp.body, "status")) |status| {
-        if (std.mem.eql(u8, status, "draining")) {
+        if (std.mem.eql(u8, status, "drained")) {
             self.running.store(false, .release);
         }
     }
