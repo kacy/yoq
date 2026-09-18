@@ -290,7 +290,7 @@ bin-packing placement: scores agents by free CPU + memory, assigns containers to
 
 agents register via HTTP, then report capacity on an adaptive heartbeat interval that starts at five seconds. they pull assignments, download images, and start containers locally. WireGuard tunnels are set up on join.
 
-if the leader changes, agents follow automatically — heartbeat responses include leader hints.
+agents persist the server endpoints learned through authenticated enrollment and heartbeats. if their current endpoint becomes unreachable, they try the known alternatives without changing their enrollment identity. leader hints must name a trusted endpoint. see the [cluster recovery contract](cluster-guide.md) for upgrade and outage details.
 
 ### app-first control plane
 
@@ -467,7 +467,7 @@ all yoq state lives under `~/.local/share/yoq/`:
 ### backup and restore
 
 - `yoq backup [--output path]` — uses SQLite Online Backup API, safe while running
-- `yoq restore <path>` — validates schema version before replacing the active database
+- `yoq restore <path>` — migrates and validates a private candidate before replacing the active database; incompatible schemas and unsupported format versions are rejected
 
 volume data is not included in backups.
 

@@ -212,7 +212,7 @@ persistent storage for all yoq state.
 
 **secrets:** encrypted at rest with XChaCha20-Poly1305. can be mounted as files or injected as environment variables. rotation doesn't require container restart.
 
-**backup/restore:** uses the SQLite Online Backup API (`sqlite3_backup_init`/`step`/`finish`), which is safe to run while the server is running. restores validate the schema version before replacing the active database. volume data is not included in backups — only the SQLite state.
+**backup/restore:** uses the SQLite Online Backup API (`sqlite3_backup_init`/`step`/`finish`), which is safe to run while the server is running. restores migrate a private candidate, then compare its required columns, keys, indexes, foreign keys, check constraints, and triggers with the current schema before replacing the active database. unsupported format versions and incompatible candidates leave live state untouched. volume data is not included in backups — only the SQLite state.
 
 key files:
 - `store.zig` — container/image CRUD operations
