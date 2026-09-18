@@ -231,6 +231,8 @@ def exercise(rig):
         # restart with the original, dead seed. both credentials and alternate
         # endpoints must come from the existing enrollment files.
         rig.start(4, "join", seed, "--port", "7700", "--token", rig.token)
+        time.sleep(3)
+        rig.require_running(4)
         rig.run(*rig.inside(4, "iptables", "-D", "OUTPUT", "-p", "tcp", "--dport", "7700", "-j", "REJECT"))
         terminal = wait_for("committed result after agent restart", lambda: [item for item in rig.request(leader, f"/agents/{agent_id}/assignments", credential=rig.worker_credential()) if item["id"] == "a11ce0000001" and item["status"] == "failed"])
         if terminal[0]["generation"] != pending[3] or terminal[0]["status_reason"] != pending[5]:
