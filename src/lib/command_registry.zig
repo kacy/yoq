@@ -10,6 +10,7 @@ const net_cmds = @import("../network/commands.zig");
 const runtime_cmds = @import("../runtime/commands.zig");
 const tls_cmds = @import("../tls/commands.zig");
 const container_cmds = @import("../runtime/container_commands.zig");
+const container_manage = @import("../runtime/cli/container/manage_commands.zig");
 const build_cmds = @import("../build/commands.zig");
 const manifest_cmds = @import("../manifest/commands.zig");
 const gpu_cmds = @import("../gpu/commands.zig");
@@ -40,6 +41,12 @@ pub const CommandSpec = struct {
 };
 
 pub const command_specs = [_]CommandSpec{
+    .{ .name = "container", .group = .runtime, .usage = "container <command>", .description = "manage or inspect local containers", .handler = container_manage.containerCommand },
+    .{ .name = "create", .group = .runtime, .usage = "create [opts] <image|rootfs> [cmd]", .description = "create a stopped container", .handler = @import("../runtime/cli/container/run_command.zig").create },
+    .{ .name = "start", .group = .runtime, .usage = "start <id|name>", .description = "start an existing container", .handler = container_manage.start },
+    .{ .name = "wait", .group = .runtime, .usage = "wait <id|name>", .description = "wait for a container exit and print its code", .handler = container_manage.wait },
+    .{ .name = "kill", .group = .runtime, .usage = "kill [--signal SIGNAL] <id|name>", .description = "send a signal to a running container", .handler = container_manage.kill },
+    .{ .name = "tag", .group = .image, .usage = "tag <source> <target>", .description = "add a local image reference", .handler = image_cmds.tag },
     .{ .name = "run", .group = .runtime, .usage = "run [opts] <image|rootfs> [cmd]", .description = "create and run a container", .handler = container_cmds.run },
     .{ .name = "ps", .group = .runtime, .usage = "ps", .description = "list containers", .handler = psHandler },
     .{ .name = "logs", .group = .runtime, .usage = "logs <id|name>", .description = "show container output", .handler = container_cmds.log },

@@ -52,7 +52,7 @@ pub fn stop(id: []const u8, alloc: std.mem.Allocator) !void {
 }
 
 fn stopLocked(id: []const u8, alloc: std.mem.Allocator) !void {
-    {
+    stopping: {
         const transition = try control.lock(id, .transition, true);
         defer transition.deinit();
         var record = try store.load(alloc, id);
@@ -60,7 +60,12 @@ fn stopLocked(id: []const u8, alloc: std.mem.Allocator) !void {
         try control.ensureRegistered(id);
         _ = try control.request(id, false);
         if (record.pid != null) {
-            const pid = state_support.currentOwnedRunningPid(&record) orelse return error.StateUnknown;
+            const pid = state_support.currentOwnedRunningPid(&record) orelse {
+                const latest = try store.load(alloc, id);
+                defer latest.deinit(alloc);
+                if (latest.pid != null) return error.StateUnknown;
+                break :stopping;
+            };
             const cfg = run_state.loadConfig(alloc, id) catch null;
             defer if (cfg) |value| value.deinit(alloc);
             try supervisor.stopProcessWithOptions(pid, if (cfg) |value| value.stop_signal else 15, if (cfg) |value| value.stop_timeout_seconds else 5);

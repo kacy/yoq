@@ -44,6 +44,10 @@ pub fn lock(id: []const u8, kind: LockKind, wait: bool) !Lock {
 pub fn register(id: []const u8, name: ?[]const u8) !void {
     var lease = try db_store.leaseDb();
     defer lease.deinit();
+    if (name) |value| {
+        const legacy = try lease.db.one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM containers WHERE hostname = ? AND id NOT IN (SELECT container_id FROM local_containers);", .{}, .{value});
+        if (legacy != null and legacy.?.count > 0) return error.NameInUse;
+    }
     try lease.db.exec("INSERT INTO local_containers (container_id, name) VALUES (?, ?);", .{}, .{ id, name });
 }
 

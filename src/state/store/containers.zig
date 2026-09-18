@@ -134,10 +134,12 @@ pub fn findByHostname(alloc: Allocator, hostname: []const u8) StoreError!?Contai
 }
 
 fn findByHostnameInDb(db: *sqlite.Db, alloc: Allocator, hostname: []const u8) StoreError!?ContainerRecord {
+    const matches = db.one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM containers WHERE hostname = ? AND id NOT IN (SELECT container_id FROM local_containers WHERE name IS NOT NULL);", .{}, .{hostname}) catch return StoreError.ReadFailed;
+    if (matches != null and matches.?.count > 1) return StoreError.ReadFailed;
     const row = (db.oneAlloc(
         ContainerRow,
         alloc,
-        "SELECT " ++ container_columns ++ " FROM containers WHERE hostname = ? ORDER BY created_at DESC LIMIT 1;",
+        "SELECT " ++ container_columns ++ " FROM containers WHERE hostname = ? AND id NOT IN (SELECT container_id FROM local_containers WHERE name IS NOT NULL) LIMIT 1;",
         .{},
         .{hostname},
     ) catch return StoreError.ReadFailed) orelse return null;

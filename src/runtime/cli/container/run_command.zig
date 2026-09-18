@@ -108,6 +108,19 @@ fn parseRunFlags(args: anytype, alloc: std.mem.Allocator, io: std.Io) ContainerE
             const value = try optionValue(args, arg, inline_value);
             if (value.len == 0) return ContainerError.InvalidArgument;
             flags.user = value;
+        } else if (std.mem.eql(u8, arg, "--rm")) {
+            flags.auto_remove = true;
+        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--interactive")) {
+            flags.interactive = true;
+        } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--tty")) {
+            flags.tty = true;
+        } else if (std.mem.eql(u8, arg, "-it") or std.mem.eql(u8, arg, "-ti")) {
+            flags.interactive = true;
+            flags.tty = true;
+        } else if (std.mem.eql(u8, arg, "--stop-signal")) {
+            flags.stop_signal = @import("../../signals.zig").parse(try optionValue(args, arg, inline_value)) orelse return ContainerError.InvalidArgument;
+        } else if (std.mem.eql(u8, arg, "--stop-timeout")) {
+            flags.stop_timeout_seconds = std.fmt.parseInt(u32, try optionValue(args, arg, inline_value), 10) catch return ContainerError.InvalidArgument;
         } else if (std.mem.eql(u8, arg, "--pull")) {
             const value = try optionValue(args, arg, inline_value);
             flags.pull_policy = std.meta.stringToEnum(image_cmds.PullPolicy, value) orelse {
@@ -347,9 +360,6 @@ fn buildSavedRunConfig(
     const working_dir = alloc.dupe(u8, flags.working_dir orelse img.working_dir) catch return ContainerError.OutOfMemory;
     errdefer alloc.free(working_dir);
 
-    const user = if (img.user) |value| alloc.dupe(u8, value) catch return ContainerError.OutOfMemory else null;
-    errdefer if (user) |value| alloc.free(value);
-
     const effective_user = flags.user orelse img.user;
     const user = if (effective_user) |value| alloc.dupe(u8, value) catch return ContainerError.OutOfMemory else null;
     errdefer if (user) |value| alloc.free(value);
@@ -371,7 +381,6 @@ fn buildSavedRunConfig(
         .command = command,
         .hostname = hostname,
         .working_dir = working_dir,
-        .user = user,
         .user = user,
         .args = args,
         .env = merged_env,
@@ -416,6 +425,14 @@ fn saveCreatedRecord(id: []const u8, cfg: *const run_state.SavedRunConfig) Conta
 }
 
 pub fn run(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    return createAndRun(args, ctx, false);
+}
+
+pub fn create(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    return createAndRun(args, ctx, true);
+}
+
+fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: bool) !void {
     const alloc = ctx.alloc;
 
     if (builtin.os.tag != .linux) {
@@ -443,6 +460,16 @@ pub fn run(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 
     var saved = buildSavedRunConfig(alloc, &flags, &img, &resolved) catch |e| return e;
     defer saved.deinit(alloc);
+    saved.auto_remove = flags.auto_remove;
+    saved.interactive = flags.interactive;
+    saved.tty = flags.tty;
+    saved.stop_timeout_seconds = flags.stop_timeout_seconds;
+    saved.stop_signal = flags.stop_signal orelse if (img.stop_signal) |value| @import("../../signals.zig").parse(value) orelse return ContainerError.InvalidArgument else 15;
+    if (img.manifest_digest.len > 0) saved.image_reference = try alloc.dupe(u8, img.manifest_digest);
+    if (saved.auto_remove and saved.restart_policy != .no) {
+        writeErr("--rm cannot be combined with a restart policy\n", .{});
+        return ContainerError.InvalidArgument;
+    }
     saved.limits.validate() catch |err| {
         writeErr("invalid resource limits: {}\n", .{err});
         return ContainerError.InvalidLimits;
@@ -455,16 +482,27 @@ pub fn run(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     };
     const id = id_buf[0..];
 
-    saveCreatedRecord(id, &saved) catch |e| return e;
-    run_state.saveConfig(id, saved) catch |err| {
-        @import("../../../state/store.zig").remove(id) catch {};
-        writeErr("failed to save container config: {}\n", .{err});
-        return ContainerError.ConfigSaveFailed;
-    };
+    {
+        const control = @import("../../local_control.zig");
+        control.register(id, flags.container_name) catch |err| {
+            writeErr("cannot reserve container name: {}\n", .{err});
+            return ContainerError.ConfigSaveFailed;
+        };
+        errdefer control.remove(id) catch {};
+        saveCreatedRecord(id, &saved) catch |e| return e;
+        run_state.saveConfig(id, saved) catch |err| {
+            @import("../../../state/store.zig").remove(id) catch {};
+            writeErr("failed to save container config: {}\n", .{err});
+            return ContainerError.ConfigSaveFailed;
+        };
+    }
 
+    if (create_only) {
+        write("{s}\n", .{id});
+        return;
+    }
     if (flags.detach) {
-        supervisor_runtime.spawnSupervisor(ctx.io, alloc, id) catch |e| return e;
-        state_support.waitForContainerStart(alloc, id) catch |e| return e;
+        try @import("../../local_lifecycle.zig").start(ctx.io, alloc, id);
         write("{s}\n", .{id});
         return;
     }

@@ -136,8 +136,7 @@ fn installHandlers() void {
         .mask = std.posix.sigemptyset(),
         .flags = @bitCast(@as(u32, 0x10000000)), // SA_RESTART
     };
-    std.posix.sigaction(std.posix.SIG.TERM, &act, null);
-    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+    for (@import("signals.zig").forwarded) |signal| std.posix.sigaction(signal, &act, null);
 }
 
 /// raw _exit syscall. avoids atexit handlers and stdio flushing

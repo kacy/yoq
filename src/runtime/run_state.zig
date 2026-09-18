@@ -44,6 +44,8 @@ pub const SavedRunConfig = struct {
     stop_signal: u8 = 15,
     stop_timeout_seconds: u32 = 10,
     auto_remove: bool = false,
+    interactive: bool = false,
+    tty: bool = false,
     args: [][]const u8,
     env: [][]const u8,
     lower_dirs: [][]const u8,
@@ -83,7 +85,7 @@ pub const RunStateError = error{
 };
 
 const configs_subdir = "run_configs";
-const format_version: u32 = 3;
+const format_version: u32 = 4;
 const max_serialized_string_bytes: u32 = 64 * 1024;
 const max_serialized_list_items: u32 = 1024;
 const max_serialized_mounts: u32 = 256;
@@ -132,6 +134,8 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     out.writeByte(cfg.stop_signal) catch return RunStateError.WriteFailed;
     writeInt(out, u32, cfg.stop_timeout_seconds) catch return RunStateError.WriteFailed;
     out.writeByte(@intFromBool(cfg.auto_remove)) catch return RunStateError.WriteFailed;
+    out.writeByte(@intFromBool(cfg.interactive)) catch return RunStateError.WriteFailed;
+    out.writeByte(@intFromBool(cfg.tty)) catch return RunStateError.WriteFailed;
     out.flush() catch return RunStateError.WriteFailed;
     file.sync(std.Options.debug_io) catch return RunStateError.WriteFailed;
     cwd().rename(tmp_path, cwd(), path, std.Options.debug_io) catch return RunStateError.WriteFailed;
@@ -203,6 +207,8 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     const stop_signal = if (version >= 3) readByte(input) catch return RunStateError.ReadFailed else 15;
     const stop_timeout_seconds = if (version >= 3) readInt(input, u32) catch return RunStateError.ReadFailed else 5;
     const auto_remove = if (version >= 3) (readByte(input) catch return RunStateError.ReadFailed) != 0 else false;
+    const interactive = if (version >= 4) (readByte(input) catch return RunStateError.ReadFailed) != 0 else false;
+    const tty = if (version >= 4) (readByte(input) catch return RunStateError.ReadFailed) != 0 else false;
     if (stop_signal == 0 or stop_signal > 64) return RunStateError.InvalidFormat;
 
     return .{
@@ -211,6 +217,8 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
         .stop_signal = stop_signal,
         .stop_timeout_seconds = stop_timeout_seconds,
         .auto_remove = auto_remove,
+        .interactive = interactive,
+        .tty = tty,
         .rootfs = rootfs,
         .command = command,
         .hostname = hostname,
@@ -446,6 +454,11 @@ test "save and load config round-trips" {
         .hostname = "test",
         .working_dir = "/work",
         .user = "app:staff",
+        .image_reference = "sha256:fixture",
+        .stop_signal = 10,
+        .stop_timeout_seconds = 3,
+        .interactive = true,
+        .tty = true,
         .args = args,
         .env = env,
         .lower_dirs = lower_dirs,
@@ -468,6 +481,10 @@ test "save and load config round-trips" {
     try std.testing.expectEqualStrings("test", loaded.hostname);
     try std.testing.expectEqualStrings("/work", loaded.working_dir);
     try std.testing.expectEqualStrings("app:staff", loaded.user.?);
+    try std.testing.expectEqualStrings("sha256:fixture", loaded.image_reference.?);
+    try std.testing.expectEqual(@as(u8, 10), loaded.stop_signal);
+    try std.testing.expectEqual(@as(u32, 3), loaded.stop_timeout_seconds);
+    try std.testing.expect(loaded.interactive and loaded.tty);
     try std.testing.expectEqual(@as(usize, 2), loaded.args.len);
     try std.testing.expectEqualStrings("sleep", loaded.args[0]);
     try std.testing.expectEqualStrings("FOO=bar", loaded.env[0]);
