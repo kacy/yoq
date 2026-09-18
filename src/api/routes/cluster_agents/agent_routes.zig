@@ -249,7 +249,7 @@ fn handleAgentHeartbeatImpl(alloc: std.mem.Allocator, request: http.Request, id:
 
     const agent_types = @import("../../../cluster/agent_types.zig");
 
-    node.recordHeartbeat(
+    if (!node.recordHeartbeat(
         id,
         .{
             .cpu_cores = cpu_cores,
@@ -262,7 +262,12 @@ fn handleAgentHeartbeatImpl(alloc: std.mem.Allocator, request: http.Request, id:
             .gpu_health = if (gpu_health_str) |s| agent_types.AgentResources.GpuHealthBuf.fromSlice(s) else .{},
         },
         nowRealSeconds(),
-    );
+    )) {
+        var response = common.notLeader(alloc, node);
+        // a missing hint must still make agents try another trusted voter.
+        response.status = .service_unavailable;
+        return response;
+    }
 
     const db = node.stateMachineDb();
     const peers_count: i64 = blk: {
@@ -792,4 +797,44 @@ test "agent recovery mutations reject success without a quorum" {
     }
     try std.testing.expectEqual(@as(u64, 0), node.raft.commit_index);
     try std.testing.expectEqual(@as(u64, 0), node.state_machine.last_applied);
+}
+
+test "agent recovery refuses follower heartbeats with or without a leader hint" {
+    const alloc = std.testing.allocator;
+    var node = try Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 0,
+        .api_port = 7700,
+        .peers = &.{.{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 }},
+        .shared_key = [_]u8{7} ** 32,
+        .data_dir = "/unused",
+    });
+    defer node.deinit();
+    node.fixPointers();
+    const request: http.Request = .{
+        .method = .POST,
+        .path = "/agents/worker000001/heartbeat",
+        .path_only = "/agents/worker000001/heartbeat",
+        .query = "",
+        .headers_raw = "",
+        .body = "{}",
+        .content_length = 2,
+    };
+    for ([_]?u64{ null, 2 }) |leader| {
+        node.leader_id = leader;
+        const response = handleAgentHeartbeat(alloc, request, "worker000001", .{ .cluster = &node, .join_token = "cluster-token" });
+        defer if (response.allocated) alloc.free(response.body);
+        try std.testing.expectEqual(http.StatusCode.service_unavailable, response.status);
+        if (leader != null) {
+            try std.testing.expectEqualStrings("10.0.0.2:7700", extractJsonString(response.body, "leader") orelse return error.MissingLeaderHint);
+        } else try std.testing.expect(extractJsonString(response.body, "leader") == null);
+        try std.testing.expect((try node.heartbeat_batcher.flush(alloc)) == null);
+    }
+    node.raft.role = .leader;
+    const accepted = handleAgentHeartbeat(alloc, request, "worker000001", .{ .cluster = &node });
+    defer if (accepted.allocated) alloc.free(accepted.body);
+    try std.testing.expectEqual(http.StatusCode.ok, accepted.status);
+    const batch = (try node.heartbeat_batcher.flush(alloc)) orelse return error.MissingHeartbeat;
+    defer alloc.free(batch);
+    try std.testing.expect(std.mem.indexOf(u8, batch, "worker000001") != null);
 }

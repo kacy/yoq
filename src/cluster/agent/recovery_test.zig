@@ -191,3 +191,43 @@ test "agent recovery never forwards a credential to an unsigned leader hint" {
     try std.testing.expectEqual(seed.endpoint.port, agent.server_port);
     try std.testing.expectError(error.WouldBlock, platform.posix.accept(stranger.fd, null, null, 0));
 }
+
+test "agent recovery retries follower heartbeat refusal without a leader hint" {
+    const alloc = std.testing.allocator;
+    const first = try Listener.init();
+    defer platform.posix.close(first.fd);
+    const second = try Listener.init();
+    defer platform.posix.close(second.fd);
+    var follower = try Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 0,
+        .api_port = second.endpoint.port,
+        .peers = &.{.{ .id = 2, .addr = second.endpoint.address, .port = 9700 }},
+        .shared_key = [_]u8{7} ** 32,
+        .data_dir = "/unused",
+    });
+    defer follower.deinit();
+    follower.fixPointers();
+    var leader = try Node.initForTests(alloc, .{ .id = 2, .port = 0, .peers = &.{}, .data_dir = "/unused" });
+    defer leader.deinit();
+    leader.fixPointers();
+    leader.raft.role = .leader;
+    var follower_server = Server{ .listener = first, .count = 1, .node = &follower };
+    const follower_thread = try std.Thread.spawn(.{}, Server.serve, .{&follower_server});
+    defer follower_thread.join();
+    var leader_server = Server{ .listener = second, .count = 1, .node = &leader };
+    const leader_thread = try std.Thread.spawn(.{}, Server.serve, .{&leader_server});
+    defer leader_thread.join();
+    var agent = Agent.init(alloc, first.endpoint.address, first.endpoint.port, "cluster-token");
+    defer agent.deinit();
+    try agent.api_endpoints.add(first.endpoint);
+    try agent.api_endpoints.add(second.endpoint);
+    var response = try endpoints.request(&agent, .post, "/agents/worker000001/heartbeat", "{}", credential);
+    defer response.deinit(alloc);
+    try std.testing.expectEqual(@as(u16, 200), response.status_code);
+    try std.testing.expectEqual(second.endpoint.port, agent.server_port);
+    try std.testing.expect((try follower.heartbeat_batcher.flush(alloc)) == null);
+    const batch = (try leader.heartbeat_batcher.flush(alloc)) orelse return error.MissingHeartbeat;
+    defer alloc.free(batch);
+    try std.testing.expect(std.mem.indexOf(u8, batch, "worker000001") != null);
+}
