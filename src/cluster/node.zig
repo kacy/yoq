@@ -100,6 +100,7 @@ pub const ApplyStatus = struct {
 pub const Node = struct {
     alloc: std.mem.Allocator,
     config: NodeConfig,
+    data_lock: ?@import("data_lock.zig").Lock = null,
     raft: Raft,
     transport: Transport,
     log: Log,
@@ -135,6 +136,8 @@ pub const Node = struct {
     }
 
     fn initInternal(alloc: std.mem.Allocator, config: NodeConfig, skip_transport_bind: bool) !Node {
+        const data_lock = if (skip_transport_bind) null else try @import("data_lock.zig").Lock.acquire(config.data_dir);
+        errdefer if (data_lock) |lock| lock.release();
         // open persistent log
         var log = if (skip_transport_bind)
             Log.initMemory() catch return NodeError.InitFailed
@@ -221,6 +224,7 @@ pub const Node = struct {
         var node = Node{
             .alloc = alloc,
             .config = config,
+            .data_lock = data_lock,
             .raft = raft,
             .transport = transport,
             .log = log,
@@ -306,6 +310,8 @@ pub const Node = struct {
         self.transport.deinit(); // also calls deinitUdp
         self.state_machine.deinit();
         self.log.deinit();
+        if (self.data_lock) |lock| lock.release();
+        self.data_lock = null;
         // Note: don't free self.raft.peers here - raft.deinit() already frees it
     }
 
