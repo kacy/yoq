@@ -30,8 +30,9 @@ pub fn formatApp(
     try json_helpers.writeJsonStringField(writer, "rollout_state", report.rolloutState());
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "rollout_control_state", report.rollout_control_state.toString());
-    try writer.print(",\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"placed\":{d},\"failed\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
+    try writer.print(",\"service_count\":{d},\"service_instance_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d},\"placed\":{d},\"failed\":{d},\"completed_targets\":{d},\"failed_targets\":{d},\"remaining_targets\":{d}", .{
         summary.service_count,
+        summary.service_instance_count,
         summary.worker_count,
         summary.cron_count,
         summary.training_job_count,

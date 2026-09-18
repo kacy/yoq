@@ -5,6 +5,7 @@ const json_helpers = @import("../lib/json_helpers.zig");
 
 pub const Summary = struct {
     service_count: usize = 0,
+    service_instance_count: usize = 0,
     worker_count: usize = 0,
     cron_count: usize = 0,
     training_job_count: usize = 0,
@@ -57,6 +58,7 @@ pub const CronScheduleSpec = struct {
 pub fn summarize(json: []const u8) Summary {
     return .{
         .service_count = countArrayObjects(json, "services"),
+        .service_instance_count = countServiceInstances(json),
         .worker_count = countArrayObjects(json, "workers"),
         .cron_count = countArrayObjects(json, "crons"),
         .training_job_count = countArrayObjects(json, "training_jobs"),
@@ -145,6 +147,17 @@ pub fn listCronSchedules(alloc: std.mem.Allocator, json: []const u8) !std.ArrayL
     return specs;
 }
 
+fn countServiceInstances(json: []const u8) usize {
+    const array = json_helpers.extractJsonArray(json, "services") orelse return 0;
+    var iter = json_helpers.extractJsonObjects(array);
+    var count: usize = 0;
+    while (iter.next()) |service| {
+        const replicas = json_helpers.extractJsonInt(service, "replicas") orelse 1;
+        count +|= @intCast(@max(0, replicas));
+    }
+    return count;
+}
+
 fn countArrayObjects(json: []const u8, key: []const u8) usize {
     const array = json_helpers.extractJsonArray(json, key) orelse return 0;
     var count: usize = 0;
@@ -231,4 +244,10 @@ test "listCronSchedules extracts cron registration specs" {
     try std.testing.expectEqualStrings("cleanup", schedules.items[0].name);
     try std.testing.expectEqual(@as(u64, 60), schedules.items[0].every);
     try std.testing.expect(std.mem.indexOf(u8, schedules.items[1].spec_json, "\"name\":\"backup\"") != null);
+}
+
+test "snapshot reports logical services and desired instances separately" {
+    const summary = summarize("{\"services\":[{\"name\":\"web\",\"replicas\":3},{\"name\":\"db\"}]}");
+    try std.testing.expectEqual(@as(usize, 2), summary.service_count);
+    try std.testing.expectEqual(@as(usize, 4), summary.service_instance_count);
 }

@@ -22,6 +22,7 @@ pub const ReleaseView = struct {
     manifest_hash: []const u8,
     created_at: i64,
     service_count: usize = 0,
+    service_instance_count: usize = 0,
     worker_count: usize = 0,
     cron_count: usize = 0,
     training_job_count: usize = 0,
@@ -50,6 +51,7 @@ pub const ReleaseView = struct {
             .manifest_hash = "",
             .created_at = self.created_at,
             .service_count = self.service_count,
+            .service_instance_count = self.service_instance_count,
             .worker_count = self.worker_count,
             .cron_count = self.cron_count,
             .training_job_count = self.training_job_count,
@@ -174,6 +176,7 @@ pub fn releaseViewFromReport(
         .manifest_hash = report.manifest_hash,
         .created_at = report.created_at,
         .service_count = summary.service_count,
+        .service_instance_count = summary.service_instance_count,
         .worker_count = summary.worker_count,
         .cron_count = summary.cron_count,
         .training_job_count = summary.training_job_count,
@@ -299,6 +302,7 @@ pub fn parseStatus(json: []const u8) AppStatusView {
             .manifest_hash = json_helpers.extractJsonString(json, "manifest_hash") orelse "?",
             .created_at = json_helpers.extractJsonInt(json, "created_at") orelse 0,
             .service_count = jsonCount(json, "service_count"),
+            .service_instance_count = jsonCount(json, "service_instance_count"),
             .worker_count = jsonCount(json, "worker_count"),
             .cron_count = jsonCount(json, "cron_count"),
             .training_job_count = jsonCount(json, "training_job_count"),
@@ -354,6 +358,7 @@ pub fn parseRelease(obj: []const u8) ReleaseView {
         .manifest_hash = json_helpers.extractJsonString(obj, "manifest_hash") orelse "?",
         .created_at = json_helpers.extractJsonInt(obj, "created_at") orelse 0,
         .service_count = jsonCount(obj, "service_count"),
+        .service_instance_count = jsonCount(obj, "service_instance_count"),
         .worker_count = jsonCount(obj, "worker_count"),
         .cron_count = jsonCount(obj, "cron_count"),
         .training_job_count = jsonCount(obj, "training_job_count"),
@@ -542,8 +547,9 @@ fn writeCommonReleaseFields(writer: anytype, release: ReleaseView) !void {
     try writer.writeByte(',');
     try json_helpers.writeJsonStringField(writer, "manifest_hash", release.manifest_hash);
     try writer.print(",\"created_at\":{d}", .{release.created_at});
-    try writer.print(",\"service_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d}", .{
+    try writer.print(",\"service_count\":{d},\"service_instance_count\":{d},\"worker_count\":{d},\"cron_count\":{d},\"training_job_count\":{d}", .{
         release.service_count,
+        release.service_instance_count,
         release.worker_count,
         release.cron_count,
         release.training_job_count,
@@ -687,8 +693,9 @@ fn writeRolloutField(writer: anytype, field_name: []const u8, release: ReleaseVi
 }
 
 fn writeWorkloads(writer: anytype, release: ReleaseView) !void {
-    try writer.print("\"workloads\":{{\"services\":{d},\"workers\":{d},\"crons\":{d},\"training_jobs\":{d}}}", .{
+    try writer.print("\"workloads\":{{\"services\":{d},\"service_instances\":{d},\"workers\":{d},\"crons\":{d},\"training_jobs\":{d}}}", .{
         release.service_count,
+        release.service_instance_count,
         release.worker_count,
         release.cron_count,
         release.training_job_count,

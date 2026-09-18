@@ -151,6 +151,7 @@ const AppStatusSnapshot = struct {
     manifest_hash: []const u8,
     created_at: i64,
     service_count: usize = 0,
+    service_instance_count: usize = 0,
     worker_count: usize = 0,
     cron_count: usize = 0,
     training_job_count: usize = 0,
@@ -196,6 +197,7 @@ const AppStatusSnapshot = struct {
             .manifest_hash = try alloc.dupe(u8, self.manifest_hash),
             .created_at = self.created_at,
             .service_count = self.service_count,
+            .service_instance_count = self.service_instance_count,
             .worker_count = self.worker_count,
             .cron_count = self.cron_count,
             .training_job_count = self.training_job_count,
@@ -502,6 +504,7 @@ fn snapshotToCurrentRelease(snapshot: AppStatusSnapshot) app_view.ReleaseView {
         .manifest_hash = snapshot.manifest_hash,
         .created_at = snapshot.created_at,
         .service_count = snapshot.service_count,
+        .service_instance_count = snapshot.service_instance_count,
         .worker_count = snapshot.worker_count,
         .cron_count = snapshot.cron_count,
         .training_job_count = snapshot.training_job_count,
@@ -673,6 +676,7 @@ fn parseAppStatusResponse(json: []const u8) AppStatusSnapshot {
         .manifest_hash = extractJsonString(json, "manifest_hash") orelse "?",
         .created_at = extractJsonInt(json, "created_at") orelse 0,
         .service_count = @intCast(@max(0, extractJsonInt(json, "service_count") orelse 0)),
+        .service_instance_count = @intCast(@max(0, extractJsonInt(json, "service_instance_count") orelse 0)),
         .worker_count = @intCast(@max(0, extractJsonInt(json, "worker_count") orelse 0)),
         .cron_count = @intCast(@max(0, extractJsonInt(json, "cron_count") orelse 0)),
         .training_job_count = @intCast(@max(0, extractJsonInt(json, "training_job_count") orelse 0)),
@@ -720,6 +724,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     w.stringField("manifest_hash", snapshot.manifest_hash);
     w.intField("created_at", snapshot.created_at);
     w.uintField("service_count", snapshot.service_count);
+    w.uintField("service_instance_count", snapshot.service_instance_count);
     w.uintField("worker_count", snapshot.worker_count);
     w.uintField("cron_count", snapshot.cron_count);
     w.uintField("training_job_count", snapshot.training_job_count);
@@ -831,6 +836,7 @@ fn writeAppStatusJsonObject(w: *json_out.JsonWriter, snapshot: AppStatusSnapshot
     }
     w.beginObjectField("workloads");
     w.uintField("services", snapshot.service_count);
+    w.uintField("service_instances", snapshot.service_instance_count);
     w.uintField("workers", snapshot.worker_count);
     w.uintField("crons", snapshot.cron_count);
     w.uintField("training_jobs", snapshot.training_job_count);
@@ -858,6 +864,7 @@ fn appStatusFromReports(
         .manifest_hash = report.manifest_hash,
         .created_at = report.created_at,
         .service_count = summary.service_count,
+        .service_instance_count = summary.service_instance_count,
         .worker_count = summary.worker_count,
         .cron_count = summary.cron_count,
         .training_job_count = summary.training_job_count,
