@@ -299,6 +299,24 @@ fn syncExistingServiceStates(orch: *orchestrator.Orchestrator, release: *const r
     }
 }
 
+fn stopPreviousServiceContainers(orch: *orchestrator.Orchestrator, idx: usize) void {
+    // replacement owns the prior release's full group, including scale-down extras.
+    // ordinary supervisor shutdown only stops the instance ids it already tracks.
+    var records = store.listAll(orch.alloc) catch return;
+    defer {
+        for (records.items) |record| record.deinit(orch.alloc);
+        records.deinit(orch.alloc);
+    }
+    const name = orch.manifest.services[idx].name;
+    for (records.items) |record| {
+        if (!std.mem.eql(u8, record.app_name orelse "", orch.app_name) or !std.mem.eql(u8, record.hostname, name)) continue;
+        health.unregisterContainer(record.id);
+        if (record.pid) |pid| @import("../runtime/process.zig").terminate(pid) catch {
+            @import("../runtime/process.zig").kill(pid) catch {};
+        };
+    }
+}
+
 fn runReplacementPlan(
     runner: anytype,
     alloc: std.mem.Allocator,
@@ -848,6 +866,7 @@ const LocalApplyBackend = struct {
             }
 
             fn stop(runner_self: *@This(), idx: usize) void {
+                stopPreviousServiceContainers(runner_self.orch, idx);
                 runner_self.orch.stopServiceByIndex(idx);
             }
 

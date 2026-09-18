@@ -89,7 +89,7 @@ pub const Orchestrator = struct {
         errdefer alloc.free(states);
         for (states) |*s| {
             s.* = .{
-                .container_id = undefined,
+                .container_id = [_]u8{0} ** 12,
                 .thread = null,
                 .status = .pending,
             };

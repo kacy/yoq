@@ -222,10 +222,6 @@ pub fn stopAll(self: anytype) void {
     health.stopChecker();
 
     const services = self.manifest.services;
-    for (services) |svc| {
-        health.unregisterService(svc.name);
-    }
-
     var i: usize = services.len;
     while (i > 0) {
         i -= 1;
@@ -240,30 +236,25 @@ pub fn stopServiceByIndex(self: anytype, idx: usize) void {
         const instance = instances.instanceIndex(self.manifest.services, idx, replica);
         self.states[instance].stop_requested.store(true, .release);
     }
-    health.unregisterService(svc.name);
-
-    // include persisted replicas from the previous release, even during scale-down.
-    var records = store.listAll(self.alloc) catch {
-        log.warn("orchestrator: failed to list containers for shutdown: {s}", .{svc.name});
-        return;
-    };
-    defer {
-        for (records.items) |record| record.deinit(self.alloc);
-        records.deinit(self.alloc);
-    }
-    for (records.items) |record| {
-        if (!std.mem.eql(u8, record.app_name orelse "", self.app_name) or !std.mem.eql(u8, record.hostname, svc.name)) continue;
-        if (record.pid) |pid| process.terminate(pid) catch {
-            process.kill(pid) catch {};
-        };
-    }
     for (0..svc.replicas) |replica| {
         const instance = instances.instanceIndex(self.manifest.services, idx, replica);
-        if (self.states[instance].thread) |thread| {
-            thread.join();
-            self.states[instance].thread = null;
+        const state = &self.states[instance];
+        if (state.getStatus() == .pending) continue;
+        const id = state.container_id;
+        health.unregisterContainer(&id);
+        if (store.load(self.alloc, &id)) |record| {
+            defer record.deinit(self.alloc);
+            if (record.pid) |pid| process.terminate(pid) catch {
+                process.kill(pid) catch {};
+            };
+        } else |err| {
+            log.debug("orchestrator: container {s} is no longer present: {}", .{ id, err });
         }
-        self.states[instance].setStatus(.stopped);
+        if (state.thread) |thread| {
+            thread.join();
+            state.thread = null;
+        }
+        state.setStatus(.stopped);
     }
 }
 
