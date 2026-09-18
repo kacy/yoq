@@ -280,6 +280,10 @@ pub fn initServer(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.A
     };
     defer node.deinit();
 
+    const certificate_binding = @import("../../state/store/certificate_db.zig").Binding.init(node.stateMachineDb(), &node.mu) catch
+        return ServerCommandError.ServerStartFailed;
+    defer certificate_binding.deinit();
+
     if (peers.len > 0 and node.transport.shared_key == null) {
         writeErr("cluster mode requires raft transport authentication when peers are configured\n", .{});
         return ServerCommandError.InvalidArgument;

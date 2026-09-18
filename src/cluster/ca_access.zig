@@ -31,8 +31,7 @@ pub const Loaded = struct {
     /// usually `defer loaded.deinit(alloc)` right after loading.
     pub fn deinit(self: *Loaded, alloc: std.mem.Allocator) void {
         alloc.free(self.cert_pem);
-        var raw = self.key_pair.secret_key.toBytes();
-        std.crypto.secureZero(u8, &raw);
+        std.crypto.secureZero(u8, std.mem.asBytes(&self.key_pair.secret_key));
     }
 };
 

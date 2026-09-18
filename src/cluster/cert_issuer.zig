@@ -362,8 +362,6 @@ test "failure counter increments and clears" {
 
 test "proxy issuer lifecycle issues and rotates with no registered services" {
     const alloc = std.testing.allocator;
-    const db_runtime = @import("state_machine/db_runtime.zig");
-    const store_common = @import("../state/store/common.zig");
     const credentials = @import("../tls/proxy_credentials.zig");
     try store.initTestDb();
     defer store.deinitTestDb();
@@ -378,17 +376,9 @@ test "proxy issuer lifecycle issues and rotates with no registered services" {
     node.raft.role = .leader;
     try std.testing.expect(node.log.setCurrentTerm(1));
 
-    // The issuer checks the node DB but its store readers use the process DB.
-    // Share the test connection so real Raft apply publishes what readers see.
-    // Restore the node's owned connection before either owner closes its DB.
-    const owned_db = node.state_machine.db;
-    {
-        var lease = try store_common.leaseDb();
-        defer lease.deinit();
-        try db_runtime.initMeta(lease.db);
-        node.state_machine.db = lease.db.*;
-    }
-    defer node.state_machine.db = owned_db;
+    // keep the local store separate, as it is in a running cluster server.
+    const certificate_binding = try @import("../state/store/certificate_db.zig").Binding.init(node.stateMachineDb(), &node.mu);
+    defer certificate_binding.deinit();
 
     const now: i64 = 1_700_000_000;
     const token = try alloc.dupe(u8, "issuer-lifecycle-token");

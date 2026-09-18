@@ -115,9 +115,12 @@ fn appendPeerInfo(alloc: std.mem.Allocator, writer: *std.Io.Writer, peer: cluste
 pub fn handleClusterCa(alloc: std.mem.Allocator, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
 
-    var rec = (store.getClusterCa(alloc) catch return common.internalError()) orelse return common.notFound();
+    var rec = blk: {
+        node.mu.lockUncancelable(std.Options.debug_io);
+        defer node.mu.unlock(std.Options.debug_io);
+        break :blk (store.getClusterCaInDb(node.stateMachineDb(), alloc) catch return common.internalError()) orelse return common.notFound();
+    };
     defer rec.deinit(alloc);
-    _ = node;
 
     var json_buf_writer = std.Io.Writer.Allocating.init(alloc);
     defer json_buf_writer.deinit();
