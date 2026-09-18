@@ -593,7 +593,14 @@ fn runAssignment(
         setContainerState(self, assignment_id, .failed);
         reportStatus(self, assignment_id, "failed", "process_failed");
     }
-    cleanup(container_id);
+    if (meta.workload_kind != null and std.mem.eql(u8, meta.workload_kind.?, "training")) {
+        // keep the stopped record and logs so remote training logs remain
+        // available after a rank exits. its network and filesystem are gone.
+        published_ports.removeInstance(self.alloc, container_id) catch |err| {
+            log.warn("failed to release training ports for {s}: {}", .{ container_id, err });
+        };
+        container.cleanupContainerDirs(container_id);
+    } else cleanup(container_id);
 }
 
 // one publication replaces every claim owned by this container. retain the
