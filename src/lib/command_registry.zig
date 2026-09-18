@@ -74,7 +74,7 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "serve", .group = .cluster, .usage = "serve [--port PORT] [--http-proxy-bind ADDR] [--http-proxy-port PORT]", .description = "start the API server (default: 7700)", .handler = cluster_cmds.serve },
     .{ .name = "init-server", .group = .cluster, .usage = "init-server [opts]", .description = "start a cluster server node", .handler = cluster_cmds.initServer },
     .{ .name = "join", .group = .cluster, .usage = "join <host> --token <token>", .description = "join a cluster as an agent node", .handler = cluster_cmds.join },
-    .{ .name = "cluster", .group = .cluster, .usage = "cluster status", .description = "show cluster node status", .handler = cluster_cmds.cluster },
+    .{ .name = "cluster", .group = .cluster, .usage = "cluster <command>", .description = "inspect cluster status or manage offline recovery", .handler = cluster_cmds.cluster },
     .{ .name = "nodes", .group = .cluster, .usage = "nodes [--server host:port]", .description = "list cluster agent nodes", .handler = cluster_cmds.nodes },
     .{ .name = "drain", .group = .cluster, .usage = "drain <id> [--server host:port]", .description = "drain an agent node", .handler = cluster_cmds.drain },
 

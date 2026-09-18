@@ -120,16 +120,27 @@ yoq serve [--port PORT] [--http-proxy-bind ADDR] [--http-proxy-port PORT]
                                      start the api server
 yoq init-server [--id N] [--port P]  start a cluster server node
     [--api-port P] [--peers ...]
-    --token TOKEN [--api-token TOKEN]
+    (--token TOKEN | --token-file FILE) [--api-token TOKEN]
     [--http-proxy-bind ADDR]
     [--http-proxy-port PORT]
-yoq join <host> --token <token>      join as an agent node
+yoq join <host> --token <token> [--port PORT]
+                                     join as an agent node
 yoq cluster status                   show cluster health
+yoq cluster backup <bundle> --set <id> --join-token-file <file>
+    [--data-dir <root>]              capture one stopped voter
+yoq cluster verify <bundle>         verify one voter bundle
+yoq cluster verify-set --set <id> <bundle>...
+                                     verify the complete fixed-voter set
+yoq cluster restore <bundle> --data-dir <fresh-root> --node-id <id>
+    --voters <sorted-ids> --set <id> --cluster <fingerprint>
+                                     restore one voter into a fresh data root
 yoq nodes [--server host:port]       list agent nodes
 yoq drain <id> [--server host:port]  drain an agent node
 ```
 
 `init-server` needs a join token and an api token. omit `--api-token` only when the matching token file already exists. see [cluster credential setup](cluster-guide.md#step-1-prepare-credentials).
+
+`--token-file` reads the join token from an owner-only file. offline recovery requires every voter and agent to stop before the first capture, one bundle per fixed voter, and the same set id throughout. restore preserves the original node ids and voter membership. see [offline cluster recovery](cluster-guide.md#offline-cluster-backup-and-restore) for credentials, exclusions, and restart commands.
 
 ## gpu
 
