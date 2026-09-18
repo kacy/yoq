@@ -52,3 +52,15 @@ test {
     _ = @import("cli/tag_command.zig");
     _ = @import("cli/resolution.zig");
 }
+
+pub fn save(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    return @import("cli/archive_command.zig").save(ctx.io, args, ctx.alloc);
+}
+
+pub fn load(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    return @import("cli/archive_command.zig").load(ctx.io, args, ctx.alloc);
+}
+
+test {
+    _ = @import("cli/archive_command.zig");
+}
