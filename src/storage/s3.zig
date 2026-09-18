@@ -111,6 +111,11 @@ pub fn validateKey(key: []const u8) S3Error!void {
     // prevent path traversal
     if (std.mem.indexOf(u8, key, "..") != null) return S3Error.InvalidKey;
     if (key[0] == '/') return S3Error.InvalidKey;
+    // keys are stored as paths. reject spellings that the filesystem aliases.
+    var segments = std.mem.splitScalar(u8, key, '/');
+    while (segments.next()) |segment| {
+        if (segment.len == 0 or std.mem.eql(u8, segment, ".")) return S3Error.InvalidKey;
+    }
     for (key) |c| {
         if (c < 0x20 or c == 0x7f or c == '\\') return S3Error.InvalidKey;
     }
@@ -261,21 +266,34 @@ pub fn deleteObject(name: []const u8, key: []const u8) S3Error!void {
     try cleanupEmptyObjectDirs(name, key);
 }
 
-/// head an object — returns metadata without reading the full file.
-pub fn headObject(name: []const u8, key: []const u8) S3Error!ObjectMeta {
+pub const OpenObject = struct {
+    file: std.Io.File,
+    meta: ObjectMeta,
+
+    pub fn close(self: OpenObject) void {
+        self.file.close(std.Options.debug_io);
+    }
+};
+
+/// keep the same file open for metadata and transfer across atomic replacements.
+pub fn openObject(name: []const u8, key: []const u8) S3Error!OpenObject {
     try validateBucketName(name);
     try validateKey(key);
-
     var buf: [paths.max_path]u8 = undefined;
     const file_path = try storagePath(&buf, storage_subdir ++ "/{s}/{s}", .{ name, key });
-
-    var file = cwd().openFile(std.Options.debug_io, file_path, .{}) catch |e| switch (e) {
+    const file = cwd().openFile(std.Options.debug_io, file_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return S3Error.ObjectNotFound,
         else => return S3Error.IoError,
     };
+    errdefer file.close(std.Options.debug_io);
+    return .{ .file = file, .meta = try objectMetadata(file) };
+}
 
-    defer file.close(std.Options.debug_io);
-    return objectMetadata(file);
+/// return metadata, hashing the file with a bounded buffer for its etag.
+pub fn headObject(name: []const u8, key: []const u8) S3Error!ObjectMeta {
+    const object = try openObject(name, key);
+    defer object.close();
+    return object.meta;
 }
 
 fn objectMetadata(file: std.Io.File) S3Error!ObjectMeta {
@@ -284,11 +302,12 @@ fn objectMetadata(file: std.Io.File) S3Error!ObjectMeta {
 
     var hasher = std.crypto.hash.Md5.init(.{});
     var read_buf: [8192]u8 = undefined;
-    var reader = file.readerStreaming(std.Options.debug_io, &read_buf);
+    var offset: u64 = 0;
     while (true) {
-        const n = reader.interface.readSliceShort(&read_buf) catch return S3Error.IoError;
+        const n = file.readPositional(std.Options.debug_io, &.{&read_buf}, offset) catch return S3Error.IoError;
         if (n == 0) break;
         hasher.update(read_buf[0..n]);
+        offset += n;
     }
     var digest: [std.crypto.hash.Md5.digest_length]u8 = undefined;
     hasher.final(&digest);
@@ -545,15 +564,16 @@ fn writeMultipartObject(dir: std.Io.Dir, bucket_name: []const u8, key: []const u
             else => return error.IoError,
         };
         defer part_file.close(std.Options.debug_io);
-        var part_reader = part_file.readerStreaming(std.Options.debug_io, &buf);
         var part_hasher = std.crypto.hash.Md5.init(.{});
+        var offset: u64 = 0;
 
         while (true) {
-            const bytes_read = part_reader.interface.readSliceShort(&buf) catch return S3Error.IoError;
+            const bytes_read = part_file.readPositional(std.Options.debug_io, &.{&buf}, offset) catch return S3Error.IoError;
             if (bytes_read == 0) break;
             pending.file.writeStreamingAll(std.Options.debug_io, buf[0..bytes_read]) catch return S3Error.IoError;
             hasher.update(buf[0..bytes_read]);
             part_hasher.update(buf[0..bytes_read]);
+            offset += bytes_read;
         }
         if (expected) |parts| {
             var digest: [16]u8 = undefined;
@@ -796,4 +816,65 @@ test "s3 selected parts verify data and omit unrequested parts" {
     const result = try getObject(alloc, bucket, "object");
     defer alloc.free(result);
     try std.testing.expectEqualStrings("firstthird", result);
+}
+
+test "storage transfer multipart and metadata handle partial read buffers" {
+    const alloc = std.testing.allocator;
+    const bucket = "transfer-part-boundaries";
+    var path_buf: [paths.max_path]u8 = undefined;
+    const path = try storagePath(&path_buf, "s3/{s}", .{bucket});
+    cwd().deleteTree(std.testing.io, path) catch {};
+    try createBucket(bucket);
+    defer cwd().deleteTree(std.testing.io, path) catch {};
+
+    var data: [20001]u8 = undefined;
+    for (&data, 0..) |*byte, index| byte.* = @truncate(index);
+    for ([_]usize{ 8191, 8192, 8193, data.len }) |size| {
+        const upload = try initiateMultipartUpload(bucket, "object");
+        defer abortMultipartUpload(&upload) catch {};
+        const part = CompletedPart{ .number = 1, .etag = try uploadPart(&upload, bucket, "object", 1, data[0..size]) };
+        const etag = try completeSelectedParts(alloc, bucket, "object", &upload, &.{part});
+        const result = try getObject(alloc, bucket, "object");
+        defer alloc.free(result);
+        try std.testing.expectEqualSlices(u8, data[0..size], result);
+        const meta = try headObject(bucket, "object");
+        try std.testing.expectEqual(size, meta.size);
+        try std.testing.expectEqualSlices(u8, &part.etag, &etag);
+        try std.testing.expectEqualSlices(u8, &part.etag, &meta.etag);
+    }
+}
+
+test "storage transfer rejects aliased keys without replacing the object" {
+    const alloc = std.testing.allocator;
+    const bucket = "transfer-key-identity";
+    var path_buf: [paths.max_path]u8 = undefined;
+    const path = try storagePath(&path_buf, "s3/{s}", .{bucket});
+    cwd().deleteTree(std.testing.io, path) catch {};
+    try createBucket(bucket);
+    defer cwd().deleteTree(std.testing.io, path) catch {};
+    _ = try putObject(bucket, "dir/key", "original");
+    for ([_][]const u8{ "dir/./key", "dir//key", "dir/key/", "./dir/key" }) |key| {
+        try std.testing.expectError(error.InvalidKey, putObject(bucket, key, "replacement"));
+    }
+    const result = try getObject(alloc, bucket, "dir/key");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("original", result);
+}
+
+test "storage transfer open object survives replacement and deletion" {
+    const bucket = "transfer-open-object";
+    var path_buf: [paths.max_path]u8 = undefined;
+    const path = try storagePath(&path_buf, "s3/{s}", .{bucket});
+    cwd().deleteTree(std.testing.io, path) catch {};
+    try createBucket(bucket);
+    defer cwd().deleteTree(std.testing.io, path) catch {};
+    const etag = try putObject(bucket, "object", "original");
+    const object = try openObject(bucket, "object");
+    defer object.close();
+    _ = try putObject(bucket, "object", "replacement");
+    try deleteObject(bucket, "object");
+    var result: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 8), try object.file.readPositionalAll(std.testing.io, &result, 0));
+    try std.testing.expectEqualStrings("original", &result);
+    try std.testing.expectEqualSlices(u8, &etag, &object.meta.etag);
 }
