@@ -630,3 +630,16 @@ test "local parity health transitions and stop cleans up an active timed check" 
         try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, proc_path, .{}));
     }
 }
+
+test "local parity prune retains a stopped container after its image tag is removed" {
+    var fixture = try ImageFixture.init();
+    defer fixture.deinit();
+    defer cleanupContainer(&fixture.env, "prune-owner");
+    try expectCommand(&fixture.env, &.{ "run", "--no-net", "-d", "--name", "prune-owner", ImageFixture.tag, "sleep", "60" });
+    try expectExecOutput(&fixture.env, "prune-owner", "printf retained > /work/marker", "");
+    try expectCommand(&fixture.env, &.{ "stop", "prune-owner" });
+    try expectCommand(&fixture.env, &.{ "rmi", ImageFixture.tag });
+    try expectCommand(&fixture.env, &.{"prune"});
+    try expectCommand(&fixture.env, &.{ "start", "prune-owner" });
+    try expectExecOutput(&fixture.env, "prune-owner", "IFS= read -r marker < /work/marker; printf '%s' \"$marker\"", "retained");
+}
