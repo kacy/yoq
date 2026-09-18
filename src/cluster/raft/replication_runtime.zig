@@ -18,19 +18,17 @@ pub fn handleAppendEntries(
         return .{ .term = current_term, .success = false, .match_index = 0 };
     }
 
-    if (args.term >= current_term) {
-        if (args.term > current_term) {
-            if (!common.stepDown(self, args.term, min_election_ticks, max_election_ticks)) {
-                return .{ .term = current_term, .success = false, .match_index = 0 };
-            }
-        } else if (self.role == .candidate) {
-            self.role = .follower;
-            self.actions.append(self.alloc, .{ .become_follower = .{ .leader_id = args.leader_id } }) catch |e| {
-                logger.warn("raft: failed to queue become_follower action: {}", .{e});
-            };
+    if (args.term > current_term) {
+        if (!common.stepDown(self, args.term, min_election_ticks, max_election_ticks)) {
+            return .{ .term = current_term, .success = false, .match_index = 0 };
         }
-        self.ticks_since_event = 0;
+    } else if (self.role == .candidate) {
+        self.role = .follower;
+        self.actions.append(self.alloc, .{ .become_follower = .{ .leader_id = args.leader_id } }) catch |e| {
+            logger.warn("raft: failed to queue become_follower action: {}", .{e});
+        };
     }
+    self.ticks_since_event = 0;
 
     if (args.prev_log_index > 0) {
         const prev_term = self.log.termAt(args.prev_log_index);
@@ -39,44 +37,28 @@ pub fn handleAppendEntries(
         }
     }
 
-    // Only this request's contiguous prefix is verified. A follower may still
-    // have a longer, divergent suffix until a later batch replaces it.
-    var verified_index = args.prev_log_index;
-    for (args.entries) |entry| {
-        const next = @addWithOverflow(verified_index, 1);
-        if (next[1] != 0 or entry.index != next[0]) {
-            return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
-        }
-        verified_index = entry.index;
-    }
+    // validate the entire batch before truncating or appending. a follower
+    // may retain a divergent suffix beyond the prefix verified here.
+    const verified_index = verifiedPrefix(args.prev_log_index, args.entries) orelse {
+        return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
+    };
 
     for (args.entries) |entry| {
         const existing_term = self.log.termAt(entry.index);
-        if (existing_term != 0 and existing_term != entry.term) {
+        if (existing_term != 0) {
+            if (existing_term == entry.term) continue;
             if (!self.log.truncateFrom(entry.index)) {
                 return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
             }
-            self.log.append(entry) catch {
-                return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
-            };
-        } else if (existing_term == 0) {
-            self.log.append(entry) catch {
-                return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
-            };
         }
+        self.log.append(entry) catch {
+            return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
+        };
     }
 
-    if (args.leader_commit > self.commit_index) {
-        const new_commit = @min(args.leader_commit, verified_index);
-        if (new_commit > self.commit_index) {
-            self.actions.append(self.alloc, .{
-                .commit_entries = .{ .up_to = new_commit },
-            }) catch |e| {
-                logger.warn("raft: failed to queue commit action: {}", .{e});
-                return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
-            };
-            self.commit_index = new_commit;
-        }
+    const new_commit = @min(args.leader_commit, verified_index);
+    if (new_commit > self.commit_index and !queueCommit(self, new_commit)) {
+        return .{ .term = self.persistent_state.current_term, .success = false, .match_index = 0 };
     }
 
     return .{
@@ -112,9 +94,8 @@ pub fn handleAppendEntriesReply(
 
     const backtrack_floor = self.match_index[peer_idx] + 1;
     if (self.next_index[peer_idx] <= backtrack_floor) {
-        // A delayed failure reply can arrive after a newer success reply has
-        // already advanced match_index. Ignore it rather than undoing known
-        // follower progress and resending old traffic.
+        // a delayed failure may follow a newer success. keep the prefix
+        // already acknowledged by the follower.
         return;
     }
 
@@ -184,25 +165,43 @@ pub fn advanceCommitIndex(self: anytype) void {
     while (candidate_index > self.commit_index and candidate_index > 0) : (candidate_index -= 1) {
         if (self.log.termAt(candidate_index) != current_term) continue;
 
-        var count: usize = 1;
-        for (self.match_index) |mi| {
-            if (mi >= candidate_index) count += 1;
+        // the leader's local entry counts toward the majority.
+        var replicas: usize = 1;
+        for (self.match_index) |matched_index| {
+            if (matched_index >= candidate_index) replicas += 1;
         }
 
         const quorum = (self.peers.len + 1) / 2 + 1;
-        if (count >= quorum) {
-            self.actions.append(self.alloc, .{
-                .commit_entries = .{ .up_to = candidate_index },
-            }) catch |e| {
-                logger.warn("raft: failed to queue commit action: {}", .{e});
-                return;
-            };
-            self.commit_index = candidate_index;
-            break;
-        }
+        if (replicas < quorum) continue;
+
+        _ = queueCommit(self, candidate_index);
+        return;
     }
 }
 
 pub fn peerIndex(self: anytype, id: anytype) ?usize {
     return common.peerIndex(self, id);
+}
+
+fn verifiedPrefix(previous_index: types.LogIndex, entries: []const LogEntry) ?types.LogIndex {
+    var verified_index = previous_index;
+    for (entries) |entry| {
+        const next = @addWithOverflow(verified_index, 1);
+        if (next[1] != 0 or entry.index != next[0]) return null;
+        verified_index = entry.index;
+    }
+    return verified_index;
+}
+
+fn queueCommit(self: anytype, up_to: types.LogIndex) bool {
+    // queue the application work before advancing the index, so a failed
+    // allocation leaves the commit available for a later retry.
+    self.actions.append(self.alloc, .{
+        .commit_entries = .{ .up_to = up_to },
+    }) catch |e| {
+        logger.warn("raft: failed to queue commit action: {}", .{e});
+        return false;
+    };
+    self.commit_index = up_to;
+    return true;
 }
