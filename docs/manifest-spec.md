@@ -586,7 +586,7 @@ training jobs orchestrate distributed GPU training runs. defined under `[trainin
 | `env` | array of strings | no | `[]` | environment variables |
 | `working_dir` | string | no | image default | working directory |
 | `volumes` | array of strings | no | `[]` | volume mounts |
-| `gpus` | integer | yes | — | total number of GPUs (= number of ranks) |
+| `gpus` | integer | yes | — | total gpu count and number of ranks, from 1 to 4,096 |
 | `gpu_type` | string | no | none | GPU model filter (e.g. `"H100"`) |
 | `data` | table | no | none | reserved; supplying this table is rejected |
 | `checkpoint` | table | no | none | checkpoint configuration |
