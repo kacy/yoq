@@ -92,7 +92,10 @@ pub fn listBuildCacheDigests(alloc: Allocator) StoreError!std.ArrayList([]const 
         defer stmt.deinit();
         var iter = stmt.iterator(Row, .{}) catch return StoreError.ReadFailed;
         while (iter.nextAlloc(alloc, .{}) catch return StoreError.ReadFailed) |row| {
-            digests.append(alloc, row.value.data) catch return StoreError.ReadFailed;
+            digests.append(alloc, row.value.data) catch {
+                alloc.free(row.value.data);
+                return StoreError.ReadFailed;
+            };
         }
     }
 

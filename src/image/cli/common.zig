@@ -91,13 +91,3 @@ pub fn writePullError(target: []const u8, err: anyerror) void {
         else => {},
     }
 }
-
-pub fn addDigestHex(set: *std.StringHashMap(void), digest_str: []const u8) void {
-    const prefix = "sha256:";
-    if (std.mem.startsWith(u8, digest_str, prefix)) {
-        const hex = digest_str[prefix.len..];
-        if (hex.len == 64) {
-            set.put(hex, {}) catch {};
-        }
-    }
-}
