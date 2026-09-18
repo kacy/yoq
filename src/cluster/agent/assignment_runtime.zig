@@ -401,7 +401,7 @@ fn runAssignment(
     const hostname = buildAssignmentHostname(&hostname_buf, meta, gang_info);
 
     const gpu_count = if (execution.value.gpu_count == 0 and gang_info != null) 1 else execution.value.gpu_count;
-    var gpus = gpu_leases.Lease.acquire(gpu_count, execution.value.gpu_model) catch {
+    var gpus = gpu_leases.Lease.acquireWithMinimum(gpu_count, execution.value.gpu_model, execution.value.gpu_vram_min_mb) catch {
         setContainerState(self, assignment_id, .failed);
         reportStatus(self, assignment_id, "failed", "gpu_unavailable");
         return;

@@ -12,6 +12,10 @@ pub const Lease = struct {
     count: usize = 0,
 
     pub fn acquire(count: u32, model: ?[]const u8) !Lease {
+        return acquireWithMinimum(count, model, null);
+    }
+
+    pub fn acquireWithMinimum(count: u32, model: ?[]const u8, vram_min_mb: ?u64) !Lease {
         if (count == 0) return .{};
         var detected = detect.detect();
         defer detected.deinit();
@@ -20,15 +24,20 @@ pub const Lease = struct {
         const path = try paths.dataPath(&path_buf, "gpu-leases");
         var dir = try std.Io.Dir.cwd().openDir(std.Options.debug_io, path, .{});
         defer dir.close(std.Options.debug_io);
-        return acquireInDir(dir, detected.gpus[0..detected.count], count, model);
+        return acquireInDirWithMinimum(dir, detected.gpus[0..detected.count], count, model, vram_min_mb);
     }
 
     pub fn acquireInDir(dir: std.Io.Dir, gpus: []const detect.GpuInfo, count: u32, model: ?[]const u8) !Lease {
+        return acquireInDirWithMinimum(dir, gpus, count, model, null);
+    }
+
+    pub fn acquireInDirWithMinimum(dir: std.Io.Dir, gpus: []const detect.GpuInfo, count: u32, model: ?[]const u8, vram_min_mb: ?u64) !Lease {
         if (count > detect.max_gpus) return error.InsufficientGpus;
         var lease: Lease = .{};
         errdefer lease.deinit();
         for (gpus) |gpu| {
             if (lease.count == count) break;
+            if (vram_min_mb) |minimum| if (gpu.vram_mb < minimum) continue;
             if (model) |wanted| if (std.mem.indexOf(u8, gpu.getName(), wanted) == null) continue;
             var buf: [40]u8 = undefined;
             const name = try std.fmt.bufPrintZ(&buf, "gpu-{d}.lock", .{gpu.index});
@@ -76,4 +85,14 @@ test "training gpu leases select distinct devices and release partial reservatio
     var reused = try Lease.acquireInDir(tmp.dir, &devices, 1, null);
     defer reused.deinit();
     try std.testing.expectEqual(@as(u32, 3), reused.indices[0]);
+}
+
+test "training gpu leases enforce per-device memory requirements" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const devices = [_]detect.GpuInfo{ .{ .index = 2, .vram_mb = 8192 }, .{ .index = 5, .vram_mb = 40960 } };
+    var lease = try Lease.acquireInDirWithMinimum(tmp.dir, &devices, 1, null, 32768);
+    defer lease.deinit();
+    try std.testing.expectEqual(@as(u32, 5), lease.indices[0]);
+    try std.testing.expectError(error.InsufficientGpus, Lease.acquireInDirWithMinimum(tmp.dir, &devices, 1, null, 32768));
 }

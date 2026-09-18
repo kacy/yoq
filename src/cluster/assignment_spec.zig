@@ -17,6 +17,7 @@ pub const Execution = struct {
     ports: []const manifest.PortMapping = &.{},
     gpu_count: u32 = 0,
     gpu_model: ?[]const u8 = null,
+    gpu_vram_min_mb: ?u64 = null,
     checkpoint: ?manifest.CheckpointSpec = null,
     resume_checkpoint: bool = false,
     ib_required: bool = false,
@@ -35,6 +36,7 @@ pub fn fromWorkload(alloc: std.mem.Allocator, json: []const u8) ![]u8 {
         gpus: u32 = 0,
         gpu_limit: u32 = 0,
         gpu_model: ?[]const u8 = null,
+        gpu_vram_min_mb: ?u64 = null,
         gpus_per_rank: u32 = 0,
         gpu_type: ?[]const u8 = null,
         checkpoint: ?manifest.CheckpointSpec = null,
@@ -64,6 +66,7 @@ pub fn fromWorkload(alloc: std.mem.Allocator, json: []const u8) ![]u8 {
         .ports = parsed.value.ports,
         .gpu_count = if (parsed.value.gpus > 0) 1 else if (parsed.value.gpu_mesh) |mesh| mesh.gpus_per_rank else if (parsed.value.gpu) |gpu| gpu.count else if (parsed.value.gpus_per_rank > 0) parsed.value.gpus_per_rank else parsed.value.gpu_limit,
         .gpu_model = parsed.value.gpu_type orelse parsed.value.gpu_model orelse if (parsed.value.gpu) |gpu| gpu.model else null,
+        .gpu_vram_min_mb = parsed.value.gpu_vram_min_mb orelse if (parsed.value.gpu) |gpu| gpu.vram_min_mb else null,
         .checkpoint = parsed.value.checkpoint,
         .ib_required = parsed.value.ib_required,
     };
@@ -255,4 +258,27 @@ test "assignment resource limits reach actual kernel cgroup controls" {
         try std.testing.expectEqual(limits.cpu_max_period, actual.cpu_max_period.?);
         try std.testing.expectEqual(limits.memory_max, actual.memory_limit);
     }
+}
+
+test "training execution retains named mounts gpu settings and published ports" {
+    const alloc = std.testing.allocator;
+    const encoded = try fromWorkload(alloc,
+        \\{"command":["python","train script.py"],"env":["DATA=one two"],"working_dir":"/work","gpus":4,"gpu_type":"H100","volumes":[{"source":"dataset","target":"/data","kind":"named"}],"ports":[{"host_port":9090,"container_port":8080}],"checkpoint":{"path":"/data/checkpoints","interval_secs":60,"keep":3}}
+    );
+    defer alloc.free(encoded);
+    const enriched = try withVolumeDefinitions(alloc, encoded,
+        \\{"volume_definitions":[{"name":"dataset","driver":{"nfs":{"server":"storage","path":"/dataset","options":"vers=4"}}}]}
+    );
+    defer alloc.free(enriched);
+    const execution = try decode(alloc, enriched);
+    defer execution.deinit();
+    try std.testing.expectEqualStrings("train script.py", execution.value.argv[1]);
+    try std.testing.expectEqualStrings("DATA=one two", execution.value.env[0]);
+    try std.testing.expectEqualStrings("/work", execution.value.working_dir.?);
+    try std.testing.expectEqual(@as(u32, 1), execution.value.gpu_count);
+    try std.testing.expectEqualStrings("H100", execution.value.gpu_model.?);
+    try std.testing.expectEqualStrings("/data", execution.value.volumes[0].target);
+    try std.testing.expectEqualStrings("storage", execution.value.volume_definitions[0].driver.nfs.server);
+    try std.testing.expectEqual(@as(u16, 9090), execution.value.ports[0].host_port);
+    try std.testing.expectEqual(@as(u64, 60), execution.value.checkpoint.?.interval_secs);
 }
