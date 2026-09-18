@@ -182,6 +182,29 @@ const readExact = common.readExact;
 
 // -- tests --
 
+test "tcp transport receives an authenticated message through its listener" {
+    const alloc = std.testing.allocator;
+    var transport = try Transport.init(alloc, 0);
+    defer transport.deinit();
+    transport.shared_key = [_]u8{0x5a} ** 32;
+    transport.setLocalNodeId(7);
+    try std.testing.expect((try transport.receive(alloc)) == null);
+
+    var address: posix.sockaddr.in = undefined;
+    var address_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+    try linux_platform.posix.getsockname(transport.listen_fd, @ptrCast(&address), &address_len);
+    const port = std.mem.bigToNative(u16, address.port);
+    try transport.addPeer(7, .{ 127, 0, 0, 1 }, port);
+    const vote: RequestVoteArgs = .{ .term = 3, .candidate_id = 7, .last_log_index = 12, .last_log_term = 2 };
+
+    try transport.send(7, .{ .request_vote = vote });
+    const received = (try transport.receive(alloc)) orelse return error.ExpectedMessage;
+
+    try std.testing.expectEqual(@as(?NodeId, 7), received.sender_id);
+    try std.testing.expectEqualDeep(vote, received.message.request_vote);
+    try std.testing.expect((try transport.receive(alloc)) == null);
+}
+
 test "encode/decode round-trip: request vote" {
     const alloc = std.testing.allocator;
     const args = RequestVoteArgs{

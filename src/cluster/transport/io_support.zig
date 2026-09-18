@@ -43,7 +43,7 @@ pub fn receive(self: anytype, alloc: std.mem.Allocator) TransportError!?Received
     const timeout = posix.timeval{ .sec = 5, .usec = 0 };
     posix.setsockopt(client_fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
-    return readMessage(self, alloc, client_fd, from_addr);
+    return try readMessage(self, alloc, client_fd, from_addr);
 }
 
 // the socket frame is temporary. decoding copies entry and snapshot data
