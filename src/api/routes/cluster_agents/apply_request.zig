@@ -48,6 +48,7 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
     const document = numbers.parse(alloc, body) catch return ParseError.InvalidRequest;
     defer document.deinit();
     placement_numbers.validateWorkloads(document.value) catch return ParseError.InvalidRequest;
+    try validateNamedVolumes(document.value);
 
     var parsed: ApplyRequest = .{
         .app_name = extractJsonString(body, "app_name") orelse extractJsonString(body, "volume_app"),
@@ -169,6 +170,40 @@ fn parseRolloutPolicy(object: std.json.Value, block: []const u8) error{InvalidRo
         .failure_action = failure_action,
         .health_check_timeout = health_check_timeout,
     };
+}
+
+fn validateNamedVolumes(root: std.json.Value) ParseError!void {
+    const definitions = root.object.get("volume_definitions");
+    if (definitions) |volumes| {
+        if (volumes != .array) return error.InvalidRequest;
+        for (volumes.array.items) |volume| {
+            if (volume != .object) return error.InvalidRequest;
+            const name = volume.object.get("name") orelse return error.InvalidRequest;
+            if (name != .string or name.string.len == 0) return error.InvalidRequest;
+        }
+    }
+    for ([_][]const u8{ "services", "workers", "crons", "training_jobs" }) |kind| {
+        const workloads = root.object.get(kind) orelse continue;
+        if (workloads != .array) return error.InvalidRequest;
+        for (workloads.array.items) |workload| {
+            if (workload != .object) return error.InvalidRequest;
+            const mounts = workload.object.get("volumes") orelse continue;
+            if (mounts != .array) return error.InvalidRequest;
+            for (mounts.array.items) |mount| {
+                if (mount != .object) return error.InvalidRequest;
+                const mount_kind = mount.object.get("kind") orelse return error.InvalidRequest;
+                if (mount_kind != .string) return error.InvalidRequest;
+                if (std.mem.eql(u8, mount_kind.string, "bind")) continue;
+                if (!std.mem.eql(u8, mount_kind.string, "named")) return error.InvalidRequest;
+                const source = mount.object.get("source") orelse return error.InvalidRequest;
+                if (source != .string) return error.InvalidRequest;
+                const volumes = definitions orelse return error.InvalidRequest;
+                for (volumes.array.items) |volume| {
+                    if (std.mem.eql(u8, volume.object.get("name").?.string, source.string)) break;
+                } else return error.InvalidRequest;
+            }
+        }
+    }
 }
 
 fn extractCommandString(alloc: std.mem.Allocator, block: []const u8) ![]const u8 {
@@ -305,4 +340,17 @@ test "parse keeps replica instances under one logical service request" {
     try std.testing.expectEqual(@as(u32, 3), parsed.requests.items[0].replicas);
     try std.testing.expectEqualStrings("web", parsed.requests.items[0].request.workload_name.?);
     try std.testing.expectEqualStrings("zone=east", parsed.requests.items[0].request.required_labels);
+}
+
+test "manifest apply rejects undeclared named volumes in every workload collection" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{ "services", "workers", "crons", "training_jobs" }) |kind| {
+        const body = try std.fmt.allocPrint(alloc, "{{\"app_name\":\"app\",\"{s}\":[{{\"name\":\"test\",\"image\":\"scratch\",\"volumes\":[{{\"source\":\"data\",\"target\":\"/data\",\"kind\":\"named\"}}]}}]}}", .{kind});
+        defer alloc.free(body);
+        try std.testing.expectError(error.InvalidRequest, parse(alloc, body, true));
+        const declared = try std.fmt.allocPrint(alloc, "{s},\"volume_definitions\":[{{\"name\":\"data\",\"driver\":{{\"local\":{{}}}}}}]}}", .{body[0 .. body.len - 1]});
+        defer alloc.free(declared);
+        var parsed = try parse(alloc, declared, true);
+        defer parsed.deinit(alloc);
+    }
 }

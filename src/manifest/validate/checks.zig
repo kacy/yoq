@@ -1,7 +1,6 @@
 const std = @import("std");
 const spec = @import("../spec.zig");
 const validate = @import("../validate.zig");
-const mount_support = @import("mount_support.zig");
 
 pub fn checkHostPortConflicts(
     alloc: std.mem.Allocator,
@@ -34,40 +33,17 @@ pub fn checkVolumeReferences(
     manifest: *const spec.Manifest,
     diagnostics: *std.ArrayList(validate.Diagnostic),
 ) !void {
-    const collection = mount_support.collectAllMounts(manifest);
-
-    if (collection.truncated) {
-        const msg = std.fmt.allocPrint(
-            alloc,
-            "manifest has more than 128 services/workers/crons — volume validation may be incomplete",
-            .{},
-        ) catch return error.OutOfMemory;
-        diagnostics.append(alloc, .{ .severity = .warning, .message = msg }) catch {
-            alloc.free(msg);
-            return error.OutOfMemory;
-        };
-    }
-
-    for (collection.entries) |entry| {
-        for (entry.volumes) |vol| {
-            if (vol.kind != .named) continue;
-
-            var found = false;
-            for (manifest.volumes) |declared| {
-                if (std.mem.eql(u8, vol.source, declared.name)) {
-                    found = true;
-                    break;
+    inline for (.{ manifest.services, manifest.workers, manifest.crons, manifest.training_jobs }, .{ "service", "worker", "cron", "training" }) |workloads, kind| {
+        for (workloads) |workload| {
+            for (workload.volumes) |mount| {
+                if (mount.kind != .named) continue;
+                for (manifest.volumes) |declared| {
+                    if (std.mem.eql(u8, mount.source, declared.name)) break;
+                } else {
+                    const message = try std.fmt.allocPrint(alloc, "{s}.{s}.volumes references undeclared volume '{s}'; add [volume.{s}]", .{ kind, workload.name, mount.source, mount.source });
+                    errdefer alloc.free(message);
+                    try diagnostics.append(alloc, .{ .severity = .@"error", .message = message });
                 }
-            }
-            if (!found) {
-                const msg = std.fmt.allocPrint(alloc, "service '{s}' uses volume '{s}' which is not declared in [volume.*]", .{
-                    entry.name,
-                    vol.source,
-                }) catch return error.OutOfMemory;
-                diagnostics.append(alloc, .{ .severity = .warning, .message = msg }) catch {
-                    alloc.free(msg);
-                    return error.OutOfMemory;
-                };
             }
         }
     }

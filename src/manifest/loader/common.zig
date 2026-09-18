@@ -13,6 +13,7 @@ pub const LoadError = error{
     InvalidPortMapping,
     InvalidEnvVar,
     InvalidVolumeMount,
+    UndeclaredVolume,
     InvalidHealthCheck,
     InvalidRestartPolicy,
     InvalidRolloutConfig,

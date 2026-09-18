@@ -157,6 +157,8 @@ comptime {
     _ = @import("manifest/backup_scheduler.zig");
     _ = @import("manifest/backup_retention.zig");
     _ = @import("manifest/training.zig");
+    _ = @import("manifest/training/control_tests.zig");
+    _ = @import("manifest/child_wait.zig");
     _ = @import("manifest/checkpoint.zig");
     _ = @import("manifest/training/local_runner.zig");
     _ = @import("manifest/training/rank_ownership.zig");

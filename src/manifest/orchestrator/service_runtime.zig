@@ -244,7 +244,16 @@ pub fn runOneShotWithIo(
     manifest_volumes: []const spec.Volume,
     app_name: []const u8,
 ) bool {
-    return runOneShotWithGpu(io, alloc, image, command, env, volumes, working_dir, hostname, manifest_volumes, app_name, null);
+    return runOneShotWithGpu(io, alloc, image, command, env, volumes, working_dir, hostname, manifest_volumes, app_name, null, null);
+}
+
+pub fn runCron(alloc: std.mem.Allocator, cron: spec.Cron, manifest_volumes: []const spec.Volume, app_name: []const u8, running: *const std.atomic.Value(bool)) bool {
+    if (!running.load(.acquire)) return false;
+    var threaded_io = std.Io.Threaded.init(alloc, .{});
+    defer threaded_io.deinit();
+    if (!ensureImageAvailableWithIo(threaded_io.io(), alloc, cron.image)) return false;
+    if (!running.load(.acquire)) return false;
+    return runOneShotWithGpu(threaded_io.io(), alloc, cron.image, cron.command, cron.env, cron.volumes, cron.working_dir, cron.name, manifest_volumes, app_name, null, .{ .flag = running, .when = false });
 }
 
 pub fn validateLocalWorker(worker: spec.Worker) !void {
@@ -253,7 +262,7 @@ pub fn validateLocalWorker(worker: spec.Worker) !void {
 
 pub fn runWorkerWithIo(io: std.Io, alloc: std.mem.Allocator, worker: spec.Worker, manifest_volumes: []const spec.Volume, app_name: []const u8) !bool {
     try validateLocalWorker(worker);
-    return runOneShotWithGpu(io, alloc, worker.image, worker.command, worker.env, worker.volumes, worker.working_dir, worker.name, manifest_volumes, app_name, worker.gpu);
+    return runOneShotWithGpu(io, alloc, worker.image, worker.command, worker.env, worker.volumes, worker.working_dir, worker.name, manifest_volumes, app_name, worker.gpu, null);
 }
 
 fn runOneShotWithGpu(
@@ -268,7 +277,9 @@ fn runOneShotWithGpu(
     manifest_volumes: []const spec.Volume,
     app_name: []const u8,
     gpu: ?spec.GpuSpec,
+    cancellation: ?@import("../child_wait.zig").Cancellation,
 ) bool {
+    if (if (cancellation) |token| token.requested() else false) return false;
     var gpu_lease = if (gpu) |config|
         @import("../../gpu/lease.zig").Lease.acquireWithMinimum(config.count, config.model, config.vram_min_mb) catch |err| {
             writeErr("failed to reserve worker gpus: {}\n", .{err});
@@ -350,6 +361,11 @@ fn runOneShotWithGpu(
         .created_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
     };
 
+    if (if (cancellation) |token| token.requested() else false) {
+        store.remove(id) catch {};
+        return false;
+    }
+
     c.start() catch {
         logs.deleteLogFile(id);
         container.cleanupContainerDirs(id);
@@ -357,7 +373,7 @@ fn runOneShotWithGpu(
         return false;
     };
 
-    const exit_code = c.wait() catch 255;
+    const exit_code = @import("../child_wait.zig").wait(&c, cancellation);
 
     logs.deleteLogFile(id);
     container.cleanupContainerDirs(id);

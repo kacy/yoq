@@ -156,7 +156,7 @@ test "port conflict produces error diagnostic" {
     try std.testing.expect(result.hasErrors());
 }
 
-test "undeclared named volume produces warning diagnostic" {
+test "undeclared named volume produces error diagnostic" {
     const alloc = std.testing.allocator;
 
     const vol_mount = try alloc.alloc(spec.VolumeMount, 1);
@@ -180,9 +180,9 @@ test "undeclared named volume produces warning diagnostic" {
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), result.diagnostics.len);
-    try std.testing.expectEqual(Severity.warning, result.diagnostics[0].severity);
+    try std.testing.expectEqual(Severity.@"error", result.diagnostics[0].severity);
     try std.testing.expect(std.mem.indexOf(u8, result.diagnostics[0].message, "cache") != null);
-    try std.testing.expect(!result.hasErrors());
+    try std.testing.expect(result.hasErrors());
 }
 
 test "health check timeout >= interval produces warning" {
@@ -409,10 +409,32 @@ test "volume used by worker and cron is validated" {
     var result = try check(alloc, &manifest);
     defer result.deinit();
 
-    // should produce 2 warnings (one for "shared-data", one for "logs")
+    // both workload references must have explicit volume definitions.
     try std.testing.expectEqual(@as(usize, 2), result.diagnostics.len);
     for (result.diagnostics) |d| {
-        try std.testing.expectEqual(Severity.warning, d.severity);
+        try std.testing.expectEqual(Severity.@"error", d.severity);
     }
-    try std.testing.expect(!result.hasErrors());
+    try std.testing.expect(result.hasErrors());
+}
+
+test "volume validation covers training and workloads beyond the former collection limit" {
+    const alloc = std.testing.allocator;
+    var services: [129]spec.Service = undefined;
+    for (&services) |*service| service.* = .{
+        .name = "service",
+        .image = "scratch",
+        .command = &.{},
+        .ports = &.{},
+        .env = &.{},
+        .depends_on = &.{},
+        .working_dir = null,
+        .volumes = &.{.{ .source = "missing", .target = "/data", .kind = .named }},
+    };
+    const jobs = [_]spec.TrainingJob{.{ .name = "train", .image = "scratch", .command = &.{}, .env = &.{}, .working_dir = null, .volumes = &.{.{ .source = "missing", .target = "/data", .kind = .named }}, .gpus = 1 }};
+    const manifest: spec.Manifest = .{ .alloc = alloc, .services = &services, .workers = &.{}, .crons = &.{}, .training_jobs = &jobs, .volumes = &.{} };
+    var result = try check(alloc, &manifest);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 130), result.diagnostics.len);
+    for (result.diagnostics) |diagnostic| try std.testing.expectEqual(Severity.@"error", diagnostic.severity);
+    try std.testing.expect(std.mem.startsWith(u8, result.diagnostics[129].message, "training.train.volumes"));
 }

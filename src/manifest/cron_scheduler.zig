@@ -13,7 +13,6 @@
 
 const std = @import("std");
 const spec = @import("spec.zig");
-const orchestrator = @import("orchestrator.zig");
 const cli = @import("../lib/cli.zig");
 const runtime_wait = @import("../lib/runtime_wait.zig");
 
@@ -119,19 +118,7 @@ pub const CronScheduler = struct {
         const cron = self.crons[idx];
         writeErr("cron: running {s}...\n", .{cron.name});
 
-        _ = orchestrator.ensureImageAvailable(self.alloc, cron.image);
-
-        const success = orchestrator.runOneShot(
-            self.alloc,
-            cron.image,
-            cron.command,
-            cron.env,
-            cron.volumes,
-            cron.working_dir,
-            cron.name,
-            self.manifest_volumes,
-            self.app_name,
-        );
+        const success = @import("orchestrator/service_runtime.zig").runCron(self.alloc, cron, self.manifest_volumes, self.app_name, &self.running);
 
         if (success) {
             writeErr("cron: {s} completed\n", .{cron.name});

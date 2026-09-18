@@ -169,6 +169,20 @@ fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!sp
         }
     }
 
+    inline for (.{ services.items, workers.items, crons.items, training_jobs.items }, .{ "service", "worker", "cron", "training" }) |workloads, kind| {
+        for (workloads) |workload| {
+            for (workload.volumes) |mount| {
+                if (mount.kind != .named) continue;
+                for (volumes.items) |volume| {
+                    if (std.mem.eql(u8, volume.name, mount.source)) break;
+                } else {
+                    log.err("manifest: {s}.{s}.volumes references undeclared volume '{s}'; add [volume.{s}]", .{ kind, workload.name, mount.source, mount.source });
+                    return LoadError.UndeclaredVolume;
+                }
+            }
+        }
+    }
+
     try dependencies.validateDependencies(services.items, workers.items);
 
     const sorted = try dependencies.sortByDependency(alloc, services.items);
@@ -277,6 +291,7 @@ test "full service — all fields populated" {
         \\
         \\[service.db]
         \\image = "postgres:15"
+        \\[volume.data]
     );
     defer manifest.deinit();
 
@@ -2255,4 +2270,18 @@ test "training gpu count rejects overflow and counts above the scheduling limit"
     var maximum = try loadFromString(alloc, "[training.train]\nimage = \"scratch\"\ngpus = 4096\n");
     defer maximum.deinit();
     try std.testing.expectEqual(spec.max_training_ranks, maximum.training_jobs[0].gpus);
+}
+
+test "named volumes require declarations for every workload kind" {
+    const alloc = std.testing.allocator;
+    inline for (.{ "service", "worker", "cron", "training" }) |kind| {
+        const schedule = if (std.mem.eql(u8, kind, "cron")) "every = \"1m\"\n" else if (std.mem.eql(u8, kind, "training")) "gpus = 1\n" else "";
+        const source = try std.fmt.allocPrint(alloc, "[{s}.test]\nimage = \"scratch\"\nvolumes = [\"data:/data\"]\n{s}", .{ kind, schedule });
+        defer alloc.free(source);
+        try std.testing.expectError(error.UndeclaredVolume, loadFromString(alloc, source));
+        const declared = try std.fmt.allocPrint(alloc, "{s}\n[volume.data]\n", .{source});
+        defer alloc.free(declared);
+        var manifest = try loadFromString(alloc, declared);
+        defer manifest.deinit();
+    }
 }

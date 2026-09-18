@@ -149,6 +149,15 @@ pub fn updateTrainingJobStateInDb(db: *sqlite.Db, id: []const u8, state: []const
     ) catch return StoreError.WriteFailed;
 }
 
+/// operator transitions compare both state and allocation. a stale controller
+/// cannot revive a stopped job or replace a newer scale request.
+pub fn transitionTrainingJob(id: []const u8, expected_state: []const u8, expected_gpus: u32, state: []const u8, gpus: u32, now: i64) StoreError!bool {
+    var lease = try common.leaseDb();
+    defer lease.deinit();
+    lease.db.exec("UPDATE training_jobs SET state = ?, gpus = ?, updated_at = ? WHERE id = ? AND state = ? AND gpus = ?;", .{}, .{ state, gpus, now, id, expected_state, expected_gpus }) catch return StoreError.WriteFailed;
+    return lease.db.rowsAffected() == 1;
+}
+
 // runner progress must not overwrite an operator's durable cancellation.
 pub fn updateTrainingRunnerState(id: []const u8, state: []const u8, now: i64) StoreError!bool {
     var lease = try common.leaseDb();

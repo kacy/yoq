@@ -151,6 +151,7 @@ pub const buildMtlsCertUpsertSql = @import("store/certificates_mtls.zig").buildU
 
 pub const saveTrainingJob = @import("store/training.zig").saveTrainingJob;
 pub const saveTrainingJobInDb = @import("store/training.zig").saveTrainingJobInDb;
+pub const transitionTrainingJob = @import("store/training.zig").transitionTrainingJob;
 pub const updateTrainingRunnerState = @import("store/training.zig").updateTrainingRunnerState;
 pub const updateTrainingJobState = @import("store/training.zig").updateTrainingJobState;
 pub const updateTrainingJobStateInDb = @import("store/training.zig").updateTrainingJobStateInDb;

@@ -2,7 +2,6 @@ const std = @import("std");
 
 const cli = @import("../../lib/cli.zig");
 const container = @import("../../runtime/container.zig");
-const process = @import("../../runtime/process.zig");
 const store = @import("../../state/store.zig");
 const log = @import("../../lib/log.zig");
 const health = @import("../health.zig");
@@ -257,16 +256,9 @@ pub fn stopServiceInstances(self: anytype, idx: usize) void {
     for (0..svc.replicas) |replica| {
         const instance = instances.instanceIndex(self.manifest.services, idx, replica);
         const state = &self.states[instance];
-        if (state.getStatus() == .pending) continue;
-        const id = state.containerId();
-        health.unregisterContainer(&id);
-        if (store.load(self.alloc, &id)) |record| {
-            defer record.deinit(self.alloc);
-            if (record.pid) |pid| process.terminate(pid) catch {
-                process.kill(pid) catch {};
-            };
-        } else |err| {
-            log.debug("orchestrator: container {s} is no longer present: {}", .{ id, err });
+        if (state.getStatus() != .pending) {
+            const id = state.containerId();
+            health.unregisterContainer(&id);
         }
         if (state.thread) |thread| {
             thread.join();
