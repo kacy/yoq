@@ -121,6 +121,12 @@ fn requirePortAvailable(port: u16) !void {
     };
     defer posix.close(fd);
 
+    // match the server listeners so a closed connection in time-wait does not
+    // prevent the next test from checking an otherwise available tcp port.
+    const reuse: c_int = 1;
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&reuse)) catch |err| {
+        return skip("cannot configure port preflight: {s}", .{@errorName(err)});
+    };
     posix.bind(fd, &addr.any, addr.getOsSockLen()) catch |err| {
         return skip("required localhost port {d} is not available: {s}", .{ port, @errorName(err) });
     };
