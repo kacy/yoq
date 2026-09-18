@@ -44,7 +44,8 @@ fn fixture(root: []const u8, node_id: u64, selected_snapshot: bool) !void {
     defer state.deinit();
     const entry = @import("../raft_types.zig").LogEntry{ .index = 1, .term = 3, .data = "INSERT INTO agents (id,address,status,last_heartbeat,registered_at) VALUES ('joined-worker','127.0.0.1','active',1,1);" };
     try log.append(entry);
-    try state.apply(entry);
+    state.apply(entry);
+    try std.testing.expectEqual(@as(u64, 1), state.last_applied);
     if (selected_snapshot) {
         const cluster_path = try joinPath(root, "cluster");
         defer alloc.free(cluster_path);

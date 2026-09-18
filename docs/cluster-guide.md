@@ -467,6 +467,55 @@ for a shorter end-to-end checklist, see [golden-path.md](golden-path.md).
 
 ---
 
+### offline cluster backup and restore
+
+`yoq cluster backup` captures one stopped voter. stop **every voter and agent before the first capture**, and keep them stopped until every bundle is complete. use a new set ID for each coordinated stop. the command cannot prove that another host has stopped; taking bundles while any voter is running is unsupported.
+
+on each voter, use the same set ID and a different destination. the join-token file must contain the existing cluster join token and have owner-only permissions:
+
+```sh
+sudo -H "$(command -v yoq)" cluster backup /srv/backups/maintenance-2026-voter-1 \
+  --set maintenance-2026 \
+  --join-token-file /root/.config/yoq/join_token
+```
+
+`--data-dir <root>` selects a different source root. the default is `$HOME/.local/share/yoq`, with raft and replicated state under `cluster/`. the source lock rejects a running server; exclusive SQLite locks also reject open database users from older binaries. these checks apply only to the local voter.
+
+bundles contain `raft.db`, `state.db`, `yoq.db` when present, the selected snapshot, the API token, the join token, and `secrets.key` when present. a missing secrets key is rejected if encrypted secrets exist. files are private, and publication never replaces an existing destination. bundles contain credentials in readable form: preserve their `0700` directory and `0600` file permissions when copying them to protected storage. container filesystems, image blobs, application volumes, agent enrollment files, and agent result queues need their own backup.
+
+collect every voter bundle from that stop on a recovery host, then verify the complete set:
+
+```sh
+sudo -H "$(command -v yoq)" cluster verify-set --set maintenance-2026 \
+  /srv/backups/maintenance-2026-voter-1 \
+  /srv/backups/maintenance-2026-voter-2 \
+  /srv/backups/maintenance-2026-voter-3
+```
+
+verification checks file sizes and hashes, database integrity and schema compatibility, decryption of stored secrets, retained command history, snapshot boundaries, and one bundle for each fixed voter. the set ID and a fingerprint derived from the join token and voter IDs must agree. `cluster verify <bundle>` checks a single voter but does not establish that the complete set is available. neither command authenticates an untrusted backup; use bundles from storage you control.
+
+restore each bundle to its original voter ID and a fresh data root. supply the fingerprint printed by `verify-set`, the same set ID, and the full voter list in ascending order:
+
+```sh
+sudo -H "$(command -v yoq)" cluster restore /srv/backups/maintenance-2026-voter-1 \
+  --data-dir /srv/recovered/voter-1/.local/share/yoq \
+  --node-id 1 --voters 1,2,3 --set maintenance-2026 \
+  --cluster <verified-fingerprint>
+```
+
+create the destination's parent directory first. restore refuses an existing destination, including a symlink. it keeps the original term, vote, log, snapshot, and applied boundary; it never resets a voter to force an election. do not mix restored voters with live voters or reuse an old set ID for a later capture.
+
+start every restored voter with the original IDs and membership. the server uses `$HOME/.local/share/yoq`; set `HOME` if the restored root is elsewhere. peer addresses may change, but the voter IDs must stay fixed. `--token-file` reads the recovered private token without putting its contents in the command line:
+
+```sh
+sudo -H env HOME=/srv/recovered/voter-1 "$(command -v yoq)" init-server \
+  --id 1 --port 9700 --api-port 7700 \
+  --peers 2@10.0.0.2:9700,3@10.0.0.3:9700 \
+  --token-file /srv/recovered/voter-1/.local/share/yoq/join_token
+```
+
+wait for a leader and verify existing app and agent records before restarting agents. preserve their original enrollment files and `agent-cache.db` so terminal results can finish delivery. run this drill on disposable hosts before relying on the bundles for production recovery.
+
 ## troubleshooting
 
 **node can't join the cluster**
