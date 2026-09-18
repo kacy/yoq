@@ -126,16 +126,21 @@ pub fn isValidContainerName(name: []const u8) bool {
     return true;
 }
 
-/// parse a port mapping string "host_port:container_port" into a PortMap
+/// parse host:container[/tcp|udp]. both ports must be nonzero.
 pub fn parsePortMap(str: []const u8) ?net_setup.PortMap {
-    // find the colon separator
-    const colon_pos = std.mem.indexOf(u8, str, ":") orelse return null;
-    if (colon_pos == 0 or colon_pos >= str.len - 1) return null;
-
-    const host_port = std.fmt.parseInt(u16, str[0..colon_pos], 10) catch return null;
-    const container_port = std.fmt.parseInt(u16, str[colon_pos + 1 ..], 10) catch return null;
-
-    return .{ .host_port = host_port, .container_port = container_port };
+    var protocol: net_setup.Protocol = .tcp;
+    const ports = if (std.mem.indexOfScalar(u8, str, '/')) |slash| blk: {
+        const suffix = str[slash + 1 ..];
+        if (std.mem.eql(u8, suffix, "udp")) {
+            protocol = .udp;
+        } else if (!std.mem.eql(u8, suffix, "tcp")) return null;
+        break :blk str[0..slash];
+    } else str;
+    const colon = std.mem.indexOfScalar(u8, ports, ':') orelse return null;
+    const host_port = std.fmt.parseUnsigned(u16, ports[0..colon], 10) catch return null;
+    const container_port = std.fmt.parseUnsigned(u16, ports[colon + 1 ..], 10) catch return null;
+    if (host_port == 0 or container_port == 0) return null;
+    return .{ .host_port = host_port, .container_port = container_port, .protocol = protocol };
 }
 
 pub const VolumeMountSpec = struct {
@@ -171,6 +176,50 @@ pub fn parseVolumeMount(str: []const u8) ?VolumeMountSpec {
     }
 
     return .{ .source = source, .target = target, .read_only = read_only };
+}
+
+/// structured bind mounts are writable by default. legacy -v keeps its
+/// read-only default; callers choose the parser from the option spelling.
+pub fn parseStructuredMount(str: []const u8) ?VolumeMountSpec {
+    var source: ?[]const u8 = null;
+    var target: ?[]const u8 = null;
+    var saw_type = false;
+    var saw_mode = false;
+    var read_only = false;
+    var fields = std.mem.splitScalar(u8, str, ',');
+    while (fields.next()) |field| {
+        const eq = std.mem.indexOfScalar(u8, field, '=');
+        const key = if (eq) |i| field[0..i] else field;
+        const value = if (eq) |i| field[i + 1 ..] else "";
+        if (std.mem.eql(u8, key, "type")) {
+            if (saw_type or !std.mem.eql(u8, value, "bind")) return null;
+            saw_type = true;
+        } else if (std.mem.eql(u8, key, "source") or std.mem.eql(u8, key, "src")) {
+            if (source != null or value.len == 0) return null;
+            source = value;
+        } else if (std.mem.eql(u8, key, "target") or std.mem.eql(u8, key, "dst") or std.mem.eql(u8, key, "destination")) {
+            if (target != null or value.len == 0 or value[0] != '/') return null;
+            target = value;
+        } else if (std.mem.eql(u8, key, "readonly") or std.mem.eql(u8, key, "ro")) {
+            if (saw_mode) return null;
+            saw_mode = true;
+            if (eq == null or std.mem.eql(u8, value, "true")) {
+                read_only = true;
+            } else if (std.mem.eql(u8, value, "false")) {
+                read_only = false;
+            } else return null;
+        } else return null;
+    }
+    return .{ .source = source orelse return null, .target = target orelse return null, .read_only = read_only };
+}
+
+/// reject non-finite values and quotas that would round down to zero.
+pub fn parseCpuQuota(value: []const u8, period: u64) ?u64 {
+    const cpus = std.fmt.parseFloat(f64, value) catch return null;
+    if (!std.math.isFinite(cpus) or cpus <= 0 or cpus > 1024) return null;
+    const quota = cpus * @as(f64, @floatFromInt(period));
+    if (!std.math.isFinite(quota) or quota < 1 or quota >= @as(f64, @floatFromInt(std.math.maxInt(u64)))) return null;
+    return @intFromFloat(quota);
 }
 
 /// parse human-readable memory sizes like 512k, 256m, or 1g.
@@ -598,4 +647,33 @@ test "output failure tracking" {
     // We can't easily test actual failures without mocking stdout/stderr
     _ = stdout_write_failures;
     _ = stderr_write_failures;
+}
+
+test "port protocols and invalid ports" {
+    try std.testing.expectEqual(net_setup.Protocol.udp, parsePortMap("5353:53/udp").?.protocol);
+    try std.testing.expectEqual(net_setup.Protocol.tcp, parsePortMap("8080:80/tcp").?.protocol);
+    for ([_][]const u8{ "0:80", "80:0", "80:80/sctp", "80:80/udp/udp", "127.0.0.1:80:80", "-1:80" }) |value| {
+        try std.testing.expect(parsePortMap(value) == null);
+    }
+}
+
+test "structured mounts have explicit defaults and reject ambiguity" {
+    const writable = parseStructuredMount("type=bind,src=./data,dst=/data").?;
+    try std.testing.expect(!writable.read_only);
+    try std.testing.expect(parseVolumeMount("./data:/data").?.read_only);
+    try std.testing.expect(parseStructuredMount("source=/tmp,target=/data,readonly").?.read_only);
+    try std.testing.expect(!parseStructuredMount("source=/tmp,target=/data,readonly=false").?.read_only);
+    for ([_][]const u8{
+        "type=volume,src=data,dst=/data", "src=/tmp,dst=relative", "src=/tmp,dst=/data,unknown=x",
+        "src=/tmp,source=/var,dst=/data", "src=/tmp,dst=/data,ro,readonly=false", "src=/tmp,dst=/data,",
+        "src=/tmp", "src=/tmp,dst=/data,readonly=", "type=bind,type=bind,src=/tmp,dst=/data",
+    }) |value| try std.testing.expect(parseStructuredMount(value) == null);
+}
+
+test "cpu quotas reject non-finite and unrepresentable values" {
+    try std.testing.expectEqual(@as(?u64, 50_000), parseCpuQuota("0.5", 100_000));
+    try std.testing.expectEqual(@as(?u64, 1), parseCpuQuota("0.00001", 100_000));
+    for ([_][]const u8{ "nan", "inf", "-inf", "0", "-1", "1025", "0.000001", "1e999" }) |value| {
+        try std.testing.expect(parseCpuQuota(value, 100_000) == null);
+    }
 }
