@@ -14,6 +14,7 @@ const ebpf_support = @import("ebpf_support.zig");
 const service_registry_bridge = @import("../service_registry_bridge.zig");
 const service_reconciler = @import("../service_reconciler.zig");
 const policy = @import("../policy.zig");
+const port_mappings = @import("port_mappings.zig");
 
 pub fn setupContainer(
     container_id: []const u8,
@@ -79,36 +80,12 @@ pub fn setupContainer(
 
     var ip_str_buf: [16]u8 = undefined;
     const ip_str = ip.formatIp(container_ip, &ip_str_buf);
-    var configured_port_maps: usize = 0;
-    errdefer {
-        var idx: usize = 0;
-        while (idx < configured_port_maps) : (idx += 1) {
-            const pm = config.port_maps[idx];
-            if (ebpf.getPortMapper()) |mapper| {
-                const proto: u8 = switch (pm.protocol) {
-                    .tcp => 6,
-                    .udp => 17,
-                };
-                mapper.removeMapping(pm.host_port, proto);
-            }
-            nat.removePortMap(pm.host_port, ip_str, pm.container_port, pm.protocol.toNat());
-        }
-    }
-
-    for (config.port_maps) |pm| {
-        if (ebpf.getPortMapper()) |mapper| {
-            const proto: u8 = switch (pm.protocol) {
-                .tcp => 6,
-                .udp => 17,
-            };
-            mapper.addMapping(pm.host_port, proto, container_ip, pm.container_port);
-        }
-        nat.addPortMap(pm.host_port, ip_str, pm.container_port, pm.protocol.toNat()) catch |e| {
-            log.warn("failed to add port map {}:{} for {s}: {}", .{ pm.host_port, pm.container_port, container_id, e });
-            return common.SetupError.NatFailed;
-        };
-        configured_port_maps += 1;
-    }
+    const mappings: port_mappings.Mapping = .{ .address = container_ip, .address_text = ip_str };
+    port_mappings.install(config.port_maps, mappings) catch |err| {
+        log.warn("failed to publish ports for {s}: {}", .{ container_id, err });
+        return common.SetupError.NatFailed;
+    };
+    errdefer for (config.port_maps) |port| mappings.remove(port);
 
     const gateway = if (subnet_config) |sc| sc.gateway else bridge.gateway_ip;
     dns.startResolverAt(gateway);

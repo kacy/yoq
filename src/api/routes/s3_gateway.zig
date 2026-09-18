@@ -11,6 +11,7 @@ const http = @import("../http.zig");
 const common = @import("common.zig");
 const s3 = @import("../../storage/s3.zig");
 const s3_xml = @import("../../storage/s3_xml.zig");
+const s3_listing = @import("../../storage/s3_listing.zig");
 
 const Response = common.Response;
 
@@ -28,7 +29,9 @@ pub fn route(request: http.Request, alloc: std.mem.Allocator) ?Response {
 
     // must start with /
     if (rest[0] != '/') return null;
-    const path = rest[1..]; // strip leading /
+    var path_buf: [4096]u8 = undefined;
+    const path = decodeComponent(&path_buf, rest[1..], false) catch
+        return s3Error(alloc, "InvalidArgument", "invalid encoded object path");
 
     // split into bucket and key
     if (std.mem.indexOfScalar(u8, path, '/')) |sep| {
@@ -87,19 +90,35 @@ fn bucketLevel(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
         },
         .GET => {
             // ListObjectsV2
-            const prefix = common.extractQueryValue(request.query, "prefix") orelse "";
-
-            const objects = s3.listObjects(alloc, bucket, prefix) catch |e| return switch (e) {
+            var prefix_buf: [1024]u8 = undefined;
+            const prefix = decodeComponent(&prefix_buf, common.extractQueryValue(request.query, "prefix") orelse "", true) catch
+                return s3Error(alloc, "InvalidArgument", "invalid encoded prefix");
+            const max_keys_text = common.extractQueryValue(request.query, "max-keys") orelse "1000";
+            const max_keys = std.fmt.parseInt(usize, max_keys_text, 10) catch
+                return s3Error(alloc, "InvalidArgument", "invalid max-keys");
+            if (max_keys > 1000) return s3Error(alloc, "InvalidArgument", "max-keys must not exceed 1000");
+            var decoded_token: [1024]u8 = undefined;
+            var after_buf: [1024]u8 = undefined;
+            const after = if (common.extractQueryValue(request.query, "continuation-token")) |token|
+                std.fmt.hexToBytes(&decoded_token, token) catch return s3Error(alloc, "InvalidArgument", "invalid continuation token")
+            else
+                decodeComponent(&after_buf, common.extractQueryValue(request.query, "start-after") orelse "", true) catch
+                    return s3Error(alloc, "InvalidArgument", "invalid encoded start-after");
+            const page = s3_listing.list(alloc, bucket, prefix, after, max_keys) catch |e| return switch (e) {
                 s3.S3Error.BucketNotFound => s3ErrorStatus(alloc, .not_found, "NoSuchBucket", "bucket not found"),
                 else => s3Error(alloc, "InternalError", "failed to list objects"),
             };
-            defer {
-                for (objects) |obj| alloc.free(obj.key);
-                alloc.free(objects);
-            }
+            defer page.deinit(alloc);
+            var next_token_buf: [2048]u8 = undefined;
+            const next_token = if (page.truncated)
+                std.fmt.bufPrint(&next_token_buf, "{x}", .{page.objects[page.objects.len - 1].key}) catch
+                    return common.internalError()
+            else
+                null;
 
-            var buf: [65536]u8 = undefined;
-            const xml = s3_xml.listObjectsV2Xml(&buf, bucket, prefix, objects) orelse
+            const buf = alloc.alloc(u8, 16384 + page.objects.len * 6400) catch return common.internalError();
+            defer alloc.free(buf);
+            const xml = s3_xml.listObjectsPageXml(buf, bucket, prefix, page.objects, max_keys, next_token) orelse
                 return s3Error(alloc, "InternalError", "response too large");
 
             return xmlResponse(alloc, xml);
@@ -112,7 +131,7 @@ fn bucketLevel(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
 fn objectLevel(request: http.Request, alloc: std.mem.Allocator, bucket: []const u8, key: []const u8) Response {
     // check for multipart upload operations via query parameters
     if (request.query.len > 0) {
-        if (std.mem.indexOf(u8, request.query, "uploads") != null and request.method == .POST) {
+        if (common.extractQueryValue(request.query, "uploads") != null and request.method == .POST) {
             return initiateMultipart(alloc, bucket, key);
         }
         if (common.extractQueryValue(request.query, "uploadId")) |upload_id| {
@@ -130,7 +149,7 @@ fn objectLevel(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
                 else => s3Error(alloc, "InternalError", "failed to put object"),
             };
 
-            return etagJsonResponse(alloc, &etag);
+            return etagJsonResponse(alloc, etag);
         },
         .GET => {
             // GetObject
@@ -145,6 +164,7 @@ fn objectLevel(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
                 .body = data,
                 .allocated = true,
                 .content_type = "application/octet-stream",
+                .etag = s3.computeEtag(data),
             };
         },
         .HEAD => {
@@ -156,7 +176,7 @@ fn objectLevel(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
                 else => s3Error(alloc, "InternalError", "failed to head object"),
             };
 
-            return headResponse(alloc, meta);
+            return headResponse(meta);
         },
         .DELETE => {
             // DeleteObject — S3 returns 204 even if object doesn't exist
@@ -204,14 +224,28 @@ fn multipartOp(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
                 else => s3Error(alloc, "InternalError", "failed to upload part"),
             };
 
-            return etagJsonResponse(alloc, &etag);
+            return etagJsonResponse(alloc, etag);
         },
         .POST => {
-            // CompleteMultipartUpload
-            const etag = s3.completeMultipartUpload(alloc, bucket, key, upload_id) catch |e| return switch (e) {
+            // check existence first so an aborted upload still returns NoSuchUpload.
+            s3.checkMultipartUpload(bucket, key, upload_id) catch |err| return switch (err) {
+                error.UploadNotFound => s3ErrorStatus(alloc, .not_found, "NoSuchUpload", "upload not found"),
+                error.InvalidUploadId => s3Error(alloc, "InvalidArgument", "invalid uploadId"),
+                else => common.internalError(),
+            };
+            const parts = @import("../../storage/s3_multipart.zig").parse(alloc, request.body) catch |err| return switch (err) {
+                error.InvalidPart => s3Error(alloc, "InvalidPart", "invalid or missing part"),
+                error.InvalidPartOrder => s3Error(alloc, "InvalidPartOrder", "parts must be in ascending order"),
+                error.MalformedXml => s3Error(alloc, "MalformedXML", "invalid multipart completion document"),
+                error.OutOfMemory => common.internalError(),
+            };
+            defer alloc.free(parts);
+            const etag = s3.completeSelectedParts(alloc, bucket, key, upload_id, parts) catch |e| return switch (e) {
                 s3.S3Error.UploadNotFound => s3ErrorStatus(alloc, .not_found, "NoSuchUpload", "upload not found"),
                 s3.S3Error.BucketNotFound => s3ErrorStatus(alloc, .not_found, "NoSuchBucket", "bucket not found"),
                 s3.S3Error.InvalidUploadId => s3Error(alloc, "InvalidArgument", "invalid uploadId"),
+                s3.S3Error.InvalidPart => s3Error(alloc, "InvalidPart", "part is missing or its etag does not match"),
+                s3.S3Error.InvalidPartOrder => s3Error(alloc, "InvalidPartOrder", "parts must be in ascending order"),
                 else => s3Error(alloc, "InternalError", "failed to complete multipart upload"),
             };
 
@@ -235,8 +269,26 @@ fn multipartOp(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
 
 // -- helpers --
 
+fn decodeComponent(buf: []u8, encoded: []const u8, plus_as_space: bool) ![]const u8 {
+    var input: usize = 0;
+    var output: usize = 0;
+    while (input < encoded.len) : (input += 1) {
+        if (output == buf.len) return error.TooLong;
+        const byte = encoded[input];
+        buf[output] = if (byte == '%') decoded: {
+            if (input + 2 >= encoded.len) return error.InvalidEncoding;
+            const high = std.fmt.charToDigit(encoded[input + 1], 16) catch return error.InvalidEncoding;
+            const low = std.fmt.charToDigit(encoded[input + 2], 16) catch return error.InvalidEncoding;
+            input += 2;
+            break :decoded high * 16 + low;
+        } else if (plus_as_space and byte == '+') ' ' else byte;
+        output += 1;
+    }
+    return buf[0..output];
+}
+
 fn s3Error(alloc: std.mem.Allocator, code: []const u8, message: []const u8) Response {
-    return s3ErrorStatus(alloc, .bad_request, code, message);
+    return s3ErrorStatus(alloc, if (std.mem.eql(u8, code, "InternalError")) .internal_server_error else .bad_request, code, message);
 }
 
 fn s3ErrorStatus(alloc: std.mem.Allocator, status: http.StatusCode, code: []const u8, message: []const u8) Response {
@@ -250,25 +302,17 @@ fn s3ErrorStatus(alloc: std.mem.Allocator, status: http.StatusCode, code: []cons
     return .{ .status = status, .body = owned, .allocated = true, .content_type = "application/xml" };
 }
 
-fn headResponse(alloc: std.mem.Allocator, meta: s3.ObjectMeta) Response {
-    var buf: [256]u8 = undefined;
-    const json = std.fmt.bufPrint(&buf, "{{\"content_length\":{d},\"etag\":\"{s}\",\"last_modified\":{d}}}", .{
-        meta.size,
-        meta.etag[0..meta.etag_len],
-        meta.last_modified,
-    }) catch return common.internalError();
-
-    const owned = alloc.dupe(u8, json) catch return common.internalError();
-    return .{ .status = .ok, .body = owned, .allocated = true };
+fn headResponse(meta: s3.ObjectMeta) Response {
+    return .{ .status = .ok, .body = "", .allocated = false, .content_type = "application/octet-stream", .content_length = @intCast(meta.size), .etag = meta.etag };
 }
 
-fn etagJsonResponse(alloc: std.mem.Allocator, etag: []const u8) Response {
+fn etagJsonResponse(alloc: std.mem.Allocator, etag: [32]u8) Response {
     var etag_buf: [64]u8 = undefined;
     const etag_json = std.fmt.bufPrint(&etag_buf, "{{\"ETag\":\"\\\"{s}\\\"\"}}", .{etag}) catch
         return .{ .status = .ok, .body = "{}", .allocated = false };
 
     const owned = alloc.dupe(u8, etag_json) catch return common.internalError();
-    return .{ .status = .ok, .body = owned, .allocated = true };
+    return .{ .status = .ok, .body = owned, .allocated = true, .etag = etag };
 }
 
 fn xmlResponse(alloc: std.mem.Allocator, xml: []const u8) Response {

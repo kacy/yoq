@@ -82,6 +82,17 @@ pub fn wait(pid: posix.pid_t, no_hang: bool) ProcessError!WaitResult {
     return ProcessError.WaitFailed;
 }
 
+/// retain ownership of stopped children until they exit or are killed.
+pub fn waitForExit(pid: posix.pid_t) ProcessError!WaitResult {
+    while (true) {
+        const result = try wait(pid, false);
+        switch (result.status) {
+            .stopped, .running => continue,
+            .exited, .signaled => return result,
+        }
+    }
+}
+
 /// send a signal to a process.
 pub fn sendSignal(pid: posix.pid_t, sig: anytype) ProcessError!void {
     const sig_num: u32 = switch (@typeInfo(@TypeOf(sig))) {

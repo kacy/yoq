@@ -83,30 +83,40 @@ pub const ObjectEntry = struct {
     key: []const u8,
     size: u64,
     last_modified: i64,
-    etag: []const u8,
+    etag: [32]u8,
 };
 
 /// build ListObjectsV2 result XML.
 pub fn listObjectsV2Xml(buf: []u8, bucket: []const u8, prefix: []const u8, objects: []const ObjectEntry) ?[]const u8 {
+    return listObjectsPageXml(buf, bucket, prefix, objects, 1000, null);
+}
+
+pub fn listObjectsPageXml(buf: []u8, bucket: []const u8, prefix: []const u8, objects: []const ObjectEntry, max_keys: usize, next_token: ?[]const u8) ?[]const u8 {
     var pos: usize = 0;
 
     var esc_bucket_buf: [256]u8 = undefined;
     const esc_bucket = escapeXml(&esc_bucket_buf, bucket) orelse return null;
-    var esc_prefix_buf: [256]u8 = undefined;
+    var esc_prefix_buf: [6144]u8 = undefined;
     const esc_prefix = escapeXml(&esc_prefix_buf, prefix) orelse return null;
 
     const header = std.fmt.bufPrint(buf[pos..],
         \\<?xml version="1.0" encoding="UTF-8"?>
         \\<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-        \\<Name>{s}</Name><Prefix>{s}</Prefix><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated><KeyCount>{d}</KeyCount>
-    , .{ esc_bucket, esc_prefix, objects.len }) catch return null;
+        \\<Name>{s}</Name><Prefix>{s}</Prefix><MaxKeys>{d}</MaxKeys><IsTruncated>{s}</IsTruncated><KeyCount>{d}</KeyCount>
+    , .{ esc_bucket, esc_prefix, max_keys, if (next_token != null) "true" else "false", objects.len }) catch return null;
     pos += header.len;
 
+    if (next_token) |token| {
+        // tokens contain only hex digits produced by the listing handler.
+        const element = std.fmt.bufPrint(buf[pos..], "<NextContinuationToken>{s}</NextContinuationToken>", .{token}) catch return null;
+        pos += element.len;
+    }
+
     for (objects) |obj| {
-        var esc_key_buf: [512]u8 = undefined;
+        var esc_key_buf: [6144]u8 = undefined;
         const esc_key = escapeXml(&esc_key_buf, obj.key) orelse return null;
         var esc_etag_buf: [64]u8 = undefined;
-        const esc_etag = escapeXml(&esc_etag_buf, obj.etag) orelse return null;
+        const esc_etag = escapeXml(&esc_etag_buf, &obj.etag) orelse return null;
         var ts_buf: [20]u8 = undefined;
         const ts = formatTimestamp(&ts_buf, obj.last_modified);
 
@@ -222,7 +232,7 @@ test "listObjectsV2Xml — empty" {
 test "listObjectsV2Xml — with objects" {
     var buf: [4096]u8 = undefined;
     const objects = [_]ObjectEntry{
-        .{ .key = "file1.txt", .size = 1024, .last_modified = 1000, .etag = "abc123" },
+        .{ .key = "file1.txt", .size = 1024, .last_modified = 1000, .etag = "0123456789abcdef0123456789abcdef".* },
     };
     const xml = listObjectsV2Xml(&buf, "mybucket", "", &objects).?;
     try std.testing.expect(std.mem.indexOf(u8, xml, "<Key>file1.txt</Key>") != null);
