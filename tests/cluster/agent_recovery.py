@@ -165,8 +165,8 @@ def exercise(rig):
     for node in range(1, 4):
         rig.start_server(node)
     first = wait_for("initial leader", rig.leader)
-    seed = f"10.233.0.{first}:7700"
-    rig.start(4, "join", seed, "--token", rig.token)
+    seed = f"10.233.0.{first}"
+    rig.start(4, "join", seed, "--port", "7700", "--token", rig.token)
     agents = wait_for("joined agent", lambda: rig.request(first, "/agents"))
     if len(agents) != 1:
         raise RuntimeError(f"expected one joined agent, got {len(agents)}")
@@ -189,7 +189,7 @@ def exercise(rig):
         rig.stop(4)
         # restart with the original, dead seed. both credentials and alternate
         # endpoints must come from the existing enrollment files.
-        rig.start(4, "join", seed, "--token", rig.token)
+        rig.start(4, "join", seed, "--port", "7700", "--token", rig.token)
         rig.run(*rig.inside(4, "iptables", "-D", "OUTPUT", "-p", "tcp", "--dport", "7700", "-j", "REJECT"))
         terminal = wait_for("committed result after agent restart", lambda: [item for item in rig.request(leader, f"/agents/{agent_id}/assignments") if item["id"] == "outage000001" and item["status"] == "failed"])
         current = rig.request(leader, "/agents")
