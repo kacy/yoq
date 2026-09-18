@@ -14,7 +14,10 @@ pub const CgroupError = error{
 const min_memory_bytes: u64 = 4 * 1024 * 1024;
 const min_pids: u32 = 1;
 
+pub const CpuSet = @import("cpuset.zig").CpuSet;
+
 pub const ResourceLimits = struct {
+    cpuset_cpus: ?CpuSet = null,
     cpu_weight: ?u16 = null,
     cpu_max_usec: ?u64 = null,
     cpu_max_period: u64 = 100_000,
@@ -32,6 +35,10 @@ pub const ResourceLimits = struct {
     };
 
     pub fn validate(self: ResourceLimits) CgroupError!void {
+        if (self.cpuset_cpus) |cpus| {
+            if (cpus.len > cpus.buffer.len) return error.InvalidLimit;
+            _ = CpuSet.parse(cpus.text()) catch return error.InvalidLimit;
+        }
         if (self.memory_max) |mem| {
             if (mem < min_memory_bytes) return CgroupError.LimitBelowMinimum;
         }

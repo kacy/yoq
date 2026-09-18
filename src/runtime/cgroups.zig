@@ -9,10 +9,15 @@ const metrics_support = @import("cgroups/metrics_support.zig");
 
 pub const CgroupError = common.CgroupError;
 pub const ResourceLimits = common.ResourceLimits;
+pub const CpuSet = common.CpuSet;
 pub const PsiMetrics = common.PsiMetrics;
 pub const IoStats = common.IoStats;
 pub const Cgroup = lifecycle_support.Cgroup;
 
 pub fn parseIoStat(content: []const u8) IoStats {
     return metrics_support.parseIoStat(content);
+}
+
+test {
+    _ = @import("cgroups/cpuset.zig");
 }

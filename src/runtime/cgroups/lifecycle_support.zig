@@ -66,6 +66,13 @@ pub const Cgroup = struct {
     }
 
     pub fn setLimits(self: *const Cgroup, limits: ResourceLimits) CgroupError!void {
+        if (limits.cpuset_cpus) |requested| {
+            var available_buffer: [512]u8 = undefined;
+            const available_text = self.readFile("cpuset.cpus.effective", &available_buffer) catch return error.NotSupported;
+            const available = common.CpuSet.parse(available_text) catch return error.InvalidLimit;
+            if (!requested.isSubsetOf(&available)) return error.InvalidLimit;
+            self.writeFile("cpuset.cpus", requested.text()) catch return error.WriteFailed;
+        }
         if (limits.cpu_weight) |weight| {
             if (weight < 1 or weight > 10000) {
                 log.err("cgroup: invalid cpu_weight {d} for {s}, must be 1-10000", .{ weight, self.path() });
@@ -379,7 +386,7 @@ fn enableSubtreeControllers(dir_path: []const u8) bool {
 }
 
 fn buildDesiredSubtreeControl(available: []const u8, buf: []u8) ?[]const u8 {
-    const wanted = [_][]const u8{ "cpu", "memory", "pids", "io" };
+    const wanted = [_][]const u8{ "cpu", "memory", "pids", "io", "cpuset" };
     var pos: usize = 0;
 
     for (wanted) |name| {
