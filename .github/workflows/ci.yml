@@ -356,6 +356,33 @@ jobs:
       - name: exercise backup verification and recovery commands
         run: python3 scripts/backup-restore-smoke.py ./zig-out/bin/yoq
 
+  agent-recovery:
+    name: agent-recovery
+    needs: changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-zig
+      - name: install namespace fixture tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes iproute2 iptables wireguard-tools
+      - name: build yoq
+        run: zig build -Doptimize=ReleaseSafe
+      - name: recover a joined agent after leader death and interrupted result delivery
+        run: sudo env YOQ_BIN="$PWD/zig-out/bin/yoq" YOQ_SMOKE_DIR="$RUNNER_TEMP/agent-recovery" bash scripts/agent-recovery-smoke.sh
+      - name: retain recovery logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agent-recovery-logs
+          path: |
+            ${{ runner.temp }}/agent-recovery/*.log
+            ${{ runner.temp }}/agent-recovery/result.json
+          retention-days: 7
+
   registry-tls:
     name: registry-tls
     runs-on: ubuntu-latest
