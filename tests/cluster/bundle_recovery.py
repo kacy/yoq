@@ -58,7 +58,7 @@ def exercise_bundles(rig):
     # changing an artifact must fail verification before any destination is opened.
     token_copy = bundles[0] / "api_token"
     original = token_copy.read_bytes()
-    token_copy.write_bytes(b"x" + original[1:])
+    token_copy.write_bytes((b"0" if original[:1] != b"0" else b"1") + original[1:])
     command("verify", bundles[0], reject=True)
     token_copy.write_bytes(original)
 

@@ -135,7 +135,7 @@ class Rig:
     def reports(self):
         path = self.data(4) / "agent-cache.db"
         with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)) as database:
-            return database.execute("SELECT assignment_id, status, delivered FROM assignment_results").fetchall()
+            return database.execute("SELECT assignment_id, status, delivered, generation, revision, reason FROM assignment_results").fetchall()
 
     def cleanup(self):
         for node in self.processes:
@@ -156,23 +156,27 @@ class HeldRegistry:
         self.socket.settimeout(1)
         self.connected = threading.Event()
         self.release = threading.Event()
+        self.stopped = threading.Event()
+        self.connections = 0
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.thread.start()
 
     def serve(self):
-        while not self.release.is_set():
+        while not self.stopped.is_set():
             try:
                 connection, _ = self.socket.accept()
             except TimeoutError:
                 continue
             with connection:
+                self.connections += 1
                 self.connected.set()
                 self.release.wait(45)
                 # failing image preparation produces a real terminal report
                 # without fetching an external image or launching a container.
-                return
+                # keep accepting so a repeated image pull is observable.
 
     def close(self):
+        self.stopped.set()
         self.release.set()
         self.thread.join(timeout=3)
         self.socket.close()
@@ -191,6 +195,7 @@ def exercise(rig):
     agent_id = agents[0]["id"]
     wait_for("persisted server discovery", lambda: list((rig.data(4) / "enrollment").glob("*.api-servers")))
 
+    killed_at = int(time.time())
     rig.stop(first)
     leader = wait_for("leader election after process death", rig.leader)
     if leader == first:
@@ -207,7 +212,7 @@ def exercise(rig):
 
     wait_for("surviving follower learns the elected leader", follower_redirects)
     wait_for("committed heartbeat after leader loss",
-             lambda: any(item["id"] == agent_id and item["last_heartbeat"] > agents[0]["last_heartbeat"]
+             lambda: any(item["id"] == agent_id and item["last_heartbeat"] > killed_at
                          for item in rig.request(leader, "/agents")))
     registry = HeldRegistry()
     try:
@@ -216,14 +221,28 @@ def exercise(rig):
         rig.request(leader, "/cluster/propose", sql.encode())
         wait_for("assignment received after leader loss", registry.connected.is_set)
         rig.run(*rig.inside(4, "iptables", "-A", "OUTPUT", "-p", "tcp", "--dport", "7700", "-j", "REJECT"))
-        registry.close()
-        wait_for("durable undelivered terminal report", lambda: ("a11ce0000001", "failed", 0) in rig.reports())
+        registry.release.set()
+        pending = wait_for("durable undelivered terminal report",
+                           lambda: [row for row in rig.reports() if row[:3] == ("a11ce0000001", "failed", 0)])[0]
         rig.stop(4)
+        if pending not in rig.reports():
+            raise RuntimeError("the terminal report did not survive agent process death")
+        connections_before_restart = registry.connections
         # restart with the original, dead seed. both credentials and alternate
         # endpoints must come from the existing enrollment files.
         rig.start(4, "join", seed, "--port", "7700", "--token", rig.token)
         rig.run(*rig.inside(4, "iptables", "-D", "OUTPUT", "-p", "tcp", "--dport", "7700", "-j", "REJECT"))
         terminal = wait_for("committed result after agent restart", lambda: [item for item in rig.request(leader, f"/agents/{agent_id}/assignments", credential=rig.worker_credential()) if item["id"] == "a11ce0000001" and item["status"] == "failed"])
+        if terminal[0]["generation"] != pending[3] or terminal[0]["status_reason"] != pending[5]:
+            raise RuntimeError("the committed result differs from the persisted terminal report")
+
+        def acknowledged_or_retired():
+            rows = [row for row in rig.reports() if row[0] == pending[0]]
+            return not rows or rows == [pending[:2] + (1,) + pending[3:]]
+
+        wait_for("outbox acknowledgment or confirmed retirement", acknowledged_or_retired)
+        if registry.connections != connections_before_restart:
+            raise RuntimeError("agent restart repeated the completed image pull")
         current = rig.request(leader, "/agents")
         if [item["id"] for item in current] != [agent_id]:
             raise RuntimeError("agent restart changed the enrollment identity")
