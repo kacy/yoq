@@ -343,7 +343,8 @@ defined under `[service.<name>.tls]`. enables TLS termination with automatic or 
 
 | field | type | required | default | description |
 |-------|------|----------|---------|-------------|
-| `domain` | string | yes | — | domain name for the certificate |
+| `domain` | string | for acme | — | domain name for the certificate; optional for peer-only tls |
+| `peer` | string | no | `"off"` | peer authentication policy: `off`, `warn`, or `require` |
 
 ACME is enabled by adding `[service.<name>.tls.acme]`.
 
@@ -726,7 +727,7 @@ driver = "parallel"
 mount_path = "/mnt/lustre/datasets"
 ```
 
-volumes referenced in service/worker/cron `volumes` arrays that aren't explicitly defined use the default local driver.
+every named volume referenced by a service, worker, cron, or training job must have a `[volume.<name>]` definition. an empty definition uses the local driver. undeclared names are rejected while loading the manifest, before any workload starts. bind mounts use their explicit host paths and do not need named volume definitions.
 
 ---
 
