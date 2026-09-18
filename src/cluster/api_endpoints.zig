@@ -102,7 +102,7 @@ pub fn load(alloc: std.mem.Allocator, seed: Endpoint, token: []const u8) !Set {
     try set.add(seed);
     var path_buf: [paths.max_path]u8 = undefined;
     const directory = try paths.dataPath(&path_buf, "enrollment");
-    var dir = try std.Io.Dir.cwd().openDir(std.Options.debug_io, directory, .{});
+    var dir = try std.Io.Dir.cwd().openDir(std.Options.debug_io, directory, .{ .iterate = true });
     defer dir.close(std.Options.debug_io);
     try loadAt(&set, alloc, dir, seed, token);
     return set;
@@ -122,7 +122,7 @@ fn loadAt(set: *Set, alloc: std.mem.Allocator, dir: std.Io.Dir, seed: Endpoint, 
 pub fn save(set: *const Set, seed: Endpoint, token: []const u8) !void {
     var path_buf: [paths.max_path]u8 = undefined;
     const directory = try paths.dataPath(&path_buf, "enrollment");
-    var dir = try std.Io.Dir.cwd().openDir(std.Options.debug_io, directory, .{});
+    var dir = try std.Io.Dir.cwd().openDir(std.Options.debug_io, directory, .{ .iterate = true });
     defer dir.close(std.Options.debug_io);
     try saveAt(set, dir, seed, token);
 }
@@ -185,7 +185,7 @@ pub fn request(self: anytype, method: enum { get, post }, path: []const u8, body
 
 test "agent recovery endpoint membership requires proof and survives restart" {
     const alloc = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const seed: Endpoint = .{ .address = .{ 127, 0, 0, 1 }, .port = 7700 };
     const peer: Endpoint = .{ .address = .{ 127, 0, 0, 2 }, .port = 8800 };

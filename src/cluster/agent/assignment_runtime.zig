@@ -894,40 +894,46 @@ fn flushResultsLimit(self: anytype, limit: usize) void {
         var response = api_endpoints.request(self, .post, path, body.written(), self.worker_credential) catch break;
         defer response.deinit(self.alloc);
         if (response.status_code >= 500) break;
-        if (response.status_code != 200) continue;
-        const Receipt = struct { committed: bool = false, generation: i64 = -1 };
+        if (response.status_code != 200 and response.status_code != 403) continue;
+        const Receipt = struct { committed: bool = false, obsolete: bool = false, generation: i64 = -1 };
         const receipt = std.json.parseFromSlice(Receipt, self.alloc, response.body, .{ .ignore_unknown_fields = true }) catch continue;
         defer receipt.deinit();
         if (!receipt.value.committed or receipt.value.generation != result.generation) continue;
+        if (response.status_code == 403 and !receipt.value.obsolete) continue;
         result_store.acknowledge(&self.id, result) catch return;
     }
 }
 
 fn recoverInterrupted(self: anytype, result: result_store.Result) !void {
-    if (result.container_id) |id| {
-        const group = try @import("../../runtime/cgroups.zig").Cgroup.open(id);
-        const exists = blk: {
-            std.Io.Dir.cwd().access(std.Options.debug_io, group.path(), .{}) catch |err| {
-                if (err == error.FileNotFound) break :blk false;
-                return err;
-            };
-            break :blk true;
-        };
-        if (exists) try group.destroy();
-        // the id was durably attached before c.start, so this cleanup never
-        // chooses a process by a reused pid or a matching workload name.
-        const record = store.load(self.alloc, id) catch |err| {
-            if (err != error.NotFound) return err;
-            try result_store.record(&self.id, result.assignment_id, result.generation, "failed", "agent_restarted");
-            return;
-        };
-        defer record.deinit(self.alloc);
-        @import("../../runtime/cli/container/lifecycle_commands.zig").cleanupNetwork(id, record.ip_address, record.veth_host);
-        try published_ports.removeInstance(self.alloc, id);
-        container.cleanupContainerDirs(id);
-        try store.updateStatus(id, "stopped", null, 255);
-    }
+    try recoverInterruptedWith(self, result, recoverContainer);
+}
+
+fn recoverInterruptedWith(self: anytype, result: result_store.Result, comptime stopContainer: anytype) !void {
+    if (result.container_id) |id| try stopContainer(self.alloc, id);
     try result_store.record(&self.id, result.assignment_id, result.generation, "failed", "agent_restarted");
+}
+
+fn recoverContainer(alloc: std.mem.Allocator, id: []const u8) !void {
+    const group = try @import("../../runtime/cgroups.zig").Cgroup.open(id);
+    const exists = blk: {
+        std.Io.Dir.cwd().access(std.Options.debug_io, group.path(), .{}) catch |err| {
+            if (err == error.FileNotFound) break :blk false;
+            return err;
+        };
+        break :blk true;
+    };
+    if (exists) try group.destroy();
+    // the id was durably attached before c.start, so this cleanup never
+    // chooses a process by a reused pid or a matching workload name.
+    const record = store.load(alloc, id) catch |err| {
+        if (err != error.NotFound) return err;
+        return;
+    };
+    defer record.deinit(alloc);
+    @import("../../runtime/cli/container/lifecycle_commands.zig").cleanupNetwork(id, record.ip_address, record.veth_host);
+    try published_ports.removeInstance(alloc, id);
+    container.cleanupContainerDirs(id);
+    try store.updateStatus(id, "stopped", null, 255);
 }
 
 fn retireResults(self: anytype, snapshot: []const u8) !void {
@@ -1279,4 +1285,68 @@ test "service publication retains the assigned rank zero rendezvous port" {
     const duplicate = try servicePublishedPorts(alloc, &.{.{ .host_port = 8080, .container_port = 8080 }}, gang);
     defer alloc.free(duplicate);
     try std.testing.expectEqual(@as(usize, 1), duplicate.len);
+}
+
+test "agent recovery new generation cancels old worker before reusing its id" {
+    const agent_mod = @import("../agent.zig");
+    const alloc = std.testing.allocator;
+    const Fixture = struct {
+        alloc: std.mem.Allocator,
+        container_lock: std.Io.Mutex = .init,
+        local_containers: std.StringHashMap(*agent_mod.LocalAssignment),
+    };
+    try agent_store.initTestDb();
+    defer agent_store.closeDb();
+    var fixture = Fixture{ .alloc = alloc, .local_containers = std.StringHashMap(*agent_mod.LocalAssignment).init(alloc) };
+    defer fixture.local_containers.deinit();
+    const owner = try alloc.create(agent_mod.LocalAssignment);
+    owner.* = .{ .generation = 2 };
+    try fixture.local_containers.put(try alloc.dupe(u8, "assignment"), owner);
+    const desired = "[{\"id\":\"assignment\",\"status\":\"pending\",\"generation\":3}]";
+    try cancelRemovedAssignments(&fixture, desired);
+    try std.testing.expect(owner.canceled.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), fixture.local_containers.count());
+    owner.done.store(true, .release);
+    try cancelRemovedAssignments(&fixture, desired);
+    try std.testing.expectEqual(@as(u32, 0), fixture.local_containers.count());
+}
+
+test "agent recovery waits for owned container cleanup before reporting interruption" {
+    const alloc = std.testing.allocator;
+    try agent_store.initTestDb();
+    defer agent_store.closeDb();
+    const fixture = .{ .alloc = alloc, .id = "worker000001".* };
+    try std.testing.expect(try result_store.claim(&fixture.id, "assignment", 3));
+    try result_store.attachContainer(&fixture.id, "assignment", 3, "abcdef012345");
+    try result_store.record(&fixture.id, "assignment", 3, "running", null);
+    const saved = try result_store.list(alloc, &fixture.id);
+    defer {
+        for (saved) |result| result.deinit(alloc);
+        alloc.free(saved);
+    }
+    const Cleanup = struct {
+        fn blocked(_: std.mem.Allocator, id: []const u8) !void {
+            try std.testing.expectEqualStrings("abcdef012345", id);
+            return error.DeleteFailed;
+        }
+        fn stopped(_: std.mem.Allocator, id: []const u8) !void {
+            try std.testing.expectEqualStrings("abcdef012345", id);
+        }
+    };
+    try std.testing.expectError(error.DeleteFailed, recoverInterruptedWith(&fixture, saved[0], Cleanup.blocked));
+    const waiting = try result_store.list(alloc, &fixture.id);
+    defer {
+        for (waiting) |result| result.deinit(alloc);
+        alloc.free(waiting);
+    }
+    try std.testing.expectEqualStrings("running", waiting[0].status);
+    try std.testing.expect(!try result_store.claim(&fixture.id, "assignment", 3));
+    try recoverInterruptedWith(&fixture, saved[0], Cleanup.stopped);
+    const recovered = try result_store.list(alloc, &fixture.id);
+    defer {
+        for (recovered) |result| result.deinit(alloc);
+        alloc.free(recovered);
+    }
+    try std.testing.expectEqualStrings("failed", recovered[0].status);
+    try std.testing.expectEqualStrings("agent_restarted", recovered[0].reason.?);
 }

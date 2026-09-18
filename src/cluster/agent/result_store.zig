@@ -42,6 +42,7 @@ pub const Result = struct {
 };
 
 pub fn claim(agent: []const u8, id: []const u8, generation: i64) !bool {
+    if (agent.len == 0 or agent.len > 64 or id.len == 0 or id.len > 64 or generation < 0) return error.InvalidAssignment;
     const db = try cache.lockDb();
     defer cache.unlockDb();
     const existing = try db.one(struct { present: i64 }, "SELECT 1 AS present FROM assignment_results WHERE agent_id = ? AND assignment_id = ? AND generation = ?;", .{}, .{ agent, id, generation });
@@ -61,6 +62,8 @@ pub fn attachContainer(agent: []const u8, id: []const u8, generation: i64, conta
 }
 
 pub fn record(agent: []const u8, id: []const u8, generation: i64, status: []const u8, reason: ?[]const u8) !void {
+    if (!std.mem.eql(u8, status, "running") and !std.mem.eql(u8, status, "stopped") and !std.mem.eql(u8, status, "failed")) return error.InvalidStatus;
+    if (reason) |text| if (text.len > 128) return error.InvalidReason;
     const db = try cache.lockDb();
     defer cache.unlockDb();
     // only the first terminal result wins. a delayed running report cannot
@@ -143,4 +146,20 @@ test "agent recovery result outbox survives reopen and ignores stale acknowledgm
     const other_agent = try list(alloc, "other-agent");
     defer alloc.free(other_agent);
     try std.testing.expectEqual(@as(usize, 0), other_agent.len);
+}
+
+test "agent recovery result queue stops admission without evicting terminal results" {
+    try cache.initTestDb();
+    defer cache.closeDb();
+    {
+        const db = try cache.lockDb();
+        defer cache.unlockDb();
+        try db.exec("WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM n WHERE value < 8192) INSERT INTO assignment_results (agent_id, assignment_id, generation, status) SELECT 'agent', CAST(value AS TEXT), 0, 'failed' FROM n;", .{}, .{});
+    }
+    try std.testing.expectError(error.ResultQueueFull, claim("agent", "new", 0));
+    try std.testing.expect(!try claim("agent", "1", 0));
+    const db = try cache.lockDb();
+    defer cache.unlockDb();
+    const row = (try db.one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignment_results WHERE status = 'failed' AND delivered = 0;", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, max_attempts), row.count);
 }

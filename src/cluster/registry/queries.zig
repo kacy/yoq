@@ -256,7 +256,6 @@ pub fn findWorkloadHostByRank(
 }
 
 const AssignmentRow = struct {
-    generation: i64,
     id: sqlite.Text,
     agent_id: sqlite.Text,
     image: sqlite.Text,
@@ -273,6 +272,7 @@ const AssignmentRow = struct {
     gang_world_size: ?i64,
     gang_master_addr: ?sqlite.Text,
     gang_master_port: ?i64,
+    generation: i64,
 };
 
 fn queryAssignmentRows(alloc: Allocator, db: *sqlite.Db, comptime query: []const u8, args: anytype) ![]Assignment {

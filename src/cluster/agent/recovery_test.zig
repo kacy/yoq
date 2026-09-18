@@ -168,3 +168,26 @@ test "agent recovery retains rejected and legacy uncommitted result responses" {
     }
     try results.acknowledge(&agent.id, saved[0]);
 }
+
+test "agent recovery never forwards a credential to an unsigned leader hint" {
+    const alloc = std.testing.allocator;
+    const seed = try Listener.init();
+    defer platform.posix.close(seed.fd);
+    const stranger = try Listener.init();
+    defer platform.posix.close(stranger.fd);
+    const timeout = posix.timeval{ .sec = 0, .usec = 1000 };
+    try platform.posix.setsockopt(stranger.fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+    const body = try std.fmt.allocPrint(alloc, "{{\"error\":\"not leader\",\"leader\":\"127.0.0.1:{d}\"}}", .{stranger.endpoint.port});
+    defer alloc.free(body);
+    var server = Server{ .listener = seed, .count = 1, .status = .bad_request, .static_body = body };
+    const thread = try std.Thread.spawn(.{}, Server.serve, .{&server});
+    var agent = Agent.init(alloc, seed.endpoint.address, seed.endpoint.port, "cluster-token");
+    defer agent.deinit();
+    var response = try endpoints.request(&agent, .post, "/agents/register", "{}", credential);
+    defer response.deinit(alloc);
+    thread.join();
+    if (server.failure) |err| return err;
+    try std.testing.expectEqual(@as(u16, 400), response.status_code);
+    try std.testing.expectEqual(seed.endpoint.port, agent.server_port);
+    try std.testing.expectError(error.WouldBlock, platform.posix.accept(stranger.fd, null, null, 0));
+}

@@ -421,6 +421,19 @@ pub fn handleAssignmentStatusUpdate(alloc: std.mem.Allocator, request: http.Requ
     const session = mutation.Session.begin(node) catch return common.notLeader(alloc, node);
     session.commit(bound) catch |err| return deploy_routes.mutationFailure(alloc, node, err);
 
+    node.mu.lockUncancelable(std.Options.debug_io);
+    const still_owner = credentials.ownsAssignment(node.stateMachineDb(), agent_id, assignment_id) catch {
+        node.mu.unlock(std.Options.debug_io);
+        return common.internalError();
+    };
+    const still_leader = session.checkLocked();
+    node.mu.unlock(std.Options.debug_io);
+    still_leader catch |err| return deploy_routes.mutationFailure(alloc, node, err);
+    if (!still_owner) {
+        const body = std.fmt.allocPrint(alloc, "{{\"committed\":true,\"obsolete\":true,\"generation\":{d}}}", .{generation}) catch return common.internalError();
+        return .{ .status = .forbidden, .body = body, .allocated = true };
+    }
+
     const body = std.fmt.allocPrint(alloc, "{{\"ok\":true,\"committed\":true,\"status\":\"{s}\",\"generation\":{d}}}", .{ status, generation }) catch return common.internalError();
     return .{ .status = .ok, .body = body, .allocated = true };
 }
@@ -719,6 +732,15 @@ test "agent recovery status acknowledgments fence attempts and preserve terminal
     node.fixPointers();
     node.raft.role = .leader;
     try node.stateMachineDb().exec("INSERT INTO assignments (id, agent_id, image, status, generation, created_at) VALUES ('assignment', 'worker', 'unused', 'running', 2, 1);", .{}, .{});
+    const snapshot = handleAgentAssignments(alloc, "worker", .{ .cluster = &node, .join_token = null });
+    defer if (snapshot.allocated) alloc.free(snapshot.body);
+    try std.testing.expectEqual(http.StatusCode.ok, snapshot.status);
+    const assigned = try std.json.parseFromSlice([]struct { id: []const u8, image: []const u8, generation: i64 }, alloc, snapshot.body, .{ .ignore_unknown_fields = true });
+    defer assigned.deinit();
+    try std.testing.expectEqual(@as(usize, 1), assigned.value.len);
+    try std.testing.expectEqualStrings("assignment", assigned.value[0].id);
+    try std.testing.expectEqualStrings("unused", assigned.value[0].image);
+    try std.testing.expectEqual(@as(i64, 2), assigned.value[0].generation);
     const requests = [_][]const u8{
         "{\"status\":\"failed\",\"generation\":1}",
         "{\"status\":\"failed\"}",
@@ -747,7 +769,7 @@ test "agent recovery mutations reject success without a quorum" {
     var node = try Node.initForTests(alloc, .{
         .id = 1,
         .port = 0,
-        .peers = &.{.{ .id = 2, .addr = .{ 127, 0, 0, 1 }, .port = 29702 }},
+        .peers = &.{.{ .id = 2, .addr = .{ 127, 0, 0, 1 }, .port = 0 }},
         .shared_key = [_]u8{7} ** 32,
         .data_dir = "/unused",
     });

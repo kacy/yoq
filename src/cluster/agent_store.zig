@@ -1,8 +1,5 @@
-// agent_store — local assignment cache for agent resilience
-//
-// caches assignment state in a local SQLite database so the agent
-// can survive restarts and server disconnections. follows the same
-// global-db pattern as state/store.zig.
+// local assignment cache and durable result delivery share one sqlite file.
+// a mutex protects the connection across assignment workers and the agent loop.
 
 const std = @import("std");
 const sqlite = @import("sqlite");
