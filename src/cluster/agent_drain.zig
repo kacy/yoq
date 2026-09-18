@@ -1,5 +1,5 @@
-// drain services one replica at a time. the original assignment remains live
-// until its durable replacement has passed the agent's readiness check.
+// track each service replica through its handoff. the original assignment
+// remains live until its durable replacement passes the agent's readiness check.
 const std = @import("std");
 const sqlite = @import("sqlite");
 const registry = @import("registry.zig");
