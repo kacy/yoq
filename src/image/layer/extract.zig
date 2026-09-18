@@ -5,6 +5,7 @@ const paths = @import("../../lib/paths.zig");
 const log = @import("../../lib/log.zig");
 const tar_extract = @import("../../lib/tar_extract.zig");
 const layer_path = @import("path.zig");
+const spec = @import("../spec.zig");
 const types = @import("types.zig");
 
 const max_path = paths.max_path;
@@ -18,8 +19,28 @@ fn cwd() std.Io.Dir {
 }
 
 pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.LayerError![]const u8 {
+    return extractLayerWithCompression(alloc, digest_str, null);
+}
+
+pub fn extractLayerDescriptor(alloc: std.mem.Allocator, descriptor: spec.Descriptor) types.LayerError![]const u8 {
+    const compression: tar_extract.Compression = switch (spec.layerCompression(descriptor.mediaType) orelse return error.UnsupportedMediaType) {
+        .tar => .tar,
+        .gzip => .gzip,
+        .zstd => .zstd,
+    };
+    return extractLayerWithCompression(alloc, descriptor.digest, compression);
+}
+
+fn extractLayerWithCompression(alloc: std.mem.Allocator, digest_str: []const u8, expected_compression: ?tar_extract.Compression) types.LayerError![]const u8 {
     const digest = blob_store.Digest.parse(digest_str) orelse return error.BlobNotFound;
     const hex = digest.hex();
+    var blob_path_buf: [max_path]u8 = undefined;
+    const blob_path = blob_store.blobPath(digest, &blob_path_buf) catch return error.BlobNotFound;
+    if (expected_compression) |expected| {
+        const actual = tar_extract.detectLayerCompression(blob_path) catch return error.ExtractionFailed;
+        if (actual != expected) return error.ExtractionFailed;
+    }
+
     var parent_buf: [max_path]u8 = undefined;
     const parent_path = try layer_path.layerDir(&parent_buf);
     cwd().createDirPath(std.Options.debug_io, parent_path) catch return error.ExtractionFailed;
@@ -38,8 +59,8 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
         (platform.File{ .handle = parent.handle }).sync() catch return error.ExtractionFailed;
         return alloc.dupe(u8, dest_path) catch error.ExtractionFailed;
     }
-    // Only unpublished/stale entries are removed, while holding the same lock
-    // as extractors and garbage collection. Published entries never mutate.
+    // remove unpublished entries while holding the lock shared by extraction
+    // and garbage collection. published entries remain immutable.
     parent.deleteTree(std.Options.debug_io, &hex) catch |err| {
         if (err != error.FileNotFound) return error.ExtractionFailed;
     };
@@ -59,14 +80,12 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
     stage.createDir(std.Options.debug_io, "rootfs", .fromMode(0o755)) catch return error.ExtractionFailed;
     var stage_path_buf: [max_path]u8 = undefined;
     const stage_path = std.fmt.bufPrint(&stage_path_buf, "{s}/{s}/rootfs", .{ parent_path, stage_name }) catch return error.PathTooLong;
-    var blob_path_buf: [max_path]u8 = undefined;
-    const blob_path = blob_store.blobPath(digest, &blob_path_buf) catch return error.BlobNotFound;
-    extractTarGz(blob_path, stage_path) catch |err| return switch (err) {
+    tar_extract.extractImageLayer(blob_path, stage_path) catch |err| return switch (err) {
         error.WhiteoutRequiresPrivilege => error.WhiteoutRequiresPrivilege,
         else => error.ExtractionFailed,
     };
 
-    // Flush the complete tree before publishing metadata. syncfs also covers
+    // flush the complete tree before publishing metadata. syncfs also covers
     // archive directories whose final modes intentionally prohibit traversal.
     if (linux.errno(linux.syscall1(.syncfs, @intCast(stage.handle))) != .SUCCESS) return error.ExtractionFailed;
     var marker = stage.createFile(std.Options.debug_io, cache_marker_name, .{ .exclusive = true, .permissions = .fromMode(0o600) }) catch return error.ExtractionFailed;
@@ -80,21 +99,31 @@ pub fn extractLayer(alloc: std.mem.Allocator, digest_str: []const u8) types.Laye
     return alloc.dupe(u8, dest_path) catch error.ExtractionFailed;
 }
 
-/// Return immutable native layers in OCI manifest order: base first, newest
-/// last. Every overlay caller uses the same ordering contract.
+/// return immutable layers in manifest order, from base to newest. overlay
+/// callers reverse this order when constructing their lowerdir list.
 pub fn assembleRootfs(
     alloc: std.mem.Allocator,
     layer_digests: []const []const u8,
 ) types.LayerError![]const []const u8 {
+    return assemble(alloc, layer_digests);
+}
+
+pub fn assembleRootfsDescriptors(alloc: std.mem.Allocator, descriptors: []const spec.Descriptor) types.LayerError![]const []const u8 {
+    return assemble(alloc, descriptors);
+}
+
+fn assemble(alloc: std.mem.Allocator, layers: anytype) types.LayerError![]const []const u8 {
     var layer_paths: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
         for (layer_paths.items) |path| alloc.free(path);
         layer_paths.deinit(alloc);
     }
 
-    for (layer_digests) |digest| {
-        const path = extractLayer(alloc, digest) catch |err| return switch (err) {
+    for (layers) |item| {
+        const extracted = if (@TypeOf(item) == spec.Descriptor) extractLayerDescriptor(alloc, item) else extractLayer(alloc, item);
+        const path = extracted catch |err| return switch (err) {
             error.WhiteoutRequiresPrivilege => error.WhiteoutRequiresPrivilege,
+            error.UnsupportedMediaType => error.UnsupportedMediaType,
             else => types.LayerError.AssemblyFailed,
         };
         layer_paths.append(alloc, path) catch {
@@ -112,10 +141,6 @@ pub fn isSafeTarPath(name: []const u8) bool {
 
 pub fn isSafeSymlinkTarget(entry_path: []const u8, link_target: []const u8) bool {
     return tar_extract.isSafeSymlinkTarget(entry_path, link_target);
-}
-
-fn extractTarGz(gz_path: []const u8, dest_path: []const u8) !void {
-    try tar_extract.extractImageLayer(gz_path, dest_path);
 }
 
 fn hasCompleteCacheMarker(parent: std.Io.Dir, hex: []const u8) bool {

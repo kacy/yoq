@@ -58,7 +58,7 @@ pub fn pullAndResolveImage(io: std.Io, alloc: std.mem.Allocator, target: []const
         }
     }
 
-    result.layer_paths = layer.assembleRootfs(alloc, result.pull_result.?.layer_digests) catch |err| {
+    result.layer_paths = layer.assembleRootfsDescriptors(alloc, result.pull_result.?.layers) catch |err| {
         writeErr("failed to extract image layers: {}\n", .{err});
         return common.ImageCommandsError.PullFailed;
     };

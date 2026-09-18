@@ -10,7 +10,12 @@ pub fn requestWithTimeout(
     uri: std.Uri,
     options: std.http.Client.RequestOptions,
 ) !std.http.Client.Request {
-    const request = try client.request(method, uri, options);
+    var request_options = options;
+    // registry callers consume raw body readers and verify blob digests.
+    // do not advertise transport encodings that these readers do not decode.
+    if (request_options.headers.accept_encoding == .default)
+        request_options.headers.accept_encoding = .{ .override = "identity" };
+    const request = try client.request(method, uri, request_options);
     setSocketTimeouts(request.connection.?);
     return request;
 }

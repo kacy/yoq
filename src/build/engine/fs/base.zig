@@ -62,7 +62,7 @@ pub fn processFrom(
         log.warn("failed to save base image record: {}", .{err});
     };
 
-    const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch
+    const layer_paths = layer.assembleRootfsDescriptors(alloc, result.layers) catch
         return types.BuildError.PullFailed;
     defer {
         for (layer_paths) |path| alloc.free(path);
