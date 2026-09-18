@@ -85,7 +85,7 @@ int xdp_port_map(struct xdp_md *ctx)
         return XDP_PASS;
 
     // require ipv4 without options and a complete, unfragmented datagram.
-    if (ip->ihl_version != 0x45 || (ip->frag_off & htons(0x3fff)))
+    if (ip->ihl_version != 0x45 || (ip->frag_off & htons(IPV4_FRAGMENT_MASK)))
         return XDP_PASS;
 
     __u16 ip_len = ntohs(ip->tot_len);
@@ -107,7 +107,7 @@ int xdp_port_map(struct xdp_md *ctx)
     key.protocol = ip->protocol;
 
     if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = (void *)((char *)ip + 20);
+        struct tcphdr *tcp = (void *)((char *)ip + sizeof(*ip));
         if (ip_len < sizeof(*ip) + sizeof(*tcp) || (void *)(tcp + 1) > data_end)
             return XDP_PASS;
         __u16 tcp_len = (ntohs(tcp->flags) >> 12) * 4;
@@ -115,7 +115,7 @@ int xdp_port_map(struct xdp_md *ctx)
             return XDP_PASS;
         key.port = tcp->dest;
     } else if (ip->protocol == IPPROTO_UDP) {
-        struct udphdr *udp = (void *)((char *)ip + 20);
+        struct udphdr *udp = (void *)((char *)ip + sizeof(*ip));
         if (ip_len < sizeof(*ip) + sizeof(*udp) || (void *)(udp + 1) > data_end)
             return XDP_PASS;
         __u16 udp_len = ntohs(udp->len);
