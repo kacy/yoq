@@ -141,7 +141,10 @@ fn flushAt(now_ns: u64) !void {
         last_published_ns = now_ns;
         break :blk source;
     };
-    for (copies.items) |copy| try history_store.save(alloc, copy.service, &source.producer, &source.boot, copy.history.samples[0..copy.history.count], now_ns);
+    const histories = try alloc.alloc(history_store.History, copies.items.len);
+    defer alloc.free(histories);
+    for (copies.items, 0..) |*copy, index| histories[index] = .{ .service = copy.service, .samples = copy.history.samples[0..copy.history.count] };
+    try history_store.saveBatch(alloc, &source.producer, &source.boot, histories, now_ns);
 }
 
 pub fn snapshotShared(service: []const u8) !?Snapshot {

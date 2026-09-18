@@ -85,7 +85,7 @@ fn fetchInner(alloc: std.mem.Allocator, io: std.Io, agent: registry.AgentRecord,
     const uri = std.Uri.parse(url) catch return .{ .failure = "InvalidAgentAddress" };
     var auth_buffer: [1024]u8 = undefined;
     const auth = std.fmt.bufPrint(&auth_buffer, "Bearer {s}", .{token}) catch return .{ .failure = "InvalidToken" };
-    var client: std.http.Client = .{ .allocator = alloc, .io = io };
+    var client: std.http.Client = .{ .allocator = alloc, .io = io, .read_buffer_size = 8192 };
     defer client.deinit();
     var request = client.request(.GET, uri, .{
         .redirect_behavior = .not_allowed,
@@ -96,6 +96,8 @@ fn fetchInner(alloc: std.mem.Allocator, io: std.Io, agent: registry.AgentRecord,
     request.sendBodiless() catch |err| return .{ .failure = @errorName(err) };
     var headers: [8192]u8 = undefined;
     var response = request.receiveHead(&headers) catch |err| return .{ .failure = @errorName(err) };
+    const head = response.head.bytes;
+    if (head.len < 12 or !std.mem.eql(u8, head[9..12], "200")) return .{ .failure = "UnexpectedStatus" };
     if (response.head.status != .ok) return .{ .failure = "UnexpectedStatus" };
     var transfer: [8192]u8 = undefined;
     const body = response.reader(&transfer).allocRemaining(alloc, .limited(response_limit)) catch |err| return .{ .failure = @errorName(err) };

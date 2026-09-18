@@ -29,7 +29,7 @@ fn sendInner(alloc: std.mem.Allocator, io: std.Io, url: []const u8, body: []cons
     if ((!std.ascii.eqlIgnoreCase(uri.scheme, "http") and !std.ascii.eqlIgnoreCase(uri.scheme, "https")) or
         uri.host == null or uri.user != null or uri.password != null or uri.fragment != null)
         return .{ .failure = "InvalidUrl" };
-    var client: std.http.Client = .{ .allocator = alloc, .io = io };
+    var client: std.http.Client = .{ .allocator = alloc, .io = io, .read_buffer_size = 8192 };
     defer client.deinit();
     var request = client.request(.POST, uri, .{
         .redirect_behavior = .not_allowed,
@@ -40,6 +40,10 @@ fn sendInner(alloc: std.mem.Allocator, io: std.Io, url: []const u8, body: []cons
     request.sendBodyComplete(@constCast(body)) catch |err| return .{ .failure = @errorName(err) };
     var headers: [8192]u8 = undefined;
     const response = request.receiveHead(&headers) catch |err| return .{ .failure = @errorName(err) };
+    // the stdlib parser decodes status arithmetic without checking its digits.
+    const head = response.head.bytes;
+    if (head.len < 12 or head[9] < '1' or head[9] > '5' or !std.ascii.isDigit(head[10]) or !std.ascii.isDigit(head[11]))
+        return .{ .failure = "MalformedStatus" };
     const status: u16 = @intFromEnum(response.head.status);
     return .{ .status = status, .failure = if (status >= 200 and status < 300) null else "UnexpectedStatus" };
 }
@@ -61,7 +65,7 @@ test "alert webhook reports success non-success redirects malformed responses an
         .{ .reply = .{ .status = "204 No Content" }, .failure = null, .status = 204 },
         .{ .reply = .{ .status = "503 Service Unavailable" }, .failure = "UnexpectedStatus", .status = 503 },
         .{ .reply = .{ .status = "302 Found", .headers = "Location: http://127.0.0.1:1/private\r\n" }, .failure = "TooManyHttpRedirects", .status = null },
-        .{ .reply = .{ .status = "invalid" }, .failure = "HttpHeadersInvalid", .status = null },
+        .{ .reply = .{ .status = "invalid" }, .failure = "MalformedStatus", .status = null },
         .{ .reply = .{ .delay_ms = 250 }, .failure = "Timeout", .status = null, .timeout = 40 },
     };
     for (cases) |case| {
