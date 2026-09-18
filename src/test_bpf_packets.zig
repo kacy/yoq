@@ -399,5 +399,8 @@ pub fn main() !void {
     defer storage.deinit();
     const gpu = try Loaded(@import("gpu_bytecode")).init(.sched_cls);
     defer gpu.deinit();
-    std.debug.print("storage metrics and gpu priority: kernel verifier load passed\n", .{});
+    const smoke = try Loaded(@import("test_bytecode")).init(.sched_cls);
+    defer smoke.deinit();
+    try expectUnchanged(smoke.fd, &transportPacket(17, client, vip, 12000, 8080), 0);
+    std.debug.print("storage metrics, gpu priority and smoke program: kernel verifier load passed\n", .{});
 }

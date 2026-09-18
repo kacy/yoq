@@ -203,8 +203,12 @@ static void test_cache_hit_response(void)
 int main(void)
 {
     // skb packet addresses are 32-bit fields, even in this host executable.
-    packet = mmap(NULL, BUFFER_SIZE, PROT_READ | PROT_WRITE,
-                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_32BIT
+    flags |= MAP_32BIT;
+#endif
+    packet = mmap((void *)0x10000000, BUFFER_SIZE, PROT_READ | PROT_WRITE,
+                  flags, -1, 0);
     assert(packet != MAP_FAILED);
     assert((uintptr_t)packet <= UINT32_MAX - BUFFER_SIZE);
     bpf_skb_load_bytes = load_bytes;

@@ -13,7 +13,7 @@ zig build-exe -O ReleaseSafe --dep linux_platform --dep lb_bytecode \
 sudo "$fixture_dir/fixture"
 zig build-exe -O ReleaseSafe --dep linux_platform --dep lb_bytecode \
   --dep port_bytecode --dep policy_bytecode --dep dns_bytecode \
-  --dep metrics_bytecode --dep storage_bytecode --dep gpu_bytecode \
+  --dep metrics_bytecode --dep storage_bytecode --dep gpu_bytecode --dep test_bytecode \
   -Mroot=src/test_bpf_packets.zig \
   -Mlinux_platform=src/lib/linux_platform.zig \
   -Mlb_bytecode=src/network/bpf/lb.zig \
@@ -23,5 +23,6 @@ zig build-exe -O ReleaseSafe --dep linux_platform --dep lb_bytecode \
   -Mmetrics_bytecode=src/network/bpf/metrics.zig \
   -Mstorage_bytecode=src/network/bpf/storage_metrics.zig \
   -Mgpu_bytecode=src/network/bpf/gpu_prio.zig \
+  -Mtest_bytecode=src/network/bpf/test_prog.zig \
   -lc -femit-bin="$fixture_dir/packets"
 sudo "$fixture_dir/packets"
