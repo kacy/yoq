@@ -419,3 +419,22 @@ test "training job store round-trip" {
     defer restarted.deinit(alloc);
     try std.testing.expectEqual(@as(i64, 1), restarted.restart_count);
 }
+
+test "training checkpoint resume maps the most specific mount into container paths" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.Options.debug_io, "step_20", .default_dir);
+    try tmp.dir.createDir(std.Options.debug_io, "step_3", .default_dir);
+    const host = try tmp.dir.realPathFileAlloc(std.Options.debug_io, ".", alloc);
+    defer alloc.free(host);
+    const mounts = [_]@import("../runtime/container.zig").BindMount{
+        .{ .source = "/missing", .target = "/data" },
+        .{ .source = host, .target = "/data/checkpoints" },
+    };
+    const latest = (try latestMountedCheckpoint(alloc, "/data/checkpoints", &mounts)).?;
+    defer alloc.free(latest);
+    try std.testing.expectEqualStrings("/data/checkpoints/step_20", latest);
+    try std.testing.expect((try mountedDirectory(alloc, "/database", &mounts)) == null);
+    try std.testing.expectError(error.InvalidCheckpointPath, mountedDirectory(alloc, "/data/../etc", &mounts));
+}

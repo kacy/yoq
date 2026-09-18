@@ -56,8 +56,11 @@ pub fn createPersistentRecord(self: anytype) !void {
 }
 
 pub fn loadResumeCheckpoint(self: anytype) void {
-    const jid = self.job_id orelse return;
-    const path = checkpoint_mgr.getLatestCheckpointPath(self.alloc, jid) orelse return;
+    const ckpt = self.job.checkpoint orelse return;
+    var arena = std.heap.ArenaAllocator.init(self.alloc);
+    defer arena.deinit();
+    const mounts = @import("../orchestrator/service_runtime.zig").resolveServiceVolumes(arena.allocator(), self.job.volumes, self.manifest_volumes, self.app_name) catch return;
+    const path = (checkpoint_mgr.latestMountedCheckpoint(self.alloc, ckpt.path, mounts.bind_mounts.items) catch return) orelse return;
     if (self.resume_path) |existing| self.alloc.free(existing);
     self.resume_path = path;
 }
@@ -65,11 +68,12 @@ pub fn loadResumeCheckpoint(self: anytype) void {
 pub fn syncCheckpoints(self: anytype) void {
     const ckpt = self.job.checkpoint orelse return;
     const jid = self.job_id orelse return;
-    const new_ckpts = checkpoint_mgr.syncCheckpoints(self.alloc, jid, ckpt.path, ckpt.keep) catch 0;
-    if (new_ckpts > 0) {
-        const cli = @import("../../lib/cli.zig");
-        cli.writeErr("recorded {d} checkpoint(s)\n", .{new_ckpts});
-    }
+    var arena = std.heap.ArenaAllocator.init(self.alloc);
+    defer arena.deinit();
+    const mounts = @import("../orchestrator/service_runtime.zig").resolveServiceVolumes(arena.allocator(), self.job.volumes, self.manifest_volumes, self.app_name) catch return;
+    const host_path = (checkpoint_mgr.mountedDirectory(arena.allocator(), ckpt.path, mounts.bind_mounts.items) catch return) orelse return;
+    const new_ckpts = checkpoint_mgr.syncCheckpoints(self.alloc, jid, host_path, ckpt.keep) catch 0;
+    if (new_ckpts > 0) @import("../../lib/cli.zig").writeErr("recorded {d} checkpoint(s)\n", .{new_ckpts});
 }
 
 pub fn stopRunningRanks(self: anytype) !void {

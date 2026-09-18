@@ -1,10 +1,6 @@
-// training — training job lifecycle controller
-//
-// manages multi-rank GPU training jobs: start (gang-schedule all ranks),
-// pause (stop containers), resume (restart from checkpoint), stop.
-//
-// for local mode: launches rank containers via orchestrator.runOneShot().
-// for cluster mode: POSTs to /deploy with gang scheduling parameters.
+// training job lifecycle for local rank groups and cluster assignments.
+// local control persists cancellation before stopping ranks. cluster control
+// uses the app training endpoints so placement and job state change together.
 
 const std = @import("std");
 const spec = @import("spec.zig");

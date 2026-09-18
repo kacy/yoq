@@ -20,8 +20,10 @@ pub fn startLocal(self: anytype) !void {
     orchestrator.shutdown_requested.store(false, .release);
     orchestrator.installSignalHandlers();
     errdefer {
-        self.state = .failed;
-        state_support.persistState(self) catch {};
+        if (!(state_support.refreshControl(self) catch false)) {
+            self.state = .failed;
+            state_support.persistState(self) catch {};
+        }
     }
     while (true) {
         self.state = .scheduling;
@@ -93,6 +95,7 @@ fn cancelled(self: anytype) !bool {
 }
 
 test "training ranks all start before polling and a failed rank stops its peers" {
+    orchestrator.shutdown_requested.store(false, .release);
     const training = @import("../training.zig");
     const spec = @import("../spec.zig");
     const job = spec.TrainingJob{ .name = "train", .image = "scratch", .command = &.{}, .env = &.{}, .working_dir = null, .volumes = &.{}, .gpus = 3 };
@@ -117,4 +120,40 @@ test "training ranks all start before polling and a failed rank stops its peers"
     try std.testing.expect(!try runRanks(&ctrl, &group));
     try std.testing.expect(group.stopped);
     try std.testing.expectEqual(training.RankStatus.failed, ctrl.rank_status[1]);
+}
+
+test "training startup failure and cancellation stop every started rank" {
+    const training = @import("../training.zig");
+    const spec = @import("../spec.zig");
+    const job = spec.TrainingJob{ .name = "train", .image = "scratch", .command = &.{}, .env = &.{}, .working_dir = null, .volumes = &.{}, .gpus = 3 };
+    var ctrl = try training.TrainingController.init(std.testing.allocator, &job, "demo");
+    defer ctrl.deinit();
+    const FakeGroup = struct {
+        started: usize = 0,
+        stopped: bool = false,
+        cancel: bool = false,
+        pub fn start(self: *@This(), rank: usize) !void {
+            if (rank == 1) return error.StartFailed;
+            self.started += 1;
+            if (self.cancel) orchestrator.shutdown_requested.store(true, .release);
+        }
+        pub fn poll(_: *@This(), _: usize) !?u8 {
+            return error.UnexpectedPoll;
+        }
+        pub fn stopAll(self: *@This()) void {
+            self.stopped = true;
+        }
+    };
+    orchestrator.shutdown_requested.store(false, .release);
+    defer orchestrator.shutdown_requested.store(false, .release);
+    var failed: FakeGroup = .{};
+    try std.testing.expectError(error.StartFailed, runRanks(&ctrl, &failed));
+    try std.testing.expectEqual(@as(usize, 1), failed.started);
+    try std.testing.expect(failed.stopped);
+    @memset(ctrl.rank_status, .pending);
+    var canceled: FakeGroup = .{ .cancel = true };
+    try std.testing.expect(!try runRanks(&ctrl, &canceled));
+    try std.testing.expectEqual(@as(usize, 1), canceled.started);
+    try std.testing.expect(canceled.stopped);
+    try std.testing.expectEqual(training.TrainingJobState.stopped, ctrl.state);
 }
