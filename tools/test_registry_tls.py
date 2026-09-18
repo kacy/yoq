@@ -163,8 +163,12 @@ def inside(binary, root, outer_namespace):
         assert not requests, "certificate for another hostname was accepted"
         accepted = pull("localhost", root / "trusted")
         assert accepted.returncode == 0, accepted.stderr.decode()
-        assert set(requests) == {"/v2/", "/v2/fixture/manifests/" + digest(manifest),
-                                 *("/v2/fixture/blobs/" + key for key in contents), *redirected_blobs}, requests
+        manifest_path = "/v2/fixture/manifests/" + digest(manifest)
+        # authentication probes the requested repository before fetching its manifest.
+        assert requests[:2] == [manifest_path, manifest_path], requests
+        expected_requests = [manifest_path, manifest_path,
+                             *("/v2/fixture/blobs/" + key for key in contents), *redirected_blobs]
+        assert sorted(requests) == sorted(expected_requests), requests
         for key, data in contents.items():
             if key == parsed_manifest["config"]["digest"]:
                 continue
