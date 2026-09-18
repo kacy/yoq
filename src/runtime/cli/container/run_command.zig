@@ -16,7 +16,6 @@ const supervisor_runtime = @import("supervisor_runtime.zig");
 const write = cli.write;
 const writeErr = cli.writeErr;
 const parsePortMap = cli.parsePortMap;
-const parseEnvVar = cli.parseEnvVar;
 const parseVolumeMount = cli.parseVolumeMount;
 const parseMemorySize = cli.parseMemorySize;
 const isValidContainerName = cli.isValidContainerName;
@@ -31,147 +30,179 @@ fn isFilesystemTarget(target: []const u8) bool {
         std.mem.eql(u8, target, "..");
 }
 
-fn parseRunFlags(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) ContainerError!RunFlags {
-    var port_maps: std.ArrayList(net_setup.PortMap) = .empty;
-    var env: std.ArrayList([]const u8) = .empty;
-    var volume_specs: std.ArrayList(cli.VolumeMountSpec) = .empty;
-    var networking_enabled = true;
-    var container_name: ?[]const u8 = null;
-    var detach = false;
-    var limits: @import("../../cgroups.zig").ResourceLimits = .{};
-    var restart_policy: run_state.RestartPolicy = .no;
-    var target: ?[]const u8 = null;
+fn optionValue(args: anytype, option: []const u8, inline_value: ?[]const u8) ContainerError![]const u8 {
+    return inline_value orelse args.next() orelse {
+        writeErr("{s} requires a value\n", .{option});
+        return ContainerError.InvalidArgument;
+    };
+}
 
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--name")) {
-            const name_val = args.next() orelse {
-                writeErr("--name requires a container name\n", .{});
-                return ContainerError.InvalidArgument;
-            };
-            if (!isValidContainerName(name_val)) {
-                writeErr("invalid container name: {s}\n", .{name_val});
-                writeErr("names must be 1-63 chars, alphanumeric or hyphens, no leading/trailing hyphen\n", .{});
+fn appendEnv(alloc: std.mem.Allocator, env: *std.ArrayList([]const u8), value: []const u8) ContainerError!void {
+    const eq = std.mem.indexOfScalar(u8, value, '=');
+    const name = if (eq) |i| value[0..i] else value;
+    if (name.len == 0 or std.mem.indexOfAny(u8, name, " \t\r\n") != null or std.mem.indexOfScalar(u8, value, 0) != null) {
+        writeErr("invalid environment variable name\n", .{});
+        return ContainerError.InvalidArgument;
+    }
+    const owned = if (eq != null)
+        alloc.dupe(u8, value) catch return ContainerError.OutOfMemory
+    else blk: {
+        const key = alloc.dupeZ(u8, name) catch return ContainerError.OutOfMemory;
+        defer alloc.free(key);
+        if (std.c.getenv(key)) |host_value| {
+            break :blk std.fmt.allocPrint(alloc, "{s}={s}", .{ name, std.mem.span(host_value) }) catch return ContainerError.OutOfMemory;
+        }
+        // Keep an unset name so it also removes a value inherited from the image.
+        break :blk alloc.dupe(u8, name) catch return ContainerError.OutOfMemory;
+    };
+    errdefer alloc.free(owned);
+    env.append(alloc, owned) catch return ContainerError.OutOfMemory;
+}
+
+fn appendEnvFile(alloc: std.mem.Allocator, env: *std.ArrayList([]const u8), contents: []const u8) ContainerError!void {
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trimStart(u8, std.mem.trimEnd(u8, raw, "\r"), " \t");
+        if (line.len == 0 or line[0] == '#') continue;
+        try appendEnv(alloc, env, line);
+    }
+}
+
+fn parseRunFlags(args: anytype, alloc: std.mem.Allocator, io: std.Io) ContainerError!RunFlags {
+    var flags: RunFlags = .{};
+    errdefer flags.deinit(alloc);
+    var file_env: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (file_env.items) |value| alloc.free(value);
+        file_env.deinit(alloc);
+    }
+
+    while (args.next()) |raw_arg| {
+        const eq = if (std.mem.startsWith(u8, raw_arg, "--")) std.mem.indexOfScalar(u8, raw_arg, '=') else null;
+        const option = if (eq) |i| raw_arg[0..i] else raw_arg;
+        const inline_value = if (eq) |i| raw_arg[i + 1 ..] else null;
+        // Flags without a value must reject forms such as --detach=false.
+        const takes_no_value = std.mem.eql(u8, option, "--detach") or std.mem.eql(u8, option, "--net") or
+            std.mem.eql(u8, option, "--no-net") or std.mem.eql(u8, option, "--");
+        const arg = if (inline_value != null and takes_no_value) raw_arg else option;
+        if (std.mem.eql(u8, arg, "--")) {
+            flags.target = try optionValue(args, "--", null);
+            break;
+        } else if (std.mem.eql(u8, arg, "--name") or std.mem.eql(u8, arg, "--hostname")) {
+            const value = try optionValue(args, arg, inline_value);
+            if (!isValidContainerName(value)) {
+                writeErr("invalid {s}: {s} (use 1-63 letters, digits, or hyphens)\n", .{ arg, value });
                 return ContainerError.InvalidArgument;
             }
-            container_name = name_val;
-        } else if (std.mem.eql(u8, arg, "-p")) {
-            const port_str = args.next() orelse {
-                writeErr("-p requires host_port:container_port\n", .{});
+            if (std.mem.eql(u8, arg, "--name")) flags.container_name = value else flags.hostname = value;
+        } else if (std.mem.eql(u8, arg, "--entrypoint")) {
+            flags.entrypoint = try optionValue(args, arg, inline_value);
+        } else if (std.mem.eql(u8, arg, "--workdir") or std.mem.eql(u8, arg, "-w")) {
+            const value = try optionValue(args, arg, inline_value);
+            if (value.len == 0 or value[0] != '/') {
+                writeErr("working directory must be an absolute container path\n", .{});
+                return ContainerError.InvalidArgument;
+            }
+            flags.working_dir = value;
+        } else if (std.mem.eql(u8, arg, "--user") or std.mem.eql(u8, arg, "-u")) {
+            const value = try optionValue(args, arg, inline_value);
+            if (value.len == 0) return ContainerError.InvalidArgument;
+            flags.user = value;
+        } else if (std.mem.eql(u8, arg, "--pull")) {
+            const value = try optionValue(args, arg, inline_value);
+            flags.pull_policy = std.meta.stringToEnum(image_cmds.PullPolicy, value) orelse {
+                writeErr("--pull requires missing, always, or never\n", .{});
                 return ContainerError.InvalidArgument;
             };
-            const pm = parsePortMap(port_str) orelse {
-                writeErr("invalid port mapping: {s}\n", .{port_str});
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--publish")) {
+            const value = try optionValue(args, arg, inline_value);
+            const mapping = parsePortMap(value) orelse {
+                writeErr("invalid port mapping: {s}; expected host:container[/tcp|udp]\n", .{value});
                 return ContainerError.InvalidArgument;
             };
-            port_maps.append(alloc, pm) catch return ContainerError.OutOfMemory;
+            flags.port_maps.append(alloc, mapping) catch return ContainerError.OutOfMemory;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--env")) {
-            const env_str = args.next() orelse {
-                writeErr("{s} requires KEY=VALUE\n", .{arg});
+            try appendEnv(alloc, &flags.env, try optionValue(args, arg, inline_value));
+        } else if (std.mem.eql(u8, arg, "--env-file")) {
+            const path = try optionValue(args, arg, inline_value);
+            const contents = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(1024 * 1024)) catch |err| {
+                writeErr("cannot read environment file {s}: {}\n", .{ path, err });
                 return ContainerError.InvalidArgument;
             };
-            if (parseEnvVar(env_str) == null) {
-                writeErr("invalid env var: {s}\n", .{env_str});
-                return ContainerError.InvalidArgument;
-            }
-            env.append(alloc, env_str) catch return ContainerError.OutOfMemory;
+            defer alloc.free(contents);
+            try appendEnvFile(alloc, &file_env, contents);
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--volume") or std.mem.eql(u8, arg, "--mount")) {
-            const mount_str = args.next() orelse {
-                writeErr("{s} requires source:target[:ro]\n", .{arg});
+            const value = try optionValue(args, arg, inline_value);
+            const structured = std.mem.eql(u8, arg, "--mount") and std.mem.indexOfScalar(u8, value, '=') != null;
+            const mount = (if (structured) cli.parseStructuredMount(value) else parseVolumeMount(value)) orelse {
+                writeErr("invalid mount: {s}; use --mount type=bind,src=PATH,dst=/PATH[,readonly] or -v PATH:/PATH[:ro|rw]\n", .{value});
                 return ContainerError.InvalidArgument;
             };
-            const mount = parseVolumeMount(mount_str) orelse {
-                writeErr("invalid volume mount: {s}\n", .{mount_str});
-                return ContainerError.InvalidArgument;
-            };
-            volume_specs.append(alloc, mount) catch return ContainerError.OutOfMemory;
+            if (std.mem.eql(u8, arg, "--mount") and !structured) {
+                writeErr("warning: --mount colon syntax is deprecated and defaults to read-only; use -v or structured --mount\n", .{});
+            }
+            flags.volume_specs.append(alloc, mount) catch return ContainerError.OutOfMemory;
         } else if (std.mem.eql(u8, arg, "--no-net")) {
-            networking_enabled = false;
+            flags.networking_enabled = false;
         } else if (std.mem.eql(u8, arg, "--net")) {
-            networking_enabled = true;
+            flags.networking_enabled = true;
         } else if (std.mem.eql(u8, arg, "--memory")) {
-            const mem_str = args.next() orelse {
-                writeErr("--memory requires a size like 256m\n", .{});
-                return ContainerError.InvalidArgument;
-            };
-            limits.memory_max = parseMemorySize(mem_str) orelse {
-                writeErr("invalid memory size: {s}\n", .{mem_str});
+            const value = try optionValue(args, arg, inline_value);
+            flags.limits.memory_max = if (std.mem.eql(u8, value, "unlimited")) null else parseMemorySize(value) orelse {
+                writeErr("--memory requires a size such as 256m, or unlimited\n", .{});
                 return ContainerError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--pids")) {
-            const pids_str = args.next() orelse {
-                writeErr("--pids requires a numeric limit\n", .{});
-                return ContainerError.InvalidArgument;
-            };
-            limits.pids_max = std.fmt.parseUnsigned(u32, pids_str, 10) catch {
-                writeErr("invalid pids limit: {s}\n", .{pids_str});
+            const value = try optionValue(args, arg, inline_value);
+            flags.limits.pids_max = if (std.mem.eql(u8, value, "unlimited")) null else std.fmt.parseUnsigned(u32, value, 10) catch {
+                writeErr("--pids requires a positive integer, or unlimited\n", .{});
                 return ContainerError.InvalidArgument;
             };
         } else if (std.mem.eql(u8, arg, "--cpu-weight")) {
-            const weight_str = args.next() orelse {
-                writeErr("--cpu-weight requires a value between 1 and 10000\n", .{});
+            const value = try optionValue(args, arg, inline_value);
+            const weight = std.fmt.parseUnsigned(u16, value, 10) catch 0;
+            if (weight < 1 or weight > 10000) {
+                writeErr("--cpu-weight requires an integer between 1 and 10000\n", .{});
                 return ContainerError.InvalidArgument;
-            };
-            limits.cpu_weight = std.fmt.parseUnsigned(u16, weight_str, 10) catch {
-                writeErr("invalid cpu weight: {s}\n", .{weight_str});
-                return ContainerError.InvalidArgument;
-            };
+            }
+            flags.limits.cpu_weight = weight;
         } else if (std.mem.eql(u8, arg, "--cpus")) {
-            const cpu_str = args.next() orelse {
-                writeErr("--cpus requires a number like 2 or 0.5\n", .{});
+            const value = try optionValue(args, arg, inline_value);
+            flags.limits.cpu_max_usec = if (std.mem.eql(u8, value, "unlimited")) null else cli.parseCpuQuota(value, flags.limits.cpu_max_period) orelse {
+                writeErr("--cpus requires a finite positive number up to 1024, with a quota of at least one microsecond, or unlimited\n", .{});
                 return ContainerError.InvalidArgument;
             };
-            const cpu_count = std.fmt.parseFloat(f64, cpu_str) catch {
-                writeErr("invalid CPU value: {s}\n", .{cpu_str});
-                return ContainerError.InvalidArgument;
-            };
-            if (cpu_count <= 0) {
-                writeErr("--cpus must be greater than 0\n", .{});
-                return ContainerError.InvalidArgument;
-            }
-            if (cpu_count > 1024) {
-                writeErr("--cpus exceeds maximum of 1024\n", .{});
-                return ContainerError.InvalidArgument;
-            }
-            limits.cpu_max_usec = @intFromFloat(cpu_count * @as(f64, @floatFromInt(limits.cpu_max_period)));
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--detach")) {
-            detach = true;
+            flags.detach = true;
         } else if (std.mem.eql(u8, arg, "--restart")) {
-            const policy_str = args.next() orelse {
-                writeErr("--restart requires one of: no, always, on-failure\n", .{});
+            const value = try optionValue(args, arg, inline_value);
+            flags.restart_policy = run_state.RestartPolicy.parse(value) orelse {
+                writeErr("invalid restart policy: {s}\n", .{value});
                 return ContainerError.InvalidArgument;
             };
-            restart_policy = run_state.RestartPolicy.parse(policy_str) orelse {
-                writeErr("invalid restart policy: {s}\n", .{policy_str});
-                return ContainerError.InvalidArgument;
-            };
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            writeErr("unknown run option: {s}\n", .{arg});
+            return ContainerError.InvalidArgument;
         } else {
-            target = arg;
+            flags.target = arg;
             break;
         }
     }
-
-    const run_target = target orelse {
-        writeErr("usage: yoq run [--name <name>] [-e KEY=VALUE] [-v source:target[:ro]] [--mount source:target[:ro]] [-p host:container] [--memory SIZE] [--pids N] [--cpu-weight N] [--cpus N] [-d] [--restart POLICY] [--no-net] <image|rootfs> [command]\n", .{});
+    if (flags.target.len == 0) {
+        writeErr("usage: yoq run [options] <image|rootfs> [command [args...]]\n", .{});
         return ContainerError.InvalidArgument;
-    };
-
-    var user_argv: std.ArrayList([]const u8) = .empty;
-    while (args.next()) |arg| {
-        user_argv.append(alloc, arg) catch return ContainerError.OutOfMemory;
     }
-
-    return .{
-        .port_maps = port_maps,
-        .env = env,
-        .volume_specs = volume_specs,
-        .networking_enabled = networking_enabled,
-        .container_name = container_name,
-        .detach = detach,
-        .limits = limits,
-        .restart_policy = restart_policy,
-        .target = run_target,
-        .user_argv = user_argv,
+    flags.limits.validate() catch |err| {
+        writeErr("invalid resource limits: {}\n", .{err});
+        return ContainerError.InvalidLimits;
     };
+    while (args.next()) |arg| flags.user_argv.append(alloc, arg) catch return ContainerError.OutOfMemory;
+
+    // File values precede explicit -e values regardless of option order.
+    file_env.appendSlice(alloc, flags.env.items) catch return ContainerError.OutOfMemory;
+    flags.env.clearRetainingCapacity();
+    std.mem.swap(std.ArrayList([]const u8), &file_env, &flags.env);
+    return flags;
 }
 
 fn dupStringList(alloc: std.mem.Allocator, values: []const []const u8) ContainerError![][]const u8 {
@@ -210,18 +241,18 @@ fn mergeEnv(alloc: std.mem.Allocator, base_env: []const []const u8, override_env
     }
 
     for (override_env) |value| {
-        const eq = std.mem.indexOfScalar(u8, value, '=') orelse continue;
-        const key = value[0..eq];
+        const eq = std.mem.indexOfScalar(u8, value, '=');
+        const key = if (eq) |i| value[0..i] else value;
         var replaced = false;
-        for (merged.items) |*existing| {
+        for (merged.items, 0..) |*existing, i| {
             const existing_eq = std.mem.indexOfScalar(u8, existing.*, '=') orelse continue;
             if (std.mem.eql(u8, existing.*[0..existing_eq], key)) {
-                existing.* = value;
+                if (eq != null) existing.* = value else _ = merged.orderedRemove(i);
                 replaced = true;
                 break;
             }
         }
-        if (!replaced) {
+        if (!replaced and eq != null) {
             merged.append(alloc, value) catch return ContainerError.OutOfMemory;
         }
     }
@@ -310,13 +341,17 @@ fn buildSavedRunConfig(
     const command = alloc.dupe(u8, resolved.command) catch return ContainerError.OutOfMemory;
     errdefer alloc.free(command);
 
-    const hostname = alloc.dupe(u8, flags.container_name orelse "container") catch return ContainerError.OutOfMemory;
+    const hostname = alloc.dupe(u8, flags.hostname orelse "container") catch return ContainerError.OutOfMemory;
     errdefer alloc.free(hostname);
 
-    const working_dir = alloc.dupe(u8, img.working_dir) catch return ContainerError.OutOfMemory;
+    const working_dir = alloc.dupe(u8, flags.working_dir orelse img.working_dir) catch return ContainerError.OutOfMemory;
     errdefer alloc.free(working_dir);
 
     const user = if (img.user) |value| alloc.dupe(u8, value) catch return ContainerError.OutOfMemory else null;
+    errdefer if (user) |value| alloc.free(value);
+
+    const effective_user = flags.user orelse img.user;
+    const user = if (effective_user) |value| alloc.dupe(u8, value) catch return ContainerError.OutOfMemory else null;
     errdefer if (user) |value| alloc.free(value);
 
     const args = dupStringList(alloc, resolved.args.items) catch |e| return e;
@@ -337,6 +372,7 @@ fn buildSavedRunConfig(
         .hostname = hostname,
         .working_dir = working_dir,
         .user = user,
+        .user = user,
         .args = args,
         .env = merged_env,
         .lower_dirs = lower_dirs,
@@ -345,6 +381,21 @@ fn buildSavedRunConfig(
         .port_maps = port_maps,
         .limits = flags.limits,
         .restart_policy = flags.restart_policy,
+    };
+}
+
+fn resolveRunCommand(alloc: std.mem.Allocator, flags: *const RunFlags, img: *const image_cmds.ImageResolution) ContainerError!oci.ResolvedCommand {
+    var entrypoint_buffer: [1][]const u8 = undefined;
+    const entrypoint: []const []const u8 = if (flags.entrypoint) |value| blk: {
+        if (value.len == 0) break :blk &.{};
+        entrypoint_buffer[0] = value;
+        break :blk &entrypoint_buffer;
+    } else img.entrypoint;
+    // An explicit entrypoint also clears the image's default arguments.
+    const default_cmd: []const []const u8 = if (flags.entrypoint != null) &.{} else img.default_cmd;
+    return oci.resolveCommand(alloc, entrypoint, default_cmd, flags.user_argv.items) catch |err| {
+        writeErr("failed to resolve command: {}\n", .{err});
+        return ContainerError.CommandResolveFailed;
     };
 }
 
@@ -376,21 +427,18 @@ pub fn run(args: *std.process.Args.Iterator, ctx: AppContext) !void {
         writeErr("warning: yoq run requires root privileges for cgroups and networking\n", .{});
     }
 
-    var flags = parseRunFlags(args, alloc) catch |e| return e;
+    var flags = parseRunFlags(args, alloc, ctx.io) catch |e| return e;
     defer flags.deinit(alloc);
 
     const is_image = !isFilesystemTarget(flags.target);
 
     var img = if (is_image)
-        try image_cmds.pullAndResolveImage(ctx.io, alloc, flags.target)
+        try image_cmds.resolveImage(ctx.io, alloc, flags.target, flags.pull_policy)
     else
         image_cmds.ImageResolution{ .rootfs = flags.target };
     defer img.deinit();
 
-    var resolved = oci.resolveCommand(alloc, img.entrypoint, img.default_cmd, flags.user_argv.items) catch |err| {
-        writeErr("failed to resolve command: {}\n", .{err});
-        return ContainerError.CommandResolveFailed;
-    };
+    var resolved = try resolveRunCommand(alloc, &flags, &img);
     defer resolved.args.deinit(alloc);
 
     var saved = buildSavedRunConfig(alloc, &flags, &img, &resolved) catch |e| return e;
@@ -443,4 +491,117 @@ test "buildMounts rejects disallowed canonical source without leaking" {
     };
 
     try std.testing.expectError(ContainerError.InvalidArgument, buildMounts(alloc, &specs));
+}
+
+const TestArgs = struct {
+    values: []const []const u8,
+    index: usize = 0,
+
+    fn next(self: *TestArgs) ?[]const u8 {
+        if (self.index == self.values.len) return null;
+        defer self.index += 1;
+        return self.values[self.index];
+    }
+};
+
+test "run options keep process overrides separate from container names" {
+    var args: TestArgs = .{ .values = &.{ "--name", "web", "--hostname", "inside", "--entrypoint", "/bin/sh", "-w", "/app", "-u", "1000:1000", "--pull", "never", "--memory", "unlimited", "--pids", "unlimited", "--cpus", "unlimited", "image", "-c", "echo hello" } };
+    var flags = try parseRunFlags(&args, std.testing.allocator, std.testing.io);
+    defer flags.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("web", flags.container_name.?);
+    try std.testing.expectEqualStrings("inside", flags.hostname.?);
+    try std.testing.expectEqualStrings("/app", flags.working_dir.?);
+    try std.testing.expectEqualStrings("1000:1000", flags.user.?);
+    try std.testing.expectEqual(image_cmds.PullPolicy.never, flags.pull_policy);
+    try std.testing.expect(flags.limits.memory_max == null and flags.limits.pids_max == null and flags.limits.cpu_max_usec == null);
+    try std.testing.expectEqualStrings("-c", flags.user_argv.items[0]);
+
+    const img: image_cmds.ImageResolution = .{ .rootfs = "/tmp/rootfs", .entrypoint = &.{"/original"}, .default_cmd = &.{"default"}, .user = "old", .working_dir = "/old" };
+    var resolved = try resolveRunCommand(std.testing.allocator, &flags, &img);
+    defer resolved.args.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("/bin/sh", resolved.command);
+    var saved = try buildSavedRunConfig(std.testing.allocator, &flags, &img, &resolved);
+    defer saved.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("1000:1000", saved.user.?);
+    try std.testing.expectEqualStrings("/app", saved.working_dir);
+    try std.testing.expectEqualStrings("inside", saved.hostname);
+}
+
+test "run rejects unknown options and invalid resource values without leaking" {
+    const cases = [_][]const []const u8{
+        &.{ "-e", "A=B", "--unknown", "image" },
+        &.{ "--cpu-weight", "0", "image" },
+        &.{ "--cpu-weight", "10001", "image" },
+        &.{ "--cpus", "nan", "image" },
+        &.{ "--cpus", "0.000001", "image" },
+        &.{ "--workdir", "relative", "image" },
+        &.{ "--pull", "sometimes", "image" },
+        &.{ "-e", "A=B", "--name" },
+    };
+    for (cases) |values| {
+        var args: TestArgs = .{ .values = values };
+        try std.testing.expectError(ContainerError.InvalidArgument, parseRunFlags(&args, std.testing.allocator, std.testing.io));
+    }
+}
+
+test "entrypoint override clears image arguments including empty entrypoint" {
+    var flags: RunFlags = .{ .entrypoint = "/new" };
+    defer flags.deinit(std.testing.allocator);
+    const img: image_cmds.ImageResolution = .{ .rootfs = "/rootfs", .entrypoint = &.{ "/old", "old-argument" }, .default_cmd = &.{"default"} };
+    var resolved = try resolveRunCommand(std.testing.allocator, &flags, &img);
+    defer resolved.args.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("/new", resolved.command);
+    try std.testing.expectEqual(@as(usize, 0), resolved.args.items.len);
+    flags.entrypoint = "";
+    try flags.user_argv.append(std.testing.allocator, "echo");
+    var cleared = try resolveRunCommand(std.testing.allocator, &flags, &img);
+    defer cleared.args.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("echo", cleared.command);
+}
+
+test "env files preserve literal values and later overrides remove unset names" {
+    const alloc = std.testing.allocator;
+    var env: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (env.items) |value| alloc.free(value);
+        env.deinit(alloc);
+    }
+    try appendEnvFile(alloc, &env, "# comment\r\n\n A=one\r\nB=literal # value\nA=two\n");
+    const merged = try mergeEnv(alloc, &.{ "A=image", "C=keep" }, env.items);
+    defer freeOwnedStringList(alloc, merged);
+    try std.testing.expectEqualStrings("A=two", merged[0]);
+    try std.testing.expectEqualStrings("C=keep", merged[1]);
+    try std.testing.expectEqualStrings("B=literal # value", merged[2]);
+    const removed = try mergeEnv(alloc, merged, &.{ "A", "B=cli" });
+    defer freeOwnedStringList(alloc, removed);
+    try std.testing.expectEqual(@as(usize, 2), removed.len);
+    try std.testing.expectEqualStrings("C=keep", removed[0]);
+    try std.testing.expectEqualStrings("B=cli", removed[1]);
+}
+
+test "run environment file values precede explicit environment options" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "env", .data = "VALUE=file\nSECOND=two\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "env", alloc);
+    defer alloc.free(path);
+    var args: TestArgs = .{ .values = &.{ "-e", "VALUE=cli", "--env-file", path, "image" } };
+    var flags = try parseRunFlags(&args, alloc, std.testing.io);
+    defer flags.deinit(alloc);
+    const env = try mergeEnv(alloc, &.{"VALUE=image"}, flags.env.items);
+    defer freeOwnedStringList(alloc, env);
+    try std.testing.expectEqualStrings("VALUE=cli", env[0]);
+    try std.testing.expectEqualStrings("SECOND=two", env[1]);
+}
+
+test "run accepts equals values and rejects values on switches" {
+    var args: TestArgs = .{ .values = &.{ "--entrypoint=", "--pull=never", "--env=VALUE=a=b", "--hostname=inside", "image", "echo" } };
+    var flags = try parseRunFlags(&args, std.testing.allocator, std.testing.io);
+    defer flags.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("", flags.entrypoint.?);
+    try std.testing.expectEqualStrings("VALUE=a=b", flags.env.items[0]);
+    try std.testing.expectEqualStrings("inside", flags.hostname.?);
+    var invalid: TestArgs = .{ .values = &.{ "--detach=false", "image" } };
+    try std.testing.expectError(ContainerError.InvalidArgument, parseRunFlags(&invalid, std.testing.allocator, std.testing.io));
 }

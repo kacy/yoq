@@ -664,9 +664,9 @@ test "structured mounts have explicit defaults and reject ambiguity" {
     try std.testing.expect(parseStructuredMount("source=/tmp,target=/data,readonly").?.read_only);
     try std.testing.expect(!parseStructuredMount("source=/tmp,target=/data,readonly=false").?.read_only);
     for ([_][]const u8{
-        "type=volume,src=data,dst=/data", "src=/tmp,dst=relative", "src=/tmp,dst=/data,unknown=x",
+        "type=volume,src=data,dst=/data", "src=/tmp,dst=relative",                "src=/tmp,dst=/data,unknown=x",
         "src=/tmp,source=/var,dst=/data", "src=/tmp,dst=/data,ro,readonly=false", "src=/tmp,dst=/data,",
-        "src=/tmp", "src=/tmp,dst=/data,readonly=", "type=bind,type=bind,src=/tmp,dst=/data",
+        "src=/tmp",                       "src=/tmp,dst=/data,readonly=",         "type=bind,type=bind,src=/tmp,dst=/data",
     }) |value| try std.testing.expect(parseStructuredMount(value) == null);
 }
 
