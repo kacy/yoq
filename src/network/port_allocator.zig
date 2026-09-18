@@ -32,7 +32,7 @@ fn bindPort(mapping: common.PortMap) Error!struct { fd: posix.fd_t, port: u16 } 
     };
     var length = address.getOsSockLen();
     platform.posix.getsockname(fd, &address.any, &length) catch return error.AllocationFailed;
-    return .{ .fd = fd, .port = address.getPort() };
+    return .{ .fd = fd, .port = std.mem.bigToNative(u16, address.in.port) };
 }
 
 /// Hold sockets in the supervisor until NAT teardown finishes. Database
