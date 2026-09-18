@@ -37,8 +37,8 @@ pub fn listen() !struct { fd: std.posix.fd_t, port: u16 } {
 pub const Server = struct {
     fd: std.posix.fd_t,
     ca: []const u8,
-    cert: []const u8,
-    private_key: []const u8,
+    cert: []u8,
+    private_key: []u8,
     now: i64,
     request: []const u8,
     response: []const u8,
