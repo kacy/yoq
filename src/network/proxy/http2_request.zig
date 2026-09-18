@@ -143,11 +143,25 @@ pub fn rewriteClientConnectionPreface(
     return out.toOwnedSlice(alloc);
 }
 
-pub fn parseRequestHeaderSequence(
+pub const HeaderSequence = struct {
+    frame: http2.FrameHeader,
+    headers: std.ArrayList(hpack.HeaderField),
+    consumed: usize,
+
+    pub fn deinit(self: *HeaderSequence, alloc: std.mem.Allocator) void {
+        for (self.headers.items) |header| header.deinit(alloc);
+        self.headers.deinit(alloc);
+    }
+};
+
+// consume a complete block once. callers must wait for every continuation
+// before calling, because decoding advances the connection's dynamic table.
+pub fn decodeHeaderSequence(
     alloc: std.mem.Allocator,
+    decoder: *hpack.Decoder,
     buf: []const u8,
     start: usize,
-) ParseError!ParseResult {
+) ParseError!HeaderSequence {
     var pos = start;
     if (pos + http2.frame_header_len > buf.len) return error.BufferTooShort;
     const first = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
@@ -172,12 +186,35 @@ pub fn parseRequestHeaderSequence(
         if ((continuation.flags & Flag.end_headers) != 0) break;
     }
 
-    var headers = try hpack.decodeHeaderBlock(alloc, header_block.items);
+    return .{
+        .frame = first,
+        .headers = try decoder.decode(alloc, header_block.items),
+        .consumed = pos - start,
+    };
+}
+
+pub fn parseRequestHeaderSequence(
+    alloc: std.mem.Allocator,
+    buf: []const u8,
+    start: usize,
+) ParseError!ParseResult {
+    var decoder: hpack.Decoder = .{};
+    defer decoder.deinit(alloc);
+    return parseRequestHeaderSequenceWithDecoder(alloc, &decoder, buf, start);
+}
+
+pub fn parseRequestHeaderSequenceWithDecoder(
+    alloc: std.mem.Allocator,
+    decoder: *hpack.Decoder,
+    buf: []const u8,
+    start: usize,
+) ParseError!ParseResult {
+    const sequence = try decodeHeaderSequence(alloc, decoder, buf, start);
+    var headers = sequence.headers;
     errdefer {
         for (headers.items) |header| header.deinit(alloc);
         headers.deinit(alloc);
     }
-
     var method: ?[]u8 = null;
     var authority: ?[]u8 = null;
     var path: ?[]u8 = null;
@@ -207,15 +244,49 @@ pub fn parseRequestHeaderSequence(
 
     return .{
         .request = .{
-            .stream_id = first.stream_id,
+            .stream_id = sequence.frame.stream_id,
             .method = method orelse return error.MissingMethod,
             .authority = authority orelse return error.MissingAuthority,
             .path = path orelse return error.MissingPath,
-            .end_stream = (first.flags & Flag.end_stream) != 0,
+            .end_stream = (sequence.frame.flags & Flag.end_stream) != 0,
         },
         .headers = try headers.toOwnedSlice(alloc),
-        .consumed = pos - start,
+        .consumed = sequence.consumed,
     };
+}
+
+pub fn encodeForwardedHeaders(
+    alloc: std.mem.Allocator,
+    headers: []const hpack.HeaderField,
+    end_stream: bool,
+    options: RewriteOptions,
+) ![]u8 {
+    var outgoing: std.ArrayList(hpack.HeaderField) = .empty;
+    defer outgoing.deinit(alloc);
+    var saw_forwarded_proto = false;
+    for (headers) |header| {
+        var value: []const u8 = header.value;
+        if (options.outbound_authority != null and std.mem.eql(u8, header.name, ":authority")) {
+            value = options.outbound_authority.?;
+        } else if (options.outbound_path != null and std.mem.eql(u8, header.name, ":path")) {
+            value = options.outbound_path.?;
+        } else if (options.forwarded_proto != null and std.mem.eql(u8, header.name, "x-forwarded-proto")) {
+            value = options.forwarded_proto.?;
+            saw_forwarded_proto = true;
+        }
+        try outgoing.append(alloc, .{ .name = header.name, .value = @constCast(value) });
+    }
+    if (options.forwarded_proto != null and !saw_forwarded_proto) {
+        try outgoing.append(alloc, .{ .name = @constCast("x-forwarded-proto"), .value = @constCast(options.forwarded_proto.?) });
+    }
+    const block = try hpack.encodeHeaderBlockIndependent(alloc, outgoing.items);
+    defer alloc.free(block);
+    return http2.buildFrame(alloc, .{
+        .length = @intCast(block.len),
+        .frame_type = .headers,
+        .flags = Flag.end_headers | (if (end_stream) Flag.end_stream else @as(u8, 0)),
+        .stream_id = options.stream_id orelse 1,
+    }, block);
 }
 
 pub fn rewriteRequestHeaderSequence(
@@ -759,4 +830,40 @@ test "http2 request releases partial pseudoheader allocations on every allocatio
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.parse, .{frame});
+}
+
+test "http2 compression reuses request indices without decoding again for rewrites" {
+    const alloc = std.testing.allocator;
+    var decoder: hpack.Decoder = .{};
+    defer decoder.deinit(alloc);
+    const first_block = [_]u8{ 0x82, 0x86, 0x84, 0x41, 3, 'a', 'p', 'i' };
+    const second_block = [_]u8{ 0x82, 0x86, 0x84, 0xbe };
+    for ([_][]const u8{ &first_block, &second_block }, 0..) |block, index| {
+        const frame = try http2.buildFrame(alloc, .{ .length = @intCast(block.len), .frame_type = .headers, .flags = 5, .stream_id = @intCast(1 + 2 * index) }, block);
+        defer alloc.free(frame);
+        const parsed = try parseRequestHeaderSequenceWithDecoder(alloc, &decoder, frame, 0);
+        defer parsed.deinit(alloc);
+        try std.testing.expectEqualStrings("api", parsed.request.authority);
+        // retries and mirrors use the decoded fields, without inserting them
+        // into the inbound table again or changing the original route fields.
+        for ([_][]const u8{ "primary", "mirror" }) |target| {
+            const rewritten = try encodeForwardedHeaders(alloc, parsed.headers, true, .{ .outbound_authority = target });
+            defer alloc.free(rewritten);
+            const forwarded = try parseRequestHeaderSequence(alloc, rewritten, 0);
+            defer forwarded.deinit(alloc);
+            try std.testing.expectEqualStrings(target, forwarded.request.authority);
+            try std.testing.expectEqualStrings("api", parsed.request.authority);
+        }
+    }
+}
+
+test "http2 compression incomplete continuation leaves decoder unchanged" {
+    const alloc = std.testing.allocator;
+    var decoder: hpack.Decoder = .{};
+    defer decoder.deinit(alloc);
+    const block = [_]u8{ 0x40, 1, 'x', 1, 'a' };
+    const partial = try http2.buildFrame(alloc, .{ .length = block.len, .frame_type = .headers, .flags = 0, .stream_id = 1 }, &block);
+    defer alloc.free(partial);
+    try std.testing.expectError(error.BufferTooShort, decodeHeaderSequence(alloc, &decoder, partial, 0));
+    try std.testing.expectError(error.InvalidIndex, decoder.decode(alloc, &.{0xbe}));
 }
