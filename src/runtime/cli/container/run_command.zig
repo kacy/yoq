@@ -536,8 +536,12 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
         return;
     }
 
-    supervisor_runtime.installSignalHandlers();
-    const exit_code = supervisor_runtime.superviseSavedRun(id, &saved, true);
+    {
+        const lock = try @import("../../local_control.zig").lock(id, .command, true);
+        defer lock.deinit();
+        try supervisor_runtime.spawnAttachedSupervisor(ctx.io, alloc, id);
+    }
+    const exit_code = try @import("../../session.zig").attach(id, saved.interactive);
     std.process.exit(exit_code);
 }
 

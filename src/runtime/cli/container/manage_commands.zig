@@ -78,7 +78,14 @@ pub fn inspect(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 pub fn containerCommand(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const name = cli.requireArg(args, "usage: yoq container <create|run|start|stop|restart|rm|wait|kill|inspect|exec|logs|ls>\n");
     const commands = @import("../../container_commands.zig");
+    const resources = @import("resource_commands.zig");
+    if (std.mem.eql(u8, name, "top")) return resources.top(args, ctx);
+    if (std.mem.eql(u8, name, "stats")) return resources.stats(args, ctx);
+    if (std.mem.eql(u8, name, "pause")) return resources.pause(args, ctx);
+    if (std.mem.eql(u8, name, "unpause")) return resources.unpause(args, ctx);
+    if (std.mem.eql(u8, name, "update")) return resources.update(args, ctx);
     if (std.mem.eql(u8, name, "recover")) return recover(args, ctx);
+    if (std.mem.eql(u8, name, "attach")) return commands.attach(args, ctx);
     if (std.mem.eql(u8, name, "inspect")) return inspect(args, ctx);
     if (std.mem.eql(u8, name, "create")) return @import("run_command.zig").create(args, ctx);
     if (std.mem.eql(u8, name, "start")) return start(args, ctx);

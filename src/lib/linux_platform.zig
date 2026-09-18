@@ -938,6 +938,7 @@ pub const posix = struct {
     fn connectResult(rc: usize) !void {
         return switch (syscallErrno(rc)) {
             .SUCCESS => {},
+            .NOENT => error.FileNotFound,
             .ACCES, .PERM => error.PermissionDenied,
             .ADDRINUSE => error.AddressInUse,
             .ADDRNOTAVAIL => error.AddressNotAvailable,

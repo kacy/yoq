@@ -100,9 +100,11 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
     }
 
     while (true) {
-        var channels = session.ProcessIo.init(cfg.interactive, cfg.tty) catch return 255;
+        const current_cfg = run_state.loadConfig(std.heap.page_allocator, id) catch return 255;
+        defer current_cfg.deinit(std.heap.page_allocator);
+        var channels = session.ProcessIo.init(current_cfg.interactive, current_cfg.tty) catch return 255;
         defer channels.deinit();
-        var c = containerFromSaved(id, cfg, false);
+        var c = containerFromSaved(id, &current_cfg, false);
         c.config.session_io = &channels;
         c.config.session_output = .{ .context = &server, .write = session.Server.output };
         server.prepareChild(&channels);
@@ -117,7 +119,9 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
             c.start() catch |err| {
                 // startup rollback may have retained resources for cleanup.
                 store.setStartupOutcome(id, .failed) catch {};
-                writeErr("failed to start container: {}\n", .{err});
+                var error_buf: [256]u8 = undefined;
+                const message = std.fmt.bufPrint(&error_buf, "failed to start container: {}\n", .{err}) catch "failed to start container\n";
+                session.Server.output(&server, "stderr", message);
                 return 255;
             };
             server.childStarted();
@@ -137,7 +141,9 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         // the writable layer belongs to the container, not this process run.
         // failed teardown retains its handles and must never be overwritten.
         if (c.runtime.cgroup != null or c.net_info != null) return last_exit;
-        if (!shouldRestart(cfg.restart_policy, last_exit)) break;
+        const policy_cfg = run_state.loadConfig(std.heap.page_allocator, id) catch return 255;
+        defer policy_cfg.deinit(std.heap.page_allocator);
+        if (!shouldRestart(policy_cfg.restart_policy, last_exit)) break;
         if (!(control.shouldRun(id, generation) catch return 255)) break;
         store.updateStatus(id, "restarting", null, last_exit) catch return 255;
         var elapsed: u32 = 0;
@@ -247,6 +253,11 @@ pub fn runSupervisor(args: *std.process.Args.Iterator, alloc: std.mem.Allocator)
 
     const mode = args.next() orelse "detached";
     const exit_code = superviseGeneration(id, &cfg, std.mem.eql(u8, mode, "attach"), generation);
+    if (cfg.auto_remove) {
+        @import("../../local_lifecycle.zig").removeWithVolumes(id, alloc, true) catch |err| {
+            writeErr("automatic removal failed for {s}: {}\n", .{ id, err });
+        };
+    }
     std.process.exit(exit_code);
 }
 

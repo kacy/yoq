@@ -10,6 +10,7 @@ const net_cmds = @import("../network/commands.zig");
 const runtime_cmds = @import("../runtime/commands.zig");
 const tls_cmds = @import("../tls/commands.zig");
 const container_cmds = @import("../runtime/container_commands.zig");
+const container_resources = @import("../runtime/cli/container/resource_commands.zig");
 const container_manage = @import("../runtime/cli/container/manage_commands.zig");
 const build_cmds = @import("../build/commands.zig");
 const manifest_cmds = @import("../manifest/commands.zig");
@@ -41,6 +42,12 @@ pub const CommandSpec = struct {
 };
 
 pub const command_specs = [_]CommandSpec{
+    .{ .name = "top", .group = .runtime, .usage = "top [opts] <id|name>", .description = "show container processes", .handler = container_resources.top },
+    .{ .name = "stats", .group = .runtime, .usage = "stats [opts] <id|name>", .description = "show container resource usage", .handler = container_resources.stats },
+    .{ .name = "pause", .group = .runtime, .usage = "pause [opts] <id|name>", .description = "freeze a running container", .handler = container_resources.pause },
+    .{ .name = "unpause", .group = .runtime, .usage = "unpause [opts] <id|name>", .description = "resume a paused container", .handler = container_resources.unpause },
+    .{ .name = "update", .group = .runtime, .usage = "update [opts] <id|name>", .description = "update resource limits or restart policy", .handler = container_resources.update },
+    .{ .name = "attach", .group = .runtime, .usage = "attach [--no-stdin] <id|name>", .description = "attach to a running container", .handler = container_cmds.attach },
     .{ .name = "save", .group = .image, .usage = "save [-o PATH] <image>...", .description = "write an oci image archive", .handler = image_cmds.save },
     .{ .name = "load", .group = .image, .usage = "load [-i PATH]", .description = "load an oci image archive", .handler = image_cmds.load },
     .{ .name = "volume", .group = .runtime, .usage = "volume <create|ls|inspect|rm>", .description = "manage local container volumes", .handler = @import("../runtime/cli/volume_command.zig").volume },

@@ -58,6 +58,13 @@ pub fn produceImage(alloc: std.mem.Allocator, state: *types.BuildState, tag: ?[]
 }
 
 pub fn buildConfigJson(alloc: std.mem.Allocator, state: *const types.BuildState) ![]const u8 {
+    return writeConfigJson(alloc, state) catch |err| switch (err) {
+        error.WriteFailed => error.OutOfMemory,
+        else => err,
+    };
+}
+
+fn writeConfigJson(alloc: std.mem.Allocator, state: *const types.BuildState) ![]const u8 {
     var buf_writer = std.Io.Writer.Allocating.init(alloc);
     defer buf_writer.deinit();
 

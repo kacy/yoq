@@ -48,7 +48,8 @@ pub fn register(id: []const u8, name: ?[]const u8) !void {
         const legacy = try lease.db.one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM containers WHERE hostname = ? AND id NOT IN (SELECT container_id FROM local_containers WHERE name IS NOT NULL);", .{}, .{value});
         if (legacy != null and legacy.?.count > 0) return error.NameInUse;
     }
-    try lease.db.exec("INSERT INTO local_containers (container_id, name) VALUES (?, ?);", .{}, .{ id, name });
+    const inserted = try lease.db.one(struct { inserted: i64 }, "INSERT INTO local_containers (container_id, name) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING 1 AS inserted;", .{}, .{ id, name });
+    if (inserted == null) return error.NameInUse;
 }
 
 // old standalone records acquire lifecycle state lazily. leave legacy names

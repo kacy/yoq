@@ -68,6 +68,10 @@ fn stopLocked(id: []const u8, alloc: std.mem.Allocator) !void {
             };
             const cfg = run_state.loadConfig(alloc, id) catch null;
             defer if (cfg) |value| value.deinit(alloc);
+            if (std.mem.eql(u8, record.status, "paused")) {
+                const cg = try @import("cgroups.zig").Cgroup.open(id);
+                try cg.setFrozen(false);
+            }
             try supervisor.stopProcessWithOptions(pid, if (cfg) |value| value.stop_signal else 15, if (cfg) |value| value.stop_timeout_seconds else 5);
         }
     }
