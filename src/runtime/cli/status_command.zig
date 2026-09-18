@@ -1179,6 +1179,7 @@ test "writeAppStatusJsonObject includes nested release and workload views" {
         .manifest_hash = "sha256:222",
         .created_at = 200,
         .service_count = 2,
+        .service_instance_count = 5,
         .worker_count = 1,
         .cron_count = 2,
         .training_job_count = 3,
@@ -1207,7 +1208,7 @@ test "writeAppStatusJsonObject includes nested release and workload views" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout_checkpoint\":{\"engine\":\"local\",\"phase\":\"replace\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rollout\":{\"state\":\"unknown\",\"control_state\":\"active\",\"completed_targets\":1,\"failed_targets\":1,\"remaining_targets\":0,\"failure_details\":null,\"targets\":[{\"workload_kind\":\"service\",\"workload_name\":\"web\",\"state\":\"ready\",\"reason\":null}],\"checkpoint\":{\"engine\":\"local\",\"phase\":\"replace\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"previous_successful_release\":{\"id\":\"dep-0\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":2,\"workers\":1,\"crons\":2,\"training_jobs\":3}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":2,\"service_instances\":5,\"workers\":1,\"crons\":2,\"training_jobs\":3}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"training_runtime\":{\"active\":1,\"paused\":1,\"failed\":1}") != null);
 }
 
