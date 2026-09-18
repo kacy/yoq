@@ -2027,3 +2027,57 @@ test "http2 compression cancellation preserves the connection decoder for late t
     try std.testing.expectEqualStrings("x", fields.items[0].name);
     try std.testing.expectEqualStrings("a", fields.items[0].value);
 }
+
+test "http2 compression fragments a small indexed block after literal expansion" {
+    const alloc = std.testing.allocator;
+    var pair: [2]i32 = undefined;
+    if (std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0, &pair) != 0) return error.SocketFailed;
+    defer linux_platform.posix.close(pair[0]);
+    defer linux_platform.posix.close(pair[1]);
+    var routing = ConnectionRouter{ .allocator = alloc, .routes = &.{}, .client_fd = pair[0], .client_ip = null, .sent_settings = true };
+    defer routing.deinit();
+    const route = router.Route{ .name = "api", .service = "api", .vip_address = "10.43.0.1", .match = .{ .host = "api", .path_prefix = "/" } };
+    const upstream = upstream_mod.Upstream{ .service = "api", .endpoint_id = "api-hpack", .address = "127.0.0.1", .port = 1 };
+    try routing.streams.append(alloc, .{ .downstream_stream_id = 3, .route = route, .backend_service = try alloc.dupe(u8, "api"), .upstream = try ownedTestUpstream(alloc, upstream), .connection = .{ .connection = .{ .bare = try linux_platform.posix.dup(pair[0]) }, .timeout_ms = 1000 }, .request_deadline_at_ms = nowMs() + 1000 });
+    var value: [1024]u8 = undefined;
+    @memset(&value, 'v');
+    const indexed_literal = try hpack.encodeHeaderBlockLiteral(alloc, &.{.{ .name = @constCast("x-expanded"), .value = &value }});
+    defer alloc.free(indexed_literal);
+    // insert the literal once; every later field refers to dynamic index 62.
+    indexed_literal[0] = 0x40;
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(alloc);
+    try block.append(alloc, 0x88);
+    try block.appendSlice(alloc, indexed_literal);
+    try block.appendNTimes(alloc, 0xbe, 20);
+    try std.testing.expect(block.items.len < flow.max_frame_payload);
+    const frame = try http2.buildFrame(alloc, .{ .length = @intCast(block.items.len), .frame_type = .headers, .flags = 5, .stream_id = 1 }, block.items);
+    defer alloc.free(frame);
+    try routing.streams.items[0].upstream_buf.appendSlice(alloc, frame);
+    try routing.handleUpstreamHeaders(0);
+    var bytes: [32768]u8 = undefined;
+    const count = try linux_platform.posix.recv(pair[1], &bytes, posix.MSG.DONTWAIT);
+    try std.testing.expect(count > flow.max_frame_payload);
+    var offset: usize = 0;
+    var frames: usize = 0;
+    while (offset < count) {
+        const header = http2.parseFrameHeader(bytes[offset..count]).?;
+        try std.testing.expectEqual(@as(u32, 3), header.stream_id);
+        try std.testing.expect(header.length <= flow.max_frame_payload);
+        try std.testing.expectEqual(if (frames == 0) http2.FrameType.headers else http2.FrameType.continuation, header.frame_type);
+        try std.testing.expectEqual(@as(u8, if (frames == 0) 1 else 0), header.flags & 1);
+        offset += 9 + header.length;
+        try std.testing.expectEqual(@as(u8, if (offset == count) 4 else 0), header.flags & 4);
+        frames += 1;
+    }
+    try std.testing.expect(frames > 1);
+    var decoder: hpack.Decoder = .{};
+    defer decoder.deinit(alloc);
+    var decoded = try http2_request.decodeHeaderSequence(alloc, &decoder, bytes[0..count], 0);
+    defer decoded.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 22), decoded.headers.items.len);
+    for (decoded.headers.items[1..]) |field| {
+        try std.testing.expectEqualStrings("x-expanded", field.name);
+        try std.testing.expectEqualSlices(u8, &value, field.value);
+    }
+}
