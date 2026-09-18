@@ -297,68 +297,15 @@ pub fn rewriteRequestHeaderSequence(
     start: usize,
     options: RewriteOptions,
 ) (ParseError || hpack.Error)!StreamRewriteResult {
-    var pos = start;
-    if (pos + http2.frame_header_len > buf.len) return error.BufferTooShort;
-    const first = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
-    if (first.frame_type != .headers or first.stream_id == 0) return error.InvalidHeadersFrame;
-    pos += http2.frame_header_len;
-    if (pos + first.length > buf.len) return error.BufferTooShort;
-
-    var header_block: std.ArrayList(u8) = .empty;
-    defer header_block.deinit(alloc);
-    try header_block.appendSlice(alloc, try headerBlockFragment(buf[pos .. pos + first.length], first.flags));
-    pos += first.length;
-
-    while ((first.flags & Flag.end_headers) == 0) {
-        if (pos + http2.frame_header_len > buf.len) return error.BufferTooShort;
-        const continuation = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
-        if (continuation.frame_type != .continuation or continuation.stream_id != first.stream_id)
-            return error.InvalidFrameSequence;
-        pos += http2.frame_header_len;
-        if (pos + continuation.length > buf.len) return error.BufferTooShort;
-        try header_block.appendSlice(alloc, buf[pos .. pos + continuation.length]);
-        pos += continuation.length;
-        if ((continuation.flags & Flag.end_headers) != 0) break;
-    }
-
-    var headers = try hpack.decodeHeaderBlock(alloc, header_block.items);
-    defer {
-        for (headers.items) |header| header.deinit(alloc);
-        headers.deinit(alloc);
-    }
-
-    var saw_forwarded_proto = false;
-    for (headers.items) |*header| {
-        if (options.outbound_authority != null and std.mem.eql(u8, header.name, ":authority")) {
-            alloc.free(header.value);
-            header.value = try alloc.dupe(u8, options.outbound_authority.?);
-        } else if (options.outbound_path != null and std.mem.eql(u8, header.name, ":path")) {
-            alloc.free(header.value);
-            header.value = try alloc.dupe(u8, options.outbound_path.?);
-        } else if (options.forwarded_proto != null and std.mem.eql(u8, header.name, "x-forwarded-proto")) {
-            alloc.free(header.value);
-            header.value = try alloc.dupe(u8, options.forwarded_proto.?);
-            saw_forwarded_proto = true;
-        }
-    }
-
-    if (options.forwarded_proto != null and !saw_forwarded_proto) {
-        try headers.append(alloc, .{
-            .name = try alloc.dupe(u8, "x-forwarded-proto"),
-            .value = try alloc.dupe(u8, options.forwarded_proto.?),
-        });
-    }
-
-    const rewritten_block = try hpack.encodeHeaderBlockLiteral(alloc, headers.items);
-    defer alloc.free(rewritten_block);
+    var decoder: hpack.Decoder = .{};
+    defer decoder.deinit(alloc);
+    var sequence = try decodeHeaderSequence(alloc, &decoder, buf, start);
+    defer sequence.deinit(alloc);
+    var outbound = options;
+    outbound.stream_id = options.stream_id orelse sequence.frame.stream_id;
     return .{
-        .bytes = try http2.buildFrame(alloc, .{
-            .length = @intCast(rewritten_block.len),
-            .frame_type = .headers,
-            .flags = (first.flags & Flag.end_stream) | Flag.end_headers,
-            .stream_id = options.stream_id orelse first.stream_id,
-        }, rewritten_block),
-        .consumed = pos - start,
+        .bytes = try encodeForwardedHeaders(alloc, sequence.headers.items, sequence.frame.flags & Flag.end_stream != 0, outbound),
+        .consumed = sequence.consumed,
     };
 }
 
