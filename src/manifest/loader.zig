@@ -2239,3 +2239,17 @@ test "manifest rejects ignored controls and invalid replica or alert values" {
     try std.testing.expectError(error.InvalidAlertConfig, loadFromString(alloc, prefix ++ "[service.web.alerts]\nwebhook = \"file:///tmp/alert\""));
     try std.testing.expectError(error.InvalidFieldType, loadFromString(alloc, prefix ++ "[service.web.alerts]\nrestart_count = 1.5"));
 }
+
+test "all example manifests satisfy the strict schema" {
+    const paths = [_][]const u8{
+        "examples/web-app/manifest.toml",
+        "examples/cron/manifest.toml",
+        "examples/redis/manifest.toml",
+        "examples/http-routing/manifest.toml",
+        "examples/cluster/manifest.toml",
+    };
+    for (paths) |path| {
+        var manifest = try load(std.testing.allocator, path);
+        defer manifest.deinit();
+    }
+}

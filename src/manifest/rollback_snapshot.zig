@@ -274,6 +274,7 @@ fn manifestFromSnapshot(alloc: std.mem.Allocator, parsed: JsonApp) !spec.Manifes
 }
 
 fn serviceFromSnapshot(alloc: std.mem.Allocator, svc: JsonService) !spec.Service {
+    if (svc.replicas < 1 or svc.replicas > 4096) return error.InvalidServiceConfig;
     var result: spec.Service = .{ .name = "", .image = "", .command = &.{}, .env = &.{}, .depends_on = &.{}, .volumes = &.{}, .ports = &.{}, .working_dir = null };
     errdefer result.deinit(alloc);
     result.name = try alloc.dupe(u8, svc.name);
@@ -694,4 +695,18 @@ test "rollback preserves logical replicas placement and alert configuration" {
     const serialized_again = try restored.release.app.toApplyJson(alloc);
     defer alloc.free(serialized_again);
     try std.testing.expectEqualStrings(json, serialized_again);
+}
+
+fn checkReplicaSnapshotAllocation(alloc: std.mem.Allocator) !void {
+    var manifest = try manifestFromSnapshot(alloc, .{
+        .app_name = "demo",
+        .services = &.{.{ .name = "web", .image = "nginx", .replicas = 3, .required_labels = "zone=east", .alerts = .{ .cpu_percent = 90, .webhook = "https://example.test/alerts" }, .command = &.{ "nginx", "-g" }, .env = &.{"MODE=prod"}, .ports = &.{.{ .host_port = 8080, .container_port = 80 }}, .volumes = &.{.{ .source = "/data", .target = "/app/data" }} }},
+        .workers = &.{.{ .name = "migrate", .image = "alpine", .required_labels = "zone=east" }},
+    });
+    defer manifest.deinit();
+    try std.testing.expectEqual(@as(u32, 3), manifest.services[0].replicas);
+}
+
+test "replica rollback snapshot releases partially copied config on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkReplicaSnapshotAllocation, .{});
 }

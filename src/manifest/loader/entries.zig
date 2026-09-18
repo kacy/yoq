@@ -38,6 +38,7 @@ pub fn parseCommonFields(
         alloc.dupe(u8, value) catch return common.LoadError.OutOfMemory
     else
         null;
+    errdefer if (working_dir) |value| alloc.free(value);
 
     return .{
         .image = alloc.dupe(u8, image_raw) catch return common.LoadError.OutOfMemory,
@@ -86,7 +87,13 @@ pub fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const to
         log.err("manifest: service.{s}.replicas must be between 1 and 4096", .{name});
         return error.InvalidServiceConfig;
     }
-    const required_labels = try parseRequiredLabels(alloc, name, table);
+    if (gpu_mesh_spec) |mesh| {
+        if (@as(u64, @intCast(replicas_raw)) * mesh.world_size > 4096) {
+            log.err("manifest: service.{s} exceeds 4096 replica ranks", .{name});
+            return error.InvalidServiceConfig;
+        }
+    }
+    const required_labels = try parseRequiredLabels(alloc, "service", name, table);
     errdefer alloc.free(required_labels);
     const alerts = try parseAlerts(alloc, name, table.getTable("alerts"));
     errdefer if (alerts) |config| config.deinit(alloc);
@@ -159,7 +166,11 @@ pub fn parseVolume(alloc: std.mem.Allocator, name: []const u8, table: *const tom
             return common.LoadError.InvalidVolumeConfig;
         };
         break :blk .{ .parallel = .{ .mount_path = alloc.dupe(u8, path) catch return common.LoadError.OutOfMemory } };
-    } else .{ .local = .{} };
+    } else if (std.mem.eql(u8, driver_str, "local")) .{ .local = .{} } else {
+        log.err("manifest: volume.{s} has unknown driver '{s}'", .{ name, driver_str });
+        return error.InvalidVolumeConfig;
+    };
+    errdefer driver.deinit(alloc);
 
     return .{
         .name = alloc.dupe(u8, name) catch return common.LoadError.OutOfMemory,
@@ -182,7 +193,7 @@ pub fn parseWorker(alloc: std.mem.Allocator, name: []const u8, table: *const tom
 
     const gpu_mesh_spec = try fields.parseGpuMeshSpec(table.getTable("gpu_mesh"));
 
-    const required_labels = try parseRequiredLabels(alloc, name, table);
+    const required_labels = try parseRequiredLabels(alloc, "worker", name, table);
     errdefer alloc.free(required_labels);
 
     return .{
@@ -394,7 +405,7 @@ fn parseFaultToleranceSpec(table: ?*const toml.Table) spec.FaultToleranceSpec {
     };
 }
 
-fn parseRequiredLabels(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) common.LoadError![]const u8 {
+fn parseRequiredLabels(alloc: std.mem.Allocator, kind: []const u8, name: []const u8, table: *const toml.Table) common.LoadError![]const u8 {
     const labels = table.getString("required_labels") orelse "";
     if (labels.len > 4096) return error.InvalidServiceConfig;
     if (labels.len > 0) {
@@ -402,7 +413,7 @@ fn parseRequiredLabels(alloc: std.mem.Allocator, name: []const u8, table: *const
         while (parts.next()) |part| {
             const pair = std.mem.trim(u8, part, " \t");
             const equals = std.mem.indexOfScalar(u8, pair, '=') orelse {
-                log.err("manifest: {s}.required_labels requires comma-separated key=value pairs", .{name});
+                log.err("manifest: {s}.{s}.required_labels requires comma-separated key=value pairs", .{ kind, name });
                 return error.InvalidServiceConfig;
             };
             if (equals == 0 or equals == pair.len - 1) return error.InvalidServiceConfig;
