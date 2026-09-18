@@ -1401,7 +1401,7 @@ test "tls peer — parses require / warn / off" {
         .{ .raw = "warn", .want = .warn },
         .{ .raw = "off", .want = .off },
     }) |case| {
-        const src = "[service.web]\nimage = \"nginx:latest\"\n[service.web.tls]\nperker_unused = 0\npeer = \"" ++ case.raw ++ "\"\n";
+        const src = "[service.web]\nimage = \"nginx:latest\"\n[service.web.tls]\npeer = \"" ++ case.raw ++ "\"\n";
         var manifest = try loadFromString(alloc, src);
         defer manifest.deinit();
         const tls = manifest.services[0].tls orelse return error.TestExpectedNonNull;

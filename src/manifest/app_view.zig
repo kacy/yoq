@@ -740,7 +740,7 @@ test "app_view status json preserves top-level and nested fields" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"release_id\":\"dep-2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"previous_successful_release\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"current_release\":{\"id\":\"dep-2\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":2,\"workers\":0,\"crons\":0,\"training_jobs\":0}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":2,\"service_instances\":0,\"workers\":0,\"crons\":0,\"training_jobs\":0}") != null);
 }
 
 test "app_view history json preserves release markers" {
@@ -780,7 +780,7 @@ test "app_view history json preserves release markers" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"message\":\"placement failed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"is_current\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"previous_successful\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":0,\"workers\":0,\"crons\":0,\"training_jobs\":0}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"workloads\":{\"services\":0,\"service_instances\":0,\"workers\":0,\"crons\":0,\"training_jobs\":0}") != null);
 }
 
 test "app_view status parser reads rendered json" {
