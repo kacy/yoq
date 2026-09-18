@@ -90,7 +90,7 @@ pub fn priorInstances(alloc: Allocator, app: []const u8, service: []const u8, to
         for (result.items) |id| alloc.free(id);
         result.deinit(alloc);
     }
-    var query = try db.db.prepare("SELECT i.container AS id FROM local_service_instances i JOIN local_service_owners o ON o.app = i.app AND o.service = i.service WHERE o.app = ? AND o.service = ? AND o.token = ? AND i.generation < o.generation UNION SELECT c.id FROM containers c LEFT JOIN local_service_instances i ON i.container = c.id JOIN local_service_owners o ON o.app = c.app_name AND o.service = c.hostname WHERE o.app = ? AND o.service = ? AND o.token = ? AND i.container IS NULL;");
+    var query = try db.db.prepare("SELECT i.container AS id FROM local_service_instances i JOIN local_service_owners o ON o.app = i.app AND o.service = i.service WHERE o.app = ? AND o.service = ? AND o.token = ? AND i.generation < o.generation UNION SELECT c.id FROM containers c LEFT JOIN local_service_instances i ON i.container = c.id JOIN local_service_owners o ON o.app = c.app_name AND o.service = c.hostname WHERE o.app = ? AND o.service = ? AND o.token = ? AND i.container IS NULL AND NOT EXISTS (SELECT 1 FROM local_training_ranks r WHERE r.container_id = c.id);");
     defer query.deinit();
     var rows = try query.iterator(struct { id: sqlite.Text }, .{ app, service, token, app, service, token });
     while (try rows.nextAlloc(alloc, .{})) |row| {
@@ -250,4 +250,24 @@ test "retiring a replica group clears registration left by a dead supervisor" {
     try std.testing.expect(!try instanceExists("gone-record!"));
     try release("app", "web", "down");
     try std.testing.expect(!try isOwner("app", "web", "down"));
+}
+
+test "service legacy cleanup excludes a marked training rank with the same name" {
+    const store = @import("../../state/store.zig");
+    const ranks = @import("../training/rank_ownership.zig");
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    for ([_][]const u8{ "legacy-service", "training-rank" }) |id| {
+        try store.save(.{ .id = id, .rootfs = "/", .command = "true", .hostname = "train-rank-0", .status = "created", .pid = null, .exit_code = null, .app_name = "demo", .created_at = 0 });
+    }
+    try ranks.register("demo", "train", "run", "training-rank", 0);
+    try claim("demo", "train-rank-0", "owner");
+    var previous = try priorInstances(alloc, "demo", "train-rank-0", "owner");
+    defer {
+        for (previous.items) |id| alloc.free(id);
+        previous.deinit(alloc);
+    }
+    try std.testing.expectEqual(@as(usize, 1), previous.items.len);
+    try std.testing.expectEqualStrings("legacy-service", previous.items[0]);
 }

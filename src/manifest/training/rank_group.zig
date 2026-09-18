@@ -21,10 +21,12 @@ pub const Group = struct {
     ranks: []?container.Container,
     job: *const spec.TrainingJob,
     app_name: []const u8,
+    job_id: []const u8,
     resume_path: ?[]const u8,
     master_addr: []const u8 = "0.0.0.0",
 
     pub fn init(controller: anytype) !Group {
+        const job_id = controller.job_id orelse return error.JobMissing;
         const arena = try controller.alloc.create(std.heap.ArenaAllocator);
         errdefer controller.alloc.destroy(arena);
         arena.* = std.heap.ArenaAllocator.init(controller.alloc);
@@ -38,7 +40,7 @@ pub const Group = struct {
         if (volumes.bind_mounts.items.len != controller.job.volumes.len) return error.VolumeFailed;
         const ranks = try alloc.alloc(?container.Container, controller.gpu_count);
         @memset(ranks, null);
-        return .{ .arena = arena, .backing_alloc = controller.alloc, .image = image, .volumes = volumes, .gpus = gpus, .ranks = ranks, .job = controller.job, .app_name = controller.app_name, .resume_path = controller.resume_path };
+        return .{ .arena = arena, .backing_alloc = controller.alloc, .image = image, .volumes = volumes, .gpus = gpus, .ranks = ranks, .job = controller.job, .app_name = controller.app_name, .job_id = job_id, .resume_path = controller.resume_path };
     }
 
     pub fn deinit(self: *Group) void {
@@ -94,6 +96,8 @@ pub const Group = struct {
         };
         const c = &self.ranks[rank].?;
         try store.save(.{ .id = id, .rootfs = self.image.rootfs, .command = resolved.command.command, .hostname = hostname, .status = "created", .pid = null, .exit_code = null, .app_name = self.app_name, .created_at = c.created_at });
+        // persist ownership before starting so every live rank is recoverable.
+        try @import("rank_ownership.zig").register(self.app_name, self.job.name, self.job_id, id, @intCast(rank));
         c.start() catch |err| {
             store.updateStatus(id, "stopped", null, 255) catch {};
             return err;
