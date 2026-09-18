@@ -133,7 +133,7 @@ yoq help                           show command help
 
 local runtime commands need the privileges and state directory used to start the app. the quickstart shows the sudo form. app rollback requires an earlier successful release; `--print` lets you inspect it before applying it. service-level `yoq rollback <service>` prints a saved configuration for manual redeployment.
 
-see the [command reference](docs/commands.md) for image, build, policy, certificate, cluster, and training commands, and the [rollout guide](docs/rollouts.md) for deployment and recovery behavior.
+see the [installation and recovery guide](docs/install-and-recovery.md) for fresh hosts, backups, and upgrades. see the [command reference](docs/commands.md) for image, build, policy, certificate, cluster, and training commands, and the [rollout guide](docs/rollouts.md) for deployment and recovery behavior.
 
 ## examples and documentation
 

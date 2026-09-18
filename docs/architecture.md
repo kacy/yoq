@@ -64,9 +64,9 @@ OCI image management — pull from any registry, content-addressable storage, la
 
 **store:** blobs live at `~/.local/share/yoq/blobs/sha256/<hex>`. writes are atomic (temp file, then rename). same content always maps to the same path, giving automatic deduplication across images.
 
-**registry client:** speaks the OCI distribution protocol over HTTPS. handles bearer token auth, multi-arch manifests (selects the target linux architecture), and both Docker and OCI media types. size limits prevent memory exhaustion (10MB manifests, 512MB blobs).
+**registry client:** speaks the OCI distribution protocol over HTTPS. handles bearer token auth, multi-arch manifests (selects the target linux architecture), and both Docker and OCI media types. manifests are bounded at 10 mb. layers default to a 512 mib limit; `YOQ_MAX_LAYER_BYTES` sets an explicit positive byte limit. see [registry authentication](registry-auth.md).
 
-**layers:** tar.gz extraction with automatic format detection (gzip, bzip2, xz, zstd). layers are cached by digest — shared across images that use the same base.
+**layers:** manifest descriptors select gzip, uncompressed tar, or zstd extraction. unsupported media types fail explicitly. layers are cached by digest — shared across images that use the same base.
 
 key files:
 - `spec.zig` — OCI types (Manifest, ImageConfig, Descriptor)
@@ -178,7 +178,7 @@ multi-node orchestration via Raft consensus and SWIM gossip.
 
 **scheduler:** bin-packing placement as a pure function: given resource requests and agent capacities, it scores agents by free resources (CPU + memory) and assigns containers. draining and offline agents are skipped.
 
-**replicated commands:** API writes, membership changes, and heartbeat batches pass through `Node.proposeLocked` and the same structural guard used during replay. A command is an unmodified SQL batch; no envelope or wire version is added, so existing single statements and batches replay unchanged. Every statement and its applied index commit in one transaction. Invalid structure is rejected before proposal; SQL syntax, schema, and constraint errors during apply roll back the batch and leave the applied index unchanged. Apply stops at that entry and retries on later ticks; it never skips a failed command. Storage errors remain distinct from leadership errors.
+**replicated commands:** admission and replay prepare generated sql against an empty canonical schema. only replicated tables, deterministic functions, and documented query forms are accepted. valid mutations and their applied index commit together. permanently invalid committed commands receive a durable rejection so later entries can apply; storage failures and unexpected live schema differences stop replay. all voters must use the same validation rules. see [upgrade and recovery requirements](cluster-guide.md#upgrading-replicated-command-validation).
 
 This preserves the current command format, not arbitrary schema compatibility. During a rolling upgrade, producers must use SQL understood by every member. New tables, columns, or statement forms require compatible schema rollout before producers emit them. A future typed command format needs explicit version negotiation rather than guessing a version from SQL bytes.
 
@@ -208,7 +208,7 @@ key files:
 
 persistent storage for all yoq state.
 
-**SQLite:** the database at `~/.local/share/yoq/yoq.db` stores containers, images, service names, secrets, network policies, app releases, rollout progress, rollout checkpoints, training runtime state, and deployment history. schema migrations run on startup. in cluster mode, the database is replicated via Raft.
+**SQLite:** `~/.local/share/yoq/yoq.db` holds local runtime and application state. cluster servers keep the raft log and replicated state in separate databases under the cluster directory. certificate readers use the owning replicated database in cluster mode. schema initialization propagates migration failures instead of starting with a partial schema.
 
 **secrets:** encrypted at rest with XChaCha20-Poly1305. can be mounted as files or injected as environment variables. rotation doesn't require container restart.
 
@@ -235,7 +235,7 @@ GPU detection, passthrough, scheduling, and distributed training support.
 
 **InfiniBand/NCCL:** detects InfiniBand HCAs, generates NCCL topology XML for optimal GPU-NIC affinity, and injects NCCL environment variables into training containers.
 
-**health monitoring:** periodic checks of GPU temperature, ECC errors, and utilization via NVML. feeds into the alerting system.
+**health monitoring:** NVML provides gpu temperature, ecc errors, and utilization. service webhook thresholds cover the metrics listed in the [alert guide](alerts.md); gpu measurements are not additional webhook thresholds.
 
 **CLI:** `yoq gpu topo` shows GPU topology (PCIe, NVLink, InfiniBand). `yoq gpu bench` runs GPU-to-GPU bandwidth benchmarks.
 
@@ -259,7 +259,7 @@ distributed training job orchestration.
 
 **checkpoints:** configurable checkpoint interval and retention. the controller persists checkpoint metadata to SQLite for resume-after-failure.
 
-**fault tolerance:** spare ranks can be held in reserve. failed ranks auto-restart up to a configurable limit. the job resumes from the latest checkpoint.
+**fault tolerance:** failed jobs can restart within the configured limit. applications write and restore their checkpoints. spare-rank configuration does not provide automatic spare-rank failover.
 
 ### storage (`src/storage/`)
 

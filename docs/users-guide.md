@@ -59,7 +59,7 @@ yoq speaks the OCI distribution protocol. `yoq pull` downloads images from any c
 
 blobs live at `~/.local/share/yoq/blobs/sha256/<hex>`. writes are atomic (write to temp file, then rename). identical content always maps to the same path, giving automatic deduplication across images that share layers.
 
-size limits prevent memory exhaustion: 10MB for manifests, 512MB for individual blobs.
+manifests have a 10 mb limit. layers default to 512 mib, configurable with the positive byte value `YOQ_MAX_LAYER_BYTES`. layer media types select gzip, raw tar, or zstd extraction. see [registry authentication](registry-auth.md) for private image credentials.
 
 ### build engine
 
@@ -309,7 +309,7 @@ For `GET /apps/<app>/training/<name>/logs`, the control plane now proxies the re
 
 ### rolling upgrades
 
-to upgrade a cluster without downtime:
+for compatible versions, retain quorum while upgrading a cluster. the new replicated-command validation requires all voters to be upgraded together before writes resume; follow the [installation and recovery guide](install-and-recovery.md). for an ordinary compatible rolling upgrade:
 1. drain and upgrade agents (one at a time or in batches)
 2. upgrade non-leader servers one at a time
 3. trigger leader step-down (`POST /cluster/step-down`), then upgrade the old leader
@@ -343,14 +343,14 @@ yoq detects InfiniBand HCAs, generates NCCL topology XML for optimal GPU-NIC aff
 
 ### health monitoring
 
-periodic NVML checks of GPU temperature, ECC errors, and utilization. feeds into the alerting system.
+NVML exposes gpu temperature, ecc errors, and utilization. these are not additional service webhook thresholds.
 
 ### training jobs
 
 training jobs follow a state machine: pending → scheduling → running → paused → completed/failed/stopped.
 
 - **checkpoints:** configurable interval (default 1800s) and retention (default 5)
-- **fault tolerance:** spare ranks, auto-restart (up to 10 by default), resume from latest checkpoint
+- **fault tolerance:** bounded job restarts and checkpoint metadata; applications restore their own checkpoints. automatic spare-rank failover is not implemented.
 - **data:** dataset path, sharding strategy, optional preprocessing pipeline
 - **resources:** CPU, memory, and InfiniBand requirements per rank
 

@@ -1,6 +1,6 @@
 # manifest.toml reference
 
-the manifest file defines applications. it describes services, workers, cron jobs, training jobs, and volumes in a single TOML file.
+the manifest file defines applications. it describes services, workers, cron jobs, training jobs, and volumes in a single TOML file. unknown keys, misplaced tables, and values of the wrong type are errors; validation reports the field path. run `yoq validate -f manifest.toml` before applying changes.
 
 ## quick example
 
@@ -46,6 +46,8 @@ services are long-running processes. defined under `[service.<name>]`.
 |-------|------|----------|---------|-------------|
 | `image` | string | yes | — | OCI image reference (e.g. `nginx:latest`) |
 | `command` | array of strings | no | image default | container entrypoint |
+| `replicas` | integer | no | `1` | desired service instances, from 1 to 64 |
+| `required_labels` | string | no | `""` | comma-separated `key=value` placement requirements |
 | `ports` | array of strings | no | `[]` | port mappings (`"host:container"`) |
 | `env` | array of strings | no | `[]` | environment variables (`KEY=VALUE`) |
 | `depends_on` | array of strings | no | `[]` | services to start first |
@@ -62,6 +64,12 @@ services are long-running processes. defined under `[service.<name>]`.
 | `alerts` | table | no | none | alert threshold configuration |
 
 services participate in app releases. local `yoq up` and remote `yoq up --server` both normalize the manifest into one app snapshot, store that snapshot in release history, and then execute the service portion of the release. services are the workload kind that roll out automatically on apply.
+
+### replicas and placement
+
+local applies start the requested number of service instances. cluster applies place the whole replica group before activating its rollout target; insufficient capacity rejects the group. required labels filter cluster agents. these settings are preserved in app snapshots and rollback releases. status reports both logical services and desired service instances.
+
+published host ports are shared by the service's instances on each host. new tcp connections go to eligible replicas, and existing connections remain pinned by conntrack. health checks run per instance. removing one container releases only its port claims. a cluster replacement's old and new instances must fit within the 64-backend limit; a larger temporary group is rejected before placement.
 
 ### ports
 
