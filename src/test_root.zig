@@ -246,6 +246,7 @@ comptime {
     _ = @import("cluster/commands.zig");
     _ = @import("cluster/data_lock.zig");
     _ = @import("cluster/recovery/bundle_test.zig");
+    _ = @import("cluster/cli/recovery_command.zig");
     _ = @import("tls/commands.zig");
     _ = @import("tls/cert_store/key_support.zig");
     _ = @import("tls/x509_gen.zig");

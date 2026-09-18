@@ -101,3 +101,16 @@ fn invalid() error{InvalidArgument} {
     );
     return error.InvalidArgument;
 }
+
+test "cluster bundle cli requires explicit restore identity and rejects conflicting flags" {
+    const alloc = std.testing.allocator;
+    var missing_identity = std.process.Args.Iterator.init(.{ .vector = &.{ "saved-bundle", "--data-dir", "fresh-root", "--node-id", "1", "--voters", "1,2,3", "--set", "drill" } });
+    try std.testing.expectError(error.InvalidArgument, run("restore", &missing_identity, alloc));
+    var unrelated_flags = std.process.Args.Iterator.init(.{ .vector = &.{ "saved-bundle", "--data-dir", "fresh-root" } });
+    try std.testing.expectError(error.InvalidArgument, run("verify", &unrelated_flags, alloc));
+    try std.testing.expectError(error.InvalidMembership, canonicalVoters(alloc, "1,3,2", 1));
+    try std.testing.expectError(error.InvalidMembership, canonicalVoters(alloc, "1,1,2", 1));
+    const voters = try canonicalVoters(alloc, "1,2,3", 2);
+    defer alloc.free(voters);
+    try std.testing.expectEqualStrings("1,2,3,", voters);
+}
