@@ -14,7 +14,7 @@ fn run(args: []const []const u8) Error!u8 {
     return term.exited;
 }
 
-fn rule(args: []const []const u8, remove: bool) Error!void {
+fn rule(args: []const []const u8, deleting: bool) Error!void {
     var check: [20][]const u8 = undefined;
     @memcpy(check[0..args.len], args);
     for (check[0..args.len]) |*arg| if (std.mem.eql(u8, arg.*, "-A") or std.mem.eql(u8, arg.*, "-I") or std.mem.eql(u8, arg.*, "-D")) {
@@ -23,10 +23,10 @@ fn rule(args: []const []const u8, remove: bool) Error!void {
     };
     const exists = try run(check[0..args.len]);
     if (exists != 0 and exists != 1) return error.RuleFailed;
-    if ((exists == 0) != remove) return;
+    if ((exists == 0) != deleting) return;
     if (try run(args) != 0) {
         const now = try run(check[0..args.len]);
-        if (now != (if (remove) @as(u8, 1) else @as(u8, 0))) return error.RuleFailed;
+        if (now != (if (deleting) @as(u8, 1) else @as(u8, 0))) return error.RuleFailed;
     }
 }
 
@@ -49,11 +49,11 @@ pub fn ensure(bridge_name: []const u8, base: [4]u8) !void {
     try nat.ensureMasquerade(bridge_name, subnet);
 }
 
-fn isolationRules(bridge_name: []const u8, remove: bool) !void {
-    const action: []const u8 = if (remove) "-D" else "-A";
-    try rule(&.{ "iptables", "--wait", "5", action, chain, "-i", bridge_name, "-o", bridge_name, "-j", "RETURN" }, remove);
-    try rule(&.{ "iptables", "--wait", "5", action, chain, "-i", bridge_name, "-o", "yoq+", "-j", "DROP" }, remove);
-    try rule(&.{ "iptables", "--wait", "5", action, chain, "-i", "yoq+", "-o", bridge_name, "-j", "DROP" }, remove);
+fn isolationRules(bridge_name: []const u8, deleting: bool) !void {
+    const action: []const u8 = if (deleting) "-D" else "-A";
+    try rule(&.{ "iptables", "--wait", "5", action, chain, "-i", bridge_name, "-o", bridge_name, "-j", "RETURN" }, deleting);
+    try rule(&.{ "iptables", "--wait", "5", action, chain, "-i", bridge_name, "-o", "yoq+", "-j", "DROP" }, deleting);
+    try rule(&.{ "iptables", "--wait", "5", action, chain, "-i", "yoq+", "-o", bridge_name, "-j", "DROP" }, deleting);
 }
 
 pub fn remove(bridge_name: []const u8, base: [4]u8) !void {
