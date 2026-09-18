@@ -7,7 +7,7 @@ const filesystem = @import("../filesystem.zig");
 const security = @import("../security.zig");
 const init = @import("../init.zig");
 const identity = @import("../identity.zig");
-const exec_helpers = @import("../../lib/exec_helpers.zig");
+const process_config = @import("../process_config.zig");
 const log = @import("../../lib/log.zig");
 const startup = @import("startup_channel.zig");
 const net_setup = @import("../../network/setup.zig");
@@ -83,18 +83,14 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
         if (ctx.user != null) return @intFromEnum(ExitCode.security_failed);
         startup.notify(ctx.startup_fd, .prepared) catch return @intFromEnum(ExitCode.general_error);
         startup.expect(ctx.startup_fd, .execute) catch return @intFromEnum(ExitCode.general_error);
-        linux_platform.posix.chdir(ctx.working_dir) catch {
-            linux_platform.posix.chdir("/") catch {};
-        };
+        linux_platform.posix.chdir(ctx.working_dir) catch return @intFromEnum(ExitCode.filesystem_error);
         return execCommandWrapper(@ptrCast(@constCast(ctx)));
     }
 
     setHostname(ctx.hostname);
     _ = linux.syscall1(.umask, 0o022);
 
-    linux_platform.posix.chdir(ctx.working_dir) catch {
-        linux_platform.posix.chdir("/") catch {};
-    };
+    linux_platform.posix.chdir(ctx.working_dir) catch return @intFromEnum(ExitCode.filesystem_error);
 
     const account = identity.resolve(ctx.user) catch |err| {
         log.err("container identity resolution failed: {}", .{err});
@@ -153,49 +149,7 @@ fn execCommandWrapper(arg: ?*anyopaque) callconv(.c) u8 {
 }
 
 pub fn execCommand(command: []const u8, args: []const []const u8, env: []const []const u8) u8 {
-    const str_buf_size = 65536;
-    const max_entries = 257;
-
-    comptime std.debug.assert(str_buf_size >= 4096);
-    comptime std.debug.assert(max_entries <= 512);
-
-    var str_buf: [str_buf_size]u8 = undefined;
-    var str_pos: usize = 0;
-
-    var argv: [max_entries]?[*:0]const u8 = .{null} ** max_entries;
-    argv[0] = exec_helpers.packString(&str_buf, &str_pos, command) orelse return 127;
-
-    var argv_idx: usize = 1;
-    for (args) |arg| {
-        if (argv_idx >= argv.len - 1) return 126;
-        argv[argv_idx] = exec_helpers.packString(&str_buf, &str_pos, arg) orelse return 127;
-        argv_idx += 1;
-    }
-
-    var envp: [max_entries]?[*:0]const u8 = .{null} ** max_entries;
-    for (env, 0..) |e, i| {
-        if (i >= envp.len - 1) return 126;
-        envp[i] = exec_helpers.packString(&str_buf, &str_pos, e) orelse return 127;
-    }
-
-    if (std.mem.indexOfScalar(u8, command, '/') != null) {
-        _ = linux.execve(argv[0].?, @ptrCast(&argv), @ptrCast(&envp));
-        return 127;
-    }
-    var path: []const u8 = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-    for (env) |entry| {
-        if (std.mem.startsWith(u8, entry, "PATH=")) {
-            path = entry[5..];
-            break;
-        }
-    }
-    var dirs = std.mem.splitScalar(u8, path, ':');
-    var executable: [4096]u8 = undefined;
-    while (dirs.next()) |dir| {
-        const candidate = std.fmt.bufPrintZ(&executable, "{s}/{s}", .{ if (dir.len > 0) dir else ".", command }) catch continue;
-        _ = linux.execve(candidate, @ptrCast(&argv), @ptrCast(&envp));
-    }
-    return 127;
+    return process_config.execCommand(command, args, env);
 }
 
 fn setHostname(name: []const u8) void {

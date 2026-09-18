@@ -4,6 +4,7 @@ const json_out = @import("../../../lib/json_output.zig");
 const store = @import("../../../state/store.zig");
 const logs = @import("../../logs.zig");
 const exec = @import("../../exec.zig");
+const run_state = @import("../../run_state.zig");
 const state_support = @import("state_support.zig");
 const common = @import("common.zig");
 
@@ -108,12 +109,18 @@ pub fn exec_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !voi
         exec_args.append(alloc, arg) catch return ContainerError.OutOfMemory;
     }
 
+    const saved = run_state.loadConfig(alloc, record.id) catch |err| {
+        writeErr("failed to load process configuration for {s}: {}\n", .{ id, err });
+        return ContainerError.StoreError;
+    };
+    defer saved.deinit(alloc);
+
     const exit_code = exec.execInContainer(.{
         .pid = pid,
         .command = command,
         .args = exec_args.items,
-        .env = &.{},
-        .working_dir = "/",
+        .env = saved.env,
+        .working_dir = saved.working_dir,
     }) catch |err| {
         writeErr("failed to exec in container {s}: {}\n", .{ id, err });
         return ContainerError.ProcessNotFound;

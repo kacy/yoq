@@ -16,10 +16,13 @@ const process = @import("process.zig");
 const security = @import("security.zig");
 const syscall_util = @import("../lib/syscall.zig");
 const exec_helpers = @import("../lib/exec_helpers.zig");
+const process_config = @import("process_config.zig");
 
 pub const ExecError = error{
     /// the target container is not in a running state
     ContainerNotRunning,
+    InvalidArguments,
+    RootOpenFailed,
     /// could not open a namespace fd from /proc/<pid>/ns/ (container may be gone)
     NamespaceOpenFailed,
     /// setns syscall failed — could not enter the container's namespace
@@ -49,6 +52,15 @@ pub const ExecConfig = struct {
 /// enter a running container's namespaces and exec a command.
 /// blocks until the command exits. returns the exit code.
 pub fn execInContainer(config: ExecConfig) ExecError!u8 {
+    process_config.validate(config.command, config.args, config.env) catch return ExecError.InvalidArguments;
+
+    // setns changes mounts, but does not change the calling process root.
+    // Keep the target root open before its /proc path becomes inaccessible.
+    var root_path_buf: [64]u8 = undefined;
+    const root_path = std.fmt.bufPrintZ(&root_path_buf, "/proc/{d}/root", .{config.pid}) catch return ExecError.RootOpenFailed;
+    const root_fd = linux_platform.posix.open(root_path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0) catch return ExecError.RootOpenFailed;
+    defer linux_platform.posix.close(root_fd);
+
     // open all namespace fds first, before entering any.
     // this way we fail early if the container is gone, and
     // we don't end up half-entered into namespaces.
@@ -87,10 +99,10 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
             if (fd >= 0) linux_platform.posix.close(fd);
         }
 
-        // chdir to working directory (fall back to / if it doesn't exist)
-        linux_platform.posix.chdir(config.working_dir) catch {
-            linux_platform.posix.chdir("/") catch {};
-        };
+        if (linux.errno(linux.fchdir(root_fd)) != .SUCCESS) linux.exit_group(126);
+        if (linux.errno(linux.chroot(".")) != .SUCCESS) linux.exit_group(126);
+        linux_platform.posix.close(root_fd);
+        linux_platform.posix.chdir(config.working_dir) catch linux.exit_group(126);
 
         // apply seccomp + capability restrictions so exec'd commands
         // are subject to the same security policy as the container
@@ -99,7 +111,7 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
         };
 
         // exec the command — does not return on success
-        const child_exit = execCommand(config.command, config.args, config.env);
+        const child_exit = process_config.execCommand(config.command, config.args, config.env);
         linux.exit_group(child_exit);
     }
 
@@ -113,15 +125,10 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
     }
 
     // wait for the child to finish and relay its exit code
-    const result = process.wait(child_pid, false) catch
+    const result = process.waitForExit(child_pid) catch
         return ExecError.WaitFailed;
 
-    return switch (result.status) {
-        .exited => |code| code,
-        .signaled => 128,
-        .stopped => 128, // stopped processes treated as signaled
-        .running => 0,
-    };
+    return exitCode(result.status);
 }
 
 // -- namespace helpers --
@@ -168,45 +175,12 @@ fn sysFork() ExecError!posix.pid_t {
     return @intCast(rc);
 }
 
-// -- exec helpers --
-//
-// same pattern as container.zig — stack-based argv/envp construction
-// to avoid heap allocation in the child process.
-
-/// build null-terminated argv and envp arrays on the stack and call execve.
-/// returns 127 if exec fails (convention for "command not found").
-fn execCommand(command: []const u8, args: []const []const u8, env: []const []const u8) u8 {
-    var str_buf: [65536]u8 = undefined;
-    var str_pos: usize = 0;
-
-    // argv: command + args + null terminator (max 256 entries)
-    var argv: [257]?[*:0]const u8 = .{null} ** 257;
-    argv[0] = exec_helpers.packString(&str_buf, &str_pos, command) orelse return 127;
-
-    var argv_idx: usize = 1;
-    for (args) |arg| {
-        if (argv_idx >= argv.len - 1) break;
-        argv[argv_idx] = exec_helpers.packString(&str_buf, &str_pos, arg) orelse return 127;
-        argv_idx += 1;
-    }
-
-    // envp: env vars + null terminator (max 256 entries)
-    var envp: [257]?[*:0]const u8 = .{null} ** 257;
-    for (env, 0..) |e, i| {
-        if (i >= envp.len - 1) break;
-        envp[i] = exec_helpers.packString(&str_buf, &str_pos, e) orelse return 127;
-    }
-
-    // replace this process with the command
-    _ = linux.syscall3(
-        .execve,
-        @intFromPtr(argv[0].?),
-        @intFromPtr(&argv),
-        @intFromPtr(&envp),
-    );
-
-    // if we get here, exec failed
-    return 127;
+fn exitCode(status: process.ExitStatus) u8 {
+    return switch (status) {
+        .exited => |code| code,
+        .signaled => |signal| @intCast(128 + signal),
+        .stopped, .running => unreachable, // waitForExit only returns terminal states
+    };
 }
 
 // -- tests --
@@ -264,4 +238,14 @@ test "pack string returns null when buffer full" {
     // try to pack a string that won't fit (7 chars + null = 8, but only 6 bytes left)
     const result = exec_helpers.packString(&buf, &pos, "toolong");
     try std.testing.expect(result == null);
+}
+
+test "exec preserves signal exit status" {
+    try std.testing.expectEqual(@as(u8, 143), exitCode(.{ .signaled = 15 }));
+    try std.testing.expectEqual(@as(u8, 137), exitCode(.{ .signaled = 9 }));
+    try std.testing.expectEqual(@as(u8, 23), exitCode(.{ .exited = 23 }));
+}
+
+test {
+    _ = process_config;
 }
