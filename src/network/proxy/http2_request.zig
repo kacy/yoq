@@ -104,42 +104,46 @@ pub fn rewriteClientConnectionPreface(
         return error.MissingClientPreface;
     }
 
-    var pos: usize = http2.client_preface.len;
-    var header_block: std.ArrayList(u8) = .empty;
-    defer header_block.deinit(alloc);
-
+    var decoder: hpack.Decoder = .{};
+    defer decoder.deinit(alloc);
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
     try out.appendSlice(alloc, http2.client_preface);
-
+    var pos: usize = http2.client_preface.len;
+    var first_headers = true;
     while (pos + http2.frame_header_len <= buf.len) {
-        const frame_start = pos;
-        const frame = http2.parseFrameHeader(buf[pos .. pos + http2.frame_header_len]).?;
-
-        switch (frame.frame_type) {
-            .settings, .window_update, .ping => {
-                pos += http2.frame_header_len;
-                if (pos + frame.length > buf.len) return error.BufferTooShort;
-                pos += frame.length;
-                const frame_end = pos;
-                try out.appendSlice(alloc, buf[frame_start..frame_end]);
-            },
-            .headers => break,
-            else => {
-                return error.InvalidFrameSequence;
-            },
+        const frame = http2.parseFrameHeader(buf[pos..]).?;
+        if (frame.frame_type == .headers) {
+            // buffered requests can include trailers whose indices were added
+            // by the initial headers. translate every block in the same context.
+            var sequence = try decodeHeaderSequence(alloc, &decoder, buf, pos);
+            defer sequence.deinit(alloc);
+            const rewritten = try encodeForwardedHeaders(alloc, sequence.headers.items, frame.flags & Flag.end_stream != 0, .{
+                .outbound_authority = if (first_headers) outbound_authority else null,
+                .outbound_path = if (first_headers) outbound_path else null,
+                .forwarded_proto = if (first_headers) forwarded_proto else null,
+                .stream_id = frame.stream_id,
+            });
+            defer alloc.free(rewritten);
+            var fragments: @import("http2_flow.zig").Queue = .{};
+            defer fragments.deinit(alloc);
+            fragments.appendHeaders(alloc, rewritten) catch |err| switch (err) {
+                error.QueueFull => return error.InvalidFrameSequence,
+                else => return err,
+            };
+            try out.appendSlice(alloc, fragments.bytes.items);
+            pos += sequence.consumed;
+            first_headers = false;
+        } else {
+            if (first_headers and frame.frame_type != .settings and frame.frame_type != .window_update and frame.frame_type != .ping) return error.InvalidFrameSequence;
+            const length = http2.frame_header_len + frame.length;
+            if (length > buf.len - pos) return error.BufferTooShort;
+            try out.appendSlice(alloc, buf[pos..][0..length]);
+            pos += length;
         }
     }
-
-    const rewritten = try rewriteRequestHeaderSequence(alloc, buf, pos, .{
-        .outbound_authority = outbound_authority,
-        .outbound_path = outbound_path,
-        .forwarded_proto = forwarded_proto,
-    });
-    defer rewritten.deinit(alloc);
-
-    try out.appendSlice(alloc, rewritten.bytes);
-    try out.appendSlice(alloc, buf[pos + rewritten.consumed ..]);
+    if (first_headers) return error.MissingHeaders;
+    try out.appendSlice(alloc, buf[pos..]);
     return out.toOwnedSlice(alloc);
 }
 
@@ -866,4 +870,36 @@ test "http2 compression incomplete continuation leaves decoder unchanged" {
     defer alloc.free(partial);
     try std.testing.expectError(error.BufferTooShort, decodeHeaderSequence(alloc, &decoder, partial, 0));
     try std.testing.expectError(error.InvalidIndex, decoder.decode(alloc, &.{0xbe}));
+}
+
+test "http2 compression buffered rewrite retains indexed request trailers" {
+    const alloc = std.testing.allocator;
+    const block = [_]u8{ 0x82, 0x86, 0x84, 0x41, 3, 'a', 'p', 'i', 0x40, 1, 'x', 1, 'a' };
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(alloc);
+    try input.appendSlice(alloc, http2.client_preface);
+    const head = try http2.buildFrame(alloc, .{ .length = block.len, .frame_type = .headers, .flags = 4, .stream_id = 1 }, &block);
+    defer alloc.free(head);
+    const data = try http2.buildFrame(alloc, .{ .length = 4, .frame_type = .data, .flags = 0, .stream_id = 1 }, "body");
+    defer alloc.free(data);
+    const trailer = try http2.buildFrame(alloc, .{ .length = 1, .frame_type = .headers, .flags = 5, .stream_id = 1 }, &.{0xbe});
+    defer alloc.free(trailer);
+    try input.appendSlice(alloc, head);
+    try input.appendSlice(alloc, data);
+    try input.appendSlice(alloc, trailer);
+    const rewritten = try rewriteClientConnectionPreface(alloc, input.items, "backend", null, null);
+    defer alloc.free(rewritten);
+    var decoder: hpack.Decoder = .{};
+    defer decoder.deinit(alloc);
+    const parsed = try parseRequestHeaderSequenceWithDecoder(alloc, &decoder, rewritten, http2.client_preface.len);
+    defer parsed.deinit(alloc);
+    try std.testing.expectEqualStrings("backend", parsed.request.authority);
+    const body_offset = http2.client_preface.len + parsed.consumed;
+    try std.testing.expectEqualSlices(u8, data, rewritten[body_offset..][0..data.len]);
+    var trailers = try decodeHeaderSequence(alloc, &decoder, rewritten, body_offset + data.len);
+    defer trailers.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), trailers.headers.items.len);
+    try std.testing.expectEqualStrings("x", trailers.headers.items[0].name);
+    try std.testing.expectEqualStrings("a", trailers.headers.items[0].value);
+    try std.testing.expectEqual(@as(u8, 5), trailers.frame.flags);
 }
