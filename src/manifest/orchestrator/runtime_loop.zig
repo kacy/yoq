@@ -17,6 +17,8 @@ const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const instances = @import("instances.zig");
 
+const published_ports = @import("../../network/published_ports.zig");
+
 const writeErr = cli.writeErr;
 
 const initial_backoff_ms: u64 = service_runtime.initial_backoff_ms;
@@ -31,7 +33,6 @@ const PreparedService = struct {
     merged_env: std.ArrayList([]const u8),
     working_dir: []const u8,
     vols: service_runtime.ServiceVolumes,
-    port_maps: std.ArrayList(net_setup.PortMap),
     net_config: ?net_setup.NetworkConfig,
     gpu_indices_buf: [8]u32,
     gpu_indices_len: usize,
@@ -61,18 +62,6 @@ const PreparedService = struct {
         };
         errdefer vols.deinit(alloc);
 
-        var port_maps: std.ArrayList(net_setup.PortMap) = .empty;
-        errdefer port_maps.deinit(alloc);
-        for (svc.ports) |pm| {
-            port_maps.append(alloc, .{
-                .host_port = pm.host_port,
-                .container_port = pm.container_port,
-                .protocol = .tcp,
-            }) catch |err| {
-                log.warn("failed to add port map: {}", .{err});
-            };
-        }
-
         var gpu_indices_buf: [8]u32 = undefined;
         var gpu_indices_len: usize = 0;
         if (svc.gpu) |gpu_spec| {
@@ -98,10 +87,7 @@ const PreparedService = struct {
         }
 
         const has_health_check = svc.health_check != null;
-        const net_config: ?net_setup.NetworkConfig = if (port_maps.items.len > 0)
-            .{ .port_maps = port_maps.items, .skip_dns = has_health_check }
-        else
-            .{ .skip_dns = has_health_check };
+        const net_config: ?net_setup.NetworkConfig = .{ .skip_dns = has_health_check };
 
         return .{
             .alloc = alloc,
@@ -110,7 +96,6 @@ const PreparedService = struct {
             .merged_env = merged_env,
             .working_dir = working_dir,
             .vols = vols,
-            .port_maps = port_maps,
             .net_config = net_config,
             .gpu_indices_buf = gpu_indices_buf,
             .gpu_indices_len = gpu_indices_len,
@@ -120,7 +105,6 @@ const PreparedService = struct {
 
     fn deinit(self: *PreparedService) void {
         if (self.mesh_support) |*support| support.deinit();
-        self.port_maps.deinit(self.alloc);
         self.vols.deinit(self.alloc);
         self.merged_env.deinit(self.alloc);
         self.resolved.args.deinit(self.alloc);
@@ -201,7 +185,6 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             return;
         };
 
-        orch.states[idx].setStatus(.running);
         startup_runtime.refreshServiceRuntimeBindings(
             orch.alloc,
             svc,
@@ -209,8 +192,25 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             if (orch.tls_resources) |resources| resources.backend_registry else null,
         );
 
+        published_ports.publishInstance(orch.alloc, orch.app_name, svc.name, id, svc.ports) catch |err| {
+            log.err("failed to publish ports for {s}: {}", .{ svc.name, err });
+            c.forceStop() catch {};
+            _ = c.wait() catch 255;
+            @import("../health.zig").unregisterContainer(id);
+            if (svc.ports.len > 0) published_ports.removeInstance(orch.alloc, id) catch |cleanup_err| {
+                log.warn("failed to release published ports for {s}: {}", .{ svc.name, cleanup_err });
+            };
+            cleanupContainerArtifacts(id);
+            orch.states[idx].setStatus(.failed);
+            return;
+        };
+        orch.states[idx].setStatus(.running);
+
         const exit_code = c.wait() catch 255;
         @import("../health.zig").unregisterContainer(id);
+        if (svc.ports.len > 0) published_ports.removeInstance(orch.alloc, id) catch |err| {
+            log.warn("failed to release published ports for {s}: {}", .{ svc.name, err });
+        };
         const run_duration_ns = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds() - start_time;
         cleanupContainerArtifacts(id);
 
@@ -227,6 +227,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             run_duration_ns,
             &backoff_ms,
             shutdown_requested,
+            &orch.states[idx].stop_requested,
         )) break;
     }
 
@@ -298,6 +299,7 @@ fn handleRestartPolicyExit(
     run_duration_ns: i128,
     backoff_ms: *u64,
     shutdown_requested: *const std.atomic.Value(bool),
+    stop_requested: *const std.atomic.Value(bool),
 ) bool {
     const should_restart = switch (svc.restart) {
         .none => false,
@@ -318,14 +320,14 @@ fn handleRestartPolicyExit(
 
     var slept_ms: u64 = 0;
     while (slept_ms < backoff_ms.*) {
-        if (shutdown_requested.load(.acquire)) return false;
+        if (shutdown_requested.load(.acquire) or stop_requested.load(.acquire)) return false;
         const remaining = backoff_ms.* - slept_ms;
         const sleep_chunk: u64 = @min(remaining, restart_poll_ms);
         if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(@intCast(sleep_chunk)), "restart backoff wait")) return false;
         slept_ms += sleep_chunk;
     }
 
-    if (shutdown_requested.load(.acquire)) return false;
+    if (shutdown_requested.load(.acquire) or stop_requested.load(.acquire)) return false;
     backoff_ms.* = @min(backoff_ms.* * 2, max_backoff_ms);
     return true;
 }
