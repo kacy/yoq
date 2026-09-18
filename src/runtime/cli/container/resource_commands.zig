@@ -38,7 +38,7 @@ pub fn top(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     var first = true;
     for (pids) |pid| {
         const row = readProcess(ctx.io, ctx.alloc, pid) catch |err| switch (err) {
-            error.FileNotFound, error.ProcessNotFound => continue,
+            error.FileNotFound => continue,
             else => return err,
         };
         defer ctx.alloc.free(row.command);

@@ -8,6 +8,7 @@ pub const cleanupNetwork = lifecycle.cleanupNetwork;
 
 pub fn stop(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const ref = cli.requireArg(args, "usage: yoq stop <container-id|name>\n");
+    if (args.next() != null) return error.InvalidArgument;
     const record = try state_support.resolveContainerRef(alloc, ref);
     defer record.deinit(alloc);
     try lifecycle.stop(record.id, alloc);
@@ -21,12 +22,16 @@ pub fn rm(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     if (args.next() != null) return error.InvalidArgument;
     const record = try state_support.resolveContainerRef(alloc, ref);
     defer record.deinit(alloc);
-    try lifecycle.removeWithVolumes(record.id, alloc, remove_volumes);
+    lifecycle.removeWithVolumes(record.id, alloc, remove_volumes) catch |err| {
+        if (err == error.ContainerRunning) cli.writeErr("cannot remove running container {s}; stop it first\n", .{ref});
+        return err;
+    };
     cli.write("{s}\n", .{record.id});
 }
 
 pub fn restart(io: std.Io, args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     const ref = cli.requireArg(args, "usage: yoq restart <container-id|name>\n");
+    if (args.next() != null) return error.InvalidArgument;
     const record = try state_support.resolveContainerRef(alloc, ref);
     defer record.deinit(alloc);
     try lifecycle.restart(io, alloc, record.id);

@@ -82,6 +82,8 @@ pub fn containerCommand(args: *std.process.Args.Iterator, ctx: AppContext) !void
     const name = cli.requireArg(args, "usage: yoq container <create|run|start|stop|restart|rm|wait|kill|inspect|exec|logs|ls>\n");
     const commands = @import("../../container_commands.zig");
     const resources = @import("resource_commands.zig");
+    if (std.mem.eql(u8, name, "cp")) return @import("filesystem_commands.zig").cp(args, ctx);
+    if (std.mem.eql(u8, name, "diff")) return @import("filesystem_commands.zig").diff(args, ctx);
     if (std.mem.eql(u8, name, "rename")) return @import("list_commands.zig").rename(args, ctx);
     if (std.mem.eql(u8, name, "top")) return resources.top(args, ctx);
     if (std.mem.eql(u8, name, "stats")) return resources.stats(args, ctx);

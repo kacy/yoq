@@ -42,6 +42,9 @@ pub const CommandSpec = struct {
 };
 
 pub const command_specs = [_]CommandSpec{
+    .{ .name = "cp", .group = .runtime, .usage = "cp <source> <destination>", .description = "copy files to or from a container", .handler = @import("../runtime/cli/container/filesystem_commands.zig").cp },
+    .{ .name = "diff", .group = .runtime, .usage = "diff <id|name>", .description = "list changes in a container writable layer", .handler = @import("../runtime/cli/container/filesystem_commands.zig").diff },
+    .{ .name = "__container-filesystem", .group = .runtime, .usage = "__container-filesystem", .description = "internal filesystem helper", .handler = @import("../runtime/cli/container/filesystem_commands.zig").helper, .hidden = true },
     .{ .name = "rename", .group = .runtime, .usage = "rename <id|name> <new-name>", .description = "change a container name", .handler = @import("../runtime/cli/container/list_commands.zig").rename },
     .{ .name = "top", .group = .runtime, .usage = "top [opts] <id|name>", .description = "show container processes", .handler = container_resources.top },
     .{ .name = "stats", .group = .runtime, .usage = "stats [opts] <id|name>", .description = "show container resource usage", .handler = container_resources.stats },
