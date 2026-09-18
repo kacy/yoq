@@ -121,12 +121,14 @@ pub fn processVolume(alloc: std.mem.Allocator, state: *types.BuildState, args: [
     if (trimmed.len == 0) return;
 
     if (std.mem.startsWith(u8, trimmed, "[")) {
-        const inner = std.mem.trim(u8, trimmed, "[]");
-        var iter = std.mem.splitScalar(u8, inner, ',');
-        while (iter.next()) |entry| {
-            const path = std.mem.trim(u8, entry, " \t\"");
-            if (path.len == 0) continue;
-            const owned = alloc.dupe(u8, path) catch return types.BuildError.OutOfMemory;
+        var parsed = std.json.parseFromSlice([]const []const u8, alloc, trimmed, .{}) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.MetadataFailed,
+        };
+        defer parsed.deinit();
+        for (parsed.value) |path| {
+            if (path.len == 0) return error.MetadataFailed;
+            const owned = try alloc.dupe(u8, path);
             errdefer alloc.free(owned);
             try state.volumes.append(alloc, owned);
         }

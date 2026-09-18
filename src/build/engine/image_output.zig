@@ -28,6 +28,8 @@ pub fn produceImage(alloc: std.mem.Allocator, state: *types.BuildState, tag: ?[]
     const owned_digest = alloc.dupe(u8, manifest_digest_str) catch
         return types.BuildError.ImageStoreFailed;
 
+    errdefer alloc.free(owned_digest);
+
     const ref = image_spec.parseImageRef(tag orelse "build:latest");
 
     var config_digest_str_buf: [71]u8 = undefined;
@@ -44,6 +46,7 @@ pub fn produceImage(alloc: std.mem.Allocator, state: *types.BuildState, tag: ?[]
         .created_at = nowRealSeconds(),
     }) catch |err| {
         log.warn("failed to save built image record: {}", .{err});
+        return error.ImageStoreFailed;
     };
 
     return types.BuildResult{
