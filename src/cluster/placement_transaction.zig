@@ -248,7 +248,7 @@ fn serviceSurgeFits(lease: Lease, request: scheduler.PlacementRequest, replicas:
     node.mu.lockUncancelable(std.Options.debug_io);
     defer node.mu.unlock(std.Options.debug_io);
     try lease.session.checkLocked();
-    const row = node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignments WHERE app_name = ? AND workload_kind = 'service' AND workload_name = ?;", .{}, .{ app_name, workload_name }) catch return error.InternalError;
+    const row = node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignments WHERE app_name = ? AND workload_kind = 'service' AND workload_name = ? AND status IN ('pending', 'running');", .{}, .{ app_name, workload_name }) catch return error.InternalError;
     const prior: u64 = @intCast(@max(0, row.?.count));
     const desired = @as(u64, replicas) * @max(@as(u64, 1), request.gang_world_size);
     return prior +| desired <= @import("../manifest/spec.zig").max_service_replicas;
@@ -709,6 +709,11 @@ test "replica surge limit preserves the prior group and permits resume" {
     const resumed = (try placeReplicas(alloc, session, request, "prior", 33)).?;
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 33), resumed.assignment_ids.len);
+    _ = try node.proposeCommitted("UPDATE assignments SET status = 'stopped';", 0);
+    try std.testing.expect(try replicaSurgeFits(session, request, 32));
+    const replacement = (try placeReplicas(alloc, session, request, "replacement", 32)).?;
+    defer replacement.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 32), replacement.assignment_ids.len);
 }
 
 test "cluster placement reserves service names across apps" {
