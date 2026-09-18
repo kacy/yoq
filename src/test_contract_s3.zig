@@ -99,8 +99,9 @@ test "contract: s3 object lifecycle preserves bytes and metadata" {
     const head = try routeRequest(.HEAD, "/s3/object-bucket/nested/blob.bin", "");
     defer freeResponse(head);
     try std.testing.expectEqual(http.StatusCode.ok, head.status);
-    try std.testing.expect(std.mem.indexOf(u8, head.body, "\"content_length\":11") != null);
-    try std.testing.expect(std.mem.indexOf(u8, head.body, "\"etag\":\"") != null);
+    try std.testing.expectEqualStrings("", head.body);
+    try std.testing.expectEqual(@as(?usize, object_body.len), head.content_length);
+    try std.testing.expectEqual(put.etag.?, head.etag.?);
 
     const delete = try routeRequest(.DELETE, "/s3/object-bucket/nested/blob.bin", "");
     defer freeResponse(delete);
@@ -194,7 +195,13 @@ test "contract: s3 multipart completion assembles the final object" {
 
     var complete_path_buf: [128]u8 = undefined;
     const complete_path = try std.fmt.bufPrint(&complete_path_buf, "/s3/multipart-bucket/video.bin?uploadId={s}", .{upload_id});
-    const complete = try routeRequest(.POST, complete_path, "");
+    var completion_buf: [512]u8 = undefined;
+    const completion = try std.fmt.bufPrint(
+        &completion_buf,
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{s}\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"{s}\"</ETag></Part></CompleteMultipartUpload>",
+        .{ part1.etag.?, part2.etag.? },
+    );
+    const complete = try routeRequest(.POST, complete_path, completion);
     defer freeResponse(complete);
     try std.testing.expectEqual(http.StatusCode.ok, complete.status);
     try std.testing.expectEqualStrings("application/xml", complete.content_type.?);
