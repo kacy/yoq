@@ -69,10 +69,11 @@ pub const Body = struct {
 
     fn chunkSize(self: *Body, line: []const u8) !void {
         const end = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
-        if (end == 0) return error.MalformedRequestBody;
-        for (line[0..end]) |byte| if (!std.ascii.isHex(byte)) return error.MalformedRequestBody;
-        for (line[end..]) |byte| if (byte < 0x20 or byte == 0x7f) return error.MalformedRequestBody;
-        const size = std.fmt.parseInt(usize, line[0..end], 16) catch return error.MalformedRequestBody;
+        const digits = std.mem.trimEnd(u8, line[0..end], " \t");
+        if (digits.len == 0) return error.MalformedRequestBody;
+        for (digits) |byte| if (!std.ascii.isHex(byte)) return error.MalformedRequestBody;
+        try validateExtensions(line[end..]);
+        const size = std.fmt.parseInt(usize, digits, 16) catch return error.MalformedRequestBody;
         if (size > self.limit - self.decoded) return error.BodyTooLarge;
         self.decoded += size;
         self.remaining = size;
@@ -92,6 +93,46 @@ pub const Body = struct {
             if (std.ascii.eqlIgnoreCase(line[0..colon], name)) return error.MalformedRequestBody;
     }
 };
+
+fn validateExtensions(bytes: []const u8) !void {
+    var position: usize = 0;
+    while (position < bytes.len) {
+        if (bytes[position] != ';') return error.MalformedRequestBody;
+        position += 1;
+        skipWhitespace(bytes, &position);
+        const name_start = position;
+        while (position < bytes.len and http.isHeaderNameByte(bytes[position])) position += 1;
+        if (position == name_start) return error.MalformedRequestBody;
+        skipWhitespace(bytes, &position);
+        if (position < bytes.len and bytes[position] == '=') {
+            position += 1;
+            skipWhitespace(bytes, &position);
+            if (position < bytes.len and bytes[position] == '"') {
+                position += 1;
+                while (position < bytes.len and bytes[position] != '"') {
+                    if (bytes[position] == '\\') {
+                        position += 1;
+                        if (position == bytes.len) return error.MalformedRequestBody;
+                    }
+                    const byte = bytes[position];
+                    if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return error.MalformedRequestBody;
+                    position += 1;
+                }
+                if (position == bytes.len) return error.MalformedRequestBody;
+                position += 1;
+            } else {
+                const value_start = position;
+                while (position < bytes.len and http.isHeaderNameByte(bytes[position])) position += 1;
+                if (position == value_start) return error.MalformedRequestBody;
+            }
+            skipWhitespace(bytes, &position);
+        }
+    }
+}
+
+fn skipWhitespace(bytes: []const u8, position: *usize) void {
+    while (position.* < bytes.len and (bytes[position.*] == ' ' or bytes[position.*] == '\t')) position.* += 1;
+}
 
 pub fn hasBody(request: http.Request) bool {
     return request.chunked or request.content_length != 0;
@@ -194,7 +235,7 @@ test "http1 upload validates fragmented chunk framing and leaves the next reques
 }
 
 test "http1 upload rejects ambiguous framing malformed chunks and oversized decoded bodies" {
-    for ([_][]const u8{ "-1\r\n", "+1\r\n", "g\r\n", "1\nx", "1\r\nx!", "0\r\nContent-Length: 1\r\n\r\n", "0\r\n folded: value\r\n\r\n" }) |bytes| {
+    for ([_][]const u8{ "-1\r\n", "+1\r\n", "g\r\n", "1\nx", "1\r\nx!", "1;=bad\r\n", "1;name=\"unterminated\r\n", "0\r\nContent-Length: 1\r\n\r\n", "0\r\n folded: value\r\n\r\n" }) |bytes| {
         var body: Body = .{ .state = .size_line };
         try std.testing.expectError(error.MalformedRequestBody, body.consume(bytes));
     }
