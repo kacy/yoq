@@ -215,7 +215,7 @@ pub const ClusterApplyBackend = struct {
     ) ClusterApplyError!void {
         if (rollout_progress.isTerminalState(rollout_targets.stateFor(workloadForRequest(req.request)))) return;
         scheduled_targets.ensureUnusedCapacity(self.alloc, 1) catch return error.InternalError;
-        const placement = try placement_transaction.place(self.alloc, self.session, req.request, if (self.progress) |progress| progress.release_id else null);
+        const placement = try placement_transaction.placeReplicas(self.alloc, self.session, req.request, if (self.progress) |progress| progress.release_id else null, req.replicas);
         if (placement) |reserved| {
             scheduled_targets.appendAssumeCapacity(.{
                 .request = req.request,
@@ -225,7 +225,7 @@ pub const ClusterApplyBackend = struct {
             rollout_targets.set(workloadForRequest(req.request), "starting", null);
             return;
         }
-        counters.failed += @max(@as(usize, 1), req.request.gang_world_size);
+        counters.failed += @as(usize, req.replicas) * @max(@as(usize, 1), req.request.gang_world_size);
         counters.failed_targets += 1;
         failure_details.append(workloadForRequest(req.request), "placement_failed") catch return error.InternalError;
         rollout_targets.set(workloadForRequest(req.request), "failed", "placement_failed");
