@@ -3187,7 +3187,7 @@ test "snapshot metadata write failure preserves cached and applied progress" {
     try testing.expectEqual(@as(LogIndex, 8), raft.last_applied);
 }
 
-test "replication budget carries a full command and splits follower catchup" {
+test "cluster reliability: replication budget carries a full command and splits follower catchup" {
     const codec = @import("transport/codec_support.zig");
     const limits = @import("replication_limits.zig");
     const alloc = std.testing.allocator;

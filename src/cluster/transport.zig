@@ -830,7 +830,7 @@ test "udp gossip: wrong key rejected" {
     try waitForGossipError(&receiver, &buf);
 }
 
-test "replication budget sends append entries beyond the stack buffer" {
+test "cluster reliability: replication budget sends append entries beyond the stack buffer" {
     const alloc = std.testing.allocator;
     var transport = try Transport.init(alloc, 0);
     defer transport.deinit();

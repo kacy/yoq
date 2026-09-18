@@ -81,11 +81,12 @@ pub const HeartbeatBatcher = struct {
             count += 1;
         }
         const sql = try result.toOwnedSlice(alloc);
-        // remove from the end to preserve the order of the remaining agents.
+        // remove only the consumed entries. swapping avoids repeatedly moving
+        // the unconsumed tail when a large burst spans several batches.
         var index = count;
         while (index > 0) {
             index -= 1;
-            self.buffer.orderedRemoveAt(index);
+            self.buffer.swapRemoveAt(index);
         }
         return sql;
     }
@@ -93,7 +94,7 @@ pub const HeartbeatBatcher = struct {
 
 // -- tests --
 
-test "record and flush single entry" {
+test "cluster reliability: record and flush single entry" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -114,7 +115,7 @@ test "record and flush single entry" {
     try std.testing.expect(std.mem.indexOf(u8, sql.?, "UPDATE agents") != null);
 }
 
-test "flush returns null when empty" {
+test "cluster reliability: flush returns null when empty" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -123,7 +124,7 @@ test "flush returns null when empty" {
     try std.testing.expect(sql == null);
 }
 
-test "record replaces an agent heartbeat even with an older timestamp" {
+test "cluster reliability: record replaces an agent heartbeat even with an older timestamp" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -164,7 +165,7 @@ test "record replaces an agent heartbeat even with an older timestamp" {
     try std.testing.expectEqual(@as(usize, 1), count);
 }
 
-test "batches multiple agents" {
+test "cluster reliability: batches multiple agents" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -202,7 +203,7 @@ test "batches multiple agents" {
     try std.testing.expectEqual(@as(usize, 2), count);
 }
 
-test "flush clears buffer" {
+test "cluster reliability: flush clears buffer" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -220,7 +221,7 @@ test "flush clears buffer" {
     try std.testing.expect(sql2 == null);
 }
 
-test "ignores invalid id length" {
+test "cluster reliability: ignores invalid id length" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -234,7 +235,7 @@ test "ignores invalid id length" {
     try std.testing.expect(sql == null);
 }
 
-test "flush preserves heartbeats when the snapshot allocation fails" {
+test "cluster reliability: flush preserves heartbeats when sql allocation fails" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
@@ -249,7 +250,7 @@ test "flush preserves heartbeats when the snapshot allocation fails" {
     try std.testing.expect((try batcher.flush(alloc)) == null);
 }
 
-test "heartbeat batches preserve complete statements across the size limit" {
+test "cluster reliability: heartbeat batches preserve complete statements across the size limit" {
     const alloc = std.testing.allocator;
     var batcher = HeartbeatBatcher.init(alloc);
     defer batcher.deinit();
