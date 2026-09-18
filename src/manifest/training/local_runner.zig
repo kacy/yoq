@@ -1,131 +1,162 @@
 const std = @import("std");
-
 const orchestrator = @import("../orchestrator.zig");
-const gpu_runtime = @import("../gpu_runtime.zig");
-const checkpoint_mgr = @import("../checkpoint.zig");
 const store = @import("../../state/store.zig");
-const cli = @import("../../lib/cli.zig");
 const state_support = @import("state_support.zig");
-
-const writeErr = cli.writeErr;
+const rank_group = @import("rank_group.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 pub fn startLocal(self: anytype) !void {
-    const new_job = self.job_id == null;
-    if (new_job) state_support.generateJobId(self) catch {};
-    if (new_job) state_support.createPersistentRecord(self);
+    startOwned(self) catch |err| {
+        if (err != error.TrainingCanceled) return err;
+    };
+}
 
+fn startOwned(self: anytype) !void {
+    var lock = try state_support.acquireOwner(self);
+    defer lock.release();
+    if (self.job_id == null) {
+        try state_support.generateJobId(self);
+        try state_support.createPersistentRecord(self);
+    }
+    // clear ranks left behind by a prior owner before reusing their names.
+    try state_support.stopRunningRanks(self);
+    orchestrator.shutdown_requested.store(false, .release);
+    orchestrator.installSignalHandlers();
+    errdefer {
+        if (!(state_support.refreshControl(self) catch false)) {
+            self.state = .failed;
+            state_support.persistRunnerState(self) catch {};
+        }
+    }
     while (true) {
         self.state = .scheduling;
-        state_support.persistState(self);
-
-        writeErr("pulling {s}...\n", .{self.job.image});
-        if (!orchestrator.ensureImageAvailable(self.alloc, self.job.image)) {
-            self.state = .failed;
-            state_support.persistState(self);
-            return error.ImagePullFailed;
-        }
-
-        self.state = .running;
-        state_support.persistState(self);
-
-        var mesh_support = gpu_runtime.MeshSupport.init(self.alloc);
-        defer mesh_support.deinit();
-
-        var failed_ranks: u32 = 0;
-
-        for (0..self.job.gpus) |rank| {
-            const success = runRank(self, &mesh_support, rank);
-            if (success) {
-                self.rank_status[rank] = .stopped;
-            } else {
-                self.rank_status[rank] = .failed;
-                failed_ranks += 1;
-            }
-        }
-
+        try state_support.persistRunnerState(self);
+        if (!orchestrator.ensureImageAvailable(self.alloc, self.job.image)) return error.ImagePullFailed;
+        var group = try rank_group.Group.init(self);
+        defer group.deinit();
+        const succeeded = try runRanks(self, &group);
         state_support.syncCheckpoints(self);
-
-        if (failed_ranks > 0) {
-            if (shouldAutoRestart(self, failed_ranks)) continue;
-
-            self.state = .failed;
-            state_support.persistState(self);
-            writeErr("{d}/{d} ranks failed\n", .{ failed_ranks, self.job.gpus });
+        if (self.state == .paused or self.state == .stopped) return;
+        if (succeeded) {
+            self.state = .completed;
+            try state_support.persistRunnerState(self);
             return;
         }
-
-        self.state = .completed;
-        state_support.persistState(self);
-        return;
+        if (!self.job.fault_tolerance.auto_restart or self.restart_count >= self.job.fault_tolerance.max_restarts) {
+            self.state = .failed;
+            try state_support.persistRunnerState(self);
+            return error.RankFailed;
+        }
+        self.restart_count += 1;
+        try store.incrementTrainingJobRestarts(self.job_id.?, std.Io.Clock.real.now(std.Options.debug_io).toSeconds());
+        state_support.loadResumeCheckpoint(self);
+        @memset(self.rank_status, .pending);
     }
 }
 
-fn runRank(self: anytype, mesh_support: *gpu_runtime.MeshSupport, rank: usize) bool {
-    self.rank_status[rank] = .running;
-
-    var rank_env: std.ArrayListUnmanaged([]const u8) = .empty;
+// starting a rank never waits for it. a failed rank or a control request stops
+// the whole group before resources are released or another attempt begins.
+pub fn runRanks(self: anytype, group: anytype) !bool {
     defer {
-        for (rank_env.items) |e| self.alloc.free(e);
-        rank_env.deinit(self.alloc);
-    }
-
-    for (self.job.env) |e| {
-        const duped = self.alloc.dupe(u8, e) catch continue;
-        rank_env.append(self.alloc, duped) catch {
-            self.alloc.free(duped);
-            continue;
+        group.stopAll();
+        for (self.rank_status) |*status| if (status.* == .running) {
+            status.* = .stopped;
         };
     }
-
-    mesh_support.appendEnv(
-        self.alloc,
-        &rank_env,
-        "127.0.0.1",
-        29500,
-        self.job.gpus,
-        @intCast(rank),
-        @intCast(rank),
-    );
-
-    if (self.job.checkpoint) |ckpt| {
-        checkpoint_mgr.buildCheckpointEnv(self.alloc, &rank_env, ckpt, self.resume_path) catch {};
+    for (self.rank_status, 0..) |*status, rank| {
+        if (try cancelled(self)) return false;
+        try group.start(rank);
+        status.* = .running;
     }
-
-    var hostname_buf: [128]u8 = undefined;
-    const hostname = std.fmt.bufPrint(&hostname_buf, "{s}-rank-{d}", .{ self.job.name, rank }) catch self.job.name;
-
-    writeErr("  starting rank {d}/{d}...\n", .{ rank, self.job.gpus });
-
-    return orchestrator.runOneShot(
-        self.alloc,
-        self.job.image,
-        self.job.command,
-        rank_env.items,
-        self.job.volumes,
-        self.job.working_dir,
-        hostname,
-        &.{},
-        self.app_name,
-    );
+    self.state = .running;
+    try state_support.persistRunnerState(self);
+    while (true) {
+        if (try cancelled(self)) return false;
+        var running: usize = 0;
+        for (self.rank_status, 0..) |*status, rank| {
+            if (status.* != .running) continue;
+            if (try group.poll(rank)) |code| {
+                status.* = if (code == 0) .stopped else .failed;
+                if (code != 0) return false;
+            } else running += 1;
+        }
+        if (running == 0) return true;
+        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "training rank wait")) {
+            if (try cancelled(self)) return false;
+            return error.SleepInterrupted;
+        }
+    }
 }
 
-fn shouldAutoRestart(self: anytype, failed_ranks: u32) bool {
-    if (!self.job.fault_tolerance.auto_restart) return false;
-    if (self.restart_count >= self.job.fault_tolerance.max_restarts) return false;
-
-    self.restart_count += 1;
-    if (self.job_id) |jid| {
-        store.incrementTrainingJobRestarts(jid, std.Io.Clock.real.now(std.Options.debug_io).toSeconds()) catch {};
+fn cancelled(self: anytype) !bool {
+    if (orchestrator.shutdown_requested.load(.acquire)) {
+        self.state = .stopped;
+        try state_support.persistState(self);
+        return true;
     }
-    writeErr("{d}/{d} ranks failed, restarting (attempt {d}/{d})...\n", .{
-        failed_ranks,
-        self.job.gpus,
-        self.restart_count,
-        self.job.fault_tolerance.max_restarts,
-    });
-    state_support.loadResumeCheckpoint(self);
-    for (self.rank_status) |*status| status.* = .pending;
-    self.state = .pending;
-    state_support.persistState(self);
-    return true;
+    return state_support.refreshControl(self);
+}
+
+test "training ranks all start before polling and a failed rank stops its peers" {
+    orchestrator.shutdown_requested.store(false, .release);
+    const training = @import("../training.zig");
+    const spec = @import("../spec.zig");
+    const job = spec.TrainingJob{ .name = "train", .image = "scratch", .command = &.{}, .env = &.{}, .working_dir = null, .volumes = &.{}, .gpus = 3 };
+    var ctrl = try training.TrainingController.init(std.testing.allocator, &job, "demo");
+    defer ctrl.deinit();
+    const FakeGroup = struct {
+        started: usize = 0,
+        stopped: bool = false,
+        pub fn start(self: *@This(), rank: usize) !void {
+            try std.testing.expectEqual(self.started, rank);
+            self.started += 1;
+        }
+        pub fn poll(self: *@This(), rank: usize) !?u8 {
+            try std.testing.expectEqual(@as(usize, 3), self.started);
+            return if (rank == 1) 1 else null;
+        }
+        pub fn stopAll(self: *@This()) void {
+            self.stopped = true;
+        }
+    };
+    var group: FakeGroup = .{};
+    try std.testing.expect(!try runRanks(&ctrl, &group));
+    try std.testing.expect(group.stopped);
+    try std.testing.expectEqual(training.RankStatus.failed, ctrl.rank_status[1]);
+}
+
+test "training startup failure and cancellation stop every started rank" {
+    const training = @import("../training.zig");
+    const spec = @import("../spec.zig");
+    const job = spec.TrainingJob{ .name = "train", .image = "scratch", .command = &.{}, .env = &.{}, .working_dir = null, .volumes = &.{}, .gpus = 3 };
+    var ctrl = try training.TrainingController.init(std.testing.allocator, &job, "demo");
+    defer ctrl.deinit();
+    const FakeGroup = struct {
+        started: usize = 0,
+        stopped: bool = false,
+        cancel: bool = false,
+        pub fn start(self: *@This(), rank: usize) !void {
+            if (rank == 1) return error.StartFailed;
+            self.started += 1;
+            if (self.cancel) orchestrator.shutdown_requested.store(true, .release);
+        }
+        pub fn poll(_: *@This(), _: usize) !?u8 {
+            return error.UnexpectedPoll;
+        }
+        pub fn stopAll(self: *@This()) void {
+            self.stopped = true;
+        }
+    };
+    orchestrator.shutdown_requested.store(false, .release);
+    defer orchestrator.shutdown_requested.store(false, .release);
+    var failed: FakeGroup = .{};
+    try std.testing.expectError(error.StartFailed, runRanks(&ctrl, &failed));
+    try std.testing.expectEqual(@as(usize, 1), failed.started);
+    try std.testing.expect(failed.stopped);
+    @memset(ctrl.rank_status, .pending);
+    var canceled: FakeGroup = .{ .cancel = true };
+    try std.testing.expect(!try runRanks(&ctrl, &canceled));
+    try std.testing.expectEqual(@as(usize, 1), canceled.started);
+    try std.testing.expect(canceled.stopped);
+    try std.testing.expectEqual(training.TrainingJobState.stopped, ctrl.state);
 }

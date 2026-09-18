@@ -29,6 +29,14 @@ pub fn registerService(
     container_ip: [4]u8,
     config: @import("../spec.zig").HealthCheck,
 ) types.HealthError!void {
+    return register(service_name, container_id, container_ip, config, false);
+}
+
+pub fn registerReplicaService(service_name: []const u8, container_id: [12]u8, container_ip: [4]u8, config: @import("../spec.zig").HealthCheck) types.HealthError!void {
+    return register(service_name, container_id, container_ip, config, true);
+}
+
+fn register(service_name: []const u8, container_id: [12]u8, container_ip: [4]u8, config: @import("../spec.zig").HealthCheck, replica: bool) types.HealthError!void {
     const owned_config = try config.clone(std.heap.page_allocator);
     errdefer owned_config.deinit(std.heap.page_allocator);
     var endpoint_id_buf: [96]u8 = undefined;
@@ -69,7 +77,7 @@ pub fn registerService(
     @memcpy(entry.name_buf[0..len], service_name[0..len]);
     @memcpy(entry.endpoint_id_buf[0..endpoint_len], endpoint_id[0..endpoint_len]);
 
-    if (findServiceIndex(service_name)) |index| {
+    if (if (replica) findContainerIndex(&container_id) else findServiceIndex(service_name)) |index| {
         const previous = &health_states.items[index];
         // advance the epoch so checks still in flight cannot update this registration.
         entry.registration_epoch = previous.registration_epoch + 1;
@@ -85,17 +93,38 @@ pub fn unregisterService(service_name: []const u8) void {
     health_mutex.lockUncancelable(std.Options.debug_io);
     defer health_mutex.unlock(std.Options.debug_io);
 
-    const index = findServiceIndex(service_name) orelse return;
+    while (findServiceIndex(service_name)) |index| {
+        const removed = health_states.orderedRemove(index);
+        removed.config.deinit(std.heap.page_allocator);
+    }
+}
+
+pub fn unregisterContainer(container_id: []const u8) void {
+    health_mutex.lockUncancelable(std.Options.debug_io);
+    defer health_mutex.unlock(std.Options.debug_io);
+    const index = findContainerIndex(container_id) orelse return;
     const removed = health_states.orderedRemove(index);
     removed.config.deinit(std.heap.page_allocator);
 }
 
+pub fn getContainerStatus(container_id: []const u8) ?types.HealthStatus {
+    health_mutex.lockUncancelable(std.Options.debug_io);
+    defer health_mutex.unlock(std.Options.debug_io);
+    const index = findContainerIndex(container_id) orelse return null;
+    return health_states.items[index].status;
+}
+
+/// a service is ready only after every registered replica becomes healthy.
 pub fn getStatus(service_name: []const u8) ?types.HealthStatus {
     health_mutex.lockUncancelable(std.Options.debug_io);
     defer health_mutex.unlock(std.Options.debug_io);
-
-    const index = findServiceIndex(service_name) orelse return null;
-    return health_states.items[index].status;
+    var status: ?types.HealthStatus = null;
+    for (health_states.items) |entry| {
+        if (!std.mem.eql(u8, entry.serviceName(), service_name)) continue;
+        if (entry.status == .unhealthy) return .unhealthy;
+        if (status == null or entry.status == .starting) status = entry.status;
+    }
+    return status;
 }
 
 pub fn getServiceHealth(alloc: std.mem.Allocator, service_name: []const u8) !?types.ServiceHealth {
@@ -223,4 +252,34 @@ fn findServiceIndex(service_name: []const u8) ?usize {
         if (std.mem.eql(u8, entry.serviceName(), service_name)) return idx;
     }
     return null;
+}
+
+fn findContainerIndex(container_id: []const u8) ?usize {
+    for (health_states.items, 0..) |entry, index| {
+        if (std.mem.eql(u8, &entry.container_id, container_id)) return index;
+    }
+    return null;
+}
+
+test "replica health registrations remain independent and aggregate readiness" {
+    resetForTest();
+    defer resetForTest();
+    const check: @import("../spec.zig").HealthCheck = .{ .check_type = .{ .tcp = .{ .port = 80 } } };
+    try registerReplicaService("web", "000000000001".*, .{ 10, 42, 0, 1 }, check);
+    try registerReplicaService("web", "000000000002".*, .{ 10, 42, 0, 2 }, check);
+    try registerReplicaService("web", "000000000003".*, .{ 10, 42, 0, 3 }, check);
+    try std.testing.expectEqual(@as(usize, 3), health_states.items.len);
+    health_states.items[0].status = .healthy;
+    health_states.items[1].status = .healthy;
+    try std.testing.expectEqual(types.HealthStatus.starting, getStatus("web").?);
+    health_states.items[2].status = .healthy;
+    try std.testing.expectEqual(types.HealthStatus.healthy, getStatus("web").?);
+    try registerReplicaService("web", "000000000002".*, .{ 10, 42, 0, 2 }, check);
+    try std.testing.expectEqual(@as(usize, 3), health_states.items.len);
+    try std.testing.expectEqual(types.HealthStatus.healthy, getContainerStatus("000000000001").?);
+    try std.testing.expectEqual(types.HealthStatus.starting, getContainerStatus("000000000002").?);
+    unregisterContainer("000000000002");
+    try std.testing.expectEqual(types.HealthStatus.healthy, getStatus("web").?);
+    unregisterService("web");
+    try std.testing.expect(getStatus("web") == null);
 }

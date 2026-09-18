@@ -88,6 +88,22 @@ jobs:
       - name: verify service vip traffic through container gateways
         run: bash scripts/service-gateway-smoke.sh
 
+  published-ports:
+    name: published-ports
+    needs: changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-zig
+      - name: install network fixture tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes iproute2 iptables curl
+      - name: verify published service ports across replicas
+        run: bash scripts/published-ports-smoke.sh
+
   dns-cache-kernel:
     name: dns-cache-kernel
     needs: changed-files

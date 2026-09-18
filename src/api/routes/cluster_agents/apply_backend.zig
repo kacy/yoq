@@ -37,9 +37,17 @@ const ApplyCounters = struct {
     completed_targets: usize,
     failed_targets: usize,
 
-    fn fromResumeSeed(seed: ResumeSeed) ApplyCounters {
+    fn fromResumeSeed(seed: ResumeSeed, requests: []const apply_request.ServiceRequest, targets: *const RolloutTargets) ApplyCounters {
+        var placed = seed.completed_targets;
+        if (seed.rollout_targets_json != null) {
+            placed = 0;
+            for (requests) |request| {
+                if (std.mem.eql(u8, targets.stateFor(workloadForRequest(request.request)), "ready"))
+                    placed += @as(usize, request.replicas) * @max(1, request.request.gang_world_size);
+            }
+        }
         return .{
-            .placed = seed.completed_targets,
+            .placed = placed,
             .failed = seed.failed_targets,
             .completed_targets = seed.completed_targets,
             .failed_targets = seed.failed_targets,
@@ -82,7 +90,7 @@ pub const ClusterApplyBackend = struct {
         }
         defer if (rollback_state) |state| state.deinit();
 
-        var counters = ApplyCounters.fromResumeSeed(resume_seed);
+        var counters = ApplyCounters.fromResumeSeed(resume_seed, self.requests, &rollout_targets);
 
         var batch_start: usize = 0;
         var first_batch = true;
@@ -215,7 +223,7 @@ pub const ClusterApplyBackend = struct {
     ) ClusterApplyError!void {
         if (rollout_progress.isTerminalState(rollout_targets.stateFor(workloadForRequest(req.request)))) return;
         scheduled_targets.ensureUnusedCapacity(self.alloc, 1) catch return error.InternalError;
-        const placement = try placement_transaction.place(self.alloc, self.session, req.request, if (self.progress) |progress| progress.release_id else null);
+        const placement = try placement_transaction.placeReplicas(self.alloc, self.session, req.request, if (self.progress) |progress| progress.release_id else null, req.replicas);
         if (placement) |reserved| {
             scheduled_targets.appendAssumeCapacity(.{
                 .request = req.request,
@@ -225,10 +233,16 @@ pub const ClusterApplyBackend = struct {
             rollout_targets.set(workloadForRequest(req.request), "starting", null);
             return;
         }
-        counters.failed += @max(@as(usize, 1), req.request.gang_world_size);
+        counters.failed += @as(usize, req.replicas) * @max(@as(usize, 1), req.request.gang_world_size);
         counters.failed_targets += 1;
-        failure_details.append(workloadForRequest(req.request), "placement_failed") catch return error.InternalError;
-        rollout_targets.set(workloadForRequest(req.request), "failed", "placement_failed");
+        const reason = if (!try placement_transaction.serviceNameAvailable(self.session, req.request))
+            "service_name_in_use"
+        else if (!try placement_transaction.replicaSurgeFits(self.session, req.request, req.replicas))
+            "replica_surge_limit"
+        else
+            "placement_failed";
+        failure_details.append(workloadForRequest(req.request), reason) catch return error.InternalError;
+        rollout_targets.set(workloadForRequest(req.request), "failed", reason);
         try self.reportProgress("schedule", batch_start, batch_end, counters.*, failure_details, rollout_targets);
     }
 
@@ -1138,4 +1152,21 @@ test "rollback state restores prior assignments after cutover" {
     try std.testing.expectEqual(@as(usize, 1), assignments.len);
     try std.testing.expectEqualStrings("old-web", assignments[0].id);
     try std.testing.expectEqualStrings("pending", assignments[0].status);
+}
+
+test "resumed replica rollout keeps physical placement and logical target counts" {
+    const requests = [_]apply_request.ServiceRequest{.{
+        .replicas = 3,
+        .request = .{ .image = "alpine", .command = "serve", .cpu_limit = 1000, .memory_limit_mb = 64, .workload_kind = "service", .workload_name = "api" },
+    }};
+    var targets = RolloutTargets.init(std.testing.allocator);
+    defer targets.deinit();
+    try targets.append(workloadForRequest(requests[0].request));
+    const json = try std.testing.allocator.dupe(u8, "[{\"workload_kind\":\"service\",\"workload_name\":\"api\",\"state\":\"ready\",\"reason\":null}]");
+    const seed: ResumeSeed = .{ .completed_targets = 1, .rollout_targets_json = json };
+    defer seed.deinit(std.testing.allocator);
+    targets.restoreFromJson(json);
+    const counters = ApplyCounters.fromResumeSeed(seed, &requests, &targets);
+    try std.testing.expectEqual(@as(usize, 3), counters.placed);
+    try std.testing.expectEqual(@as(usize, 1), counters.completed_targets);
 }

@@ -24,6 +24,12 @@ pub const AlertSpec = struct {
     error_rate_percent: ?f64 = null,
     webhook: ?[]const u8 = null,
 
+    pub fn clone(self: AlertSpec, alloc: std.mem.Allocator) !AlertSpec {
+        var result = self;
+        result.webhook = if (self.webhook) |url| try alloc.dupe(u8, url) else null;
+        return result;
+    }
+
     pub fn deinit(self: AlertSpec, alloc: std.mem.Allocator) void {
         if (self.webhook) |w| alloc.free(w);
     }

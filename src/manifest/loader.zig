@@ -71,6 +71,7 @@ pub fn expandVariables(alloc: std.mem.Allocator, input: []const u8) LoadError![]
 }
 
 fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!spec.Manifest {
+    try @import("loader/schema.zig").validate(alloc, root);
     var services: std.ArrayListUnmanaged(spec.Service) = .empty;
     defer {
         for (services.items) |svc| svc.deinit(alloc);
@@ -1400,7 +1401,7 @@ test "tls peer — parses require / warn / off" {
         .{ .raw = "warn", .want = .warn },
         .{ .raw = "off", .want = .off },
     }) |case| {
-        const src = "[service.web]\nimage = \"nginx:latest\"\n[service.web.tls]\nperker_unused = 0\npeer = \"" ++ case.raw ++ "\"\n";
+        const src = "[service.web]\nimage = \"nginx:latest\"\n[service.web.tls]\npeer = \"" ++ case.raw ++ "\"\n";
         var manifest = try loadFromString(alloc, src);
         defer manifest.deinit();
         const tls = manifest.services[0].tls orelse return error.TestExpectedNonNull;
@@ -2033,11 +2034,6 @@ test "training job — full parse with all sub-tables" {
         \\gpu_type = "H100"
         \\env = ["EPOCHS=10"]
         \\
-        \\[training.big-model.data]
-        \\dataset = "/mnt/lustre/pile"
-        \\sharding = "file"
-        \\preprocessing = "tokenize"
-        \\
         \\[training.big-model.checkpoint]
         \\path = "/mnt/checkpoints"
         \\interval = "15m"
@@ -2049,7 +2045,7 @@ test "training job — full parse with all sub-tables" {
         \\ib_required = true
         \\
         \\[training.big-model.fault_tolerance]
-        \\spare_ranks = 5
+        \\spare_ranks = 0
         \\auto_restart = true
         \\max_restarts = 20
     );
@@ -2063,11 +2059,7 @@ test "training job — full parse with all sub-tables" {
     try std.testing.expectEqualStrings("H100", tj.gpu_type.?);
     try std.testing.expectEqual(@as(usize, 2), tj.command.len);
 
-    // data
-    try std.testing.expect(tj.data != null);
-    try std.testing.expectEqualStrings("/mnt/lustre/pile", tj.data.?.dataset);
-    try std.testing.expectEqualStrings("file", tj.data.?.sharding);
-    try std.testing.expectEqualStrings("tokenize", tj.data.?.preprocessing.?);
+    try std.testing.expect(tj.data == null);
 
     // checkpoint
     try std.testing.expect(tj.checkpoint != null);
@@ -2081,7 +2073,7 @@ test "training job — full parse with all sub-tables" {
     try std.testing.expect(tj.resources.ib_required);
 
     // fault tolerance
-    try std.testing.expectEqual(@as(u32, 5), tj.fault_tolerance.spare_ranks);
+    try std.testing.expectEqual(@as(u32, 0), tj.fault_tolerance.spare_ranks);
     try std.testing.expect(tj.fault_tolerance.auto_restart);
     try std.testing.expectEqual(@as(u32, 20), tj.fault_tolerance.max_restarts);
 }
@@ -2164,21 +2156,21 @@ test "training job — checkpoint interval default" {
     try std.testing.expectEqual(@as(u32, 5), manifest.training_jobs[0].checkpoint.?.keep);
 }
 
-test "training job — data sharding default" {
-    const alloc = std.testing.allocator;
-
-    var manifest = try loadFromString(alloc,
+test "training rejects unsupported dataset preparation and spare ranks" {
+    try std.testing.expectError(LoadError.InvalidTrainingConfig, loadFromString(std.testing.allocator,
         \\[training.test]
         \\image = "scratch"
         \\gpus = 1
-        \\
         \\[training.test.data]
         \\dataset = "/data/pile"
-    );
-    defer manifest.deinit();
-
-    try std.testing.expectEqualStrings("file", manifest.training_jobs[0].data.?.sharding);
-    try std.testing.expect(manifest.training_jobs[0].data.?.preprocessing == null);
+    ));
+    try std.testing.expectError(LoadError.InvalidTrainingConfig, loadFromString(std.testing.allocator,
+        \\[training.test]
+        \\image = "scratch"
+        \\gpus = 1
+        \\[training.test.fault_tolerance]
+        \\spare_ranks = 1
+    ));
 }
 
 test "backup retention configuration parses count age and bytes" {
@@ -2197,4 +2189,58 @@ test "backup retention configuration parses count age and bytes" {
     try std.testing.expectEqual(@as(usize, 3), manifest.backup.?.retention.keep_count);
     try std.testing.expectEqual(@as(u64, 7 * 24 * 3600), manifest.backup.?.retention.max_age);
     try std.testing.expectEqual(@as(u64, 1048576), manifest.backup.?.retention.max_bytes);
+}
+
+test "manifest service controls retain placement and alert thresholds" {
+    const alloc = std.testing.allocator;
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx"
+        \\replicas = 3
+        \\required_labels = "region=eu,zone=a"
+        \\[service.web.alerts]
+        \\cpu_percent = 92.5
+        \\memory_percent = 85
+        \\restart_count = 2
+        \\webhook = "https://alerts.example.test/events"
+        \\[worker.migrate]
+        \\image = "postgres"
+        \\required_labels = "region=eu"
+    );
+    defer manifest.deinit();
+    const service = manifest.services[0];
+    try std.testing.expectEqual(@as(u32, 3), service.replicas);
+    try std.testing.expectEqualStrings("region=eu,zone=a", service.required_labels);
+    try std.testing.expectEqual(@as(f64, 92.5), service.alerts.?.cpu_percent.?);
+    try std.testing.expectEqual(@as(f64, 85), service.alerts.?.memory_percent.?);
+    try std.testing.expectEqual(@as(u32, 2), service.alerts.?.restart_count.?);
+    try std.testing.expectEqualStrings("https://alerts.example.test/events", service.alerts.?.webhook.?);
+    try std.testing.expectEqualStrings("region=eu", manifest.workers[0].required_labels);
+}
+
+test "manifest rejects ignored controls and invalid replica or alert values" {
+    const alloc = std.testing.allocator;
+    const prefix = "[service.web]\nimage = \"nginx\"\n";
+    try std.testing.expectError(error.UnknownField, loadFromString(alloc, prefix ++ "repilcas = 3"));
+    try std.testing.expectError(error.InvalidFieldType, loadFromString(alloc, prefix ++ "replicas = \"3\""));
+    try std.testing.expectError(error.InvalidServiceConfig, loadFromString(alloc, prefix ++ "replicas = 0"));
+    try std.testing.expectError(error.InvalidServiceConfig, loadFromString(alloc, prefix ++ "replicas = 65"));
+    try std.testing.expectError(error.InvalidServiceConfig, loadFromString(alloc, prefix ++ "required_labels = \"eu\""));
+    try std.testing.expectError(error.InvalidAlertConfig, loadFromString(alloc, prefix ++ "[service.web.alerts]\ncpu_percent = 101"));
+    try std.testing.expectError(error.InvalidAlertConfig, loadFromString(alloc, prefix ++ "[service.web.alerts]\nwebhook = \"file:///tmp/alert\""));
+    try std.testing.expectError(error.InvalidFieldType, loadFromString(alloc, prefix ++ "[service.web.alerts]\nrestart_count = 1.5"));
+}
+
+test "all example manifests satisfy the strict schema" {
+    const paths = [_][]const u8{
+        "examples/web-app/manifest.toml",
+        "examples/cron/manifest.toml",
+        "examples/redis/manifest.toml",
+        "examples/http-routing/manifest.toml",
+        "examples/cluster/manifest.toml",
+    };
+    for (paths) |path| {
+        var manifest = try load(std.testing.allocator, path);
+        defer manifest.deinit();
+    }
 }

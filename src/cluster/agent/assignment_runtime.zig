@@ -12,6 +12,9 @@ const store = @import("../../state/store.zig");
 const logs = @import("../../runtime/logs.zig");
 const agent_store = @import("../agent_store.zig");
 const assignment_spec = @import("../assignment_spec.zig");
+const gpu_leases = @import("../../gpu/lease.zig");
+const gpu_runtime = @import("../../manifest/gpu_runtime.zig");
+const published_ports = @import("../../network/published_ports.zig");
 const runtime_wait = @import("../../lib/runtime_wait.zig");
 
 const extractJsonString = json_helpers.extractJsonString;
@@ -367,7 +370,7 @@ fn runAssignment(
         return;
     }
 
-    const layer_paths = image_layer.assembleRootfs(self.alloc, pull_result.layer_digests) catch {
+    const layer_paths = image_layer.assembleRootfsDescriptors(self.alloc, pull_result.layers) catch {
         log.warn("failed to assemble rootfs for assignment {s}", .{assignment_id});
         setContainerState(self, assignment_id, .failed);
         reportStatus(self, assignment_id, "failed", "rootfs_assemble_failed");
@@ -397,36 +400,56 @@ fn runAssignment(
     var hostname_buf: [128]u8 = undefined;
     const hostname = buildAssignmentHostname(&hostname_buf, meta, gang_info);
 
-    const gpu_mesh = @import("../../gpu/mesh.zig");
-    var mesh_env: std.ArrayListUnmanaged([]const u8) = .empty;
+    const gpu_count = if (execution.value.gpu_count == 0 and gang_info != null) 1 else execution.value.gpu_count;
+    var gpus = gpu_leases.Lease.acquireWithMinimum(gpu_count, execution.value.gpu_model, execution.value.gpu_vram_min_mb) catch {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "gpu_unavailable");
+        return;
+    };
+    defer gpus.deinit();
+    var mesh_env: std.ArrayList([]const u8) = .empty;
     defer {
         for (mesh_env.items) |entry| self.alloc.free(entry);
         mesh_env.deinit(self.alloc);
     }
-    if (gang_info) |gang| {
-        const ib_result = gpu_mesh.detectInfiniband();
-        var mesh_env_buf: [1024]u8 = undefined;
-        if (gpu_mesh.generateMeshEnv(
-            &mesh_env_buf,
-            ib_result,
-            gang.master_addr,
-            gang.master_port,
-            gang.world_size,
-            gang.rank,
-            gang.rank,
-            null,
-        )) |env_data| {
-            var env_pos: usize = 0;
-            while (env_pos < env_data.len) {
-                const end = std.mem.indexOfScalarPos(u8, env_data, env_pos, 0) orelse env_data.len;
-                if (end > env_pos) {
-                    if (self.alloc.dupe(u8, env_data[env_pos..end])) |duped| {
-                        mesh_env.append(self.alloc, duped) catch {};
-                    } else |_| {}
-                }
-                env_pos = end + 1;
+    prepareGpuEnv(self.alloc, &mesh_env, &gpus, gang_info) catch {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "gpu_environment_failed");
+        return;
+    };
+    var mounts_arena = std.heap.ArenaAllocator.init(self.alloc);
+    defer mounts_arena.deinit();
+    const mount_runtime = @import("../../manifest/orchestrator/service_runtime.zig");
+    const mounts = mount_runtime.resolveServiceVolumes(mounts_arena.allocator(), execution.value.volumes, execution.value.volume_definitions, meta.app_name orelse "") catch {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "volume_mount_failed");
+        return;
+    };
+    if (mounts.bind_mounts.items.len != execution.value.volumes.len) {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "volume_mount_failed");
+        return;
+    }
+    if (execution.value.ib_required and @import("../../gpu/mesh.zig").detectInfiniband().count == 0) {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, "failed", "infiniband_unavailable");
+        return;
+    }
+    if (execution.value.checkpoint) |ckpt| {
+        const checkpoints = @import("../../manifest/checkpoint.zig");
+        const resume_path = if (execution.value.resume_checkpoint)
+            checkpoints.latestMountedCheckpoint(mounts_arena.allocator(), ckpt.path, mounts.bind_mounts.items) catch {
+                setContainerState(self, assignment_id, .failed);
+                reportStatus(self, assignment_id, "failed", "checkpoint_path_invalid");
+                return;
             }
-        } else |_| {}
+        else
+            null;
+        checkpoints.buildCheckpointEnv(self.alloc, &mesh_env, ckpt, resume_path) catch {
+            setContainerState(self, assignment_id, .failed);
+            reportStatus(self, assignment_id, "failed", "checkpoint_environment_failed");
+            return;
+        };
     }
 
     var resolved = assignment_spec.resolve(self.alloc, execution.value, config_parsed.value.config, mesh_env.items) catch {
@@ -469,6 +492,8 @@ fn runAssignment(
             .user = image_user,
             .limits = limits,
             .network = .{ .node_id = self.node_id },
+            .mounts = mounts.bind_mounts.items,
+            .gpu_indices = gpus.indices[0..gpus.count],
             .hostname = hostname,
             .lower_dirs = layer_paths,
             .env = resolved.env.items,
@@ -494,6 +519,20 @@ fn runAssignment(
         return;
     };
 
+    if (gang_info) |gang| {
+        if (gang.rank == 0) {
+            const ports = [_]manifest_spec.PortMapping{.{ .host_port = gang.master_port, .container_port = gang.master_port }};
+            published_ports.publishInstanceWithBootstrap(self.alloc, meta.app_name, hostname, container_id, &ports, gang.master_port) catch {
+                _ = waitForAssignmentExit(&c, stopping, true);
+                setContainerState(self, assignment_id, .failed);
+                reportStatus(self, assignment_id, "failed", "rendezvous_port_failed");
+                cleanup(container_id);
+                return;
+            };
+        }
+    }
+
+    defer manifest_health.unregisterContainer(container_id);
     const readiness_result = waitForServiceReadiness(stopping, self.alloc, container_id, meta);
     switch (readiness_result) {
         .healthy => {},
@@ -518,6 +557,26 @@ fn runAssignment(
         },
     }
 
+    if (meta.workload_kind != null and std.mem.eql(u8, meta.workload_kind.?, "service")) {
+        const ports = servicePublishedPorts(self.alloc, execution.value.ports, gang_info) catch {
+            _ = waitForAssignmentExit(&c, stopping, true);
+            setContainerState(self, assignment_id, .failed);
+            reportStatus(self, assignment_id, "failed", "invalid_published_ports");
+            cleanup(container_id);
+            return;
+        };
+        defer self.alloc.free(ports);
+        const bootstrap_port: ?u16 = if (gang_info) |gang| if (gang.rank == 0) gang.master_port else null else null;
+        published_ports.publishInstanceWithBootstrap(self.alloc, meta.app_name, hostname, container_id, ports, bootstrap_port) catch |err| {
+            log.warn("assignment {s} could not publish service ports: {}", .{ assignment_id, err });
+            _ = waitForAssignmentExit(&c, stopping, true);
+            setContainerState(self, assignment_id, .failed);
+            reportStatus(self, assignment_id, "failed", "published_port_failed");
+            cleanup(container_id);
+            return;
+        };
+    }
+
     reportStatus(self, assignment_id, "running", null);
     setContainerState(self, assignment_id, .running);
 
@@ -525,16 +584,45 @@ fn runAssignment(
 
     log.info("container {s} exited for assignment {s}", .{ container_id, assignment_id });
     if (meta.workload_kind != null and meta.workload_name != null and std.mem.eql(u8, meta.workload_kind.?, "service")) {
-        manifest_health.unregisterService(meta.workload_name.?);
+        manifest_health.unregisterContainer(container_id);
     }
-    if (stopping.load(.acquire) or exit_code == 0) {
+    const is_training = meta.workload_kind != null and std.mem.eql(u8, meta.workload_kind.?, "training");
+    const interrupted = stopping.load(.acquire);
+    if ((interrupted and !is_training) or (!interrupted and exit_code == 0)) {
         setContainerState(self, assignment_id, .stopped);
         reportStatus(self, assignment_id, "stopped", null);
     } else {
         setContainerState(self, assignment_id, .failed);
-        reportStatus(self, assignment_id, "failed", "process_failed");
+        // an interrupted rank has not completed its training. operator pause
+        // already removed its assignment; agent shutdown leaves it retryable.
+        reportStatus(self, assignment_id, "failed", if (interrupted) "rank_interrupted" else "process_failed");
     }
-    cleanup(container_id);
+    if (is_training) {
+        // keep the stopped record and logs so remote training logs remain
+        // available after a rank exits. its network and filesystem are gone.
+        published_ports.removeInstance(self.alloc, container_id) catch |err| {
+            log.warn("failed to release training ports for {s}: {}", .{ container_id, err });
+        };
+        container.cleanupContainerDirs(container_id);
+    } else cleanup(container_id);
+}
+
+// one publication replaces every claim owned by this container. retain the
+// rank-zero rendezvous port when adding the service's public ports.
+fn servicePublishedPorts(alloc: std.mem.Allocator, service_ports: []const manifest_spec.PortMapping, gang: ?GangInfo) ![]manifest_spec.PortMapping {
+    const rendezvous = if (gang) |group| if (group.rank == 0) group.master_port else null else null;
+    if (rendezvous) |port| {
+        for (service_ports) |existing| {
+            if (existing.host_port != port) continue;
+            if (existing.container_port != port) return error.PortCollision;
+            return alloc.dupe(manifest_spec.PortMapping, service_ports);
+        }
+        const ports = try alloc.alloc(manifest_spec.PortMapping, service_ports.len + 1);
+        @memcpy(ports[0..service_ports.len], service_ports);
+        ports[service_ports.len] = .{ .host_port = port, .container_port = port };
+        return ports;
+    }
+    return alloc.dupe(manifest_spec.PortMapping, service_ports);
 }
 
 /// Stop and reap the process on its assignment thread before releasing resources.
@@ -585,17 +673,17 @@ fn waitForServiceReadiness(stopping: anytype, alloc: std.mem.Allocator, containe
     if (container_id.len != id_buf.len) return .invalid;
     @memcpy(&id_buf, container_id[0..id_buf.len]);
 
-    manifest_health.registerService(service_name, id_buf, container_ip, health_check) catch return .invalid;
+    manifest_health.registerReplicaService(service_name, id_buf, container_ip, health_check) catch return .invalid;
     manifest_health.startChecker();
 
     const deadline_ns = nowAwakeNanoseconds() + (@as(i128, @intCast(estimateHealthStartupWindowSeconds(health_check))) * std.time.ns_per_s);
     defer {
-        const final_status = manifest_health.getStatus(service_name) orelse .starting;
-        if (final_status != .healthy) manifest_health.unregisterService(service_name);
+        const final_status = manifest_health.getContainerStatus(container_id) orelse .starting;
+        if (final_status != .healthy) manifest_health.unregisterContainer(container_id);
     }
     while (nowAwakeNanoseconds() < deadline_ns) {
         if (stopping.load(.acquire)) return .timeout;
-        switch (manifest_health.getStatus(service_name) orelse .starting) {
+        switch (manifest_health.getContainerStatus(container_id) orelse .starting) {
             .healthy => return .healthy,
             .unhealthy => return .unhealthy,
             .starting => if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(100), "assignment readiness wait")) return .timeout,
@@ -688,6 +776,22 @@ fn parseJsonStringArray(alloc: std.mem.Allocator, json: []const u8, key: []const
     return items.toOwnedSlice(alloc) catch null;
 }
 
+fn prepareGpuEnv(alloc: std.mem.Allocator, env: *std.ArrayList([]const u8), gpus: *const gpu_leases.Lease, gang_info: ?GangInfo) !void {
+    if (gpus.count > 0) {
+        var gpu_buf: [4096]u8 = undefined;
+        const data = try @import("../../gpu/passthrough.zig").generateGpuEnv(gpus.indices[0..gpus.count], &gpu_buf);
+        try gpu_runtime.appendRequiredEnv(alloc, env, data);
+    }
+    if (gang_info) |gang| {
+        const mesh = @import("../../gpu/mesh.zig");
+        var mesh_buf: [1024]u8 = undefined;
+        const address = if (gang.rank == 0) "0.0.0.0" else gang.master_addr;
+        const data = try mesh.generateMeshEnv(&mesh_buf, mesh.detectInfiniband(), address, gang.master_port, gang.world_size, gang.rank, 0, null);
+        try gpu_runtime.appendRequiredEnv(alloc, env, data);
+        try gpu_runtime.appendRequiredEnv(alloc, env, "NCCL_SHM_DISABLE=1");
+    }
+}
+
 fn buildAssignmentHostname(buf: []u8, meta: AssignmentMeta, gang_info: ?GangInfo) []const u8 {
     if (meta.workload_kind != null and meta.workload_name != null and std.mem.eql(u8, meta.workload_kind.?, "training")) {
         if (gang_info) |gang| {
@@ -725,6 +829,9 @@ fn setContainerState(self: anytype, assignment_id: []const u8, state: anytype) v
 }
 
 fn cleanup(container_id: []const u8) void {
+    published_ports.removeInstance(std.heap.page_allocator, container_id) catch |err| {
+        log.warn("failed to release published ports for {s}: {}", .{ container_id, err });
+    };
     logs.deleteLogFile(container_id);
     container.cleanupContainerDirs(container_id);
     store.remove(container_id) catch {};
@@ -1018,4 +1125,24 @@ test "placement numbers reject malformed gang and health metadata" {
     const health = parseHealthCheckJson(alloc, "{\"kind\":\"tcp\",\"port\":65535,\"interval\":4294967295,\"timeout\":4294967295,\"retries\":4294967295,\"start_period\":4294967295}").?;
     defer health.deinit(alloc);
     try std.testing.expect(estimateHealthStartupWindowSeconds(health) > std.math.maxInt(u64));
+}
+
+test "service publication retains the assigned rank zero rendezvous port" {
+    const alloc = std.testing.allocator;
+    const service_ports = [_]manifest_spec.PortMapping{.{ .host_port = 8080, .container_port = 80 }};
+    var gang: GangInfo = .{ .rank = 0, .world_size = 3, .master_addr = "10.0.0.1", .master_port = 29501 };
+    const leader = try servicePublishedPorts(alloc, &service_ports, gang);
+    defer alloc.free(leader);
+    try std.testing.expectEqual(@as(usize, 2), leader.len);
+    try std.testing.expectEqual(@as(u16, 29501), leader[1].host_port);
+    gang.rank = 1;
+    const follower = try servicePublishedPorts(alloc, &service_ports, gang);
+    defer alloc.free(follower);
+    try std.testing.expectEqual(@as(usize, 1), follower.len);
+    gang.rank = 0;
+    gang.master_port = 8080;
+    try std.testing.expectError(error.PortCollision, servicePublishedPorts(alloc, &service_ports, gang));
+    const duplicate = try servicePublishedPorts(alloc, &.{.{ .host_port = 8080, .container_port = 8080 }}, gang);
+    defer alloc.free(duplicate);
+    try std.testing.expectEqual(@as(usize, 1), duplicate.len);
 }

@@ -30,6 +30,7 @@ pub const ApplyRequest = struct {
 };
 
 pub const ServiceRequest = struct {
+    replicas: u32 = 1,
     request: scheduler.PlacementRequest,
     rollout: spec.RolloutPolicy = .{},
 };
@@ -62,7 +63,9 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
         var iter = json_helpers.extractJsonObjects(services_json);
         while (iter.next()) |block| {
             const image = extractJsonString(block, "image") orelse continue;
-            const command = extractCommandString(alloc, block) catch |err| return if (err == error.OutOfMemory) ParseError.OutOfMemory else ParseError.InvalidRequest;
+            const encoded = extractCommandString(alloc, block) catch |err| return if (err == error.OutOfMemory) ParseError.OutOfMemory else ParseError.InvalidRequest;
+            defer alloc.free(encoded);
+            const command = @import("../../../cluster/assignment_spec.zig").withVolumeDefinitions(alloc, encoded, body) catch |err| return if (err == error.OutOfMemory) ParseError.OutOfMemory else ParseError.InvalidRequest;
 
             if (!common.validateClusterInput(image)) {
                 alloc.free(command);
@@ -78,6 +81,14 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
                 alloc.free(command);
                 return ParseError.InvalidRequest;
             };
+            const replicas = numbers.field(u32, numeric.value, "replicas", 1, spec.max_service_replicas, 1) catch {
+                alloc.free(command);
+                return ParseError.InvalidRequest;
+            };
+            if (@as(u64, replicas) * @max(@as(u64, 1), resources.world_size) > spec.max_service_replicas) {
+                alloc.free(command);
+                return ParseError.InvalidRequest;
+            }
             const rollout = parseRolloutPolicy(numeric.value, block) catch {
                 alloc.free(command);
                 return ParseError.InvalidRolloutConfig;
@@ -102,6 +113,7 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
                     .gang_master_port = resources.master_port,
                 },
                 .rollout = rollout,
+                .replicas = replicas,
             }) catch {
                 alloc.free(command);
                 return ParseError.OutOfMemory;
@@ -283,4 +295,14 @@ test "parse preserves service health checks for agent readiness" {
     try std.testing.expect(parsed.requests.items[0].request.health_check_json != null);
     try std.testing.expect(std.mem.indexOf(u8, parsed.requests.items[0].request.health_check_json.?, "\"kind\":\"http\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, parsed.requests.items[0].request.health_check_json.?, "\"path\":\"/ready\"") != null);
+}
+
+test "parse keeps replica instances under one logical service request" {
+    const alloc = std.testing.allocator;
+    var parsed = try parse(alloc, "{\"app_name\":\"demo\",\"services\":[{\"name\":\"web\",\"image\":\"nginx\",\"replicas\":3,\"required_labels\":\"zone=east\"}]}", true);
+    defer parsed.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), parsed.requests.items.len);
+    try std.testing.expectEqual(@as(u32, 3), parsed.requests.items[0].replicas);
+    try std.testing.expectEqualStrings("web", parsed.requests.items[0].request.workload_name.?);
+    try std.testing.expectEqualStrings("zone=east", parsed.requests.items[0].request.required_labels);
 }

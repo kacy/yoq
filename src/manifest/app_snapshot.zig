@@ -5,6 +5,7 @@ const json_helpers = @import("../lib/json_helpers.zig");
 
 pub const Summary = struct {
     service_count: usize = 0,
+    service_instance_count: usize = 0,
     worker_count: usize = 0,
     cron_count: usize = 0,
     training_job_count: usize = 0,
@@ -37,6 +38,10 @@ pub const TrainingJobSpec = struct {
     cpu_limit: i64,
     memory_limit_mb: i64,
     checkpoint_path: ?[]const u8,
+    checkpoint_interval: ?i64 = null,
+    checkpoint_keep: ?i64 = null,
+    auto_restart: bool = true,
+    max_restarts: u32 = 10,
 
     pub fn deinit(self: TrainingJobSpec, alloc: std.mem.Allocator) void {
         alloc.free(self.command);
@@ -57,6 +62,7 @@ pub const CronScheduleSpec = struct {
 pub fn summarize(json: []const u8) Summary {
     return .{
         .service_count = countArrayObjects(json, "services"),
+        .service_instance_count = countServiceInstances(json),
         .worker_count = countArrayObjects(json, "workers"),
         .cron_count = countArrayObjects(json, "crons"),
         .training_job_count = countArrayObjects(json, "training_jobs"),
@@ -67,7 +73,9 @@ pub fn findWorkerRunSpec(alloc: std.mem.Allocator, json: []const u8, name: []con
     const obj = findNamedObject(json, "workers", name) orelse return null;
 
     const image = json_helpers.extractJsonString(obj, "image") orelse return null;
-    const command = try extractCommandString(alloc, obj);
+    const encoded = try extractCommandString(alloc, obj);
+    defer alloc.free(encoded);
+    const command = try @import("../cluster/assignment_spec.zig").withVolumeDefinitions(alloc, encoded, json);
     errdefer alloc.free(command);
 
     const numeric = try numbers.parse(alloc, obj);
@@ -96,14 +104,18 @@ pub fn findWorkerRunSpec(alloc: std.mem.Allocator, json: []const u8, name: []con
 
 pub fn findTrainingJobSpec(alloc: std.mem.Allocator, json: []const u8, name: []const u8) !?TrainingJobSpec {
     const obj = findNamedObject(json, "training_jobs", name) orelse return null;
+    if (json_helpers.extractJsonObject(obj, "data") != null) return error.UnsupportedTrainingData;
 
     const image = json_helpers.extractJsonString(obj, "image") orelse return null;
-    const command = try extractCommandString(alloc, obj);
+    const encoded = try extractCommandString(alloc, obj);
+    defer alloc.free(encoded);
+    const command = try @import("../cluster/assignment_spec.zig").withVolumeDefinitions(alloc, encoded, json);
     errdefer alloc.free(command);
 
     const numeric = try numbers.parse(alloc, obj);
     defer numeric.deinit();
     const resources = try placement_numbers.Resources.parse(numeric.value, 65536);
+    if (try numbers.field(u32, numeric.value, "spare_ranks", 0, std.math.maxInt(u32), 0) != 0) return error.UnsupportedSpareRanks;
     const checkpoint_path = if (json_helpers.extractJsonObject(obj, "checkpoint")) |checkpoint|
         json_helpers.extractJsonString(checkpoint, "path")
     else
@@ -118,6 +130,10 @@ pub fn findTrainingJobSpec(alloc: std.mem.Allocator, json: []const u8, name: []c
         .cpu_limit = resources.cpu,
         .memory_limit_mb = resources.memory_mb,
         .checkpoint_path = checkpoint_path,
+        .checkpoint_interval = if (numeric.value.object.get("checkpoint")) |ckpt| try numbers.field(i64, ckpt, "interval_secs", 1, std.math.maxInt(i64), 1800) else null,
+        .checkpoint_keep = if (numeric.value.object.get("checkpoint")) |ckpt| try numbers.field(i64, ckpt, "keep", 1, std.math.maxInt(u32), 5) else null,
+        .auto_restart = if (numeric.value.object.get("auto_restart")) |value| if (value == .bool) value.bool else return error.InvalidRequest else true,
+        .max_restarts = try numbers.field(u32, numeric.value, "max_restarts", 0, std.math.maxInt(u32), 10),
     };
 }
 
@@ -143,6 +159,17 @@ pub fn listCronSchedules(alloc: std.mem.Allocator, json: []const u8) !std.ArrayL
     }
 
     return specs;
+}
+
+fn countServiceInstances(json: []const u8) usize {
+    const array = json_helpers.extractJsonArray(json, "services") orelse return 0;
+    var iter = json_helpers.extractJsonObjects(array);
+    var count: usize = 0;
+    while (iter.next()) |service| {
+        const replicas = json_helpers.extractJsonInt(service, "replicas") orelse 1;
+        count +|= @intCast(@max(0, replicas));
+    }
+    return count;
 }
 
 fn countArrayObjects(json: []const u8, key: []const u8) usize {
@@ -231,4 +258,10 @@ test "listCronSchedules extracts cron registration specs" {
     try std.testing.expectEqualStrings("cleanup", schedules.items[0].name);
     try std.testing.expectEqual(@as(u64, 60), schedules.items[0].every);
     try std.testing.expect(std.mem.indexOf(u8, schedules.items[1].spec_json, "\"name\":\"backup\"") != null);
+}
+
+test "snapshot reports logical services and desired instances separately" {
+    const summary = summarize("{\"services\":[{\"name\":\"web\",\"replicas\":3},{\"name\":\"db\"}]}");
+    try std.testing.expectEqual(@as(usize, 2), summary.service_count);
+    try std.testing.expectEqual(@as(usize, 4), summary.service_instance_count);
 }

@@ -23,6 +23,8 @@ pub const ApplicationServiceSpec = struct {
     cpu_limit: i64 = 1000,
     memory_limit_mb: i64 = 256,
     required_labels: []const u8 = "",
+    replicas: u32 = 1,
+    alerts: ?spec.AlertSpec = null,
 };
 
 pub const ApplicationWorkerSpec = struct {
@@ -80,6 +82,7 @@ pub const ApplicationSpec = struct {
     workers: []const ApplicationWorkerSpec,
     crons: []const ApplicationCronSpec,
     training_jobs: []const ApplicationTrainingJobSpec,
+    volume_definitions: []const spec.Volume = &.{},
     alloc: std.mem.Allocator,
 
     pub fn deinit(self: *ApplicationSpec) void {
@@ -172,6 +175,7 @@ pub const ApplicationSpec = struct {
             .workers = workers,
             .crons = crons,
             .training_jobs = training_jobs,
+            .volume_definitions = self.volume_definitions,
             .alloc = alloc,
         };
     }
@@ -192,6 +196,7 @@ pub const ApplicationSpec = struct {
             .workers = workers,
             .crons = crons,
             .training_jobs = training_jobs,
+            .volume_definitions = self.volume_definitions,
             .alloc = alloc,
         };
     }
@@ -245,6 +250,15 @@ pub const ApplicationSpec = struct {
                 });
             }
 
+            try writer.writeAll(",\"volumes\":");
+            try writeJsonVolumes(writer, svc.volumes);
+            try writer.writeAll(",\"ports\":");
+            try std.json.Stringify.value(svc.ports, .{}, writer);
+            try writer.print(",\"replicas\":{d}", .{svc.replicas});
+            if (svc.alerts) |alerts| {
+                try writer.writeAll(",\"alerts\":");
+                try std.json.Stringify.value(alerts, .{ .emit_null_optional_fields = false }, writer);
+            }
             if (svc.required_labels.len > 0) {
                 try writer.writeAll(",\"required_labels\":\"");
                 try json_helpers.writeJsonEscaped(writer, svc.required_labels);
@@ -254,7 +268,9 @@ pub const ApplicationSpec = struct {
             try writer.writeByte('}');
         }
 
-        try writer.writeAll("]}");
+        try writer.writeAll("],\"volume_definitions\":");
+        try std.json.Stringify.value(self.volume_definitions, .{}, writer);
+        try writer.writeByte('}');
         return json_buf_writer.toOwnedSlice();
     }
 
@@ -291,7 +307,9 @@ pub const ApplicationSpec = struct {
             try writeJsonTrainingJob(writer, job);
         }
 
-        try writer.writeAll("]}");
+        try writer.writeAll("],\"volume_definitions\":");
+        try std.json.Stringify.value(self.volume_definitions, .{}, writer);
+        try writer.writeByte('}');
         return json_buf_writer.toOwnedSlice();
     }
 };
@@ -323,6 +341,9 @@ pub fn fromManifest(alloc: std.mem.Allocator, app_name: []const u8, manifest: *c
             .http_routes = svc.http_routes,
             .gpu = svc.gpu,
             .gpu_mesh = svc.gpu_mesh,
+            .required_labels = svc.required_labels,
+            .replicas = svc.replicas,
+            .alerts = svc.alerts,
         };
     }
 
@@ -337,6 +358,7 @@ pub fn fromManifest(alloc: std.mem.Allocator, app_name: []const u8, manifest: *c
             .volumes = worker.volumes,
             .gpu = worker.gpu,
             .gpu_mesh = worker.gpu_mesh,
+            .required_labels = worker.required_labels,
         };
     }
 
@@ -375,6 +397,7 @@ pub fn fromManifest(alloc: std.mem.Allocator, app_name: []const u8, manifest: *c
         .workers = workers,
         .crons = crons,
         .training_jobs = training_jobs,
+        .volume_definitions = manifest.volumes,
         .alloc = alloc,
     };
 }
@@ -472,6 +495,11 @@ fn writeJsonService(writer: anytype, svc: ApplicationServiceSpec) !void {
         try writeJsonGpuMesh(writer, mesh);
     }
 
+    try writer.print(",\"replicas\":{d}", .{svc.replicas});
+    if (svc.alerts) |alerts| {
+        try writer.writeAll(",\"alerts\":");
+        try std.json.Stringify.value(alerts, .{ .emit_null_optional_fields = false }, writer);
+    }
     if (svc.required_labels.len > 0) {
         try writer.writeAll(",\"required_labels\":\"");
         try json_helpers.writeJsonEscaped(writer, svc.required_labels);

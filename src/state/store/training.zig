@@ -149,6 +149,14 @@ pub fn updateTrainingJobStateInDb(db: *sqlite.Db, id: []const u8, state: []const
     ) catch return StoreError.WriteFailed;
 }
 
+// runner progress must not overwrite an operator's durable cancellation.
+pub fn updateTrainingRunnerState(id: []const u8, state: []const u8, now: i64) StoreError!bool {
+    var lease = try common.leaseDb();
+    defer lease.deinit();
+    lease.db.exec("UPDATE training_jobs SET state = ?, updated_at = ? WHERE id = ? AND state NOT IN ('paused', 'stopped');", .{}, .{ state, now, id }) catch return StoreError.WriteFailed;
+    return lease.db.rowsAffected() == 1;
+}
+
 pub fn incrementTrainingJobRestarts(id: []const u8, now: i64) StoreError!void {
     var lease = try common.leaseDb();
     defer lease.deinit();
@@ -295,7 +303,7 @@ pub fn getLatestCheckpoint(alloc: Allocator, job_id: []const u8) StoreError!?Che
     const row = (lease.db.oneAlloc(
         CheckpointRow,
         alloc,
-        "SELECT id, job_id, step, path, size_bytes, created_at FROM training_checkpoints WHERE job_id = ? ORDER BY created_at DESC LIMIT 1;",
+        "SELECT id, job_id, step, path, size_bytes, created_at FROM training_checkpoints WHERE job_id = ? ORDER BY step DESC, created_at DESC, id DESC LIMIT 1;",
         .{},
         .{job_id},
     ) catch return StoreError.ReadFailed) orelse return null;
@@ -308,7 +316,7 @@ pub fn listCheckpoints(alloc: Allocator, job_id: []const u8) StoreError!std.Arra
 
     var records: std.ArrayList(CheckpointRecord) = .empty;
     var stmt = lease.db.prepare(
-        "SELECT id, job_id, step, path, size_bytes, created_at FROM training_checkpoints WHERE job_id = ? ORDER BY created_at DESC;",
+        "SELECT id, job_id, step, path, size_bytes, created_at FROM training_checkpoints WHERE job_id = ? ORDER BY step DESC, created_at DESC, id DESC;",
     ) catch return StoreError.ReadFailed;
     defer stmt.deinit();
     var iter = stmt.iterator(CheckpointRow, .{job_id}) catch return StoreError.ReadFailed;

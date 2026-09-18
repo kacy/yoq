@@ -91,6 +91,7 @@ fn trainStart(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
         return TrainError.DeploymentFailed;
     };
     defer ctrl.deinit();
+    ctrl.manifest_volumes = manifest.volumes;
 
     writeErr("starting training job {s} ({d} gpus)...\n", .{ name, job.gpus });
 
@@ -164,6 +165,7 @@ fn trainStatus(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allo
         return;
     };
     defer ctrl.deinit();
+    ctrl.manifest_volumes = manifest.volumes;
     const has_persistent = ctrl.loadFromStore();
 
     write("training job: {s}\n", .{name});
@@ -323,7 +325,6 @@ fn loadTrainJobContextFromParsed(parsed: TrainArgs, io: std.Io, alloc: std.mem.A
 
     const job = manifest.trainingJobByName(name) orelse {
         writeErr("unknown training job: {s}\n", .{name});
-        manifest.deinit();
         return TrainError.UnknownService;
     };
 
@@ -332,12 +333,12 @@ fn loadTrainJobContextFromParsed(parsed: TrainArgs, io: std.Io, alloc: std.mem.A
     const cwd = cwd_buf[0..cwd_len];
     const app_name = std.fs.path.basename(cwd);
 
-    const ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
+    var ctrl = training.TrainingController.init(alloc, job, app_name) catch |err| {
         writeErr("failed to initialize training controller: {}\n", .{err});
-        manifest.deinit();
         return TrainError.DeploymentFailed;
     };
 
+    ctrl.manifest_volumes = manifest.volumes;
     return .{ .name = name, .job = job, .ctrl = ctrl, .manifest = manifest, .server_addr = parsed.server_addr };
 }
 
@@ -364,11 +365,11 @@ fn trainStop(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloca
     }
 
     if (ctx.ctrl.isClusterManaged()) {
-        writeErr("training job {s} is cluster-managed; stop is not supported until remote lifecycle control is implemented\n", .{ctx.name});
+        writeErr("training job {s} is cluster-managed; use --server to stop it\n", .{ctx.name});
         return TrainError.DeploymentFailed;
     }
 
-    ctx.ctrl.stop();
+    try ctx.ctrl.stop();
     writeErr("training job {s} stopped\n", .{ctx.name});
 }
 
@@ -395,16 +396,16 @@ fn trainPause(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
     }
 
     if (ctx.ctrl.isClusterManaged()) {
-        writeErr("training job {s} is cluster-managed; pause is not supported until remote lifecycle control is implemented\n", .{ctx.name});
+        writeErr("training job {s} is cluster-managed; use --server to pause it\n", .{ctx.name});
         return TrainError.DeploymentFailed;
     }
 
-    if (ctx.ctrl.state != .running) {
+    if (ctx.ctrl.state != .running and ctx.ctrl.state != .scheduling) {
         writeErr("training job {s} is not running (state: {s})\n", .{ ctx.name, ctx.ctrl.state.label() });
         return TrainError.DeploymentFailed;
     }
 
-    ctx.ctrl.pause();
+    try ctx.ctrl.pause();
     writeErr("training job {s} paused\n", .{ctx.name});
 }
 
@@ -431,7 +432,7 @@ fn trainResume(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allo
     }
 
     if (ctx.ctrl.isClusterManaged()) {
-        writeErr("training job {s} is cluster-managed; resume is not supported until remote lifecycle control is implemented\n", .{ctx.name});
+        writeErr("training job {s} is cluster-managed; use --server to resume it\n", .{ctx.name});
         return TrainError.DeploymentFailed;
     }
 
@@ -440,7 +441,7 @@ fn trainResume(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allo
         return TrainError.DeploymentFailed;
     }
 
-    ctx.ctrl.resume_();
+    try ctx.ctrl.resume_();
 
     if (ctx.ctrl.resume_path) |rp| {
         writeErr("resuming training job {s} from checkpoint {s}\n", .{ ctx.name, rp });
@@ -535,6 +536,7 @@ fn trainScale(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
         return TrainError.DeploymentFailed;
     };
     defer ctrl.deinit();
+    ctrl.manifest_volumes = manifest.volumes;
 
     if (!ctrl.loadFromStore()) {
         writeErr("no active training job found for {s} (start it first)\n", .{name});
@@ -542,7 +544,7 @@ fn trainScale(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
     }
 
     if (ctrl.isClusterManaged()) {
-        writeErr("training job {s} is cluster-managed; scaling is not supported until remote lifecycle control is implemented\n", .{name});
+        writeErr("training job {s} is cluster-managed; use --server to scale it\n", .{name});
         return TrainError.DeploymentFailed;
     }
 
@@ -553,7 +555,7 @@ fn trainScale(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
 
     if (ctrl.state == .running) {
         writeErr("pausing {s} for rescaling...\n", .{name});
-        ctrl.pause();
+        try ctrl.pause();
     }
 
     if (ctrl.job_id) |jid| {
@@ -563,9 +565,11 @@ fn trainScale(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
         };
     }
 
-    writeErr("scaled {s} from {d} to {d} GPUs\n", .{ name, job.gpus, gpus });
+    const old_gpus = ctrl.gpu_count;
+    try ctrl.resizeRanks(gpus);
+    writeErr("scaled {s} from {d} to {d} gpus\n", .{ name, old_gpus, gpus });
 
-    ctrl.resume_();
+    try ctrl.resume_();
     writeErr("resuming {s} with {d} GPUs...\n", .{ name, gpus });
 
     if (server_addr) |addr| {
