@@ -102,6 +102,14 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
     while (true) {
         const current_cfg = run_state.loadConfig(std.heap.page_allocator, id) catch return 255;
         defer current_cfg.deinit(std.heap.page_allocator);
+        var ports = @import("../../../network/port_allocator.zig").hold(current_cfg.port_maps) catch |err| {
+            store.setStartupOutcome(id, .failed) catch {};
+            var error_buf: [192]u8 = undefined;
+            const message = std.fmt.bufPrint(&error_buf, "published port is unavailable: {}\n", .{err}) catch "published port unavailable\n";
+            session.Server.output(&server, "stderr", message);
+            return 255;
+        };
+        defer ports.deinit();
         var channels = session.ProcessIo.init(current_cfg.interactive, current_cfg.tty) catch return 255;
         defer channels.deinit();
         var c = containerFromSaved(id, &current_cfg, false);

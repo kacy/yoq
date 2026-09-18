@@ -478,6 +478,7 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
 
     var created = false;
     errdefer if (!created) @import("../../local_volumes.zig").releaseContainer(id, true) catch {};
+    errdefer if (!created) @import("../../../network/port_allocator.zig").release(id) catch {};
     if (img.volumes) |volumes| {
         if (volumes == .object) {
             var it = volumes.object.iterator();
@@ -493,6 +494,8 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
 
     var saved = buildSavedRunConfig(alloc, &flags, &img, &resolved, id) catch |e| return e;
     defer saved.deinit(alloc);
+    try @import("../../../network/port_allocator.zig").reserve(id, saved.port_maps);
+    if (img.healthcheck) |health| saved.healthcheck_json = try std.json.Stringify.valueAlloc(alloc, health, .{});
     saved.auto_remove = flags.auto_remove;
     saved.interactive = flags.interactive;
     saved.tty = flags.tty;

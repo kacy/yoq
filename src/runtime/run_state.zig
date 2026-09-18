@@ -41,6 +41,7 @@ pub const SavedRunConfig = struct {
     working_dir: []const u8,
     user: ?[]const u8 = null,
     image_reference: ?[]const u8 = null,
+    healthcheck_json: ?[]const u8 = null,
     stop_signal: u8 = 15,
     stop_timeout_seconds: u32 = 10,
     auto_remove: bool = false,
@@ -62,6 +63,7 @@ pub const SavedRunConfig = struct {
         alloc.free(self.working_dir);
         if (self.user) |user| alloc.free(user);
         if (self.image_reference) |value| alloc.free(value);
+        if (self.healthcheck_json) |value| alloc.free(value);
         freeStringList(alloc, self.args);
         freeStringList(alloc, self.env);
         freeStringList(alloc, self.lower_dirs);
@@ -85,7 +87,7 @@ pub const RunStateError = error{
 };
 
 const configs_subdir = "run_configs";
-const format_version: u32 = 4;
+const format_version: u32 = 5;
 const max_serialized_string_bytes: u32 = 64 * 1024;
 const max_serialized_list_items: u32 = 1024;
 const max_serialized_mounts: u32 = 256;
@@ -136,6 +138,7 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     out.writeByte(@intFromBool(cfg.auto_remove)) catch return RunStateError.WriteFailed;
     out.writeByte(@intFromBool(cfg.interactive)) catch return RunStateError.WriteFailed;
     out.writeByte(@intFromBool(cfg.tty)) catch return RunStateError.WriteFailed;
+    writeString(out, cfg.healthcheck_json orelse "") catch return RunStateError.WriteFailed;
     out.flush() catch return RunStateError.WriteFailed;
     file.sync(std.Options.debug_io) catch return RunStateError.WriteFailed;
     cwd().rename(tmp_path, cwd(), path, std.Options.debug_io) catch return RunStateError.WriteFailed;
@@ -184,7 +187,7 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
         alloc.free(mounts);
     }
     const network_enabled = (readByte(input) catch return RunStateError.ReadFailed) != 0;
-    const port_maps = readPortMaps(alloc, input) catch |err| return mapReadError(err);
+    const port_maps = readPortMaps(alloc, input, version) catch |err| return mapReadError(err);
     errdefer alloc.free(port_maps);
     const limits = readLimits(input) catch |err| return mapReadError(err);
     const restart_raw = readByte(input) catch return RunStateError.ReadFailed;
@@ -209,11 +212,18 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     const auto_remove = if (version >= 3) (readByte(input) catch return RunStateError.ReadFailed) != 0 else false;
     const interactive = if (version >= 4) (readByte(input) catch return RunStateError.ReadFailed) != 0 else false;
     const tty = if (version >= 4) (readByte(input) catch return RunStateError.ReadFailed) != 0 else false;
+    const health_text = if (version >= 5) readString(alloc, input) catch |err| return mapReadError(err) else null;
+    const healthcheck_json = if (health_text) |value| if (value.len > 0) value else blk: {
+        alloc.free(value);
+        break :blk null;
+    } else null;
+    errdefer if (healthcheck_json) |value| alloc.free(value);
     if (stop_signal == 0 or stop_signal > 64) return RunStateError.InvalidFormat;
 
     return .{
         .user = user,
         .image_reference = image_reference,
+        .healthcheck_json = healthcheck_json,
         .stop_signal = stop_signal,
         .stop_timeout_seconds = stop_timeout_seconds,
         .auto_remove = auto_remove,
@@ -330,10 +340,12 @@ fn writePortMaps(writer: anytype, port_maps: []const net_setup.PortMap) !void {
         try writeInt(writer, u16, pm.host_port);
         try writeInt(writer, u16, pm.container_port);
         try writer.writeByte(@intFromEnum(pm.protocol));
+        try writer.writeByte(@intFromBool(pm.host_ip != null));
+        if (pm.host_ip) |address| try writer.writeAll(&address);
     }
 }
 
-fn readPortMaps(alloc: std.mem.Allocator, reader: anytype) ![]net_setup.PortMap {
+fn readPortMaps(alloc: std.mem.Allocator, reader: anytype, version: u32) ![]net_setup.PortMap {
     const count = try readInt(reader, u32);
     if (count > max_serialized_port_maps) return error.InvalidFormat;
     const port_maps = try alloc.alloc(net_setup.PortMap, count);
@@ -347,6 +359,11 @@ fn readPortMaps(alloc: std.mem.Allocator, reader: anytype) ![]net_setup.PortMap 
         const protocol_raw = try readByte(reader);
         pm.protocol = std.enums.fromInt(net_setup.Protocol, protocol_raw) orelse
             return error.InvalidFormat;
+        if (version >= 5 and (try readByte(reader)) != 0) {
+            var address: [4]u8 = undefined;
+            try reader.readSliceAll(&address);
+            pm.host_ip = address;
+        }
     }
     return port_maps;
 }

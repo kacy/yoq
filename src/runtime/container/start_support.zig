@@ -127,10 +127,15 @@ pub fn cleanupFailedStart(self: anytype, spawned: *?namespaces.SpawnResult, netw
     finishCapture(&self.runtime);
     if (self.net_info) |*info| {
         if (self.config.network) |config| {
-            if (network_db) |db| net_setup.teardownContainer(self.config.id, info, config, db);
+            if (network_db) |db| {
+                if (net_setup.teardownContainerChecked(self.config.id, info, config, db)) |_| {
+                    self.net_info = null;
+                    store.updateNetwork(self.config.id, null, null) catch {};
+                } else |err| {
+                    log.warn("failed to roll back network for {s}: {}", .{ self.config.id, err });
+                }
+            }
         }
-        self.net_info = null;
-        store.updateNetwork(self.config.id, null, null) catch {};
     }
     if (self.runtime.cgroup) |cgroup| {
         if (cgroup.destroy()) |_| {
@@ -142,7 +147,8 @@ pub fn cleanupFailedStart(self: anytype, spawned: *?namespaces.SpawnResult, netw
     self.pid = null;
     self.status = .created;
     active_pid.store(0, .release);
-    store.updateStatus(self.config.id, if (self.runtime.cgroup == null) "created" else "cleanup_failed", null, null) catch {};
+    const clean = self.runtime.cgroup == null and self.net_info == null;
+    store.updateStatus(self.config.id, if (clean) "created" else "cleanup_failed", null, null) catch {};
 }
 
 fn finishCapture(runtime: anytype) void {
@@ -163,9 +169,12 @@ pub fn finalizeRuntime(self: anytype, exit_code: u8) void {
             var db = store.openDb() catch null;
             defer if (db) |*d| d.deinit();
             if (db) |*d| {
-                net_setup.teardownContainer(self.config.id, info, net_config, d);
-                self.net_info = null;
-                store.updateNetwork(self.config.id, null, null) catch {};
+                if (net_setup.teardownContainerChecked(self.config.id, info, net_config, d)) |_| {
+                    self.net_info = null;
+                    store.updateNetwork(self.config.id, null, null) catch {};
+                } else |_| {
+                    final_status = "cleanup_failed";
+                }
             } else {
                 // Retain ownership so a restart cannot overwrite leaked state.
                 final_status = "cleanup_failed";
