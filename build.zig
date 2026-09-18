@@ -755,12 +755,12 @@ pub fn build(b: *std.Build) void {
     };
 
     for (bpf_programs) |prog| {
-        // step 1: compile C → .o with clang
+        // use the versioned compiler; another clang may appear earlier in path.
         const c_source = b.fmt("bpf/{s}.c", .{prog});
         const obj_output = b.fmt("bpf/{s}.o", .{prog});
 
         const clang = b.addSystemCommand(&.{
-            "clang",
+            "clang-19",
             "-target",
             "bpf",
             "-O2",
@@ -770,6 +770,7 @@ pub fn build(b: *std.Build) void {
         });
         const obj_file = clang.addOutputFileArg(obj_output);
         clang.addFileArg(b.path(c_source));
+        clang.addFileInput(b.path("bpf/common.h"));
 
         // step 2: run bpf_gen to extract bytecode
         const zig_output = b.fmt("src/network/bpf/{s}.zig", .{prog});

@@ -241,6 +241,7 @@ jobs:
       - name: regenerate checked-in bpf bytecode
         shell: bash
         run: |
+          clang-19 --version
           zig build bpf
           zig fmt src/network/bpf/
 
