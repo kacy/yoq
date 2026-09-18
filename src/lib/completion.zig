@@ -42,7 +42,7 @@ const command_meta = [_]CommandMeta{
     .{ .name = "rm" },
     .{ .name = "restart" },
     .{ .name = "exec" },
-    .{ .name = "status", .flags = &.{ "--app", "--verbose", "-v", "--server" } },
+    .{ .name = "status", .flags = &.{ "--app", "--alerts", "--verbose", "-v", "--server" } },
     .{ .name = "apps", .flags = &.{ "--server", "--json", "--status", "--failed", "--in-progress" } },
     .{ .name = "metrics", .flags = &.{ "--server", "--pairs" } },
     .{ .name = "gpu", .subcommands = &.{

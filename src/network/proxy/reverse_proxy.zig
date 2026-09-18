@@ -6,6 +6,7 @@ const log = @import("../../lib/log.zig");
 const proxy_helpers = @import("proxy_helpers.zig");
 const socket_helpers = @import("socket_helpers.zig");
 const ip = @import("../ip.zig");
+const observations = @import("observations.zig");
 const http1_stream = @import("http1_stream.zig");
 const h2c_upgrade = @import("h2c_upgrade.zig");
 const http2 = @import("http2.zig");
@@ -185,8 +186,10 @@ pub const ReverseProxy = struct {
                 defer plan.deinit(self.allocator);
                 proxy_runtime.recordRouteRequestStart(plan.route.name, plan.route.service, plan.backend_service);
                 self.startMirrorRequest(raw_request, &plan, client_ip);
+                const started_ns = observations.nowNs();
                 const response = try self.forwardPlanWithClient(raw_request, &plan, client_ip);
                 if (parseForwardedStatusCode(self.allocator, plan.protocol, response)) |status_code| {
+                    if (status_code != 101) observations.record(plan.backend_service, started_ns, status_code >= 500);
                     proxy_runtime.recordResponseCode(status_code);
                 } else |_| if (plan.protocol == .http1) {
                     proxy_runtime.recordResponse(.bad_gateway);
@@ -369,6 +372,7 @@ pub const ReverseProxy = struct {
     }
 
     fn forwardStreamAttempts(self: *const ReverseProxy, raw_request: []const u8, plan: *const ForwardPlan, client_ip: ?[4]u8, downstream: *http1_stream.Downstream) !void {
+        const started_ns = observations.nowNs();
         const policy = proxy_policy.RequestPolicy{ .retries = plan.route.retries, .retry_on_5xx = plan.route.retry_on_5xx };
         const circuit = proxy_policy.CircuitBreakerPolicy{ .failure_threshold = plan.route.circuit_breaker_threshold, .open_timeout_ms = plan.route.circuit_breaker_timeout_ms };
         const request = try self.buildForwardRequestWithClient(raw_request, plan, client_ip);
@@ -389,6 +393,7 @@ pub const ReverseProxy = struct {
                     proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
                     continue;
                 }
+                observations.record(plan.backend_service, started_ns, true);
                 proxy_runtime.recordRouteFailure(plan.route.name, mapRouteFailureKind(err));
                 return err;
             };
@@ -398,6 +403,7 @@ pub const ReverseProxy = struct {
                 proxy_runtime.recordRouteRetry(plan.route.name, plan.route.service, upstream.service);
                 continue;
             }
+            if (status != 101) observations.record(plan.backend_service, started_ns, status >= 500);
             proxy_runtime.recordResponseCode(status);
             proxy_runtime.recordRouteResponseCode(plan.route.name, plan.route.service, upstream.service, status);
             proxy_runtime.recordRouteRecovered(plan.route.name);

@@ -22,6 +22,7 @@ const spec = @import("spec.zig");
 const watcher_mod = @import("../dev/watcher.zig");
 const health = @import("health.zig");
 const cron_scheduler = @import("cron_scheduler.zig");
+const alert_runtime = @import("alerts/runtime.zig");
 const backup_scheduler = @import("backup_scheduler.zig");
 const instances = @import("orchestrator/instances.zig");
 const lifecycle_support = @import("orchestrator/lifecycle_support.zig");
@@ -44,6 +45,7 @@ pub const ServiceState = struct {
     container_id: [12]u8,
     identity_mutex: std.Io.Mutex = .init,
     ownership_claimed: bool = false,
+    alert_registration: ?alert_runtime.Registration = null,
     thread: ?std.Thread,
     status: Status,
     health_status: ?health.HealthStatus = null,
@@ -133,6 +135,7 @@ pub const Orchestrator = struct {
     }
 
     pub fn deinit(self: *Orchestrator) void {
+        self.stopAlerts();
         if (self.tls_resources) |*resources| resources.deinit(self.alloc);
         if (self.cron_sched) |cs| {
             cs.deinit();
@@ -151,6 +154,26 @@ pub const Orchestrator = struct {
         if (self.restart_requested.len > 0) {
             self.alloc.free(self.restart_requested);
         }
+    }
+
+    pub fn startServiceAlerts(self: *Orchestrator, index: usize) !void {
+        if (self.states[index].alert_registration != null) return;
+        const service = self.manifest.services[index];
+        // ownership has already been claimed, including for an incremental apply.
+        // clear stale rows when the replacement removes its alert configuration.
+        try @import("../state/store/alerts.zig").clearForOwner(self.app_name, service.name, &self.supervisor_token);
+        const config = service.alerts orelse return;
+        self.states[index].alert_registration = try alert_runtime.registerOwned(self.app_name, service.name, config, &self.supervisor_token);
+    }
+
+    pub fn stopServiceAlerts(self: *Orchestrator, index: usize) void {
+        if (self.states[index].alert_registration) |registration| registration.release();
+        self.states[index].alert_registration = null;
+    }
+
+    pub fn stopAlerts(self: *Orchestrator) void {
+        for (0..@min(self.manifest.services.len, self.states.len)) |index| self.stopServiceAlerts(index);
+        alert_runtime.shutdownIfUnused();
     }
 
     /// compute the set of services to start from a list of target names.
