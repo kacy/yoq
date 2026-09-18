@@ -84,7 +84,7 @@ int dns_intercept(struct __sk_buff *skb)
     // fixed offsets require ipv4 without options. fragmented datagrams must be
     // reassembled before their dns question can be interpreted.
     if (ip->ihl_version != 0x45 || ip->protocol != IPPROTO_UDP ||
-        (ntohs(ip->frag_off) & 0x3fff) != 0 || ip->ttl == 0)
+        (ntohs(ip->frag_off) & IPV4_FRAGMENT_MASK) != 0 || ip->ttl == 0)
         return TC_ACT_UNSPEC;
 
     __u16 ip_len = ntohs(ip->tot_len);
@@ -128,12 +128,6 @@ int dns_intercept(struct __sk_buff *skb)
     __u32 wire_len = find_name_length(key_buf, read_len);
     if (wire_len == 0 || wire_len > 63 ||
         wire_len + DNS_QUESTION_FIELDS_SIZE != question_len)
-        return TC_ACT_UNSPEC;
-
-    // the first read can include question fields. map keys contain only the
-    // name and zero padding, so reload exactly the validated name.
-    __builtin_memset(key_buf, 0, sizeof(key_buf));
-    if (bpf_skb_load_bytes(skb, DNS_QUESTION_OFFSET, key_buf, wire_len) != 0)
         return TC_ACT_UNSPEC;
 
     __u8 question_fields[DNS_QUESTION_FIELDS_SIZE] = {};
