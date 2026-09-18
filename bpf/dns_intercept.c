@@ -149,91 +149,66 @@ int dns_intercept(struct __sk_buff *skb)
     if (!ip_addr)
         return TC_ACT_UNSPEC;
 
+    // save all request fields before resizing invalidates packet pointers.
     __u32 resolved_ip = *ip_addr;
-
-    // -- save header fields before resize --
     __u8 src_mac[6], dst_mac[6];
-    __builtin_memcpy(dst_mac, eth->h_dest, 6);
     __builtin_memcpy(src_mac, eth->h_source, 6);
-
-    // src_ip already validated above
+    __builtin_memcpy(dst_mac, eth->h_dest, 6);
     __u32 dst_ip = ip->daddr;
     __u16 old_ip_len = ip->tot_len;
     __u16 src_port = udp->source;
     __u16 dst_port = udp->dest;
+    __u8 recursion_desired = dns[2] & 0x01;
 
-    // -- compute response layout --
-    // SECURITY: Check for integer overflow in offset calculation
-    __u32 answer_offset = fields_offset + 4; // past name + qtype + qclass
-    __u32 new_pkt_len = answer_offset + 16;  // 16-byte answer RR
-    
-    // Validate sizes are reasonable
-    if (answer_offset < DNS_QUESTION_OFFSET || new_pkt_len > 512 || new_pkt_len < answer_offset)
-        return TC_ACT_UNSPEC;
-
-    // -- resize packet --
+    __u32 answer_offset = fields_offset + DNS_QUESTION_FIELDS_SIZE;
+    __u32 new_pkt_len = answer_offset + DNS_ANSWER_SIZE;
+    // after resizing begins, failures must drop the packet. a partial response
+    // must not continue through the ingress chain as a request.
     if (bpf_skb_change_tail(skb, new_pkt_len, 0) != 0)
-        return TC_ACT_UNSPEC;
+        return TC_ACT_SHOT;
 
-    // re-read data pointers after resize
     data = (void *)(long)skb->data;
     data_end = (void *)(long)skb->data_end;
-
-    // SECURITY: Validate new packet size
-    if (data + MIN_DNS_PACKET_SIZE > data_end)
-        return TC_ACT_UNSPEC;
-    if (data + new_pkt_len > data_end)
-        return TC_ACT_UNSPEC;
+    if (data + MIN_DNS_PACKET_SIZE > data_end || data + new_pkt_len > data_end)
+        return TC_ACT_SHOT;
 
     eth = data;
     ip = (void *)(eth + 1);
     udp = (void *)((char *)ip + 20);
-    dns = data + 42;
+    dns = data + DNS_HEADER_OFFSET;
 
-    // 1. swap MACs
     __builtin_memcpy(eth->h_dest, src_mac, 6);
     __builtin_memcpy(eth->h_source, dst_mac, 6);
-
-    // 2. swap IPs
     ip->saddr = dst_ip;
     ip->daddr = src_ip;
-
-    // 3. update IP total length (save new value for checksum update)
     __u16 new_ip_len = htons(new_pkt_len - 14);
     ip->tot_len = new_ip_len;
-
-    // 4. swap UDP ports, update length, zero checksum
     udp->source = dst_port;
     udp->dest = src_port;
     udp->len = htons(new_pkt_len - 34);
-    udp->check = 0;
+    udp->check = 0; // ipv4 permits udp without a checksum
 
-    // 5. set DNS response flags
-    dns[2] = 0x84; // QR=1, AA=1
-    dns[3] = 0x00;
-    dns[6] = 0x00; // ANCOUNT = 1
-    dns[7] = 0x01;
+    dns[2] = 0x84 | recursion_desired; // response, authoritative, preserve rd
+    dns[3] = 0;
+    dns[6] = 0;
+    dns[7] = 1;
 
-    // 6. update IP checksum AFTER all direct packet writes
-    bpf_l3_csum_replace(skb, 24, old_ip_len, new_ip_len, 2);
+    // swapping addresses preserves their checksum contribution; only length
+    // changes. checksum helpers invalidate direct packet pointers.
+    if (bpf_l3_csum_replace(skb, 24, old_ip_len, new_ip_len, 2) != 0)
+        return TC_ACT_SHOT;
 
-    // 7. write answer RR at validated offset
-    __u8 answer[16] = {
-        0xC0, 0x0C,                   // name pointer (offset 12 in DNS msg)
-        0x00, 0x01,                   // TYPE = A
-        0x00, 0x01,                   // CLASS = IN
-        0x00, 0x00, 0x00, 0x05,       // TTL = 5 seconds
-        0x00, 0x04,                   // RDLENGTH = 4
-        0, 0, 0, 0                    // RDATA (filled below)
+    __u8 answer[DNS_ANSWER_SIZE] = {
+        0xc0, 0x0c,                   // name pointer to the question
+        0x00, 0x01,                   // type a
+        0x00, 0x01,                   // class in
+        0x00, 0x00, 0x00, 0x05,       // ttl: 5 seconds
+        0x00, 0x04,                   // address length: 4 bytes
+        0, 0, 0, 0
     };
     __builtin_memcpy(&answer[12], &resolved_ip, 4);
-
-    // SECURITY: Verify answer_offset is still valid after resize
-    if (answer_offset + 16 > new_pkt_len)
-        return TC_ACT_UNSPEC;
-
-    if (bpf_skb_store_bytes(skb, answer_offset, answer, 16, 0) != 0)
-        return TC_ACT_UNSPEC;
+    if (bpf_skb_store_bytes(skb, answer_offset, answer, sizeof(answer), 0) != 0)
+        return TC_ACT_SHOT;
 
     return bpf_redirect(skb->ifindex, 0);
 }
