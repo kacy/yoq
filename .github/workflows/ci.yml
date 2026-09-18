@@ -337,6 +337,9 @@ jobs:
             ./zig-out/bin/yoq validate -f "$manifest"
           done
 
+      - name: exercise backup verification and recovery commands
+        run: python3 scripts/backup-restore-smoke.py ./zig-out/bin/yoq
+
   registry-tls:
     name: registry-tls
     runs-on: ubuntu-latest
@@ -369,4 +372,3 @@ jobs:
           sudo apt-get install --no-install-recommends -y wireguard-tools
       - name: verify native wireguard configuration
         run: bash scripts/wireguard-kernel-smoke.sh
-
