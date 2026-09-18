@@ -180,7 +180,11 @@ test "registry authenticated request methods refuse redirects before contacting 
             defer request.deinit();
             if (method == .POST or method == .PUT) try request.sendBodyComplete(&.{}) else try request.sendBodiless();
             var redirects: [1024]u8 = undefined;
-            try std.testing.expectError(error.TooManyHttpRedirects, request.receiveHead(&redirects));
+            // HEAD exposes the status directly; other methods reject following it.
+            if (method == .HEAD) {
+                const response = try request.receiveHead(&redirects);
+                try std.testing.expectEqual(std.http.Status.found, response.head.status);
+            } else try std.testing.expectError(error.TooManyHttpRedirects, request.receiveHead(&redirects));
             source.worker.?.join();
             source.worker = null;
             const received = source.last_request[0..source.last_request_length];
