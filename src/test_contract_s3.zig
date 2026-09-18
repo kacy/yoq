@@ -33,7 +33,16 @@ fn routeRequest(method: http.Method, path: []const u8, body: []const u8) !common
 }
 
 fn freeResponse(resp: common.Response) void {
-    if (resp.allocated) std.testing.allocator.free(resp.body);
+    resp.deinit(std.testing.allocator);
+}
+
+fn expectObjectBody(response: common.Response, expected: []const u8) !void {
+    try std.testing.expectEqual(@as(?usize, expected.len), response.content_length);
+    const file = response.file_body orelse return error.MissingObjectFile;
+    const bytes = try std.testing.allocator.alloc(u8, expected.len);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqual(expected.len, try file.readPositionalAll(std.testing.io, bytes, 0));
+    try std.testing.expectEqualSlices(u8, expected, bytes);
 }
 
 fn expectXmlTag(body: []const u8, tag: []const u8) ![]const u8 {
@@ -94,7 +103,7 @@ test "contract: s3 object lifecycle preserves bytes and metadata" {
     defer freeResponse(get);
     try std.testing.expectEqual(http.StatusCode.ok, get.status);
     try std.testing.expectEqualStrings("application/octet-stream", get.content_type.?);
-    try std.testing.expectEqualSlices(u8, object_body, get.body);
+    try expectObjectBody(get, object_body);
 
     const head = try routeRequest(.HEAD, "/s3/object-bucket/nested/blob.bin", "");
     defer freeResponse(head);
@@ -209,7 +218,7 @@ test "contract: s3 multipart completion assembles the final object" {
 
     const get = try routeRequest(.GET, "/s3/multipart-bucket/video.bin", "");
     defer freeResponse(get);
-    try std.testing.expectEqualSlices(u8, "hello world", get.body);
+    try expectObjectBody(get, "hello world");
 }
 
 test "contract: s3 multipart abort invalidates the upload id" {
@@ -312,7 +321,7 @@ test "contract: s3 paginates encoded keys with actual etags" {
     try std.testing.expect(std.mem.indexOf(u8, first.body, "2c1743a391305fbf367df8e4f069f9f9") != null);
     const get = try routeRequest(.GET, "/s3/page-bucket/folder/c%2Bd", "");
     defer freeResponse(get);
-    try std.testing.expectEqualStrings("beta", get.body);
+    try expectObjectBody(get, "beta");
     const bad = try routeRequest(.GET, "/s3/page-bucket/folder/bad%xx", "");
     defer freeResponse(bad);
     try std.testing.expectEqual(http.StatusCode.bad_request, bad.status);

@@ -13,6 +13,13 @@ pub const Response = struct {
     /// representation size for responses such as head that carry no body.
     content_length: ?usize = null,
     etag: ?[32]u8 = null,
+    /// owned descriptor for a streamed body; content_length is required.
+    file_body: ?std.Io.File = null,
+
+    pub fn deinit(self: Response, alloc: std.mem.Allocator) void {
+        if (self.allocated) alloc.free(self.body);
+        if (self.file_body) |file| file.close(std.Options.debug_io);
+    }
 };
 
 pub const RouteContext = struct {

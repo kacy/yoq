@@ -153,7 +153,7 @@ fn objectLevel(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
         },
         .GET => {
             // GetObject
-            const data = s3.getObject(alloc, bucket, key) catch |e| return switch (e) {
+            const object = s3.openObject(bucket, key) catch |e| return switch (e) {
                 s3.S3Error.ObjectNotFound => s3ErrorStatus(alloc, .not_found, "NoSuchKey", "object not found"),
                 s3.S3Error.InvalidKey => s3Error(alloc, "InvalidKey", "invalid object key"),
                 else => s3Error(alloc, "InternalError", "failed to get object"),
@@ -161,10 +161,12 @@ fn objectLevel(request: http.Request, alloc: std.mem.Allocator, bucket: []const 
 
             return .{
                 .status = .ok,
-                .body = data,
-                .allocated = true,
+                .body = "",
+                .allocated = false,
+                .file_body = object.file,
+                .content_length = @intCast(object.meta.size),
                 .content_type = "application/octet-stream",
-                .etag = s3.computeEtag(data),
+                .etag = object.meta.etag,
             };
         },
         .HEAD => {
