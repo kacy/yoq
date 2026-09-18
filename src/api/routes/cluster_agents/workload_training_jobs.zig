@@ -60,9 +60,16 @@ fn mutate(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8, 
         .restart_count = if (existing) |record| record.restart_count else 0,
     };
     switch (action) {
-        .start => {},
+        .start => {
+            if (existing) |record| {
+                if (isActive(record.state) or std.mem.eql(u8, record.state, "paused")) return common.conflict("training job already exists; resume or stop it first");
+            }
+            options.restart_count = 0;
+        },
         .resume_job, .scale => {
             const record = existing orelse return common.notFound();
+            if (action == .resume_job and !std.mem.eql(u8, record.state, "paused") and !std.mem.eql(u8, record.state, "failed") and !std.mem.eql(u8, record.state, "stopped")) return common.conflict("training job cannot resume from its current state");
+            if (action == .scale and !isActive(record.state) and !std.mem.eql(u8, record.state, "paused")) return common.conflict("training job cannot scale from its current state");
             options.id = record.id;
             options.gpus = if (action == .scale) action.scale else record.gpus;
             options.created_at = record.created_at;
@@ -87,6 +94,8 @@ fn changeState(alloc: std.mem.Allocator, session: mutation.Session, record: stor
 
 pub fn handleStatus(alloc: std.mem.Allocator, app_name: []const u8, job_name: []const u8, ctx: RouteContext) Response {
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
     const record = (store.findTrainingJobInDb(node.stateMachineDb(), alloc, app_name, job_name) catch return common.internalError()) orelse return common.notFound();
     defer record.deinit(alloc);
     return formatRecordResponse(alloc, record, null);
@@ -106,7 +115,11 @@ fn schedule(
     };
     defer latest.deinit(alloc);
 
-    const job = (app_snapshot.findTrainingJobSpec(alloc, latest.config_snapshot, job_name) catch return common.internalError()) orelse return common.notFound();
+    const job = (app_snapshot.findTrainingJobSpec(alloc, latest.config_snapshot, job_name) catch |err| return switch (err) {
+        error.UnsupportedTrainingData => common.badRequest("training.data is unsupported; mount datasets as volumes"),
+        error.UnsupportedSpareRanks => common.badRequest("training.fault_tolerance.spare_ranks is unsupported; use zero"),
+        else => common.internalError(),
+    }) orelse return common.notFound();
     defer job.deinit(alloc);
 
     const job_id = if (options.id) |id|
@@ -128,19 +141,24 @@ fn schedule(
         .id = job_id,
         .name = job_name,
         .app_name = app_name,
-        .state = "running",
+        .state = "scheduling",
         .image = job.image,
         .gpus = desired_gpus,
         .checkpoint_path = job.checkpoint_path,
-        .checkpoint_interval = null,
-        .checkpoint_keep = null,
+        .checkpoint_interval = job.checkpoint_interval,
+        .checkpoint_keep = job.checkpoint_keep,
         .restart_count = options.restart_count,
         .created_at = options.created_at orelse now,
         .updated_at = now,
     }) catch return common.internalError();
+    var execution = @import("../../../cluster/assignment_spec.zig").decode(alloc, job.command) catch return common.internalError();
+    defer execution.deinit();
+    execution.value.resume_checkpoint = options.id != null;
+    const command = std.json.Stringify.valueAlloc(alloc, execution.value, .{}) catch return common.internalError();
+    defer alloc.free(command);
     const scheduled = (placement.replaceWorkload(alloc, session, .{
         .image = job.image,
-        .command = job.command,
+        .command = command,
         .cpu_limit = job.cpu_limit,
         .memory_limit_mb = job.memory_limit_mb,
         .app_name = app_name,
@@ -157,6 +175,107 @@ fn schedule(
     defer record.deinit(alloc);
 
     return formatRecordResponse(alloc, record, "training job scheduled");
+}
+
+fn isActive(state: []const u8) bool {
+    for ([_][]const u8{ "pending", "scheduling", "running", "restarting" }) |active| if (std.mem.eql(u8, state, active)) return true;
+    return false;
+}
+
+// every decision is made from applied state in this leadership term. the app
+// lock excludes start, pause, scale and rollout changes while we replace ranks.
+pub fn reconcileAll(alloc: std.mem.Allocator, node: *@import("../../../cluster/node.zig").Node) !void {
+    if (!node.isLeader()) return;
+    var ids: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (ids.items) |id| alloc.free(id);
+        ids.deinit(alloc);
+    }
+    {
+        node.mu.lockUncancelable(std.Options.debug_io);
+        defer node.mu.unlock(std.Options.debug_io);
+        var query = try node.stateMachineDb().prepare("SELECT id FROM training_jobs WHERE state IN ('pending', 'scheduling', 'running', 'restarting', 'failed');");
+        defer query.deinit();
+        var rows = try query.iterator(struct { id: @import("sqlite").Text }, .{});
+        while (try rows.nextAlloc(alloc, .{})) |row| {
+            const id = row.id.data;
+            ids.append(alloc, id) catch |err| {
+                alloc.free(id);
+                return err;
+            };
+        }
+    }
+    for (ids.items) |id| reconcileJob(alloc, node, id) catch |err| switch (err) {
+        error.NotLeader => return err,
+        error.AlreadyLocked => continue,
+        else => @import("../../../lib/log.zig").warn("training reconciliation failed for {s}: {}", .{ id, err }),
+    };
+}
+
+fn reconcileJob(alloc: std.mem.Allocator, node: *@import("../../../cluster/node.zig").Node, id: []const u8) !void {
+    const session = try mutation.Session.begin(node);
+    const before = try readRecord(alloc, session, id);
+    defer before.deinit(alloc);
+    var lock = try apply_lock.acquire(alloc, before.app_name);
+    defer lock.release();
+    try session.synchronize();
+    const record = try readRecord(alloc, session, id);
+    defer record.deinit(alloc);
+    if (!isActive(record.state) and !std.mem.eql(u8, record.state, "failed")) return;
+    const latest_record = (try findRecord(alloc, session, record.app_name, record.name)) orelse return;
+    defer latest_record.deinit(alloc);
+    if (!std.mem.eql(u8, record.id, latest_record.id)) {
+        var batch = std.Io.Writer.Allocating.init(alloc);
+        defer batch.deinit();
+        // keep the historical timestamp so retiring an old row cannot make
+        // it the latest run of this named job.
+        try sql.write(&batch.writer, "UPDATE training_jobs SET state = 'stopped' WHERE id = ?;", .{record.id});
+        return session.commit(batch.written());
+    }
+    const counts = try rankCounts(session, record);
+    const next = counts.state(record.gpus);
+    if (std.mem.eql(u8, next, "failed")) {
+        if (!std.mem.eql(u8, record.state, "failed")) {
+            const response = changeState(alloc, session, record, "failed", "training rank failed");
+            defer if (response.allocated) alloc.free(response.body);
+            if (response.status != .ok) return error.InternalError;
+        }
+        const release = try readLatestRelease(alloc, session, record.app_name);
+        defer release.deinit(alloc);
+        const job = (try app_snapshot.findTrainingJobSpec(alloc, release.config_snapshot, record.name)) orelse return;
+        defer job.deinit(alloc);
+        if (!job.auto_restart or record.restart_count >= job.max_restarts) return;
+        const response = schedule(alloc, session, record.app_name, record.name, .{ .id = record.id, .gpus = record.gpus, .restart_count = record.restart_count + 1, .created_at = record.created_at });
+        defer if (response.allocated) alloc.free(response.body);
+        if (response.status != .ok and response.status != .conflict) return error.InternalError;
+        return;
+    }
+    if (std.mem.eql(u8, record.state, next)) return;
+    var batch = std.Io.Writer.Allocating.init(alloc);
+    defer batch.deinit();
+    try appendState(&batch.writer, record.id, next, nowRealSeconds());
+    try session.commit(batch.written());
+}
+
+const RankCounts = struct {
+    total: i64 = 0,
+    running: i64 = 0,
+    stopped: i64 = 0,
+    failed: i64 = 0,
+
+    fn state(self: RankCounts, expected: i64) []const u8 {
+        if (expected <= 0 or self.total != expected or self.failed > 0) return "failed";
+        if (self.stopped == expected) return "completed";
+        if (self.running + self.stopped == expected) return "running";
+        return "scheduling";
+    }
+};
+
+fn rankCounts(session: mutation.Session, record: store.TrainingJobRecord) !RankCounts {
+    session.node.mu.lockUncancelable(std.Options.debug_io);
+    defer session.node.mu.unlock(std.Options.debug_io);
+    try session.checkLocked();
+    return (try session.node.stateMachineDb().one(RankCounts, "SELECT COUNT(*) AS total, COALESCE(SUM(status = 'running'), 0) AS running, COALESCE(SUM(status = 'stopped'), 0) AS stopped, COALESCE(SUM(status = 'failed'), 0) AS failed FROM assignments WHERE app_name = ? AND workload_kind = 'training' AND workload_name = ?;", .{}, .{ record.app_name, record.name })).?;
 }
 
 fn findRecord(alloc: std.mem.Allocator, session: mutation.Session, app_name: []const u8, job_name: []const u8) mutation.Error!?store.TrainingJobRecord {
