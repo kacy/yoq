@@ -11,7 +11,7 @@ const registry = @import("service_registry_runtime.zig");
 const spec = @import("../manifest/spec.zig");
 const paths = @import("../lib/paths.zig");
 const ip = @import("ip.zig");
-const nat = @import("nat.zig");
+const firewall = @import("published_ports_firewall.zig");
 const log = @import("../lib/log.zig");
 const io = std.Options.debug_io;
 const Allocator = std.mem.Allocator;
@@ -181,94 +181,28 @@ fn saveClaims(claims: []const Claim) !void {
 }
 
 fn acquireLock() !std.posix.fd_t {
-    try paths.ensureDataDirStrict("network");
     var buf: [paths.max_path]u8 = undefined;
-    const path = try paths.dataPath(&buf, "network/published-ports.lock");
-    var zbuf: [paths.max_path]u8 = undefined;
-    const name = try std.fmt.bufPrintZ(&zbuf, "{s}", .{path});
-    const linux = std.os.linux;
-    const rc = linux.open(name, .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600);
-    if (linux.errno(rc) != .SUCCESS) return error.LockFailed;
-    const fd: std.posix.fd_t = @intCast(rc);
-    errdefer platform.posix.close(fd);
-    while (true) switch (linux.errno(linux.flock(fd, 2))) {
-        .SUCCESS => return fd,
-        .INTR => continue,
-        else => return error.LockFailed,
-    };
+    const owner = try paths.dataPath(&buf, "");
+    return @import("published_ports_lock.zig").acquire(owner);
 }
 
-fn firstForPort(claims: []const Claim, index: usize) bool {
-    for (claims[0..index]) |earlier| if (earlier.host_port == claims[index].host_port) return false;
-    return true;
-}
-
-/// each DNAT rule ends traversal. conditional probabilities give every healthy
-/// replica the same share of new connections; conntrack pins subsequent packets.
 fn renderRules(alloc: Allocator, claims: []const Claim) ![]const u8 {
-    var output: std.Io.Writer.Allocating = .init(alloc);
-    const writer = &output.writer;
-    try writer.writeAll("*filter\n:YOQ-PUBLISHED-FWD - [0:0]\n:YOQ-PUBLISHED-IN - [0:0]\n-F YOQ-PUBLISHED-FWD\n-F YOQ-PUBLISHED-IN\n");
-    for (claims, 0..) |claim, index| {
-        if (firstForPort(claims, index)) try writer.print("-A YOQ-PUBLISHED-IN -p tcp --dport {d} -j REJECT --reject-with tcp-reset\n", .{claim.host_port});
-        if (!claim.eligible) continue;
-        var buf: [16]u8 = undefined;
-        try writer.print("-A YOQ-PUBLISHED-FWD -p tcp -d {s} --dport {d} -j ACCEPT\n", .{ ip.formatIp(claim.address, &buf), claim.target_port });
-    }
-    try writer.writeAll("COMMIT\n*nat\n:YOQ-PUBLISHED - [0:0]\n:YOQ-PUBLISHED-SNAT - [0:0]\n-F YOQ-PUBLISHED\n-F YOQ-PUBLISHED-SNAT\n");
-    for (claims, 0..) |claim, index| {
-        if (!claim.eligible) continue;
-        var remaining: usize = 0;
-        for (claims[index..]) |later| if (later.eligible and later.host_port == claim.host_port) {
-            remaining += 1;
-        };
-        try writer.print("-A YOQ-PUBLISHED -p tcp --dport {d}", .{claim.host_port});
-        if (remaining > 1) try writer.print(" -m statistic --mode random --probability {d:.10}", .{1.0 / @as(f64, @floatFromInt(remaining))});
-        var buf: [16]u8 = undefined;
-        const address = ip.formatIp(claim.address, &buf);
-        try writer.print(" -j DNAT --to-destination {s}:{d}\n", .{ address, claim.target_port });
-        try writer.print("-A YOQ-PUBLISHED-SNAT -s 127.0.0.0/8 -p tcp -d {s} --dport {d} -j MASQUERADE\n", .{ address, claim.target_port });
-    }
-    try writer.writeAll("COMMIT\n");
-    return output.toOwnedSlice();
+    return firewall.renderRules(alloc, try backends(alloc, claims));
 }
 
-fn run(argv: []const []const u8, input: ?std.Io.File) !void {
-    var child = try std.process.spawn(io, .{ .argv = argv, .stdin = if (input) |file| .{ .file = file } else .ignore, .stdout = .ignore, .stderr = .ignore });
-    const term = try child.wait(io);
-    if (term != .exited or term.exited != 0) return error.FirewallFailed;
-}
-
-fn ensureJump(table: []const u8, source: []const u8, target: []const u8, local_only: bool) !void {
-    var args: std.ArrayList([]const u8) = .empty;
-    defer args.deinit(std.heap.page_allocator);
-    try args.appendSlice(std.heap.page_allocator, &.{ "iptables", "--wait", "5", "-t", table, "-C", source });
-    if (local_only) try args.appendSlice(std.heap.page_allocator, &.{ "-m", "addrtype", "--dst-type", "LOCAL" });
-    try args.appendSlice(std.heap.page_allocator, &.{ "-j", target });
-    run(args.items, null) catch {
-        args.items[5] = "-A";
-        try run(args.items, null);
+fn backends(alloc: Allocator, claims: []const Claim) ![]firewall.Backend {
+    const result = try alloc.alloc(firewall.Backend, claims.len);
+    for (claims, result) |claim, *backend| backend.* = .{
+        .host_port = claim.host_port,
+        .target_port = claim.target_port,
+        .address = claim.address,
+        .eligible = claim.eligible,
     };
+    return result;
 }
 
 fn applyRules(alloc: Allocator, claims: []const Claim) !void {
-    if (claims.len != 0) try nat.enableRouteLocalnet(@import("bridge.zig").default_bridge);
-    const rules = try renderRules(alloc, claims);
-    var buf: [paths.max_path]u8 = undefined;
-    const path = try paths.dataPath(&buf, "network/published-ports.rules");
-    // the cross-process lock also owns this scratch file. it contains only
-    // validated addresses and numeric ports, never application-provided text.
-    const file = try std.Io.Dir.cwd().createFile(io, path, .{ .read = true, .permissions = .fromMode(0o600) });
-    defer file.close(io);
-    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
-    try file.writeStreamingAll(io, rules);
-    _ = try platform.posix.lseek(file.handle, 0, std.os.linux.SEEK.SET);
-    try run(&.{ "iptables-restore", "--wait", "5", "--noflush" }, file);
-    try ensureJump("filter", "FORWARD", "YOQ-PUBLISHED-FWD", false);
-    try ensureJump("filter", "INPUT", "YOQ-PUBLISHED-IN", false);
-    try ensureJump("nat", "POSTROUTING", "YOQ-PUBLISHED-SNAT", false);
-    try ensureJump("nat", "PREROUTING", "YOQ-PUBLISHED", true);
-    try ensureJump("nat", "OUTPUT", "YOQ-PUBLISHED", true);
+    try firewall.apply(alloc, try backends(alloc, claims));
 }
 
 test "published ports reject another service and retain sibling ownership" {
