@@ -77,7 +77,10 @@ fn deriveKey(join_token: []const u8) [secrets.key_length]u8 {
 fn run(ctx: *Ctx) void {
     var attempt: u32 = 0;
     while (!ctx.stopped.isSet() and attempt < max_attempts) : (attempt += 1) {
-        if (store.clusterCaExistsInDb(ctx.node.stateMachineDb())) return;
+        ctx.node.mu.lockUncancelable(std.Options.debug_io);
+        const exists = store.clusterCaExistsInDb(ctx.node.stateMachineDb());
+        ctx.node.mu.unlock(std.Options.debug_io);
+        if (exists) return;
         if (ctx.node.isLeader()) {
             if (bootstrap(ctx)) |_| {
                 return;

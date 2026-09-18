@@ -15,7 +15,7 @@ pub fn apply(self: anytype, entry: LogEntry) void {
         return;
     }
 
-    command.apply(&self.db, entry) catch |err| {
+    command.apply(&self.db, &self.validator, entry) catch |err| {
         log.err("state machine: failed to apply entry {d}: {}", .{ entry.index, err });
         return;
     };

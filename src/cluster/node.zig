@@ -159,6 +159,7 @@ pub const Node = struct {
         errdefer sm.deinit();
 
         if (!skip_transport_bind) try snapshot_support.recover(alloc, config.data_dir, &log, &sm);
+        try sm.validateAppliedHistory(&log, alloc);
 
         // collect peer IDs for raft
         const peer_ids = try alloc.alloc(NodeId, config.peers.len);
@@ -347,7 +348,7 @@ pub const Node = struct {
     /// contract as API requests without recursively locking the node.
     pub fn proposeLocked(self: *Node, data: []const u8) !LogIndex {
         if (self.snapshot_failed.load(.acquire)) return error.SnapshotRecoveryRequired;
-        try command.validate(data);
+        try self.state_machine.validator.validate(data);
         return try self.raft.propose(data);
     }
 
@@ -1526,6 +1527,9 @@ test "replicated command admission rejects unsafe batches before appending" {
         "UPDATE agents SET cpu_used = 1; DROP TABLE agents;",
         "UPDATE agents SET address = 'unterminated;",
         "UPDATE agents SET cpu_used = 1; -- trailing comment",
+        "UPDATE agents SET nonexistent_col = 1;",
+        "UPDATE agents SET cpu_used = changes();",
+        "UPDATE agents SET cpu_used = (SELECT COUNT(*) FROM containers);",
     };
     for (invalid) |sql| {
         try std.testing.expectError(error.InvalidCommand, node.propose(sql));
