@@ -1,8 +1,6 @@
-// transport — TCP and UDP transport for raft and gossip traffic.
-//
-// The top-level module keeps the public transport surface stable. The
-// implementation now lives behind small support modules so HMAC handling,
-// message codec logic, and UDP gossip I/O are easier to audit.
+// tcp transport for raft messages and authenticated udp transport for gossip.
+// message encoding, authentication, and socket handling live in separate modules.
+// received raft payloads are owned by the caller; gossip payloads borrow its buffer.
 
 const std = @import("std");
 const linux_platform = @import("linux_platform");
@@ -46,15 +44,11 @@ pub const Transport = struct {
     peers: std.AutoHashMap(NodeId, PeerAddr),
     local_id: ?NodeId,
 
-    /// optional shared key for HMAC authentication on raft messages.
-    /// when null, messages are sent/received without authentication
-    /// (single-node mode or during initial bootstrap).
-    /// when set, all messages include a 32-byte HMAC-SHA256 tag.
+    /// a configured key authenticates the sender id and raft message body.
+    /// requireAuth rejects a missing key when peers are configured.
     shared_key: ?[32]u8,
 
-    /// optional UDP socket for gossip protocol messages.
-    /// initialized separately from the TCP listener since gossip is
-    /// only active when the cluster exceeds a size threshold.
+    /// gossip uses a separate udp socket, opened by initUdp when needed.
     udp_fd: ?linux_platform.posix.socket_t,
 
     pub fn init(alloc: std.mem.Allocator, port: u16) !Transport {
@@ -79,9 +73,7 @@ pub const Transport = struct {
         };
     }
 
-    /// test-only initializer that avoids binding a TCP listener.
-    /// useful for route-flow and state-machine tests that need a node
-    /// shell but do not start transport threads or accept network I/O.
+    /// create transport state without a listener for tests that do not accept connections.
     pub fn initForTests(alloc: std.mem.Allocator) !Transport {
         return .{
             .alloc = alloc,
@@ -124,41 +116,35 @@ pub const Transport = struct {
             const encoded = encodeSnapshot(self.alloc, msg.install_snapshot) catch return TransportError.SendFailed;
             defer self.alloc.free(encoded);
 
-            const final = self.applyHmac(encoded) catch return TransportError.SendFailed;
-            defer if (final.ptr != encoded.ptr) self.alloc.free(final);
-
-            self.sendBytes(target, peer, final) catch return TransportError.SendFailed;
+            try self.sendEncoded(peer, encoded);
             return;
         }
 
         var buf: [8192]u8 = undefined;
         const len = encode(&buf, msg) catch return TransportError.SendFailed;
 
-        const final = self.applyHmac(buf[0..len]) catch return TransportError.SendFailed;
-        defer if (final.ptr != buf[0..len].ptr) self.alloc.free(final);
-
-        self.sendBytes(target, peer, final) catch return TransportError.SendFailed;
+        try self.sendEncoded(peer, buf[0..len]);
     }
 
     fn applyHmac(self: *Transport, data: []const u8) ![]const u8 {
         return auth_support.applyHmac(self.alloc, self.shared_key, self.local_id, data);
     }
 
-    fn sendBytes(self: *Transport, peer_id: NodeId, peer: PeerAddr, data: []const u8) !void {
-        return io_support.sendBytes(self, peer_id, peer, data);
+    fn sendEncoded(self: *Transport, peer: PeerAddr, encoded: []const u8) TransportError!void {
+        const authenticated = self.applyHmac(encoded) catch return TransportError.SendFailed;
+        // without a key, applyHmac borrows encoded; otherwise it allocates a frame.
+        defer if (authenticated.ptr != encoded.ptr) self.alloc.free(authenticated);
+        io_support.sendBytes(peer, authenticated) catch return TransportError.SendFailed;
     }
 
+    /// receive one frame. the caller owns decoded entry or snapshot data
+    /// and must release it with alloc after processing the message.
     pub fn receive(self: *Transport, alloc: std.mem.Allocator) TransportError!?ReceivedMessage {
         return io_support.receive(self, alloc);
     }
 
-    // --- UDP gossip transport ---
-    //
-    // gossip messages use UDP for low-overhead, fire-and-forget delivery.
-    // the protocol handles message loss through redundant probing (SWIM).
-    //
-    // UDP frame: [8B sender_id] [32B HMAC-SHA256] [gossip payload...]
-    // HMAC is computed over [sender_id + payload].
+    // udp gossip frames contain a sender id, an hmac tag, and the payload.
+    // gossip retries lost messages through repeated probes.
 
     pub fn initUdp(self: *Transport, port: u16) !void {
         return udp_support.initUdp(self, port);
@@ -172,6 +158,8 @@ pub const Transport = struct {
         return udp_support.sendGossip(self, ip, port, payload);
     }
 
+    /// the returned payload borrows buf. the gossip caller must check the
+    /// authenticated sender against its current membership and source address.
     pub fn receiveGossip(self: *Transport, buf: []u8) TransportError!?GossipReceiveResult {
         return udp_support.receiveGossip(self, buf);
     }

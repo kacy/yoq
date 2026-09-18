@@ -1,20 +1,16 @@
 const std = @import("std");
 const linux_platform = @import("linux_platform");
 const posix = std.posix;
-const types = @import("../raft_types.zig");
 const common = @import("common.zig");
 const auth_support = @import("auth_support.zig");
 const codec_support = @import("codec_support.zig");
 
-const NodeId = types.NodeId;
 const PeerAddr = common.PeerAddr;
 const ReceivedMessage = common.ReceivedMessage;
 const TransportError = common.TransportError;
 const VerifiedBody = common.VerifiedBody;
 
-pub fn sendBytes(self: anytype, peer_id: NodeId, peer: PeerAddr, data: []const u8) !void {
-    _ = self;
-    _ = peer_id;
+pub fn sendBytes(peer: PeerAddr, data: []const u8) !void {
     const fd = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch return TransportError.ConnectFailed;
     defer linux_platform.posix.close(fd);
 
@@ -47,17 +43,24 @@ pub fn receive(self: anytype, alloc: std.mem.Allocator) TransportError!?Received
     const timeout = posix.timeval{ .sec = 5, .usec = 0 };
     posix.setsockopt(client_fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
 
+    return readMessage(self, alloc, client_fd, from_addr);
+}
+
+// the socket frame is temporary. decoding copies entry and snapshot data
+// before the stack buffer or allocated body is released.
+fn readMessage(self: anytype, alloc: std.mem.Allocator, client_fd: linux_platform.posix.socket_t, from_addr: linux_platform.net.Address) TransportError!ReceivedMessage {
     var len_buf: [4]u8 = undefined;
     common.readExact(client_fd, &len_buf) catch return TransportError.ReceiveFailed;
-    const msg_len = std.mem.readInt(u32, &len_buf, .little);
-    if (msg_len > common.max_receive_size or msg_len < 1) return TransportError.InvalidMessage;
+    const body_len = std.mem.readInt(u32, &len_buf, .little);
+    if (body_len > common.max_receive_size or body_len < 1) return TransportError.InvalidMessage;
 
     var stack_buf: [8192]u8 = undefined;
-    const body = if (msg_len <= stack_buf.len)
-        stack_buf[0..msg_len]
+    const body_is_allocated = body_len > stack_buf.len;
+    const body = if (!body_is_allocated)
+        stack_buf[0..body_len]
     else
-        alloc.alloc(u8, msg_len) catch return TransportError.ReceiveFailed;
-    defer if (msg_len > stack_buf.len) alloc.free(body);
+        alloc.alloc(u8, body_len) catch return TransportError.ReceiveFailed;
+    defer if (body_is_allocated) alloc.free(body);
 
     common.readExact(client_fd, body) catch return TransportError.ReceiveFailed;
 
