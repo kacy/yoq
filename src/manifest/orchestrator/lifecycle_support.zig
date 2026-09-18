@@ -61,6 +61,7 @@ pub fn startAll(self: anytype, comptime OrchestratorError: type, serviceThreadFn
     if (services.len == 0) return OrchestratorError.ManifestEmpty;
 
     try self.computeStartSet();
+    errdefer self.stopAlerts();
 
     var pull_io = std.Io.Threaded.init(self.alloc, .{});
     defer pull_io.deinit();
@@ -177,6 +178,7 @@ pub fn startServiceByIndex(
     }
 
     errdefer stopServiceByIndex(self, idx);
+    self.startServiceAlerts(idx) catch return OrchestratorError.StartFailed;
     for (0..svc.replicas) |replica| {
         const instance = instances.instanceIndex(self.manifest.services, idx, replica);
         self.states[instance].stop_requested.store(false, .release);
@@ -208,6 +210,7 @@ pub fn startServiceByIndex(
 }
 
 pub fn stopAll(self: anytype) void {
+    self.stopAlerts();
     if (self.cron_sched) |cs| {
         cs.stop();
         writeErr("stopped cron scheduler\n", .{});
@@ -234,6 +237,7 @@ pub fn stopAll(self: anytype) void {
 }
 
 pub fn stopServiceByIndex(self: anytype, idx: usize) void {
+    self.stopServiceAlerts(idx);
     stopServiceInstances(self, idx);
     if (self.states[idx].ownership_claimed) {
         ownership.release(self.app_name, self.manifest.services[idx].name, &self.supervisor_token) catch |err| {

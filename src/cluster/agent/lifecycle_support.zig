@@ -74,6 +74,7 @@ pub fn stop(self: anytype) void {
         self.loop_thread = null;
     }
     self.assignment_workers.join();
+    @import("../../manifest/alerts/runtime.zig").shutdownIfUnused();
     stopLogServer(self);
 
     if (self.node_id != null) {
@@ -92,6 +93,7 @@ pub fn wait(self: anytype) void {
         self.loop_thread = null;
     }
     self.assignment_workers.join();
+    @import("../../manifest/alerts/runtime.zig").shutdownIfUnused();
     stopLogServer(self);
 }
 

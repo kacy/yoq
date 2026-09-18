@@ -146,6 +146,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
 
     var backoff_ms: u64 = initial_backoff_ms;
 
+    var started_once = false;
     while (!orch.states[idx].stop_requested.load(.acquire) and !shutdown_requested.load(.acquire)) {
         if (!(ownership.isOwner(orch.app_name, svc.name, &orch.supervisor_token) catch false)) break;
         if (supervised_id) |id| ownership.removeInstance(&id) catch {};
@@ -224,6 +225,8 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             orch.states[idx].setStatus(.failed);
             return;
         };
+        if (started_once) @import("../alerts/runtime.zig").recordRestart(orch.app_name, svc.name, &orch.supervisor_token);
+        started_once = true;
         orch.states[idx].setStatus(.running);
 
         const exit_code = c.wait() catch 255;

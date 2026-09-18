@@ -28,6 +28,7 @@ const StatusError = error{
 
 pub fn status(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var verbose = false;
+    var alerts = false;
     var server: ?cli.ServerAddr = null;
     var app_mode = false;
     var target_name: ?[]const u8 = null;
@@ -35,6 +36,8 @@ pub fn status(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
             cli.output_mode = .json;
+        } else if (std.mem.eql(u8, arg, "--alerts")) {
+            alerts = true;
         } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "--app")) {
@@ -51,8 +54,32 @@ pub fn status(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
     }
 
     if (!app_mode and target_name != null) {
-        writeErr("usage: yoq status [--app [name]] [--verbose] [--server host:port]\n", .{});
+        writeErr("usage: yoq status [--app [name]] [--alerts] [--verbose] [--server host:port]\n", .{});
         return StatusError.InvalidArgument;
+    }
+
+    if (alerts) {
+        const owned_name = if (app_mode and target_name == null) try currentAppNameAlloc(io, alloc) else null;
+        defer if (owned_name) |name| alloc.free(name);
+        const app_name = target_name orelse owned_name;
+        if (app_name) |name| {
+            if (!@import("../../api/routes/common.zig").validateClusterInput(name)) return StatusError.InvalidArgument;
+        }
+        if (server) |remote| {
+            var path_buffer: [512]u8 = undefined;
+            const path = if (app_name) |name| try std.fmt.bufPrint(&path_buffer, "/v1/status/alerts?app={s}", .{name}) else "/v1/status/alerts";
+            var token_buffer: [64]u8 = undefined;
+            const token = cli.readApiTokenWithIo(io, &token_buffer);
+            var response = try http_client.getWithAuth(alloc, remote.ip, remote.port, path, token);
+            defer response.deinit(alloc);
+            if (response.status_code != 200) return StatusError.ServerError;
+            write("{s}\n", .{response.body});
+        } else {
+            const json = try @import("../../state/store/alerts.zig").listJson(alloc, app_name);
+            defer alloc.free(json);
+            write("{s}\n", .{json});
+        }
+        return;
     }
 
     if (app_mode) {
