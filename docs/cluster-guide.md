@@ -378,13 +378,17 @@ the response includes `leader_id` and, on non-leader nodes, a `leader` field wit
 
 ### leader discovery and write forwarding
 
-only the Raft leader can accept write operations (deploy, register, drain, etc.). when a write request hits a non-leader server, the API returns a `400` with the leader's address:
+only the raft leader accepts cluster mutations. deployment, registration, assignment status, and administrative mutation routes return `400` on a follower, with the leader's api address when known:
 
 ```json
 {"error":"not leader","leader":"10.0.0.1:7700"}
 ```
 
-clients can use the `leader` field to redirect their request. agents do this automatically — both during registration and on every heartbeat, agents check for leader hints and update their target server address. this means agents tolerate leadership changes without manual reconfiguration.
+follower heartbeats return `503`, including a leader hint when available, so an agent tries another trusted voter even when the follower does not know the leader. mutation routes also return `503` when they cannot confirm committed application. that response does not prove that the mutation was rejected; operators should inspect current state before retrying.
+
+assignment status replies include `committed: true` and the attempt generation only after committed application. the agent keeps its durable report until it receives that receipt, and generation checks prevent an old attempt from changing its replacement. drain, label, and credential-revocation routes also wait for committed application before reporting success.
+
+agents follow leader hints only when the address belongs to their persisted trusted endpoints. authenticated registration and heartbeat responses update that list. if an endpoint becomes unreachable, agents try the saved alternatives while retaining their enrollment identity; an unsigned hint cannot add a new address. startup registration retries temporary failures for up to 120 seconds, then exits so the operator can restore connectivity and restart it.
 
 point deployment and rollout commands at the current leader. the examples use `10.0.0.1:7700` as that leader; substitute the address reported by cluster status. the app cli does not automatically retry a deployment after a `"not leader"` response. read-only status requests can query other members.
 
@@ -404,7 +408,6 @@ the important read paths are:
 - `GET /apps`
 - `GET /apps/<name>/status`
 - `GET /apps/<name>/history`
-- `POST /apps/<name>/rollback`
 - `GET /apps/<app>/training/<name>/status`
 - `GET /apps/<app>/training/<name>/logs`
 
@@ -459,9 +462,9 @@ do these on a healthy non-production cluster before you trust a new release:
 1. trigger a leader step-down and verify that another server becomes leader
 2. restart one agent and verify it returns to `active`
 3. for routed workloads, restart the listener path and verify traffic recovers
+4. stop one workload unexpectedly and verify the reconciler restores healthy discovery state
 
 use `./scripts/http-routing-recovery-smoke.sh` as the local reference drill before doing the same check on a cluster deployment.
-4. stop one workload unexpectedly and verify the reconciler restores healthy discovery state
 
 for a shorter end-to-end checklist, see [golden-path.md](golden-path.md).
 
