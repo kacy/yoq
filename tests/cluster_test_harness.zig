@@ -369,6 +369,11 @@ pub const TestCluster = struct {
         );
     }
 
+    /// enroll an agent with the join token required by the registration route.
+    pub fn registerAgent(self: *TestCluster, node: *ClusterNode, body: []const u8) !http_client.Response {
+        return http_client.postWithAuth(self.alloc, .{ 127, 0, 0, 1 }, node.api_port, "/agents/register", body, self.join_token);
+    }
+
     /// GET from a node's API endpoint with auth.
     /// caller must free the returned body.
     pub fn getFromNode(self: *TestCluster, node: *ClusterNode, path: []const u8) !http_client.Response {

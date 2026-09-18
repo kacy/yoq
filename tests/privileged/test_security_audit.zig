@@ -91,7 +91,8 @@ test "security audit: GPU MIG partition IDs validated" {
 test "security audit: deploy parses valid JSON regardless of field order" {
     var cluster = try initCluster(1, 19508, 17508);
     defer cluster.deinit();
-    const port = cluster.nodes.items[0].api_port;
+    const leader = try cluster.waitForLeader(15000);
+    const port = leader.api_port;
     const token = cluster.api_token;
 
     const body =

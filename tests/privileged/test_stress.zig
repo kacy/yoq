@@ -123,7 +123,7 @@ test "stress: burst node registration via agent join API" {
             \\{{"token":"{s}","address":"10.0.{d}.{d}:9700","role":"agent","cpu_cores":4,"memory_mb":8192}}
         , .{ cluster.join_token, i / 255, i % 255 }) catch continue;
 
-        var resp = http_client.postWithAuth(alloc, addr, leader.api_port, "/agents/register", body, cluster.api_token) catch continue;
+        var resp = cluster.registerAgent(leader, body) catch continue;
         defer resp.deinit(alloc);
 
         if (resp.status_code == 200 or resp.status_code == 201 or resp.status_code == 409) {

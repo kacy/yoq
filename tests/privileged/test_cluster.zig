@@ -145,7 +145,7 @@ test "leader replicates proposed data to followers" {
     // retry the POST — leader may need a moment to accept writes
     var registered = false;
     for (0..10) |attempt| {
-        var resp = cluster.postToNode(leader, "/agents/register", body) catch |err| {
+        var resp = cluster.registerAgent(leader, body) catch |err| {
             std.debug.print("  POST attempt {d} connect error: {}\n", .{ attempt, err });
             std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(1 * std.time.ns_per_s)), .awake) catch unreachable;
             continue;
@@ -162,7 +162,7 @@ test "leader replicates proposed data to followers" {
 
     if (!registered) {
         std.debug.print("  failed to register agent after retries\n", .{});
-        return error.SkipZigTest;
+        return error.AgentRegistrationFailed;
     }
 
     // wait for raft replication
@@ -200,8 +200,8 @@ test "leader replicates proposed data to followers" {
         }
 
         if (!found) {
-            std.debug.print("  replication not observed within timeout (env-specific)\n", .{});
-            return error.SkipZigTest;
+            std.debug.print("  replication not observed within timeout\n", .{});
+            return error.ReplicationTimeout;
         }
         std.debug.print("  data replicated to follower\n", .{});
     }
@@ -328,7 +328,7 @@ test "node restart and catch-up after crash" {
 
     var registered = false;
     for (0..10) |_| {
-        var resp = cluster.postToNode(leader, "/agents/register", body) catch {
+        var resp = cluster.registerAgent(leader, body) catch {
             std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(1 * std.time.ns_per_s)), .awake) catch unreachable;
             continue;
         };
@@ -342,7 +342,7 @@ test "node restart and catch-up after crash" {
     }
     if (!registered) {
         std.debug.print("  failed to register agent\n", .{});
-        return error.SkipZigTest;
+        return error.AgentRegistrationFailed;
     }
 
     // wait for replication
@@ -356,16 +356,16 @@ test "node restart and catch-up after crash" {
             break;
         }
     }
-    const target = target_node orelse return error.SkipZigTest;
+    const target = target_node orelse return error.MissingFollower;
     const target_id = target.id;
 
     // verify it has the data before crash
     {
-        var resp = cluster.getFromNode(target, "/agents") catch return error.SkipZigTest;
+        var resp = try cluster.getFromNode(target, "/agents");
         defer resp.deinit(alloc);
         if (std.mem.indexOf(u8, resp.body, "10.0.0.88:9090") == null) {
             std.debug.print("  data not replicated before crash\n", .{});
-            return error.SkipZigTest;
+            return error.ReplicationTimeout;
         }
     }
 
@@ -373,7 +373,7 @@ test "node restart and catch-up after crash" {
     cluster.stopNode(target_id);
     std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(2 * std.time.ns_per_s)), .awake) catch unreachable;
 
-    const restarted = cluster.getNode(target_id) orelse return error.SkipZigTest;
+    const restarted = cluster.getNode(target_id) orelse return error.MissingFollower;
     try cluster.startNode(restarted);
 
     // wait for catch-up
@@ -398,8 +398,8 @@ test "node restart and catch-up after crash" {
     }
 
     if (!found) {
-        std.debug.print("  data not found on restarted node (env-specific)\n", .{});
-        return error.SkipZigTest;
+        std.debug.print("  data not found on restarted node\n", .{});
+        return error.ReplicationTimeout;
     }
     std.debug.print("  node restarted and caught up successfully\n", .{});
 }
