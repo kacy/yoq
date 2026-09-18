@@ -138,7 +138,7 @@ HTTP, TCP, gRPC, or exec probes run at configurable intervals. gRPC probes use t
 
 ### gRPC routing
 
-http/1 responses stream large downloads and server-sent events, and websocket upgrades switch to bidirectional forwarding. request bodies still share a 64 kib buffer. see [proxy streaming](proxy-streaming.md) for deadlines and framing limits.
+http/1 responses stream large downloads and server-sent events, and websocket upgrades switch to bidirectional forwarding. fixed-length and chunked request bodies stream with backpressure up to 256 mib of decoded body data. request headers have a separate 16 kib limit. uploads are not retried or mirrored because the proxy does not retain their bytes. see [proxy streaming](proxy-streaming.md) for deadlines and framing limits.
 
 gRPC services can use the HTTP routing listener through plaintext HTTP/2 passthrough, either with prior-knowledge `h2c` or HTTP/1.1 `Upgrade: h2c`. unary requests and streaming RPC traffic are forwarded end to end, including client `DATA` frames, server `DATA` frames, and trailing `HEADERS`. if the routed host also has a matching `tls.domain`, the TLS terminator can negotiate ALPN `h2` and forward that HTTPS traffic into the same routing path.
 
@@ -290,7 +290,7 @@ bin-packing placement: scores agents by free CPU + memory, assigns containers to
 
 agents register via HTTP, then report capacity on an adaptive heartbeat interval that starts at five seconds. they pull assignments, download images, and start containers locally. WireGuard tunnels are set up on join.
 
-if the leader changes, agents follow automatically — heartbeat responses include leader hints.
+agents persist the server endpoints learned through authenticated enrollment and heartbeats. if their current endpoint becomes unreachable, they try the known alternatives without changing their enrollment identity. leader hints must name a trusted endpoint. see the [cluster recovery contract](cluster-guide.md) for upgrade and outage details.
 
 ### app-first control plane
 
@@ -368,9 +368,9 @@ training jobs follow a state machine: pending → scheduling → running → pau
 
 ## storage
 
-### S3-compatible gateway
+### s3-style storage gateway
 
-a filesystem-backed S3-compatible API. supports bucket CRUD, object HEAD/GET/PUT/DELETE, and multipart uploads. objects are stored under `~/.local/share/yoq/s3/`.
+a filesystem-backed s3-style api with yoq bearer authentication. it supports bucket operations, object HEAD/GET/PUT/DELETE, and multipart uploads within the [documented client contract](storage-api.md). it does not implement aws signature version 4, so an unmodified aws sdk is not a supported client. objects are stored under `~/.local/share/yoq/s3/`.
 
 ### volume drivers
 
@@ -462,14 +462,18 @@ all yoq state lives under `~/.local/share/yoq/`:
 - `yoq.db` — SQLite database (containers, images, secrets, policies, history)
 - `blobs/sha256/` — content-addressable image store
 - `s3/` — S3 gateway object storage
-- `api_token` — API bearer token
+- `api_token` — api bearer token
+- `secrets.key` — local encryption key; keep a protected recovery copy
+- `cluster/` — server raft log, replicated state, and selected snapshot
+- `enrollment/` — agent identity and authenticated server discovery
+- `agent-cache.db` — cached assignments and durable result delivery
 
 ### backup and restore
 
 - `yoq backup [--output path]` — uses SQLite Online Backup API, safe while running
-- `yoq restore <path>` — validates schema version before replacing the active database
+- `yoq restore <path>` — migrates and validates a private candidate before replacing the active database; incompatible schemas and unsupported format versions are rejected
 
-volume data is not included in backups.
+these commands cover the local database. cluster recovery uses a separate offline bundle for each fixed voter; it also requires the join token, encryption keys, and selected raft snapshot. stop every voter and agent before capture. volume data, object bytes, and agent enrollment need separate protection. follow the [offline cluster recovery procedure](cluster-guide.md#offline-cluster-backup-and-restore).
 
 ### ports
 

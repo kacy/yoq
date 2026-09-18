@@ -47,16 +47,11 @@ see [examples/http-routing/README.md](http-routing/README.md) for the complete w
 
 ## cluster
 
-a multi-node deployment with postgres, API server, nginx with automatic TLS, and a database backup cron. this example now matches the canonical cluster workflow: bootstrap with `init-server`, join agents, then deploy with `yoq up --server`.
+a multi-node deployment with postgres, an api service, nginx with automatic tls, and a database backup cron.
 
-```bash
-TOKEN=$(openssl rand -hex 32)
-yoq init-server --id 1 --port 9700 --api-port 7700 --token "$TOKEN"
-yoq join 10.0.0.1:7700 --token "$TOKEN"
-yoq up --server 10.0.0.1:7700 -f examples/cluster/manifest.toml
-```
+follow the [complete cluster setup](cluster/README.md). prepare the shared join token and private api token files, then start the fixed three-voter set with matching peer lists. run the server and agent commands in separate terminals on their respective hosts; they remain in the foreground. use `sudo -H "$(command -v yoq)"` for runtime commands so they share root's state and credentials.
 
-see [examples/cluster/README.md](cluster/README.md) for full setup instructions.
+once all voters and agents are ready, deploy from a separate operator terminal with the api token installed. use the current leader's address and supply `DB_PASSWORD` as shown in the complete setup.
 
 ## writing your own manifest
 

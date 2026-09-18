@@ -87,9 +87,9 @@ for a larger example with postgres, redis, workers, and health checks, see [exam
 
 ### routing and certificates
 
-http routing supports host, path, method, and header matching, rewrites, weighted backends, and best-effort request mirroring. grpc health checks use `grpc.health.v1.Health/Check`.
+http routing supports host, path, method, and header matching, rewrites, weighted backends, and best-effort request mirroring. grpc health checks use `grpc.health.v1.Health/Check`. http/1 uploads stream with bounded buffers and backpressure; requests with bodies are not retried or mirrored.
 
-http/2 clients can use prior-knowledge `h2c` or `Upgrade: h2c` on the plaintext listener. tls-terminated http/2 uses alpn when the routed host matches a service's `tls.domain`.
+http/2 clients can use prior-knowledge `h2c` or `Upgrade: h2c` on the plaintext listener. tls-terminated http/2 uses alpn when the routed host matches a service's `tls.domain`. streaming upstream connections support verified service tls and bounded per-stream flow control. see [proxy streaming](docs/proxy-streaming.md) for protocol and size limits.
 
 acme certificate provisioning and renewal support http-01 and dns-01 challenges. http-01 needs port 80 on the target host. dns-01 needs an explicit provider configuration and credentials stored with `yoq secret`.
 
@@ -97,7 +97,7 @@ see the [command reference](docs/commands.md#secrets-and-certificates) and [rout
 
 ### clusters
 
-server nodes run raft, the api, and the scheduler. agent nodes run workloads and report their health and resources. server nodes use raft consensus with sqlite-backed state. cluster transport uses hmac-sha256 authentication. yoq also includes gossip failure detection, node drain, and rolling upgrades with leader step-down.
+server nodes run raft, the api, and the scheduler. agent nodes run workloads and report their health and resources. server nodes use raft consensus with sqlite-backed state. cluster transport uses hmac-sha256 authentication. yoq also includes gossip failure detection, node drain, and leader step-down. agents retain authenticated server alternatives and durable assignment results across outages. schema changes can require a coordinated upgrade; follow the [cluster guide](docs/cluster-guide.md) for upgrade and offline recovery procedures.
 
 use `yoq up --server <server-ip>:<port>` to deploy an app to an existing cluster. see the [cluster guide](docs/cluster-guide.md) for setup and recovery procedures.
 

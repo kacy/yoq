@@ -12,13 +12,13 @@ it starts five echo services behind the built-in router:
 start the server in one terminal. the commands below use root-owned state under `/root/.local/share/yoq`:
 
 ```bash
-sudo -H yoq serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
+sudo -H "$(command -v yoq)" serve --http-proxy-bind 127.0.0.1 --http-proxy-port 17080
 ```
 
 in a second terminal, keep the app running:
 
 ```bash
-sudo -H yoq up -f examples/http-routing/manifest.toml
+sudo -H "$(command -v yoq)" up -f examples/http-routing/manifest.toml
 ```
 
 from a third terminal, exercise the routes and authenticated status endpoints:
