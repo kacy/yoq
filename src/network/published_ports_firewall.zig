@@ -21,6 +21,7 @@ fn firstForPort(claims: []const Backend, index: usize) bool {
 /// replica the same share of new connections; conntrack pins subsequent packets.
 pub fn renderRules(alloc: Allocator, claims: []const Backend) ![]const u8 {
     var output: std.Io.Writer.Allocating = .init(alloc);
+    errdefer output.deinit();
     const writer = &output.writer;
     try writer.writeAll("*filter\n:YOQ-PUBLISHED-FWD - [0:0]\n:YOQ-PUBLISHED-IN - [0:0]\n-F YOQ-PUBLISHED-FWD\n-F YOQ-PUBLISHED-IN\n");
     for (claims, 0..) |claim, index| {
@@ -68,6 +69,7 @@ fn ensureJump(table: []const u8, source: []const u8, target: []const u8, local_o
 pub fn apply(alloc: Allocator, claims: []const Backend) !void {
     if (claims.len != 0) try nat.enableRouteLocalnet(@import("bridge.zig").default_bridge);
     const rules = try renderRules(alloc, claims);
+    defer alloc.free(rules);
     const linux = std.os.linux;
     const opened = linux.memfd_create("yoq-published-ports", linux.MFD.CLOEXEC);
     if (linux.errno(opened) != .SUCCESS) return error.ScratchFileFailed;
