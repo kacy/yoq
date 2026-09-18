@@ -1,5 +1,7 @@
 # image layer storage
 
+registry pulls preserve layer media types and support raw tar, gzip, and zstd. the download limit defaults to 512 mib per layer and can be set with `YOQ_MAX_LAYER_BYTES`. see [registry authentication and layer limits](registry-auth.md#layer-formats-and-size-limits) for the supported formats and extraction limits.
+
 Layer lists follow OCI manifest order: base first, newest last. The shared OverlayFS mount boundary reverses that list because the kernel gives its leftmost lower directory precedence. Container, build, and application paths use this same contract.
 
 Image extraction converts empty OCI `.wh.name` files into native OverlayFS whiteouts, and `.wh..wh..opq` into opaque directory metadata. Conversion happens before publishing the immutable cache entry. Whiteouts affect older layers, so a file recreated in the same layer survives regardless of archive order; a recreated directory hides its former children. Generic tar extraction, including ADD archives, leaves these names alone. Layer creation converts kernel deletion metadata back into OCI markers, so RUN deletions survive image export and later pulls.
