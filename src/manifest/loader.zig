@@ -2275,7 +2275,7 @@ test "training gpu count rejects overflow and counts above the scheduling limit"
 test "named volumes require declarations for every workload kind" {
     const alloc = std.testing.allocator;
     inline for (.{ "service", "worker", "cron", "training" }) |kind| {
-        const schedule = if (std.mem.eql(u8, kind, "cron")) "every = \"1m\"\n" else "";
+        const schedule = if (std.mem.eql(u8, kind, "cron")) "every = \"1m\"\n" else if (std.mem.eql(u8, kind, "training")) "gpus = 1\n" else "";
         const source = try std.fmt.allocPrint(alloc, "[{s}.test]\nimage = \"scratch\"\nvolumes = [\"data:/data\"]\n{s}", .{ kind, schedule });
         defer alloc.free(source);
         try std.testing.expectError(error.UndeclaredVolume, loadFromString(alloc, source));
