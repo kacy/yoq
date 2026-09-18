@@ -107,11 +107,23 @@ pub fn stopRunningRanks(self: anytype) !void {
     const supervisor = @import("../../runtime/cli/container/supervisor_runtime.zig");
     if (isClusterManaged(self)) return error.RemoteControlRequired;
     if (self.job_id != null) {
-        for (0..self.gpu_count) |rank| {
-            var buf: [256]u8 = undefined;
-            const hostname = try std.fmt.bufPrint(&buf, "{s}-rank-{d}", .{ self.job.name, rank });
-            const record = (try store.findAppContainer(self.alloc, self.app_name, hostname)) orelse continue;
+        const prefix = try std.fmt.allocPrint(self.alloc, "{s}-rank-", .{self.job.name});
+        defer self.alloc.free(prefix);
+        var ids = try store.listAppContainerIds(self.alloc, self.app_name);
+        defer {
+            for (ids.items) |id| self.alloc.free(id);
+            ids.deinit(self.alloc);
+        }
+        // inspect every stored rank, including ranks beyond a newly reduced
+        // manifest count and duplicate records left by an interrupted attempt.
+        for (ids.items) |id| {
+            const record = store.load(self.alloc, id) catch |err| switch (err) {
+                error.NotFound => continue,
+                else => return err,
+            };
             defer record.deinit(self.alloc);
+            if (!std.mem.startsWith(u8, record.hostname, prefix)) continue;
+            _ = std.fmt.parseInt(u32, record.hostname[prefix.len..], 10) catch continue;
             if (runtime_state.currentOwnedRunningPid(&record)) |pid| {
                 try supervisor.stopProcess(pid);
                 if (!runtime_state.waitForStoppedState(self.alloc, record.id)) return error.RanksStillRunning;
