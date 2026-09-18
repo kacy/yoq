@@ -394,7 +394,7 @@ pub const ReverseProxy = struct {
             defer upstream.deinit(self.allocator);
             const status = self.streamAttempt(request, plan, &upstream, downstream, websocket, raw_request[std.mem.indexOf(u8, raw_request, "\r\n\r\n").? + 4 ..], parsed, http10, proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), @intCast(attempt), 503, false)) catch |err| {
                 // downstream cancellation does not describe upstream health.
-                if (err == error.OutOfMemory or err == error.ClientClosed or err == error.MalformedRequestBody or err == error.IncompleteRequestBody or err == error.BodyTooLarge) return err;
+                if (err == error.OutOfMemory or err == error.ClientClosed or err == error.MalformedRequestBody or err == error.IncompleteRequestBody or err == error.RequestBodyTimedOut or err == error.BodyTooLarge) return err;
                 recordUpstreamError(upstream.endpoint_id, circuit, mapUpstreamFailure(err), plan.route.name, plan.route.service, upstream.service);
                 if (!downstream.started.* and proxy_policy.shouldRetry(policy, proxy_helpers.methodString(plan.method), @intCast(attempt), null, true)) {
                     proxy_runtime.recordRetry();
@@ -1061,7 +1061,7 @@ fn peekHttp2StreamId(raw_request: []const u8) ?u32 {
 
 fn proxyFailureResponse(err: anyerror) ProxyResponse {
     return switch (err) {
-        error.MalformedRequestBody, error.IncompleteRequestBody => .{
+        error.MalformedRequestBody, error.IncompleteRequestBody, error.RequestBodyTimedOut => .{
             .status = .bad_request,
             .body = "{\"error\":\"invalid request body\"}",
         },

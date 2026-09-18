@@ -171,7 +171,7 @@ pub fn isHeaderNameByte(byte: u8) bool {
 }
 
 /// extract Content-Length from raw headers. case-insensitive.
-/// returns 0 if not found or unparseable.
+/// returns 0 when absent; malformed or repeated values return an error.
 pub fn findContentLength(headers: []const u8) HttpError!usize {
     const needle = "content-length:";
     var pos: usize = 0;
@@ -195,12 +195,8 @@ pub fn findContentLength(headers: []const u8) HttpError!usize {
             if (match) {
                 if (parsed_content_length != null) return HttpError.BadRequest;
 
-                // skip header name and any whitespace
-                var val_start = needle.len;
-                while (val_start < line.len and line[val_start] == ' ') {
-                    val_start += 1;
-                }
-                parsed_content_length = std.fmt.parseInt(usize, line[val_start..], 10) catch
+                const value = std.mem.trim(u8, line[needle.len..], " \t");
+                parsed_content_length = std.fmt.parseInt(usize, value, 10) catch
                     return HttpError.BadRequest;
             }
         }

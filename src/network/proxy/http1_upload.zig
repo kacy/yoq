@@ -169,13 +169,14 @@ pub fn sendAndReadHead(
             .{ .fd = connection.fd(), .events = posix.POLL.IN | @as(i16, if (pending.len > 0 or connection.pendingWrite()) posix.POLL.OUT else 0), .revents = 0 },
             .{ .fd = downstream.fd, .events = if (headers_sent and body.state != .done and pending.len == 0 and !connection.pendingWrite()) posix.POLL.IN else 0, .revents = 0 },
         };
-        const milliseconds = try deadline.remaining();
+        const waiting_for_body = headers_sent and body.state != .done and pending.len == 0 and !connection.pendingWrite();
+        const milliseconds = deadline.remaining() catch return if (waiting_for_body) error.RequestBodyTimedOut else error.TimedOut;
         const timeout: posix.timespec = .{ .sec = @divTrunc(milliseconds, 1000), .nsec = @rem(milliseconds, 1000) * std.time.ns_per_ms };
         const ready = posix.ppoll(&fds, &timeout, null) catch |err| switch (err) {
             error.SignalInterrupt => continue,
             else => return error.ReceiveFailed,
         };
-        if (ready == 0) return error.TimedOut;
+        if (ready == 0) return if (waiting_for_body) error.RequestBodyTimedOut else error.TimedOut;
         if (fds[1].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) return error.ClientClosed;
     }
 }
@@ -370,7 +371,7 @@ test "http1 upload cancellation and stalled bodies return within the operation d
     var downstream: response.Downstream = .{ .fd = client[0], .timeout_ms = 20, .started = &started };
     const headers = "POST /upload HTTP/1.1\r\nHost: app.test\r\nContent-Length: 8\r\n\r\n";
     const parsed = (try http.parseRequestHead(headers)).?;
-    try std.testing.expectError(error.TimedOut, sendAndReadHead(&connection, &downstream, headers, "", parsed));
+    try std.testing.expectError(error.RequestBodyTimedOut, sendAndReadHead(&connection, &downstream, headers, "", parsed));
     _ = std.os.linux.shutdown(client[1], 1);
     try std.testing.expectError(error.IncompleteRequestBody, sendAndReadHead(&connection, &downstream, headers, "", parsed));
 }
