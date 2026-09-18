@@ -10,7 +10,7 @@ pub fn save(io: std.Io, alloc: std.mem.Allocator, writer: *std.Io.Writer, refere
     defer arena.deinit();
     const scratch = arena.allocator();
     var descriptors: std.ArrayList(common.Descriptor) = .empty;
-    var wanted: std.AutoArrayHashMap(blobs.Digest, u64) = .init(scratch);
+    var wanted: std.AutoArrayHashMapUnmanaged(blobs.Digest, u64) = .empty;
     var total: u64 = 0;
     for (references) |reference| {
         const ref = spec.parseImageRef(reference);
@@ -28,11 +28,11 @@ pub fn save(io: std.Io, alloc: std.mem.Allocator, writer: *std.Io.Writer, refere
         defer parsed.deinit();
         const manifest = parsed.value;
         try common.validateManifest(manifest);
-        try addBlob(&wanted, digest, size, &total);
+        try addBlob(scratch, &wanted, digest, size, &total);
         const config_digest = blobs.Digest.parse(manifest.config.digest) orelse return error.InvalidDigest;
-        try addBlob(&wanted, config_digest, manifest.config.size, &total);
+        try addBlob(scratch, &wanted, config_digest, manifest.config.size, &total);
         for (manifest.layers) |layer| {
-            try addBlob(&wanted, blobs.Digest.parse(layer.digest) orelse return error.InvalidDigest, layer.size, &total);
+            try addBlob(scratch, &wanted, blobs.Digest.parse(layer.digest) orelse return error.InvalidDigest, layer.size, &total);
         }
         const name = if (ref.digest_reference)
             try common.referenceName(scratch, ref.host, ref.repository, ref.reference)
@@ -66,9 +66,9 @@ pub fn save(io: std.Io, alloc: std.mem.Allocator, writer: *std.Io.Writer, refere
     try tar.finishPedantically();
 }
 
-fn addBlob(wanted: *std.AutoArrayHashMap(blobs.Digest, u64), digest: blobs.Digest, size: u64, total: *u64) !void {
+fn addBlob(alloc: std.mem.Allocator, wanted: *std.AutoArrayHashMapUnmanaged(blobs.Digest, u64), digest: blobs.Digest, size: u64, total: *u64) !void {
     if (size > common.max_blob) return error.ArchiveLimitExceeded;
-    const entry = try wanted.getOrPut(digest);
+    const entry = try wanted.getOrPut(alloc, digest);
     if (entry.found_existing) {
         if (entry.value_ptr.* != size) return error.BlobSizeMismatch;
         return;
