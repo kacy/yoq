@@ -46,6 +46,7 @@ pub fn downloadLayerWorker(
     repository: []const u8,
     digest: []const u8,
     token: common.Token,
+    max_layer_bytes: u64,
     err_flag: *std.atomic.Value(bool),
     thread_err: *?common.RegistryError,
 ) void {
@@ -54,7 +55,7 @@ pub fn downloadLayerWorker(
     var thread_client: std.http.Client = .{ .io = io, .allocator = alloc };
     defer thread_client.deinit();
 
-    downloadLayerBlob(alloc, &thread_client, host, repository, digest, token) catch |err| {
+    downloadLayerBlob(alloc, &thread_client, host, repository, digest, token, max_layer_bytes) catch |err| {
         thread_err.* = switch (err) {
             error.BlobNotFound => common.RegistryError.BlobNotFound,
             error.NetworkError => common.RegistryError.NetworkError,
@@ -72,6 +73,7 @@ pub fn downloadLayerBlob(
     repository: []const u8,
     digest: []const u8,
     token: common.Token,
+    max_layer_bytes: u64,
 ) !void {
     const expected = blob_store.Digest.parse(digest) orelse return error.DigestMismatch;
 
@@ -81,7 +83,7 @@ pub fn downloadLayerBlob(
         blob_store.removeBlob(expected);
     }
 
-    try downloadBlobToStore(alloc, client, host, repository, digest, expected, token);
+    try downloadBlobToStore(alloc, client, host, repository, digest, expected, token, max_layer_bytes);
 }
 
 fn fetchBlobFromUrl(
@@ -168,6 +170,7 @@ fn downloadBlobToStore(
     digest: []const u8,
     expected: blob_store.Digest,
     token: common.Token,
+    max_layer_bytes: u64,
 ) !void {
     var url_buf: [1024]u8 = undefined;
     const url = std.fmt.bufPrint(
@@ -176,7 +179,7 @@ fn downloadBlobToStore(
         .{ host, repository, digest },
     ) catch return error.BlobNotFound;
 
-    try downloadBlobUrlToStore(alloc, client, host, url, expected, token, true, 0);
+    try downloadBlobUrlToStore(alloc, client, host, url, expected, token, max_layer_bytes, true, 0);
 }
 
 fn downloadBlobUrlToStore(
@@ -186,6 +189,7 @@ fn downloadBlobUrlToStore(
     url: []const u8,
     expected: blob_store.Digest,
     token: common.Token,
+    max_layer_bytes: u64,
     send_auth: bool,
     redirect_count: u8,
 ) !void {
@@ -229,7 +233,7 @@ fn downloadBlobUrlToStore(
             log.warn("layer fetch: redirect missing or oversized location for {s}", .{url_summary});
             return error.NetworkError;
         };
-        return downloadBlobUrlToStore(alloc, client, host, location, expected, token, false, redirect_count + 1);
+        return downloadBlobUrlToStore(alloc, client, host, location, expected, token, max_layer_bytes, false, redirect_count + 1);
     }
 
     if (response.head.status != .ok) {
@@ -238,7 +242,7 @@ fn downloadBlobUrlToStore(
     }
 
     if (response.head.content_length) |content_length| {
-        if (content_length > common.max_blob_size) return error.ResponseTooLarge;
+        if (content_length > max_layer_bytes) return error.ResponseTooLarge;
     }
 
     var tmp_path_buf: [paths.max_path]u8 = undefined;
@@ -252,7 +256,7 @@ fn downloadBlobUrlToStore(
     var transfer_buf: [8192]u8 = undefined;
     const body_reader = response.reader(&transfer_buf);
     var chunk_buf: [8192]u8 = undefined;
-    var bytes_read_total: usize = 0;
+    var bytes_read_total: u64 = 0;
 
     while (true) {
         const bytes_read = body_reader.readSliceShort(&chunk_buf) catch |err| {
@@ -261,8 +265,8 @@ fn downloadBlobUrlToStore(
         };
         if (bytes_read == 0) break;
 
+        if (bytes_read > max_layer_bytes - bytes_read_total) return error.ResponseTooLarge;
         bytes_read_total += bytes_read;
-        if (bytes_read_total > common.max_blob_size) return error.ResponseTooLarge;
 
         tmp_file.writeStreamingAll(std.Options.debug_io, chunk_buf[0..bytes_read]) catch return error.NetworkError;
     }
@@ -346,5 +350,34 @@ test "registry transfer uses the small config cap for chunked and unknown length
             .{ .value = "" },
             "http",
         ));
+    }
+}
+
+test "registry layer byte policy applies to length chunked and close-delimited transfers" {
+    const Server = @import("test_support.zig").Server;
+    const body = "layer transfer policy fixture";
+    const expected = blob_store.computeDigest(body);
+    defer blob_store.deleteBlob(expected) catch {};
+    for ([_]Server.Reply{ .{ .framing = .length }, .{ .framing = .chunked }, .{ .framing = .close } }) |framing| {
+        for ([_]u64{ body.len - 1, body.len }) |limit| {
+            blob_store.removeBlob(expected);
+            var server = try Server.init(&.{.{ .framing = framing.framing, .body = body }});
+            defer server.deinit();
+            try server.start();
+            var client: std.http.Client = .{ .io = std.testing.io, .allocator = std.testing.allocator };
+            defer client.deinit();
+            var host_buffer: [64]u8 = undefined;
+            var url_buffer: [128]u8 = undefined;
+            const host = try server.host(&host_buffer);
+            const url = try std.fmt.bufPrint(&url_buffer, "http://{s}/layer", .{host});
+            const result = downloadBlobUrlToStore(std.testing.allocator, &client, host, url, expected, .{ .value = "" }, limit, false, 0);
+            if (limit < body.len) {
+                try std.testing.expectError(error.ResponseTooLarge, result);
+                try std.testing.expect(!blob_store.hasBlob(expected));
+            } else {
+                try result;
+                try std.testing.expect(blob_store.verifyBlob(expected));
+            }
+        }
     }
 }

@@ -7,14 +7,18 @@ const posix = std.posix;
 pub const Server = struct {
     pub const Reply = struct {
         body: []const u8 = "",
+        status: []const u8 = "200 OK",
         headers: []const u8 = "",
         framing: enum { length, chunked, close } = .length,
         repeated_bytes: ?usize = null,
+        delay_ms: u32 = 0,
     };
     fd: posix.fd_t,
     replies: []const Reply,
     worker: ?std.Thread = null,
     requests: usize = 0,
+    last_request: [8192]u8 = undefined,
+    last_request_length: usize = 0,
 
     pub fn init(replies: []const Reply) !Server {
         const fd = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
@@ -68,13 +72,18 @@ pub const Server = struct {
                 used += count;
                 if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n") != null) break;
             }
+            @memcpy(self.last_request[0..used], request[0..used]);
+            self.last_request_length = used;
             self.requests += 1;
             sendReply(fd, reply) catch return; // early client refusal is expected
         }
     }
 
     fn sendReply(fd: posix.fd_t, reply: Reply) !void {
-        try writeAll(fd, "HTTP/1.1 200 OK\r\nConnection: close\r\n");
+        if (reply.delay_ms > 0) std.Io.sleep(std.testing.io, .fromMilliseconds(reply.delay_ms), .awake) catch {};
+        try writeAll(fd, "HTTP/1.1 ");
+        try writeAll(fd, reply.status);
+        try writeAll(fd, "\r\nConnection: close\r\n");
         try writeAll(fd, reply.headers);
         var header_buf: [128]u8 = undefined;
         const size = reply.repeated_bytes orelse reply.body.len;

@@ -10,6 +10,9 @@ pub const Response = struct {
     allocated: bool,
     // override content type (null = application/json)
     content_type: ?[]const u8 = null,
+    /// representation size for responses such as head that carry no body.
+    content_length: ?usize = null,
+    etag: ?[32]u8 = null,
 };
 
 pub const RouteContext = struct {

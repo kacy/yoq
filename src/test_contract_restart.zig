@@ -102,7 +102,8 @@ test "contract: multipart staging persists on disk until completion and then cle
         "/s3/restart-multipart/blob.bin?partNumber=1&uploadId={s}",
         .{upload_id},
     );
-    freeResponse(try routeRequest(.PUT, part1_path, "hello "));
+    const part1 = try routeRequest(.PUT, part1_path, "hello ");
+    defer freeResponse(part1);
 
     var staging_dir_buf: [paths.max_path]u8 = undefined;
     const staging_dir = try paths.dataPathFmt(&staging_dir_buf, "s3-multipart/{s}", .{upload_id});
@@ -125,7 +126,8 @@ test "contract: multipart staging persists on disk until completion and then cle
         "/s3/restart-multipart/blob.bin?partNumber=2&uploadId={s}",
         .{upload_id},
     );
-    freeResponse(try routeRequest(.PUT, part2_path, "world"));
+    const part2 = try routeRequest(.PUT, part2_path, "world");
+    defer freeResponse(part2);
 
     var complete_path_buf: [160]u8 = undefined;
     const complete_path = try std.fmt.bufPrint(
@@ -133,7 +135,10 @@ test "contract: multipart staging persists on disk until completion and then cle
         "/s3/restart-multipart/blob.bin?uploadId={s}",
         .{upload_id},
     );
-    const complete = try routeRequest(.POST, complete_path, "");
+    var completion_buf: [512]u8 = undefined;
+    const completion_body = try std.fmt.bufPrint(&completion_buf, "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{s}</ETag></Part>" ++
+        "<Part><PartNumber>2</PartNumber><ETag>{s}</ETag></Part></CompleteMultipartUpload>", .{ part1.etag.?, part2.etag.? });
+    const complete = try routeRequest(.POST, complete_path, completion_body);
     defer freeResponse(complete);
     try std.testing.expectEqual(http.StatusCode.ok, complete.status);
 

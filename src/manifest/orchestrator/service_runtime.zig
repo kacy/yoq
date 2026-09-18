@@ -69,7 +69,7 @@ pub fn ensureImageAvailableWithIo(io: std.Io, alloc: std.mem.Allocator, image: [
     var result = registry.pull(io, alloc, ref) catch return false;
     defer result.deinit();
 
-    const layer_paths = layer.assembleRootfs(alloc, result.layer_digests) catch return false;
+    const layer_paths = layer.assembleRootfsDescriptors(alloc, result.layers) catch return false;
     defer {
         for (layer_paths) |path| alloc.free(path);
         alloc.free(layer_paths);
@@ -119,7 +119,7 @@ pub fn resolveServiceImageWithIo(io: std.Io, alloc: std.mem.Allocator, image: []
         }
     }
 
-    result.layer_paths = layer.assembleRootfs(alloc, result.pull_result.?.layer_digests) catch return null;
+    result.layer_paths = layer.assembleRootfsDescriptors(alloc, result.pull_result.?.layers) catch return null;
     if (result.layer_paths.len == 0) {
         log.err("image {s} has no extracted root filesystem", .{image});
         return null;

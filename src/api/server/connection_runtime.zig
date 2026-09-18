@@ -121,14 +121,8 @@ pub fn handleConnection(alloc: std.mem.Allocator, client_fd: posix.fd_t) void {
     const response = routes.dispatch(owned_request.request, alloc);
     defer if (response.allocated) alloc.free(response.body);
 
-    const content_type = response.content_type orelse "application/json";
-    writeResponse(
-        client_fd,
-        response.status,
-        content_type,
-        response.body,
-        owned_request.request.method == .HEAD,
-    );
+    const wire = transport.Stream{ .fd = client_fd, .deadline = transport.Deadline.afterMilliseconds(5000) };
+    writeRouteResponseTo(wire, response, owned_request.request.method == .HEAD) catch {};
 }
 
 pub const ReadRequestError = error{
@@ -236,17 +230,21 @@ fn sendError(fd: posix.fd_t, status: http.StatusCode, message: []const u8) void 
     wire.writeAll(resp) catch {};
 }
 
-fn writeResponse(fd: posix.fd_t, status: http.StatusCode, content_type: []const u8, body: []const u8, omit_body: bool) void {
-    const wire = transport.Stream{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(5000) };
-    writeResponseTo(wire, status, content_type, body, omit_body) catch {};
+fn writeResponseTo(writer: anytype, status: http.StatusCode, content_type: []const u8, body: []const u8, omit_body: bool) !void {
+    return writeRouteResponseTo(writer, .{ .status = status, .content_type = content_type, .body = body, .allocated = false }, omit_body);
 }
 
-fn writeResponseTo(writer: anytype, status: http.StatusCode, content_type: []const u8, body: []const u8, omit_body: bool) !void {
+fn writeRouteResponseTo(writer: anytype, response: @import("../routes/common.zig").Response, omit_body: bool) !void {
     var header_buf: [512]u8 = undefined;
-    const headers = http.formatResponseHeaders(&header_buf, status, content_type, body.len);
+    const headers = http.formatResponseHeaders(&header_buf, response.status, response.content_type orelse "application/json", response.content_length orelse response.body.len);
     if (headers.len == 0) return error.ResponseFormattingFailed;
-    try writer.writeAll(headers);
-    if (!omit_body) try writer.writeAll(body);
+    try writer.writeAll(headers[0 .. headers.len - 2]);
+    if (response.etag) |etag| {
+        var etag_buf: [48]u8 = undefined;
+        try writer.writeAll(try std.fmt.bufPrint(&etag_buf, "ETag: \"{s}\"\r\n", .{etag}));
+    }
+    try writer.writeAll("\r\n");
+    if (!omit_body) try writer.writeAll(response.body);
 }
 
 const TestFile = struct {
@@ -329,6 +327,25 @@ test "writeResponse omits body for HEAD semantics while preserving content lengt
 
     try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, response, "Content-Length: 8\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, response, "\r\n\r\n"));
+}
+
+test "s3 head writes object size and etag without a metadata body" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile(std.testing.io, "head", .{ .read = true });
+    defer file.close(std.testing.io);
+    try writeRouteResponseTo(TestFile{ .fd = file.handle }, .{
+        .status = .ok,
+        .body = "",
+        .allocated = false,
+        .content_length = 500000,
+        .etag = "0123456789abcdef0123456789abcdef".*,
+    }, true);
+    const response = try tmp.dir.readFileAlloc(std.testing.io, "head", std.testing.allocator, .limited(512));
+    defer std.testing.allocator.free(response);
+    try std.testing.expect(std.mem.indexOf(u8, response, "Content-Length: 500000\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "ETag: \"0123456789abcdef0123456789abcdef\"\r\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, response, "\r\n\r\n"));
 }
 

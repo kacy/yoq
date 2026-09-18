@@ -99,8 +99,9 @@ test "contract: s3 object lifecycle preserves bytes and metadata" {
     const head = try routeRequest(.HEAD, "/s3/object-bucket/nested/blob.bin", "");
     defer freeResponse(head);
     try std.testing.expectEqual(http.StatusCode.ok, head.status);
-    try std.testing.expect(std.mem.indexOf(u8, head.body, "\"content_length\":11") != null);
-    try std.testing.expect(std.mem.indexOf(u8, head.body, "\"etag\":\"") != null);
+    try std.testing.expectEqualStrings("", head.body);
+    try std.testing.expectEqual(@as(?usize, object_body.len), head.content_length);
+    try std.testing.expectEqual(put.etag.?, head.etag.?);
 
     const delete = try routeRequest(.DELETE, "/s3/object-bucket/nested/blob.bin", "");
     defer freeResponse(delete);
@@ -194,7 +195,13 @@ test "contract: s3 multipart completion assembles the final object" {
 
     var complete_path_buf: [128]u8 = undefined;
     const complete_path = try std.fmt.bufPrint(&complete_path_buf, "/s3/multipart-bucket/video.bin?uploadId={s}", .{upload_id});
-    const complete = try routeRequest(.POST, complete_path, "");
+    var completion_buf: [512]u8 = undefined;
+    const completion = try std.fmt.bufPrint(
+        &completion_buf,
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{s}\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"{s}\"</ETag></Part></CompleteMultipartUpload>",
+        .{ part1.etag.?, part2.etag.? },
+    );
+    const complete = try routeRequest(.POST, complete_path, completion);
     defer freeResponse(complete);
     try std.testing.expectEqual(http.StatusCode.ok, complete.status);
     try std.testing.expectEqualStrings("application/xml", complete.content_type.?);
@@ -279,4 +286,34 @@ test "contract: s3 invalid bucket and key return exact client errors" {
     try std.testing.expectEqual(http.StatusCode.bad_request, invalid_key.status);
     try std.testing.expectEqualStrings("application/xml", invalid_key.content_type.?);
     try std.testing.expect(std.mem.indexOf(u8, invalid_key.body, "<Code>InvalidKey</Code>") != null);
+}
+
+test "contract: s3 paginates encoded keys with actual etags" {
+    try support.lockContractTests();
+    defer support.unlockContractTests();
+    try support.cleanupS3TestState();
+    defer support.cleanupS3TestState() catch {};
+    freeResponse(try routeRequest(.PUT, "/s3/page-bucket", ""));
+    freeResponse(try routeRequest(.PUT, "/s3/page-bucket/folder/a%20b", "alpha"));
+    freeResponse(try routeRequest(.PUT, "/s3/page-bucket/folder/c%2Bd", "beta"));
+    const first = try routeRequest(.GET, "/s3/page-bucket?prefix=folder%2F&max-keys=1", "");
+    defer freeResponse(first);
+    try std.testing.expectEqual(http.StatusCode.ok, first.status);
+    try std.testing.expectEqualStrings("true", try expectXmlTag(first.body, "IsTruncated"));
+    try std.testing.expectEqualStrings("folder/a b", try expectXmlTag(first.body, "Key"));
+    const token = try expectXmlTag(first.body, "NextContinuationToken");
+    var path_buf: [2048]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/s3/page-bucket?prefix=folder%2F&max-keys=1&continuation-token={s}", .{token});
+    const second = try routeRequest(.GET, path, "");
+    defer freeResponse(second);
+    try std.testing.expectEqual(http.StatusCode.ok, second.status);
+    try std.testing.expectEqualStrings("false", try expectXmlTag(second.body, "IsTruncated"));
+    try std.testing.expectEqualStrings("folder/c+d", try expectXmlTag(second.body, "Key"));
+    try std.testing.expect(std.mem.indexOf(u8, first.body, "2c1743a391305fbf367df8e4f069f9f9") != null);
+    const get = try routeRequest(.GET, "/s3/page-bucket/folder/c%2Bd", "");
+    defer freeResponse(get);
+    try std.testing.expectEqualStrings("beta", get.body);
+    const bad = try routeRequest(.GET, "/s3/page-bucket/folder/bad%xx", "");
+    defer freeResponse(bad);
+    try std.testing.expectEqual(http.StatusCode.bad_request, bad.status);
 }

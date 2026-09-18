@@ -54,6 +54,17 @@ jobs:
               - 'src/network/ebpf/**'
               - 'src/network/bpf/**'
 
+  storage-write-fault:
+    name: storage-write-fault
+    needs: changed-files
+    if: needs.changed-files.outputs.non_docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-zig
+      - name: preserve stored bytes after a failed replacement
+        run: bash scripts/storage-write-fault.sh
+
   veth-namespace:
     name: veth-namespace
     needs: changed-files

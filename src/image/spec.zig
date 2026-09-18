@@ -16,6 +16,20 @@
 
 const std = @import("std");
 
+pub const LayerCompression = enum { tar, gzip, zstd };
+
+pub fn layerCompression(media: []const u8) ?LayerCompression {
+    if (std.mem.eql(u8, media, media_type.oci_layer_tar) or
+        std.mem.eql(u8, media, "application/vnd.oci.image.layer.nondistributable.v1.tar")) return .tar;
+    if (std.mem.eql(u8, media, media_type.oci_layer_gzip) or
+        std.mem.eql(u8, media, media_type.docker_layer_gzip) or
+        std.mem.eql(u8, media, "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip") or
+        std.mem.eql(u8, media, "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip")) return .gzip;
+    if (std.mem.eql(u8, media, media_type.oci_layer_zstd) or
+        std.mem.eql(u8, media, "application/vnd.oci.image.layer.nondistributable.v1.tar+zstd")) return .zstd;
+    return null;
+}
+
 /// a content descriptor — points to a blob by digest and size.
 /// used in manifests to reference configs and layers.
 pub const Descriptor = struct {
@@ -102,6 +116,8 @@ pub const media_type = struct {
     pub const manifest_list = "application/vnd.docker.distribution.manifest.list.v2+json";
     pub const oci_manifest = "application/vnd.oci.image.manifest.v1+json";
     pub const oci_index = "application/vnd.oci.image.index.v1+json";
+    pub const oci_layer_tar = "application/vnd.oci.image.layer.v1.tar";
+    pub const oci_layer_zstd = "application/vnd.oci.image.layer.v1.tar+zstd";
     pub const oci_layer_gzip = "application/vnd.oci.image.layer.v1.tar+gzip";
     pub const docker_layer_gzip = "application/vnd.docker.image.rootfs.diff.tar.gzip";
     pub const oci_config = "application/vnd.oci.image.config.v1+json";

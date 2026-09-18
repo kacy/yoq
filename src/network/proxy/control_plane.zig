@@ -525,7 +525,12 @@ test "mapped listener target serves proxied HTTP after event-driven repair" {
     try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
 
     var response_buf: [1024]u8 = undefined;
-    const bytes_read = try posix.read(client_fd, &response_buf);
+    var bytes_read: usize = 0;
+    while (bytes_read < response_buf.len) {
+        const count = try posix.read(client_fd, response_buf[bytes_read..]);
+        if (count == 0) break;
+        bytes_read += count;
+    }
     try std.testing.expect(bytes_read > 0);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "HTTP/1.1 200 OK\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "\r\n\r\nhello") != null);
@@ -609,7 +614,12 @@ test "periodic repair restores mapped listener target and serves proxied HTTP" {
     try socket_helpers.writeAll(client_fd, "GET / HTTP/1.1\r\nHost: api.internal\r\n\r\n");
 
     var response_buf: [1024]u8 = undefined;
-    const bytes_read = try posix.read(client_fd, &response_buf);
+    var bytes_read: usize = 0;
+    while (bytes_read < response_buf.len) {
+        const count = try posix.read(client_fd, response_buf[bytes_read..]);
+        if (count == 0) break;
+        bytes_read += count;
+    }
     try std.testing.expect(bytes_read > 0);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "HTTP/1.1 200 OK\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..bytes_read], "\r\n\r\nhello") != null);

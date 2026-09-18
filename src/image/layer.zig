@@ -1,6 +1,6 @@
 // layer — OCI image layer extraction and creation
 //
-// extracts OCI image layers (gzipped tarballs) into directories
+// extracts oci image layers (raw, gzip, or zstd tar archives) into directories
 // and assembles a complete rootfs from ordered layers.
 // also creates new layers from directories (for image builds).
 //
@@ -22,6 +22,8 @@ pub const LayerError = layer_types.LayerError;
 pub const LayerCreateResult = layer_types.LayerCreateResult;
 
 pub const extractLayer = layer_extract.extractLayer;
+pub const extractLayerDescriptor = layer_extract.extractLayerDescriptor;
+pub const assembleRootfsDescriptors = layer_extract.assembleRootfsDescriptors;
 pub const assembleRootfs = layer_extract.assembleRootfs;
 pub const createLayerFromDir = layer_create.createLayerFromDir;
 pub const listExtractedLayersOnDisk = layer_path.listExtractedLayersOnDisk;
@@ -590,4 +592,8 @@ test "layer format migration rebuilds verified blobs without mutating v3 entries
     var bytes: [64]u8 = undefined;
     try std.testing.expectEqualStrings("fresh image contents", try extracted.readFile(std.testing.io, "version", &bytes));
     try std.testing.expectEqualStrings("old extraction policy", try previous.readFile(std.testing.io, "rootfs/version", &bytes));
+}
+
+test {
+    _ = @import("layer/compression_tests.zig");
 }

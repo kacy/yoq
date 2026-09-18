@@ -341,7 +341,8 @@ test "contract: HEAD omits body bytes but preserves content length" {
     defer std.testing.allocator.free(response);
 
     var len_buf: [64]u8 = undefined;
-    const content_length_header = try std.fmt.bufPrint(&len_buf, "Content-Length: {d}\r\n", .{route_resp.body.len});
+    try std.testing.expectEqual(@as(?usize, 9), route_resp.content_length);
+    const content_length_header = try std.fmt.bufPrint(&len_buf, "Content-Length: {d}\r\n", .{@as(usize, 9)});
     try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, response, content_length_header) != null);
     try std.testing.expectEqual(@as(usize, 0), (try responseBody(response)).len);

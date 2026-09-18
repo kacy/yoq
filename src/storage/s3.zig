@@ -4,13 +4,14 @@
 // buckets are directories within a designated storage root, objects are
 // files within bucket directories. multipart uploads use a staging area.
 //
-// not a full S3 implementation — just enough for apps to use S3 SDKs
-// for blob storage without external dependencies.
+// the gateway exposes a limited s3-style contract with yoq authentication.
+// see docs/storage-api.md for supported operations and client limitations.
 
 const std = @import("std");
 const linux_platform = @import("linux_platform");
 const log = @import("../lib/log.zig");
 const paths = @import("../lib/paths.zig");
+const PendingObject = @import("object_write.zig").Pending;
 
 pub const S3Error = error{
     BucketNotFound,
@@ -19,6 +20,8 @@ pub const S3Error = error{
     ObjectNotFound,
     UploadNotFound,
     InvalidPartNumber,
+    InvalidPart,
+    InvalidPartOrder,
     IoError,
     PathTooLong,
     HomeDirNotFound,
@@ -220,16 +223,10 @@ pub fn putObject(name: []const u8, key: []const u8, data: []const u8) S3Error![3
     var buf: [paths.max_path]u8 = undefined;
     const file_path = try storagePath(&buf, storage_subdir ++ "/{s}/{s}", .{ name, key });
 
-    // ensure parent directories exist (for keys like "dir/subdir/file.txt")
-    if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |last_sep| {
-        cwd().createDirPath(std.Options.debug_io, file_path[0..last_sep]) catch return S3Error.IoError;
-    }
-
-    var file = cwd().createFile(std.Options.debug_io, file_path, .{}) catch {
-        return S3Error.IoError;
-    };
-    defer file.close(std.Options.debug_io);
-    file.writeStreamingAll(std.Options.debug_io, data) catch return S3Error.IoError;
+    var pending = PendingObject.init(file_path) catch return S3Error.IoError;
+    defer pending.deinit();
+    pending.file.writeStreamingAll(std.Options.debug_io, data) catch return S3Error.IoError;
+    pending.publish() catch return S3Error.IoError;
 
     return computeEtag(data);
 }
@@ -272,14 +269,18 @@ pub fn headObject(name: []const u8, key: []const u8) S3Error!ObjectMeta {
     var buf: [paths.max_path]u8 = undefined;
     const file_path = try storagePath(&buf, storage_subdir ++ "/{s}/{s}", .{ name, key });
 
-    const stat = cwd().statFile(std.Options.debug_io, file_path, .{}) catch |e| switch (e) {
+    var file = cwd().openFile(std.Options.debug_io, file_path, .{}) catch |e| switch (e) {
         error.FileNotFound => return S3Error.ObjectNotFound,
         else => return S3Error.IoError,
     };
 
-    // stream file through MD5 in fixed-size chunks to avoid loading entire file
-    var file = cwd().openFile(std.Options.debug_io, file_path, .{}) catch return S3Error.IoError;
     defer file.close(std.Options.debug_io);
+    return objectMetadata(file);
+}
+
+fn objectMetadata(file: std.Io.File) S3Error!ObjectMeta {
+    // stat and hash the same open file, even if another writer replaces its name.
+    const stat = file.stat(std.Options.debug_io) catch return S3Error.IoError;
 
     var hasher = std.crypto.hash.Md5.init(.{});
     var read_buf: [8192]u8 = undefined;
@@ -330,20 +331,22 @@ pub fn listObjects(
     defer walker.deinit();
 
     while (walker.next(std.Options.debug_io) catch return S3Error.IoError) |entry| {
-        if (entry.kind == .directory) continue;
+        if (entry.kind != .file) continue;
 
         const key = entry.path;
 
         // apply prefix filter
         if (prefix.len > 0 and !std.mem.startsWith(u8, key, prefix)) continue;
 
-        const stat = entry.dir.statFile(std.Options.debug_io, entry.basename, .{}) catch continue;
+        var file = entry.dir.openFile(std.Options.debug_io, entry.basename, .{}) catch return S3Error.IoError;
+        defer file.close(std.Options.debug_io);
+        const meta = try objectMetadata(file);
         const key_copy = alloc.dupe(u8, key) catch return S3Error.IoError;
         entries.append(alloc, .{
             .key = key_copy,
-            .size = stat.size,
-            .last_modified = @intCast(stat.mtime.toSeconds()),
-            .etag = "d41d8cd98f00b204e9800998ecf8427e", // placeholder for listing
+            .size = meta.size,
+            .last_modified = meta.last_modified,
+            .etag = meta.etag,
         }) catch {
             alloc.free(key_copy);
             return S3Error.IoError;
@@ -354,6 +357,7 @@ pub fn listObjects(
 }
 
 pub const ObjectEntry = @import("s3_xml.zig").ObjectEntry;
+pub const CompletedPart = @import("s3_multipart.zig").Part;
 
 // -- multipart upload operations --
 
@@ -399,9 +403,10 @@ pub fn uploadPart(upload_id: []const u8, bucket_name: []const u8, key: []const u
     cwd().access(std.Options.debug_io, parent, .{}) catch return S3Error.UploadNotFound;
     try verifyMultipartTarget(parent, bucket_name, key);
 
-    var file = cwd().createFile(std.Options.debug_io, staging_path, .{}) catch return S3Error.IoError;
-    defer file.close(std.Options.debug_io);
-    file.writeStreamingAll(std.Options.debug_io, data) catch return S3Error.IoError;
+    var pending = PendingObject.init(staging_path) catch return S3Error.IoError;
+    defer pending.deinit();
+    pending.file.writeStreamingAll(std.Options.debug_io, data) catch return S3Error.IoError;
+    pending.publish() catch return S3Error.IoError;
 
     return computeEtag(data);
 }
@@ -452,11 +457,53 @@ pub fn completeMultipartUpload(
         }
     }.lessThan);
 
-    const etag = try writeMultipartObject(dir, bucket_name, key, part_names.items);
+    const etag = try writeMultipartObject(dir, bucket_name, key, part_names.items, null);
 
     // clean up staging directory
     cwd().deleteTree(std.Options.debug_io, staging_path) catch {};
 
+    return etag;
+}
+
+/// check the upload target before parsing a completion request. completion
+/// verifies it again because an abort may race with request parsing.
+pub fn checkMultipartUpload(bucket: []const u8, key: []const u8, upload_id: []const u8) S3Error!void {
+    try validateUploadId(upload_id);
+    var staging_buf: [paths.max_path]u8 = undefined;
+    const staging_path = try storagePath(&staging_buf, multipart_subdir ++ "/{s}", .{upload_id});
+    try verifyMultipartTarget(staging_path, bucket, key);
+}
+
+/// publish exactly the requested parts, checking their etags while copying.
+pub fn completeSelectedParts(alloc: std.mem.Allocator, bucket: []const u8, key: []const u8, upload_id: []const u8, parts: []const CompletedPart) S3Error![32]u8 {
+    try validateBucketName(bucket);
+    try validateKey(key);
+    try validateUploadId(upload_id);
+    if (!bucketExists(bucket)) return error.BucketNotFound;
+    if (parts.len == 0 or parts.len > 10000) return error.InvalidPart;
+    var staging_buf: [paths.max_path]u8 = undefined;
+    const staging_path = try storagePath(&staging_buf, multipart_subdir ++ "/{s}", .{upload_id});
+    try verifyMultipartTarget(staging_path, bucket, key);
+    var dir = cwd().openDir(std.Options.debug_io, staging_path, .{}) catch return error.UploadNotFound;
+    defer dir.close(std.Options.debug_io);
+    var names: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (names.items) |name| alloc.free(name);
+        names.deinit(alloc);
+    }
+    var previous: u32 = 0;
+    for (parts) |part| {
+        if (part.number == 0 or part.number > 10000) return error.InvalidPart;
+        if (part.number <= previous) return error.InvalidPartOrder;
+        previous = part.number;
+        const name = std.fmt.allocPrint(alloc, "{d:0>5}", .{part.number}) catch return error.IoError;
+        names.append(alloc, name) catch {
+            alloc.free(name);
+            return error.IoError;
+        };
+    }
+    const etag = try writeMultipartObject(dir, bucket, key, names.items, parts);
+    cwd().deleteTree(std.Options.debug_io, staging_path) catch {};
     return etag;
 }
 
@@ -482,35 +529,42 @@ pub fn computeEtag(data: []const u8) [32]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-fn writeMultipartObject(dir: std.Io.Dir, bucket_name: []const u8, key: []const u8, part_names: []const []const u8) S3Error![32]u8 {
+fn writeMultipartObject(dir: std.Io.Dir, bucket_name: []const u8, key: []const u8, part_names: []const []const u8, expected: ?[]const CompletedPart) S3Error![32]u8 {
     var out_path_buf: [paths.max_path]u8 = undefined;
     const file_path = try storagePath(&out_path_buf, storage_subdir ++ "/{s}/{s}", .{ bucket_name, key });
 
-    if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |last_sep| {
-        cwd().createDirPath(std.Options.debug_io, file_path[0..last_sep]) catch return S3Error.IoError;
-    }
-
-    var out_file = cwd().createFile(std.Options.debug_io, file_path, .{ .truncate = true }) catch return S3Error.IoError;
-    defer out_file.close(std.Options.debug_io);
+    var pending = PendingObject.init(file_path) catch return S3Error.IoError;
+    defer pending.deinit();
 
     var hasher = std.crypto.hash.Md5.init(.{});
     var buf: [8192]u8 = undefined;
 
-    for (part_names) |pn| {
-        var part_file = dir.openFile(std.Options.debug_io, pn, .{}) catch return S3Error.IoError;
+    for (part_names, 0..) |pn, i| {
+        var part_file = dir.openFile(std.Options.debug_io, pn, .{}) catch |err| switch (err) {
+            error.FileNotFound => return if (expected != null) error.InvalidPart else error.IoError,
+            else => return error.IoError,
+        };
         defer part_file.close(std.Options.debug_io);
         var part_reader = part_file.readerStreaming(std.Options.debug_io, &buf);
+        var part_hasher = std.crypto.hash.Md5.init(.{});
 
         while (true) {
             const bytes_read = part_reader.interface.readSliceShort(&buf) catch return S3Error.IoError;
             if (bytes_read == 0) break;
-            out_file.writeStreamingAll(std.Options.debug_io, buf[0..bytes_read]) catch return S3Error.IoError;
+            pending.file.writeStreamingAll(std.Options.debug_io, buf[0..bytes_read]) catch return S3Error.IoError;
             hasher.update(buf[0..bytes_read]);
+            part_hasher.update(buf[0..bytes_read]);
+        }
+        if (expected) |parts| {
+            var digest: [16]u8 = undefined;
+            part_hasher.final(&digest);
+            if (!std.mem.eql(u8, &std.fmt.bytesToHex(digest, .lower), &parts[i].etag)) return error.InvalidPart;
         }
     }
 
     var digest: [std.crypto.hash.Md5.digest_length]u8 = undefined;
     hasher.final(&digest);
+    pending.publish() catch return S3Error.IoError;
     return std.fmt.bytesToHex(digest, .lower);
 }
 
@@ -690,4 +744,56 @@ test "completeMultipartUpload streams parts into final object" {
 
     try std.testing.expectEqualStrings("hello streamed world", data);
     try std.testing.expectEqualStrings(&expected_etag, &etag);
+}
+
+test "storage reliability preserves the old object when multipart reading fails" {
+    const alloc = std.testing.allocator;
+    const bucket = "failed-multipart-replacement";
+    var bucket_buf: [paths.max_path]u8 = undefined;
+    const bucket_path = try storagePath(&bucket_buf, storage_subdir ++ "/{s}", .{bucket});
+    defer cwd().deleteTree(std.Options.debug_io, bucket_path) catch {};
+    try createBucket(bucket);
+    _ = try putObject(bucket, "object", "previous value");
+    var parts = std.testing.tmpDir(.{});
+    defer parts.cleanup();
+    var first = try parts.dir.createFile(std.testing.io, "00001", .{});
+    try first.writeStreamingAll(std.testing.io, "replacement begins here");
+    first.close(std.testing.io);
+
+    try std.testing.expectError(error.IoError, writeMultipartObject(parts.dir, bucket, "object", &.{ "00001", "00002" }, null));
+    const preserved = try getObject(alloc, bucket, "object");
+    defer alloc.free(preserved);
+    try std.testing.expectEqualStrings("previous value", preserved);
+    const listed = try listObjects(alloc, bucket, "");
+    defer {
+        for (listed) |entry| alloc.free(entry.key);
+        alloc.free(listed);
+    }
+    try std.testing.expectEqual(@as(usize, 1), listed.len);
+    try std.testing.expectEqualStrings("object", listed[0].key);
+}
+
+test "s3 selected parts verify data and omit unrequested parts" {
+    const alloc = std.testing.allocator;
+    const bucket = "selected-parts";
+    var bucket_buf: [paths.max_path]u8 = undefined;
+    const bucket_path = try storagePath(&bucket_buf, storage_subdir ++ "/{s}", .{bucket});
+    defer cwd().deleteTree(std.Options.debug_io, bucket_path) catch {};
+    try createBucket(bucket);
+    _ = try putObject(bucket, "object", "old");
+    const upload = try initiateMultipartUpload(bucket, "object");
+    defer abortMultipartUpload(&upload) catch {};
+    const first = try uploadPart(&upload, bucket, "object", 1, "first");
+    _ = try uploadPart(&upload, bucket, "object", 2, "unused");
+    const third = try uploadPart(&upload, bucket, "object", 3, "third");
+    const wrong = [_]CompletedPart{ .{ .number = 1, .etag = first }, .{ .number = 3, .etag = first } };
+    try std.testing.expectError(error.InvalidPart, completeSelectedParts(alloc, bucket, "object", &upload, &wrong));
+    const preserved = try getObject(alloc, bucket, "object");
+    defer alloc.free(preserved);
+    try std.testing.expectEqualStrings("old", preserved);
+    const selected = [_]CompletedPart{ .{ .number = 1, .etag = first }, .{ .number = 3, .etag = third } };
+    _ = try completeSelectedParts(alloc, bucket, "object", &upload, &selected);
+    const result = try getObject(alloc, bucket, "object");
+    defer alloc.free(result);
+    try std.testing.expectEqualStrings("firstthird", result);
 }
