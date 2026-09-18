@@ -160,7 +160,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
     defer threaded_io.deinit();
 
     var prepared = PreparedService.init(threaded_io.io(), orch, idx) orelse {
-        orch.states[idx].status = .failed;
+        orch.states[idx].setStatus(.failed);
         return;
     };
     defer prepared.deinit();
@@ -171,7 +171,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
         var id_buf: [12]u8 = undefined;
         container.generateId(&id_buf) catch {
             writeErr("failed to generate container ID for {s}\n", .{svc.name});
-            orch.states[idx].status = .failed;
+            orch.states[idx].setStatus(.failed);
             return;
         };
         const id = id_buf[0..];
@@ -188,7 +188,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             .app_name = orch.app_name,
             .created_at = std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
         }) catch {
-            orch.states[idx].status = .failed;
+            orch.states[idx].setStatus(.failed);
             return;
         };
 
@@ -197,11 +197,11 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
 
         c.start() catch {
             cleanupContainerArtifacts(id);
-            orch.states[idx].status = .failed;
+            orch.states[idx].setStatus(.failed);
             return;
         };
 
-        orch.states[idx].status = .running;
+        orch.states[idx].setStatus(.running);
         startup_runtime.refreshServiceRuntimeBindings(
             orch.alloc,
             svc,
@@ -230,7 +230,7 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
         )) break;
     }
 
-    orch.states[idx].status = .stopped;
+    orch.states[idx].setStatus(.stopped);
 }
 
 pub fn watcherThread(orch: anytype, w: *watcher_mod.Watcher, shutdown_requested: *const std.atomic.Value(bool)) void {
@@ -280,7 +280,7 @@ fn handleDevModeRestart(
         return true;
     }
 
-    orch.states[idx].status = .stopped;
+    orch.states[idx].setStatus(.stopped);
     while (!shutdown_requested.load(.acquire) and !orch.states[idx].stop_requested.load(.acquire)) {
         if (orch.restart_requested[idx].load(.acquire)) {
             orch.restart_requested[idx].store(false, .release);

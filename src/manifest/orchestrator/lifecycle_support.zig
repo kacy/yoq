@@ -67,12 +67,12 @@ pub fn startAll(self: anytype, comptime OrchestratorError: type, serviceThreadFn
     for (services, 0..) |svc, i| {
         if (!shouldStart(self, svc.name)) continue;
 
-        self.states[i].status = .pulling;
+        self.states[i].setStatus(.pulling);
         writeErr("pulling {s}...\n", .{svc.image});
 
         if (!service_runtime.ensureImageAvailableWithIo(pull_io.io(), self.alloc, svc.image)) {
             writeErr("failed to pull image: {s}\n", .{svc.image});
-            self.states[i].status = .failed;
+            self.states[i].setStatus(.failed);
             return OrchestratorError.PullFailed;
         }
         writeErr("  {s} ready\n", .{svc.image});
@@ -179,16 +179,16 @@ pub fn startServiceByIndex(
     for (0..svc.replicas) |replica| {
         const instance = instances.instanceIndex(self.manifest.services, idx, replica);
         self.states[instance].stop_requested.store(false, .release);
-        self.states[instance].status = .starting;
+        self.states[instance].setStatus(.starting);
         container.generateId(&self.states[instance].container_id) catch {
             writeErr("failed to generate container ID for {s}\n", .{svc.name});
-            self.states[instance].status = .failed;
+            self.states[instance].setStatus(.failed);
             return OrchestratorError.StartFailed;
         };
 
         const thread = std.Thread.spawn(.{}, serviceThreadFn, .{ self, instance }) catch {
             writeErr("failed to spawn thread for {s}\n", .{svc.name});
-            self.states[instance].status = .failed;
+            self.states[instance].setStatus(.failed);
             return OrchestratorError.StartFailed;
         };
         self.states[instance].thread = thread;
@@ -263,15 +263,16 @@ pub fn stopServiceByIndex(self: anytype, idx: usize) void {
             thread.join();
             self.states[instance].thread = null;
         }
-        self.states[instance].status = .stopped;
+        self.states[instance].setStatus(.stopped);
     }
 }
 
 pub fn waitForShutdown(self: anytype, shutdown_requested: *const std.atomic.Value(bool)) void {
     while (!shutdown_requested.load(.acquire)) {
         var all_done = true;
-        for (self.states) |state| {
-            if (state.status == .running or state.status == .starting or state.status == .pulling) {
+        for (self.states) |*state| {
+            const status = state.getStatus();
+            if (status == .running or status == .starting or status == .pulling) {
                 all_done = false;
                 break;
             }
@@ -301,7 +302,7 @@ fn waitForInstanceRunning(self: anytype, idx: usize) bool {
     const start = @as(u64, @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds()));
 
     while (true) {
-        const status = self.states[idx].status;
+        const status = self.states[idx].getStatus();
         if (status == .running) return true;
         if (status == .failed or status == .stopped) return false;
 

@@ -46,7 +46,15 @@ pub const ServiceState = struct {
     health_status: ?health.HealthStatus = null,
     stop_requested: std.atomic.Value(bool) = .init(false),
 
-    pub const Status = enum {
+    pub fn getStatus(self: *const ServiceState) Status {
+        return @atomicLoad(Status, &self.status, .acquire);
+    }
+
+    pub fn setStatus(self: *ServiceState, value: Status) void {
+        @atomicStore(Status, &self.status, value, .release);
+    }
+
+    pub const Status = enum(u8) {
         pending,
         pulling,
         starting,
@@ -151,16 +159,17 @@ pub const Orchestrator = struct {
     pub fn serviceHealth(self: *const Orchestrator, service_index: usize) health.HealthStatus {
         var result: health.HealthStatus = .healthy;
         for (0..self.manifest.services[service_index].replicas) |replica| {
-            const state = self.states[instances.instanceIndex(self.manifest.services, service_index, replica)];
-            if (state.status == .failed or state.status == .stopped) return .unhealthy;
-            if (state.status != .running) {
+            const state = &self.states[instances.instanceIndex(self.manifest.services, service_index, replica)];
+            const status = state.getStatus();
+            if (status == .failed or status == .stopped) return .unhealthy;
+            if (status != .running) {
                 result = .starting;
                 continue;
             }
             if (self.manifest.services[service_index].health_check != null) {
-                const status = health.getContainerStatus(&state.container_id) orelse .starting;
-                if (status == .unhealthy) return .unhealthy;
-                if (status == .starting) result = .starting;
+                const readiness = health.getContainerStatus(&state.container_id) orelse .starting;
+                if (readiness == .unhealthy) return .unhealthy;
+                if (readiness == .starting) result = .starting;
             }
         }
         return result;
@@ -606,7 +615,7 @@ test "computeStartSet: no filter starts everything" {
 }
 
 fn fakeStartServiceThread(orch: *Orchestrator, idx: usize) void {
-    orch.states[idx].status = .running;
+    orch.states[idx].setStatus(.running);
 }
 
 fn fakeJoinableThread(_: *Orchestrator, _: usize) void {}
