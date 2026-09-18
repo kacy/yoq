@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 
 fn ensureSchema(db: *sqlite.Db) !void {
     try db.exec("CREATE TABLE IF NOT EXISTS local_service_owners (app TEXT NOT NULL, service TEXT NOT NULL, token TEXT NOT NULL, generation INTEGER NOT NULL, PRIMARY KEY(app, service));", .{}, .{});
+    try db.exec("CREATE UNIQUE INDEX IF NOT EXISTS local_service_active_name ON local_service_owners(service) WHERE token != '';", .{}, .{});
     try db.exec("CREATE TABLE IF NOT EXISTS local_service_instances (container TEXT PRIMARY KEY, app TEXT NOT NULL, service TEXT NOT NULL, generation INTEGER NOT NULL);", .{}, .{});
 }
 
@@ -15,7 +16,23 @@ pub fn claim(app: []const u8, service: []const u8, token: []const u8) !void {
     var db = try common.leaseDb();
     defer db.deinit();
     try ensureSchema(db.db);
+    try assertAvailableInDb(db.db, app, service);
     try db.db.exec("INSERT INTO local_service_owners (app, service, token, generation) VALUES (?, ?, ?, 1) ON CONFLICT(app, service) DO UPDATE SET generation = CASE WHEN token = excluded.token THEN generation ELSE generation + 1 END, token = excluded.token;", .{}, .{ app, service, token });
+}
+
+pub fn assertAvailable(app: []const u8, service: []const u8) !void {
+    var db = try common.leaseDb();
+    defer db.deinit();
+    try ensureSchema(db.db);
+    try assertAvailableInDb(db.db, app, service);
+}
+
+fn assertAvailableInDb(db: *sqlite.Db, app: []const u8, service: []const u8) !void {
+    const Row = struct { count: i64 };
+    const owners = try db.one(Row, "SELECT COUNT(*) AS count FROM local_service_owners WHERE service = ? AND app != ? AND token != '';", .{}, .{ service, app });
+    if (owners.?.count > 0) return error.ServiceNameInUse;
+    const containers = try db.one(Row, "SELECT COUNT(*) AS count FROM containers WHERE hostname = ? AND coalesce(app_name, '') != ? AND status IN ('created', 'running');", .{}, .{ service, app });
+    if (containers.?.count > 0) return error.ServiceNameInUse;
 }
 
 pub fn isOwner(app: []const u8, service: []const u8, token: []const u8) !bool {
@@ -127,4 +144,19 @@ test "replacement generations reject stale restarts and preserve the current own
         leftovers.deinit(alloc);
     }
     try std.testing.expectEqual(@as(usize, 2), leftovers.items.len);
+}
+
+test "global service names reject a different active app" {
+    const store = @import("../../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try claim("first", "web", "first-owner");
+    try std.testing.expectError(error.ServiceNameInUse, assertAvailable("second", "web"));
+    try std.testing.expectError(error.ServiceNameInUse, claim("second", "web", "second-owner"));
+    try claim("first", "web", "replacement");
+    try release("first", "web", "first-owner");
+    try std.testing.expectError(error.ServiceNameInUse, claim("second", "web", "second-owner"));
+    try release("first", "web", "replacement");
+    try claim("second", "web", "second-owner");
+    try std.testing.expect(try isOwner("second", "web", "second-owner"));
 }

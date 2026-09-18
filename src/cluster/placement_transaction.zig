@@ -146,6 +146,7 @@ fn placeWithMetadata(alloc: std.mem.Allocator, session: mutation.Session, reques
 fn placeOnce(alloc: std.mem.Allocator, session: mutation.Session, request: scheduler.PlacementRequest, release_id: ?[]const u8, metadata_sql: ?[]const u8, replicas: u32) mutation.Error!?Placement {
     const lease = try Lease.begin(session);
     defer lease.deinit();
+    if (!try serviceNameAvailableInLease(lease, request)) return null;
     if (release_id) |id| {
         if (try resumePlacement(alloc, lease, request, id, replicas)) |existing| return existing;
     }
@@ -209,6 +210,23 @@ fn placeOnce(alloc: std.mem.Allocator, session: mutation.Session, request: sched
     }
     try lease.commit(batch.written());
     return .{ .assignment_ids = owned };
+}
+
+pub fn serviceNameAvailable(session: mutation.Session, request: scheduler.PlacementRequest) mutation.Error!bool {
+    const lease = try Lease.begin(session);
+    defer lease.deinit();
+    return serviceNameAvailableInLease(lease, request);
+}
+
+fn serviceNameAvailableInLease(lease: Lease, request: scheduler.PlacementRequest) mutation.Error!bool {
+    if (!std.mem.eql(u8, request.workload_kind orelse "", "service")) return true;
+    const name = request.workload_name orelse return true;
+    const node = lease.session.node;
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
+    try lease.session.checkLocked();
+    const row = node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM assignments WHERE workload_kind = 'service' AND workload_name = ? AND coalesce(app_name, '') != ? AND status IN ('pending', 'running');", .{}, .{ name, request.app_name orelse "" }) catch return error.InternalError;
+    return row.?.count == 0;
 }
 
 pub fn replicaSurgeFits(session: mutation.Session, request: scheduler.PlacementRequest, replicas: u32) mutation.Error!bool {
@@ -659,4 +677,23 @@ test "replica surge limit preserves the prior group and permits resume" {
     const resumed = (try placeReplicas(alloc, session, request, "prior", 33)).?;
     defer resumed.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 33), resumed.assignment_ids.len);
+}
+
+test "cluster placement reserves service names across apps" {
+    const alloc = std.testing.allocator;
+    var node = try testNode();
+    defer node.deinit();
+    const session = try mutation.Session.begin(&node);
+    const first = (try place(alloc, session, test_request, "first")).?;
+    defer first.deinit(alloc);
+    var other = test_request;
+    other.app_name = "another-app";
+    other.cpu_limit = 100;
+    try std.testing.expect(!try serviceNameAvailable(session, other));
+    try std.testing.expect((try place(alloc, session, other, "second")) == null);
+    try std.testing.expectEqual(@as(i64, 1), try countRows(node.stateMachineDb(), "assignments"));
+    _ = try node.proposeCommitted("UPDATE assignments SET status = 'stopped';", 0);
+    try std.testing.expect(try serviceNameAvailable(session, other));
+    const reused = (try place(alloc, session, other, "second")).?;
+    defer reused.deinit(alloc);
 }

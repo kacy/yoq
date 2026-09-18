@@ -235,7 +235,12 @@ pub const ClusterApplyBackend = struct {
         }
         counters.failed += @as(usize, req.replicas) * @max(@as(usize, 1), req.request.gang_world_size);
         counters.failed_targets += 1;
-        const reason = if (try placement_transaction.replicaSurgeFits(self.session, req.request, req.replicas)) "placement_failed" else "replica_surge_limit";
+        const reason = if (!try placement_transaction.serviceNameAvailable(self.session, req.request))
+            "service_name_in_use"
+        else if (!try placement_transaction.replicaSurgeFits(self.session, req.request, req.replicas))
+            "replica_surge_limit"
+        else
+            "placement_failed";
         failure_details.append(workloadForRequest(req.request), reason) catch return error.InternalError;
         rollout_targets.set(workloadForRequest(req.request), "failed", reason);
         try self.reportProgress("schedule", batch_start, batch_end, counters.*, failure_details, rollout_targets);

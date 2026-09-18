@@ -79,6 +79,10 @@ pub const PreparedLocalApply = struct {
         }
 
         try orch.computeStartSet();
+        for (manifest.services) |svc| {
+            if (orch.start_set) |set| if (!set.contains(svc.name)) continue;
+            try @import("orchestrator/ownership.zig").assertAvailable(release.app.app_name, svc.name);
+        }
         startup_runtime.syncServiceDefinitions(alloc, manifest.services, orch.start_set);
 
         return .{
@@ -305,6 +309,10 @@ fn stopPreviousServiceContainers(orch: *orchestrator.Orchestrator, idx: usize) !
     const name = orch.manifest.services[idx].name;
     try ownership.claim(orch.app_name, name, &orch.supervisor_token);
     orch.states[idx].ownership_claimed = true;
+    errdefer {
+        ownership.release(orch.app_name, name, &orch.supervisor_token) catch {};
+        orch.states[idx].ownership_claimed = false;
+    }
     var previous = try ownership.priorInstances(orch.alloc, orch.app_name, name, &orch.supervisor_token);
     defer {
         for (previous.items) |id| orch.alloc.free(id);
