@@ -64,6 +64,7 @@ pub const findAppContainer = @import("store/containers.zig").findAppContainer;
 pub const listAll = @import("store/containers.zig").listAll;
 
 pub const saveImage = @import("store/images.zig").saveImage;
+pub const saveImages = @import("store/images.zig").saveImages;
 pub const loadImage = @import("store/images.zig").loadImage;
 pub const findImage = @import("store/images.zig").findImage;
 pub const listImages = @import("store/images.zig").listImages;

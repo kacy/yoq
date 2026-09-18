@@ -99,6 +99,22 @@ pub fn saveImage(record: ImageRecord) StoreError!void {
     try saveImageInDb(lease.db, record, &ref);
 }
 
+/// Publish all references from an archive together after content validation.
+pub fn saveImages(records: []const ImageRecord) StoreError!void {
+    var lease = try common.leaseDb();
+    defer lease.deinit();
+    lease.db.exec("SAVEPOINT image_import;", .{}, .{}) catch return error.WriteFailed;
+    errdefer {
+        lease.db.exec("ROLLBACK TO image_import;", .{}, .{}) catch {};
+        lease.db.exec("RELEASE image_import;", .{}, .{}) catch {};
+    }
+    for (records) |record| {
+        const ref = try CanonicalReference.init(record.registry orelse "registry-1.docker.io", record.repository);
+        try saveImageInDb(lease.db, record, &ref);
+    }
+    lease.db.exec("RELEASE image_import;", .{}, .{}) catch return error.WriteFailed;
+}
+
 fn saveImageInDb(db: *sqlite.Db, record: ImageRecord, ref: *const CanonicalReference) StoreError!void {
     db.exec("SAVEPOINT image_save;", .{}, .{}) catch return error.WriteFailed;
     errdefer {
@@ -327,4 +343,22 @@ test "image reliability legacy records keep content without guessing registry or
     try std.testing.expectError(error.NotFound, findImage(std.testing.allocator, "other.example", "team/app", "stable"));
     try saveImage(referenceTestRecord("registry.example", "stable", "legacy"));
     try expectReference("registry.example", "team/app", "stable", "legacy");
+}
+
+test "image archive reference publication rolls back the entire batch on failure" {
+    try common.initTestDb();
+    defer common.deinitTestDb();
+    {
+        var lease = try common.leaseDb();
+        defer lease.deinit();
+        try lease.db.exec("CREATE TRIGGER reject_archive_tag BEFORE INSERT ON image_references WHEN NEW.tag = 'reject' BEGIN SELECT RAISE(ABORT, 'fixture'); END;", .{}, .{});
+    }
+    const first: ImageRecord = .{ .id = "archive-first", .repository = "archive-batch", .tag = "first", .manifest_digest = "archive-first", .config_digest = "config", .total_size = 0, .created_at = 1 };
+    var second = first;
+    second.id = "archive-second";
+    second.manifest_digest = "archive-second";
+    second.tag = "reject";
+    try std.testing.expectError(error.WriteFailed, saveImages(&.{ first, second }));
+    try std.testing.expectError(error.NotFound, findImage(std.testing.allocator, "docker.io", "archive-batch", "first"));
+    try std.testing.expectError(error.NotFound, loadImage(std.testing.allocator, "archive-first"));
 }
