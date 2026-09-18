@@ -143,17 +143,28 @@ fn saveAt(set: *const Set, dir: std.Io.Dir, seed: Endpoint, token: []const u8) !
     try (@import("linux_platform").File{ .handle = dir.handle }).sync();
 }
 
-pub fn request(self: anytype, method: enum { get, post }, path: []const u8, body: []const u8, credential: ?[]const u8) !http.Response {
+pub const Method = enum { get, post };
+
+pub fn request(self: anytype, method: Method, path: []const u8, body: []const u8, credential: ?[]const u8) !http.Response {
+    return requestWithOptions(self, method, path, body, credential, .{});
+}
+
+pub fn requestWithOptions(self: anytype, method: Method, path: []const u8, body: []const u8, credential: ?[]const u8, options: http.RequestOptions) !http.Response {
     if (self.api_endpoints.len == 0) try self.api_endpoints.add(.{ .address = self.server_addr, .port = self.server_port });
     // each operation tries at most three servers. the cursor survives failed
     // rounds, so a large cluster cannot trap every retry on its first peers.
     var attempts: usize = 0;
     while (attempts < @min(self.api_endpoints.len, 3)) : (attempts += 1) {
+        try options.check();
         const target = self.api_endpoints.current();
         var response = (if (method == .get)
-            http.getWithAuth(self.alloc, target.address, target.port, path, credential)
+            http.getWithOptions(self.alloc, target.address, target.port, path, credential, options)
         else
-            http.postWithAuth(self.alloc, target.address, target.port, path, body, credential)) catch {
+            http.postWithOptions(self.alloc, target.address, target.port, path, body, credential, options)) catch |err| {
+            switch (err) {
+                error.Canceled, error.OutOfMemory, error.InvalidResponse, error.ResponseTooLarge, error.RequestTooLarge => return err,
+                else => {},
+            }
             self.api_endpoints.advance();
             continue;
         };
