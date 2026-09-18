@@ -128,9 +128,7 @@ fn registerLocked(app: []const u8, name: []const u8, config: spec.AlertSpec, loc
         if (!std.mem.eql(u8, entry.app, app) or !std.mem.eql(u8, entry.name, name)) continue;
         if (!sameConfig(entry.config, config) or entry.local_restarts != local_restarts) {
             if (entry.references != 0) return error.AlertConfigConflict;
-            for (entry.rules) |state| if (state) |rule| {
-                if (rule.rule.in_flight) return error.AlertDeliveryInProgress;
-            };
+            if (hasDelivery(entry)) return error.AlertDeliveryInProgress;
             const owned_config = try config.clone(alloc);
             entry.config.deinit(alloc);
             entry.config = owned_config;
@@ -146,7 +144,17 @@ fn registerLocked(app: []const u8, name: []const u8, config: spec.AlertSpec, loc
         entry.references += 1;
         return entry;
     }
-    if (entries.items.len == max_services) return error.TooManyAlertServices;
+    if (entries.items.len == max_services) {
+        for (entries.items, 0..) |entry, index| {
+            if (entry.references != 0 or hasDelivery(entry)) continue;
+            // only inactive entries can move: registrations and deliveries keep
+            // active service pointers stable while sampling holds this mutex.
+            _ = entries.swapRemove(index);
+            entry.deinit();
+            break;
+        }
+        if (entries.items.len == max_services) return error.TooManyAlertServices;
+    }
     const entry = try alloc.create(Service);
     errdefer alloc.destroy(entry);
     const owned_app = try alloc.dupe(u8, app);
@@ -161,6 +169,13 @@ fn registerLocked(app: []const u8, name: []const u8, config: spec.AlertSpec, loc
     };
     try entries.append(alloc, entry);
     return entry;
+}
+
+fn hasDelivery(entry: *const Service) bool {
+    for (entry.rules) |state| if (state) |rule| {
+        if (rule.rule.in_flight) return true;
+    };
+    return false;
 }
 
 fn sameConfig(a: spec.AlertSpec, b: spec.AlertSpec) bool {
@@ -365,4 +380,27 @@ test "alert runtime joins workers and persists stopped status after last registr
     const json = try status_store.listJson(std.testing.allocator, "alerts-runtime");
     defer std.testing.allocator.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"state\":\"stopped\"") != null);
+}
+
+test "alert registry reclaims inactive entries but retains active registrations and deliveries" {
+    mutex.lockUncancelable(debug_io);
+    defer mutex.unlock(debug_io);
+    defer {
+        for (entries.items) |entry| entry.deinit();
+        entries.deinit(alloc);
+        entries = .empty;
+    }
+    const config: spec.AlertSpec = .{ .cpu_percent = 80 };
+    for (0..max_services) |index| {
+        var name: [32]u8 = undefined;
+        _ = try registerLocked("app", try std.fmt.bufPrint(&name, "service-{d}", .{index}), config, false);
+    }
+    try std.testing.expectError(error.TooManyAlertServices, registerLocked("app", "new-service", config, false));
+    entries.items[0].references = 0;
+    entries.items[0].rules[0].?.rule.in_flight = true;
+    try std.testing.expectError(error.TooManyAlertServices, registerLocked("app", "new-service", config, false));
+    entries.items[0].rules[0].?.rule.in_flight = false;
+    const added = try registerLocked("app", "new-service", config, false);
+    try std.testing.expectEqualStrings("new-service", added.name);
+    try std.testing.expectEqual(@as(usize, max_services), entries.items.len);
 }
