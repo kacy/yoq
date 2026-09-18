@@ -5,6 +5,8 @@ pub const LoadError = error{
     FileNotFound,
     ReadFailed,
     ParseFailed,
+    UnknownField,
+    InvalidFieldType,
     MissingImage,
     InvalidPortMapping,
     InvalidEnvVar,

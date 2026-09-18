@@ -71,6 +71,7 @@ pub fn expandVariables(alloc: std.mem.Allocator, input: []const u8) LoadError![]
 }
 
 fn buildManifest(alloc: std.mem.Allocator, root: *const toml.Table) LoadError!spec.Manifest {
+    try @import("loader/schema.zig").validate(alloc, root);
     var services: std.ArrayListUnmanaged(spec.Service) = .empty;
     defer {
         for (services.items) |svc| svc.deinit(alloc);
