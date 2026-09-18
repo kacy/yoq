@@ -81,6 +81,16 @@ pub fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const to
 
     const gpu_mesh_spec = try fields.parseGpuMeshSpec(table.getTable("gpu_mesh"));
 
+    const replicas_raw = table.getInt("replicas") orelse 1;
+    if (replicas_raw < 1 or replicas_raw > 4096) {
+        log.err("manifest: service.{s}.replicas must be between 1 and 4096", .{name});
+        return error.InvalidServiceConfig;
+    }
+    const required_labels = try parseRequiredLabels(alloc, name, table);
+    errdefer alloc.free(required_labels);
+    const alerts = try parseAlerts(alloc, name, table.getTable("alerts"));
+    errdefer if (alerts) |config| config.deinit(alloc);
+
     return .{
         .name = alloc.dupe(u8, name) catch return common.LoadError.OutOfMemory,
         .image = parsed_common.image,
@@ -97,6 +107,9 @@ pub fn parseService(alloc: std.mem.Allocator, name: []const u8, table: *const to
         .http_routes = http_routes,
         .gpu = gpu_spec,
         .gpu_mesh = gpu_mesh_spec,
+        .replicas = @intCast(replicas_raw),
+        .required_labels = required_labels,
+        .alerts = alerts,
     };
 }
 
@@ -141,7 +154,7 @@ pub fn parseVolume(alloc: std.mem.Allocator, name: []const u8, table: *const tom
             .options = options_dup,
         } };
     } else if (std.mem.eql(u8, driver_str, "parallel")) blk: {
-        const path = table.getString("path") orelse {
+        const path = table.getString("mount_path") orelse table.getString("path") orelse {
             log.err("manifest: volume '{s}' with parallel driver requires 'path' field", .{name});
             return common.LoadError.InvalidVolumeConfig;
         };
@@ -169,6 +182,9 @@ pub fn parseWorker(alloc: std.mem.Allocator, name: []const u8, table: *const tom
 
     const gpu_mesh_spec = try fields.parseGpuMeshSpec(table.getTable("gpu_mesh"));
 
+    const required_labels = try parseRequiredLabels(alloc, name, table);
+    errdefer alloc.free(required_labels);
+
     return .{
         .name = alloc.dupe(u8, name) catch return common.LoadError.OutOfMemory,
         .image = parsed_common.image,
@@ -179,6 +195,7 @@ pub fn parseWorker(alloc: std.mem.Allocator, name: []const u8, table: *const tom
         .volumes = parsed_common.volumes,
         .gpu = gpu_spec,
         .gpu_mesh = gpu_mesh_spec,
+        .required_labels = required_labels,
     };
 }
 
@@ -319,7 +336,12 @@ fn parseCheckpointSpec(alloc: std.mem.Allocator, name: []const u8, table: ?*cons
         return common.LoadError.InvalidTrainingConfig;
     };
 
-    var interval_secs: u64 = 1800;
+    const interval_raw = ckpt_table.getInt("interval_secs") orelse 1800;
+    if (interval_raw <= 0 or (ckpt_table.getInt("interval_secs") != null and ckpt_table.getString("interval") != null)) {
+        log.err("manifest: training.{s}.checkpoint requires one positive interval", .{name});
+        return error.InvalidTrainingConfig;
+    }
+    var interval_secs: u64 = @intCast(interval_raw);
     if (ckpt_table.getString("interval")) |interval_str| {
         interval_secs = fields.parseDuration(interval_str) orelse {
             log.err("manifest: training '{s}' has invalid checkpoint interval '{s}' (expected e.g. '30m', '1h')", .{ name, interval_str });
@@ -370,4 +392,49 @@ fn parseFaultToleranceSpec(table: ?*const toml.Table) spec.FaultToleranceSpec {
         .auto_restart = auto_restart,
         .max_restarts = max_restarts,
     };
+}
+
+fn parseRequiredLabels(alloc: std.mem.Allocator, name: []const u8, table: *const toml.Table) common.LoadError![]const u8 {
+    const labels = table.getString("required_labels") orelse "";
+    if (labels.len > 4096) return error.InvalidServiceConfig;
+    if (labels.len > 0) {
+        var parts = std.mem.splitScalar(u8, labels, ',');
+        while (parts.next()) |part| {
+            const pair = std.mem.trim(u8, part, " \t");
+            const equals = std.mem.indexOfScalar(u8, pair, '=') orelse {
+                log.err("manifest: {s}.required_labels requires comma-separated key=value pairs", .{name});
+                return error.InvalidServiceConfig;
+            };
+            if (equals == 0 or equals == pair.len - 1) return error.InvalidServiceConfig;
+        }
+    }
+    return alloc.dupe(u8, labels) catch return error.OutOfMemory;
+}
+
+fn parseAlerts(alloc: std.mem.Allocator, name: []const u8, table: ?*const toml.Table) common.LoadError!?spec.AlertSpec {
+    const alerts = table orelse return null;
+    var result: spec.AlertSpec = .{};
+    inline for (.{ "cpu_percent", "memory_percent", "latency_p99_ms", "error_rate_percent" }) |field| {
+        if (alerts.getFloat(field)) |value| {
+            const maximum: f64 = if (std.mem.eql(u8, field, "latency_p99_ms")) 1e12 else 100;
+            if (!std.math.isFinite(value) or value < 0 or value > maximum) {
+                log.err("manifest: service.{s}.alerts.{s} must be between 0 and {d}", .{ name, field, maximum });
+                return error.InvalidAlertConfig;
+            }
+            @field(result, field) = value;
+        }
+    }
+    if (alerts.getInt("restart_count")) |count| {
+        if (count < 0 or count > std.math.maxInt(u32)) return error.InvalidAlertConfig;
+        result.restart_count = @intCast(count);
+    }
+    if (alerts.getString("webhook")) |url| {
+        const uri = std.Uri.parse(url) catch return error.InvalidAlertConfig;
+        if ((!std.mem.eql(u8, uri.scheme, "http") and !std.mem.eql(u8, uri.scheme, "https")) or uri.host == null) {
+            log.err("manifest: service.{s}.alerts.webhook must be an absolute http or https url", .{name});
+            return error.InvalidAlertConfig;
+        }
+        result.webhook = alloc.dupe(u8, url) catch return error.OutOfMemory;
+    }
+    return result;
 }

@@ -107,6 +107,9 @@ const JsonGpuMesh = struct {
 
 const JsonService = struct {
     name: []const u8,
+    replicas: u32 = 1,
+    required_labels: []const u8 = "",
+    alerts: ?spec.AlertSpec = null,
     image: []const u8,
     command: []const []const u8 = &.{},
     ports: []const JsonPort = &.{},
@@ -125,6 +128,7 @@ const JsonService = struct {
 
 const JsonWorker = struct {
     name: []const u8,
+    required_labels: []const u8 = "",
     image: []const u8,
     command: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
@@ -218,25 +222,45 @@ pub fn loadLocalRollbackSnapshot(alloc: std.mem.Allocator, snapshot_json: []cons
 
 fn manifestFromSnapshot(alloc: std.mem.Allocator, parsed: JsonApp) !spec.Manifest {
     const services = try alloc.alloc(spec.Service, parsed.services.len);
-    errdefer alloc.free(services);
+    var services_initialized: usize = 0;
+    errdefer {
+        for (services[0..services_initialized]) |item| item.deinit(alloc);
+        alloc.free(services);
+    }
     const workers = try alloc.alloc(spec.Worker, parsed.workers.len);
-    errdefer alloc.free(workers);
+    var workers_initialized: usize = 0;
+    errdefer {
+        for (workers[0..workers_initialized]) |item| item.deinit(alloc);
+        alloc.free(workers);
+    }
     const crons = try alloc.alloc(spec.Cron, parsed.crons.len);
-    errdefer alloc.free(crons);
+    var crons_initialized: usize = 0;
+    errdefer {
+        for (crons[0..crons_initialized]) |item| item.deinit(alloc);
+        alloc.free(crons);
+    }
     const training_jobs = try alloc.alloc(spec.TrainingJob, parsed.training_jobs.len);
-    errdefer alloc.free(training_jobs);
+    var training_jobs_initialized: usize = 0;
+    errdefer {
+        for (training_jobs[0..training_jobs_initialized]) |item| item.deinit(alloc);
+        alloc.free(training_jobs);
+    }
 
     for (parsed.services, 0..) |svc, i| {
         services[i] = try serviceFromSnapshot(alloc, svc);
+        services_initialized += 1;
     }
     for (parsed.workers, 0..) |worker, i| {
         workers[i] = try workerFromSnapshot(alloc, worker);
+        workers_initialized += 1;
     }
     for (parsed.crons, 0..) |cron, i| {
         crons[i] = try cronFromSnapshot(alloc, cron);
+        crons_initialized += 1;
     }
     for (parsed.training_jobs, 0..) |job, i| {
         training_jobs[i] = try trainingJobFromSnapshot(alloc, job);
+        training_jobs_initialized += 1;
     }
 
     return .{
@@ -250,45 +274,51 @@ fn manifestFromSnapshot(alloc: std.mem.Allocator, parsed: JsonApp) !spec.Manifes
 }
 
 fn serviceFromSnapshot(alloc: std.mem.Allocator, svc: JsonService) !spec.Service {
-    return .{
-        .name = try alloc.dupe(u8, svc.name),
-        .image = try alloc.dupe(u8, svc.image),
-        .command = try dupeStringArray(alloc, svc.command),
-        .ports = try dupPorts(alloc, svc.ports),
-        .env = try dupeStringArray(alloc, svc.env),
-        .depends_on = try dupeStringArray(alloc, svc.depends_on),
-        .working_dir = if (svc.working_dir) |working_dir| try alloc.dupe(u8, working_dir) else null,
-        .volumes = try dupVolumes(alloc, svc.volumes),
-        .health_check = if (svc.health_check) |health_check| try dupHealthCheck(alloc, health_check) else null,
-        .restart = parseRestartPolicy(svc.restart),
-        .rollout = parseRolloutPolicy(svc.rollout),
-        .tls = if (svc.tls) |tls| try dupTls(alloc, tls) else null,
-        .http_routes = try dupHttpRoutes(alloc, svc.http_routes),
-        .gpu = if (svc.gpu) |gpu| try dupGpu(alloc, gpu) else null,
-        .gpu_mesh = if (svc.gpu_mesh) |mesh| .{
-            .world_size = mesh.world_size,
-            .gpus_per_rank = mesh.gpus_per_rank,
-            .master_port = mesh.master_port,
-        } else null,
-    };
+    var result: spec.Service = .{ .name = "", .image = "", .command = &.{}, .env = &.{}, .depends_on = &.{}, .volumes = &.{}, .ports = &.{}, .working_dir = null };
+    errdefer result.deinit(alloc);
+    result.name = try alloc.dupe(u8, svc.name);
+    result.replicas = svc.replicas;
+    result.required_labels = try alloc.dupe(u8, svc.required_labels);
+    result.alerts = if (svc.alerts) |alerts| try alerts.clone(alloc) else null;
+    result.image = try alloc.dupe(u8, svc.image);
+    result.command = try dupeStringArray(alloc, svc.command);
+    result.ports = try dupPorts(alloc, svc.ports);
+    result.env = try dupeStringArray(alloc, svc.env);
+    result.depends_on = try dupeStringArray(alloc, svc.depends_on);
+    result.working_dir = if (svc.working_dir) |working_dir| try alloc.dupe(u8, working_dir) else null;
+    result.volumes = try dupVolumes(alloc, svc.volumes);
+    result.health_check = if (svc.health_check) |health_check| try dupHealthCheck(alloc, health_check) else null;
+    result.restart = parseRestartPolicy(svc.restart);
+    result.rollout = parseRolloutPolicy(svc.rollout);
+    result.tls = if (svc.tls) |tls| try dupTls(alloc, tls) else null;
+    result.http_routes = try dupHttpRoutes(alloc, svc.http_routes);
+    result.gpu = if (svc.gpu) |gpu| try dupGpu(alloc, gpu) else null;
+    result.gpu_mesh = if (svc.gpu_mesh) |mesh| .{
+        .world_size = mesh.world_size,
+        .gpus_per_rank = mesh.gpus_per_rank,
+        .master_port = mesh.master_port,
+    } else null;
+    return result;
 }
 
 fn workerFromSnapshot(alloc: std.mem.Allocator, worker: JsonWorker) !spec.Worker {
-    return .{
-        .name = try alloc.dupe(u8, worker.name),
-        .image = try alloc.dupe(u8, worker.image),
-        .command = try dupeStringArray(alloc, worker.command),
-        .env = try dupeStringArray(alloc, worker.env),
-        .depends_on = try dupeStringArray(alloc, worker.depends_on),
-        .working_dir = if (worker.working_dir) |working_dir| try alloc.dupe(u8, working_dir) else null,
-        .volumes = try dupVolumes(alloc, worker.volumes),
-        .gpu = if (worker.gpu) |gpu| try dupGpu(alloc, gpu) else null,
-        .gpu_mesh = if (worker.gpu_mesh) |mesh| .{
-            .world_size = mesh.world_size,
-            .gpus_per_rank = mesh.gpus_per_rank,
-            .master_port = mesh.master_port,
-        } else null,
-    };
+    var result: spec.Worker = .{ .name = "", .image = "", .command = &.{}, .env = &.{}, .depends_on = &.{}, .volumes = &.{}, .working_dir = null };
+    errdefer result.deinit(alloc);
+    result.name = try alloc.dupe(u8, worker.name);
+    result.required_labels = try alloc.dupe(u8, worker.required_labels);
+    result.image = try alloc.dupe(u8, worker.image);
+    result.command = try dupeStringArray(alloc, worker.command);
+    result.env = try dupeStringArray(alloc, worker.env);
+    result.depends_on = try dupeStringArray(alloc, worker.depends_on);
+    result.working_dir = if (worker.working_dir) |working_dir| try alloc.dupe(u8, working_dir) else null;
+    result.volumes = try dupVolumes(alloc, worker.volumes);
+    result.gpu = if (worker.gpu) |gpu| try dupGpu(alloc, gpu) else null;
+    result.gpu_mesh = if (worker.gpu_mesh) |mesh| .{
+        .world_size = mesh.world_size,
+        .gpus_per_rank = mesh.gpus_per_rank,
+        .master_port = mesh.master_port,
+    } else null;
+    return result;
 }
 
 fn cronFromSnapshot(alloc: std.mem.Allocator, cron: JsonCron) !spec.Cron {
@@ -330,9 +360,14 @@ fn trainingJobFromSnapshot(alloc: std.mem.Allocator, job: JsonTrainingJob) !spec
 
 fn dupeStringArray(alloc: std.mem.Allocator, items: []const []const u8) ![]const []const u8 {
     const out = try alloc.alloc([]const u8, items.len);
-    errdefer alloc.free(out);
+    var initialized: usize = 0;
+    errdefer {
+        for (out[0..initialized]) |item| alloc.free(item);
+        alloc.free(out);
+    }
     for (items, 0..) |item, i| {
         out[i] = try alloc.dupe(u8, item);
+        initialized += 1;
     }
     return out;
 }
@@ -350,13 +385,20 @@ fn dupPorts(alloc: std.mem.Allocator, ports: []const JsonPort) ![]const spec.Por
 
 fn dupVolumes(alloc: std.mem.Allocator, volumes: []const JsonVolume) ![]const spec.VolumeMount {
     const out = try alloc.alloc(spec.VolumeMount, volumes.len);
-    errdefer alloc.free(out);
+    var initialized: usize = 0;
+    errdefer {
+        for (out[0..initialized]) |vol| vol.deinit(alloc);
+        alloc.free(out);
+    }
     for (volumes, 0..) |vol, i| {
+        const source = try alloc.dupe(u8, vol.source);
+        errdefer alloc.free(source);
         out[i] = .{
-            .source = try alloc.dupe(u8, vol.source),
+            .source = source,
             .target = try alloc.dupe(u8, vol.target),
             .kind = if (std.mem.eql(u8, vol.kind, "named")) .named else .bind,
         };
+        initialized += 1;
     }
     return out;
 }
@@ -619,4 +661,37 @@ test "loadLocalRollbackSnapshot preserves mixed workload snapshot and rollout st
     try std.testing.expectEqual(@as(u32, 1), loaded.manifest.training_jobs[0].fault_tolerance.spare_ranks);
     try std.testing.expectEqual(false, loaded.manifest.training_jobs[0].fault_tolerance.auto_restart);
     try std.testing.expectEqual(@as(u32, 3), loaded.manifest.training_jobs[0].fault_tolerance.max_restarts);
+}
+
+test "rollback preserves logical replicas placement and alert configuration" {
+    const alloc = std.testing.allocator;
+    var manifest = try @import("loader.zig").loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx"
+        \\replicas = 3
+        \\required_labels = "region=eu"
+        \\[service.web.alerts]
+        \\cpu_percent = 91.5
+        \\webhook = "https://alerts.example.test/events"
+        \\[worker.migrate]
+        \\image = "postgres"
+        \\required_labels = "region=eu"
+    );
+    defer manifest.deinit();
+    var app = try app_spec.fromManifest(alloc, "test-app", &manifest);
+    defer app.deinit();
+    const json = try app.toApplyJson(alloc);
+    defer alloc.free(json);
+    var restored = try loadLocalRollbackSnapshot(alloc, json);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 1), restored.manifest.services.len);
+    try std.testing.expectEqualStrings("web", restored.manifest.services[0].name);
+    try std.testing.expectEqual(@as(u32, 3), restored.manifest.services[0].replicas);
+    try std.testing.expectEqualStrings("region=eu", restored.manifest.services[0].required_labels);
+    try std.testing.expectEqual(@as(f64, 91.5), restored.manifest.services[0].alerts.?.cpu_percent.?);
+    try std.testing.expectEqualStrings("https://alerts.example.test/events", restored.manifest.services[0].alerts.?.webhook.?);
+    try std.testing.expectEqualStrings("region=eu", restored.manifest.workers[0].required_labels);
+    const serialized_again = try restored.release.app.toApplyJson(alloc);
+    defer alloc.free(serialized_again);
+    try std.testing.expectEqualStrings(json, serialized_again);
 }

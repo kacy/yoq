@@ -2199,3 +2199,43 @@ test "backup retention configuration parses count age and bytes" {
     try std.testing.expectEqual(@as(u64, 7 * 24 * 3600), manifest.backup.?.retention.max_age);
     try std.testing.expectEqual(@as(u64, 1048576), manifest.backup.?.retention.max_bytes);
 }
+
+test "manifest service controls retain placement and alert thresholds" {
+    const alloc = std.testing.allocator;
+    var manifest = try loadFromString(alloc,
+        \\[service.web]
+        \\image = "nginx"
+        \\replicas = 3
+        \\required_labels = "region=eu,zone=a"
+        \\[service.web.alerts]
+        \\cpu_percent = 92.5
+        \\memory_percent = 85
+        \\restart_count = 2
+        \\webhook = "https://alerts.example.test/events"
+        \\[worker.migrate]
+        \\image = "postgres"
+        \\required_labels = "region=eu"
+    );
+    defer manifest.deinit();
+    const service = manifest.services[0];
+    try std.testing.expectEqual(@as(u32, 3), service.replicas);
+    try std.testing.expectEqualStrings("region=eu,zone=a", service.required_labels);
+    try std.testing.expectEqual(@as(f64, 92.5), service.alerts.?.cpu_percent.?);
+    try std.testing.expectEqual(@as(f64, 85), service.alerts.?.memory_percent.?);
+    try std.testing.expectEqual(@as(u32, 2), service.alerts.?.restart_count.?);
+    try std.testing.expectEqualStrings("https://alerts.example.test/events", service.alerts.?.webhook.?);
+    try std.testing.expectEqualStrings("region=eu", manifest.workers[0].required_labels);
+}
+
+test "manifest rejects ignored controls and invalid replica or alert values" {
+    const alloc = std.testing.allocator;
+    const prefix = "[service.web]\nimage = \"nginx\"\n";
+    try std.testing.expectError(error.UnknownField, loadFromString(alloc, prefix ++ "repilcas = 3"));
+    try std.testing.expectError(error.InvalidFieldType, loadFromString(alloc, prefix ++ "replicas = \"3\""));
+    try std.testing.expectError(error.InvalidServiceConfig, loadFromString(alloc, prefix ++ "replicas = 0"));
+    try std.testing.expectError(error.InvalidServiceConfig, loadFromString(alloc, prefix ++ "replicas = 4097"));
+    try std.testing.expectError(error.InvalidServiceConfig, loadFromString(alloc, prefix ++ "required_labels = \"eu\""));
+    try std.testing.expectError(error.InvalidAlertConfig, loadFromString(alloc, prefix ++ "[service.web.alerts]\ncpu_percent = 101"));
+    try std.testing.expectError(error.InvalidAlertConfig, loadFromString(alloc, prefix ++ "[service.web.alerts]\nwebhook = \"file:///tmp/alert\""));
+    try std.testing.expectError(error.InvalidFieldType, loadFromString(alloc, prefix ++ "[service.web.alerts]\nrestart_count = 1.5"));
+}

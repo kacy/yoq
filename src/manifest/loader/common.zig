@@ -7,6 +7,8 @@ pub const LoadError = error{
     ParseFailed,
     UnknownField,
     InvalidFieldType,
+    InvalidServiceConfig,
+    InvalidAlertConfig,
     MissingImage,
     InvalidPortMapping,
     InvalidEnvVar,

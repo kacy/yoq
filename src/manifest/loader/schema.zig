@@ -124,7 +124,7 @@ fn fieldRule(kind: Kind, key: []const u8) ?Rule {
         .service => {
             if (std.mem.eql(u8, key, "ports")) return .{ .value_type = .array };
             if (std.mem.eql(u8, key, "restart")) return .{ .value_type = .string };
-            if (oneOf(key, &.{ "replicas", "cpu_limit", "memory_limit_mb" })) return .{ .value_type = .integer };
+            if (std.mem.eql(u8, key, "replicas")) return .{ .value_type = .integer };
             const sections = .{ .{ "health_check", Kind.health }, .{ "rollout", Kind.rollout }, .{ "tls", Kind.tls }, .{ "http_proxy", Kind.route }, .{ "http_routes", Kind.routes }, .{ "alerts", Kind.alerts } };
             inline for (sections) |section| if (std.mem.eql(u8, key, section[0])) return namedTable(section[1]);
         },

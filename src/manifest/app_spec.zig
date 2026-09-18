@@ -23,6 +23,8 @@ pub const ApplicationServiceSpec = struct {
     cpu_limit: i64 = 1000,
     memory_limit_mb: i64 = 256,
     required_labels: []const u8 = "",
+    replicas: u32 = 1,
+    alerts: ?spec.AlertSpec = null,
 };
 
 pub const ApplicationWorkerSpec = struct {
@@ -245,6 +247,11 @@ pub const ApplicationSpec = struct {
                 });
             }
 
+            try writer.print(",\"replicas\":{d}", .{svc.replicas});
+            if (svc.alerts) |alerts| {
+                try writer.writeAll(",\"alerts\":");
+                try std.json.Stringify.value(alerts, .{ .emit_null_optional_fields = false }, writer);
+            }
             if (svc.required_labels.len > 0) {
                 try writer.writeAll(",\"required_labels\":\"");
                 try json_helpers.writeJsonEscaped(writer, svc.required_labels);
@@ -323,6 +330,9 @@ pub fn fromManifest(alloc: std.mem.Allocator, app_name: []const u8, manifest: *c
             .http_routes = svc.http_routes,
             .gpu = svc.gpu,
             .gpu_mesh = svc.gpu_mesh,
+            .required_labels = svc.required_labels,
+            .replicas = svc.replicas,
+            .alerts = svc.alerts,
         };
     }
 
@@ -337,6 +347,7 @@ pub fn fromManifest(alloc: std.mem.Allocator, app_name: []const u8, manifest: *c
             .volumes = worker.volumes,
             .gpu = worker.gpu,
             .gpu_mesh = worker.gpu_mesh,
+            .required_labels = worker.required_labels,
         };
     }
 
@@ -472,6 +483,11 @@ fn writeJsonService(writer: anytype, svc: ApplicationServiceSpec) !void {
         try writeJsonGpuMesh(writer, mesh);
     }
 
+    try writer.print(",\"replicas\":{d}", .{svc.replicas});
+    if (svc.alerts) |alerts| {
+        try writer.writeAll(",\"alerts\":");
+        try std.json.Stringify.value(alerts, .{ .emit_null_optional_fields = false }, writer);
+    }
     if (svc.required_labels.len > 0) {
         try writer.writeAll(",\"required_labels\":\"");
         try json_helpers.writeJsonEscaped(writer, svc.required_labels);
