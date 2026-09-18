@@ -92,7 +92,12 @@ pub fn readSmall(alloc: std.mem.Allocator, dir: std.Io.Dir, name: []const u8, li
     const input = try openRegular(dir, name, true);
     defer input.close(io);
     var reader = input.reader(io, &.{});
-    return reader.interface.allocRemaining(alloc, .limited(limit));
+    // allocRemaining stops before checking eof when it reaches its limit.
+    // reserve one extra byte so a file of exactly the allowed size succeeds.
+    const contents = try reader.interface.allocRemaining(alloc, .limited(try std.math.add(usize, limit, 1)));
+    errdefer alloc.free(contents);
+    if (contents.len > limit) return error.FileTooLarge;
+    return contents;
 }
 
 pub fn write(dir: std.Io.Dir, name: []const u8, data: []const u8) !void {
@@ -136,7 +141,7 @@ pub const Stage = struct {
         return std.mem.sliceTo(&self.temporary, 0);
     }
 
-    pub fn path(self: *const Stage, alloc: std.mem.Allocator) ![]u8 {
+    pub fn path(self: *const Stage, alloc: std.mem.Allocator) ![:0]u8 {
         return self.dir.realPathFileAlloc(io, ".", alloc);
     }
 

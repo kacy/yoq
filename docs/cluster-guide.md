@@ -505,7 +505,7 @@ sudo -H "$(command -v yoq)" cluster restore /srv/backups/maintenance-2026-voter-
 
 create the destination's parent directory first. restore refuses an existing destination, including a symlink. it keeps the original term, vote, log, and snapshot. if a crash selected a snapshot before restoring state, verification completes that restore only in a private copy; it never resets a voter to force an election. do not mix restored voters with live voters or reuse an old set ID for a later capture.
 
-start every restored voter with the original IDs and membership. the server uses `$HOME/.local/share/yoq`; set `HOME` if the restored root is elsewhere. peer addresses may change, but the voter IDs must stay fixed. `--token-file` reads the recovered private token without putting its contents in the command line:
+start every restored voter with the original IDs and membership. the server uses `$HOME/.local/share/yoq`; set `HOME` if the restored root is elsewhere. raft peer addresses may change, but the voter IDs must stay fixed. keep at least one API address and port already trusted by the agents reachable so they can learn the new server list. `--token-file` reads the recovered private token without putting its contents in the command line:
 
 ```sh
 sudo -H env HOME=/srv/recovered/voter-1 "$(command -v yoq)" init-server \
