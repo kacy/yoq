@@ -113,6 +113,7 @@ comptime {
     _ = @import("network/proxy/router.zig");
     _ = @import("network/proxy/policy.zig");
     _ = @import("network/proxy/http2.zig");
+    _ = @import("network/proxy/http2_connection_router.zig");
     _ = @import("network/proxy/http2_response.zig");
     _ = @import("network/proxy/request_plan.zig");
     _ = @import("network/proxy/http2_request.zig");
