@@ -1315,7 +1315,7 @@ test "agent recovery waits for owned container cleanup before reporting interrup
     const alloc = std.testing.allocator;
     try agent_store.initTestDb();
     defer agent_store.closeDb();
-    const fixture = .{ .alloc = alloc, .id = "worker000001".* };
+    const fixture: struct { alloc: std.mem.Allocator, id: [12]u8 } = .{ .alloc = alloc, .id = "worker000001".* };
     try std.testing.expect(try result_store.claim(&fixture.id, "assignment", 3));
     try result_store.attachContainer(&fixture.id, "assignment", 3, "abcdef012345");
     try result_store.record(&fixture.id, "assignment", 3, "running", null);
