@@ -77,6 +77,11 @@ pub fn appendClaim(writer: *std.Io.Writer, assignment_id: []const u8, claim: Cla
 /// reject stale capacity decisions through the agent_id not-null constraint.
 /// the state index is checked when the assignment batch is applied.
 pub fn appendAssignment(writer: *std.Io.Writer, id: []const u8, agent_id: []const u8, request: scheduler.PlacementRequest, gang: ?@import("../gpu/scheduler.zig").GangPlacement, index: u64, now: i64) !void {
+    const command = if (std.mem.eql(u8, request.workload_kind orelse "", "service"))
+        try @import("assignment_spec.zig").withAlertGeneration(std.heap.page_allocator, request.command, std.math.add(u64, index, 1) catch return error.InvalidRequest)
+    else
+        null;
+    defer if (command) |owned| std.heap.page_allocator.free(owned);
     try sql.write(writer, "INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, " ++
         "app_name, workload_kind, workload_name, health_check_json, " ++
         "gang_rank, gang_world_size, gang_master_addr, gang_master_port, created_at) " ++
@@ -86,7 +91,7 @@ pub fn appendAssignment(writer: *std.Io.Writer, id: []const u8, agent_id: []cons
         index,
         agent_id,
         request.image,
-        request.command,
+        command orelse request.command,
         request.cpu_limit,
         request.memory_limit_mb,
         request.app_name,
@@ -752,4 +757,22 @@ test "training and service gangs reserve distinct rendezvous ports" {
     const counts = (try node.stateMachineDb().one(struct { ports: i64, ranks: i64 }, "SELECT COUNT(DISTINCT gang_master_port) AS ports, COUNT(*) AS ranks FROM assignments;", .{}, .{})).?;
     try std.testing.expectEqual(@as(i64, 2), counts.ports);
     try std.testing.expectEqual(@as(i64, 4), counts.ranks);
+}
+
+test "service alert generations follow guarded placement order within one timestamp" {
+    const alloc = std.testing.allocator;
+    var node = try testNode();
+    defer node.deinit();
+    const session = try mutation.Session.begin(&node);
+    var request = test_request;
+    request.cpu_limit = 100;
+    const first = (try place(alloc, session, request, "first-alert-release")).?;
+    defer first.deinit(alloc);
+    const second = (try place(alloc, session, request, "second-alert-release")).?;
+    defer second.deinit(alloc);
+    const Generation = struct { generation: i64 };
+    const older = (try node.stateMachineDb().one(Generation, "SELECT json_extract(command, '$.alert_generation') AS generation FROM assignments WHERE id = ?;", .{}, .{first.assignment_ids[0]})).?.generation;
+    const newer = (try node.stateMachineDb().one(Generation, "SELECT json_extract(command, '$.alert_generation') AS generation FROM assignments WHERE id = ?;", .{}, .{second.assignment_ids[0]})).?.generation;
+    try std.testing.expect(older > 0);
+    try std.testing.expect(newer > older);
 }

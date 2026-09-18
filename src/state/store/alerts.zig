@@ -19,14 +19,24 @@ pub const Status = struct {
 };
 
 pub fn save(alloc: std.mem.Allocator, status: Status) !void {
-    return saveForOwner(alloc, status, null);
+    return saveForOwner(alloc, status, null, null);
 }
 
-pub fn saveForOwner(alloc: std.mem.Allocator, status: Status, token: ?[]const u8) !void {
+pub fn saveForOwner(alloc: std.mem.Allocator, status: Status, token: ?[]const u8, generation: ?u64) !void {
     const json = try std.json.Stringify.valueAlloc(alloc, status, .{});
     defer alloc.free(json);
     var lease = try common.leaseDb();
     defer lease.deinit();
+    if (generation) |current| {
+        try lease.db.exec(
+            "INSERT INTO alert_status (app, service, metric, status_json) SELECT ?, ?, ?, ? " ++
+                "WHERE EXISTS (SELECT 1 FROM cluster_alert_owners WHERE app = ? AND service = ? AND generation = ?) " ++
+                "ON CONFLICT(app, service, metric) DO UPDATE SET status_json = excluded.status_json;",
+            .{},
+            .{ status.app, status.service, status.metric, json, status.app, status.service, @as(i64, @intCast(current)) },
+        );
+        return;
+    }
     if (token) |owner| {
         // the ownership test and update share one statement. a late result from
         // an old supervisor cannot overwrite the replacement's status.
@@ -57,6 +67,31 @@ pub fn clearForOwner(app: []const u8, service: []const u8, token: ?[]const u8) !
     if (token) |owner| {
         try lease.db.exec("DELETE FROM alert_status WHERE app = ? AND service = ? AND EXISTS (SELECT 1 FROM local_service_owners WHERE app = ? AND service = ? AND token = ?);", .{}, .{ app, service, app, service, owner });
     } else try lease.db.exec("DELETE FROM alert_status WHERE app = ? AND service = ?;", .{}, .{ app, service });
+}
+
+pub fn isClusterGeneration(app: []const u8, service: []const u8, generation: u64) !bool {
+    var lease = try common.leaseDb();
+    defer lease.deinit();
+    return (try lease.db.one(struct { generation: i64 }, "SELECT generation FROM cluster_alert_owners WHERE app = ? AND service = ? AND generation = ?;", .{}, .{ app, service, @as(i64, @intCast(generation)) })) != null;
+}
+
+pub fn setClusterGeneration(app: []const u8, service: []const u8, generation: ?u64) !bool {
+    var lease = try common.leaseDb();
+    defer lease.deinit();
+    try lease.db.exec("BEGIN IMMEDIATE;", .{}, .{});
+    errdefer lease.db.exec("ROLLBACK;", .{}, .{}) catch {};
+    const previous = try lease.db.one(struct { generation: i64 }, "SELECT generation FROM cluster_alert_owners WHERE app = ? AND service = ?;", .{}, .{ app, service });
+    const next: ?i64 = if (generation) |value| @intCast(value) else null;
+    const before: ?i64 = if (previous) |row| row.generation else null;
+    const changed = next != before;
+    if (changed) {
+        if (next) |value| {
+            try lease.db.exec("INSERT INTO cluster_alert_owners (app, service, generation) VALUES (?, ?, ?) ON CONFLICT(app, service) DO UPDATE SET generation = excluded.generation;", .{}, .{ app, service, value });
+            try lease.db.exec("DELETE FROM alert_status WHERE app = ? AND service = ?;", .{}, .{ app, service });
+        } else try lease.db.exec("DELETE FROM cluster_alert_owners WHERE app = ? AND service = ?;", .{}, .{ app, service });
+    }
+    try lease.db.exec("COMMIT;", .{}, .{});
+    return changed;
 }
 
 // rows remain after a supervisor exits. sampled_at lets callers identify stale

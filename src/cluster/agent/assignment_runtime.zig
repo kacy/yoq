@@ -576,8 +576,12 @@ fn runAssignment(
             return;
         };
     }
-    const alert_registration = if (execution.value.alerts) |config|
-        @import("../../manifest/alerts/runtime.zig").registerCluster(meta.app_name orelse "", meta.workload_name orelse container_id, config) catch {
+    const alert_registration = if (std.mem.eql(u8, meta.workload_kind orelse "", "service") and
+        (execution.value.alerts != null or execution.value.alert_generation != 0))
+        @import("../../manifest/alerts/runtime.zig").registerCluster(meta.app_name orelse "", meta.workload_name orelse container_id, execution.value.alerts orelse .{}, execution.value.alert_generation) catch |err| blk: {
+            // an empty generation only suppresses thresholds from an older group.
+            // it must not impose the alert limit on services without alerts.
+            if (execution.value.alerts == null and err == error.TooManyAlertServices) break :blk null;
             c.forceStop() catch {};
             _ = c.wait() catch 255;
             cleanup(container_id);

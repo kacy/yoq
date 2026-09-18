@@ -13,6 +13,7 @@ pub const Execution = struct {
     env: []const []const u8 = &.{},
     working_dir: ?[]const u8 = null,
     alerts: ?manifest.AlertSpec = null,
+    alert_generation: u64 = 0,
     volumes: []const manifest.VolumeMount = &.{},
     volume_definitions: []const manifest.Volume = &.{},
     ports: []const manifest.PortMapping = &.{},
@@ -93,6 +94,19 @@ pub fn withVolumeDefinitions(alloc: std.mem.Allocator, encoded: []const u8, snap
     return result;
 }
 
+// placement stamps the guarded state index into the existing command payload.
+// it remains unchanged when the same assignment is rescheduled.
+pub fn withAlertGeneration(alloc: std.mem.Allocator, encoded: []const u8, generation: u64) ![]u8 {
+    var execution = try decode(alloc, encoded);
+    defer execution.deinit();
+    if (generation > std.math.maxInt(i64)) return error.InvalidRequest;
+    execution.value.alert_generation = generation;
+    const result = try std.json.Stringify.valueAlloc(alloc, execution.value, .{});
+    errdefer alloc.free(result);
+    if (result.len > max_encoded_bytes) return error.InvalidRequest;
+    return result;
+}
+
 pub fn decode(alloc: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(Execution) {
     if (encoded.len > max_encoded_bytes) return error.InvalidRequest;
     if (std.mem.startsWith(u8, encoded, "{")) {
@@ -109,6 +123,7 @@ pub fn decode(alloc: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(Ex
 }
 
 fn validate(execution: Execution) !void {
+    if (execution.alert_generation > std.math.maxInt(i64)) return error.InvalidRequest;
     if (execution.version != 1 or execution.argv.len > 256 or execution.env.len > 256) return error.InvalidRequest;
     for (execution.argv, 0..) |arg, index| {
         if ((index == 0 and arg.len == 0) or std.mem.indexOfScalar(u8, arg, 0) != null) return error.InvalidRequest;
@@ -296,4 +311,22 @@ test "assignment preserves service alert configuration" {
     defer execution.deinit();
     try std.testing.expectEqual(@as(f64, 90), execution.value.alerts.?.cpu_percent.?);
     try std.testing.expectEqualStrings("https://example.com/hook", execution.value.alerts.?.webhook.?);
+}
+
+test "service alert generation preserves execution metadata and defaults legacy assignments to zero" {
+    const alloc = std.testing.allocator;
+    const initial = try fromWorkload(alloc,
+        \\{"command":["worker","argument with spaces"],"alerts":{"cpu_percent":80}}
+    );
+    defer alloc.free(initial);
+    var legacy = try decode(alloc, initial);
+    defer legacy.deinit();
+    try std.testing.expectEqual(@as(u64, 0), legacy.value.alert_generation);
+    const encoded = try withAlertGeneration(alloc, initial, 42);
+    defer alloc.free(encoded);
+    var execution = try decode(alloc, encoded);
+    defer execution.deinit();
+    try std.testing.expectEqual(@as(u64, 42), execution.value.alert_generation);
+    try std.testing.expectEqualStrings("argument with spaces", execution.value.argv[1]);
+    try std.testing.expectEqual(@as(f64, 80), execution.value.alerts.?.cpu_percent.?);
 }

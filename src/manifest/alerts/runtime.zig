@@ -35,6 +35,7 @@ const Service = struct {
     references: usize = 1,
     local_restarts: bool,
     owner_token: ?[]const u8 = null,
+    cluster_generation: ?u64 = null,
     restart_total: u64 = 0,
     sampler: sampling.Sampler = .{},
     rules: [metrics.len]?RuleState = @splat(null),
@@ -49,6 +50,7 @@ const Service = struct {
     }
 
     fn isCurrent(self: *const Service) bool {
+        if (self.cluster_generation) |generation| return status_store.isClusterGeneration(self.app, self.name, generation) catch false;
         const token = self.owner_token orelse return true;
         return local_ownership.isOwner(self.app, self.name, token) catch false;
     }
@@ -69,7 +71,7 @@ const Service = struct {
             .delivery_error = state.delivery_error,
             .delivered_at = state.delivered_at,
             .http_status = state.http_status,
-        }, self.owner_token) catch |err| log.warn("alerts: cannot persist {s}/{s}/{s}: {s}", .{ self.app, self.name, @tagName(metrics[index]), @errorName(err) });
+        }, self.owner_token, self.cluster_generation) catch |err| log.warn("alerts: cannot persist {s}/{s}/{s}: {s}", .{ self.app, self.name, @tagName(metrics[index]), @errorName(err) });
     }
 };
 
@@ -87,21 +89,25 @@ pub const Registration = struct {
                 self.service.persist(index);
             }
         };
+        if (self.service.cluster_generation != null) updateClusterOwner(self.service.app, self.service.name) catch |err| {
+            log.warn("alerts: cannot update active assignment generation: {s}", .{@errorName(err)});
+        };
     }
 };
 
 // registrations borrow no manifest memory. entries stay stable until shutdown,
 // so a delivery can finish while its service is being stopped or replaced.
-pub fn registerCluster(app: []const u8, name: []const u8, config: spec.AlertSpec) !Registration {
-    return registerWithOwner(app, name, config, false, null);
+pub fn registerCluster(app: []const u8, name: []const u8, config: spec.AlertSpec, generation: u64) !Registration {
+    return registerWithOwner(app, name, config, false, null, generation);
 }
 
 pub fn registerOwned(app: []const u8, name: []const u8, config: spec.AlertSpec, token: []const u8) !Registration {
     if (!try local_ownership.isOwner(app, name, token)) return error.SupervisorSuperseded;
-    return registerWithOwner(app, name, config, true, token);
+    return registerWithOwner(app, name, config, true, token, null);
 }
 
-fn registerWithOwner(app: []const u8, name: []const u8, config: spec.AlertSpec, local_restarts: bool, token: ?[]const u8) !Registration {
+fn registerWithOwner(app: []const u8, name: []const u8, config: spec.AlertSpec, local_restarts: bool, token: ?[]const u8, generation: ?u64) !Registration {
+    if (generation) |value| if (value > std.math.maxInt(i64)) return error.InvalidAlertConfig;
     for (metrics) |metric| if (metric.threshold(config)) |threshold| {
         const maximum: f64 = switch (metric) {
             .latency_p99_ms => 1e12,
@@ -113,11 +119,17 @@ fn registerWithOwner(app: []const u8, name: []const u8, config: spec.AlertSpec, 
     ownership.lockUncancelable(debug_io);
     defer ownership.unlock(debug_io);
     mutex.lockUncancelable(debug_io);
-    const service = registerLocked(app, name, config, local_restarts, token) catch |err| {
+    const service = registerLocked(app, name, config, local_restarts, token, generation) catch |err| {
         mutex.unlock(debug_io);
         return err;
     };
-    if (service.references == 1) {
+    if (generation != null) {
+        updateClusterOwner(app, name) catch |err| {
+            service.references -= 1;
+            mutex.unlock(debug_io);
+            return err;
+        };
+    } else if (service.references == 1) {
         status_store.clearForOwner(app, name, token) catch |err| {
             service.references -= 1;
             mutex.unlock(debug_io);
@@ -127,7 +139,7 @@ fn registerWithOwner(app: []const u8, name: []const u8, config: spec.AlertSpec, 
     }
     mutex.unlock(debug_io);
     errdefer (Registration{ .service = service }).release();
-    if (sampler_thread == null) {
+    if (sampler_thread == null and hasRules(service)) {
         stopping.store(false, .release);
         sampler_thread = try std.Thread.spawn(.{}, sampleLoop, .{});
         delivery_thread = std.Thread.spawn(.{}, deliveryLoop, .{}) catch |err| {
@@ -140,9 +152,9 @@ fn registerWithOwner(app: []const u8, name: []const u8, config: spec.AlertSpec, 
     return .{ .service = service };
 }
 
-fn registerLocked(app: []const u8, name: []const u8, config: spec.AlertSpec, local_restarts: bool, token: ?[]const u8) !*Service {
+fn registerLocked(app: []const u8, name: []const u8, config: spec.AlertSpec, local_restarts: bool, token: ?[]const u8, generation: ?u64) !*Service {
     for (entries.items) |entry| {
-        if (!std.mem.eql(u8, entry.app, app) or !std.mem.eql(u8, entry.name, name) or !sameOwner(entry.owner_token, token)) continue;
+        if (!std.mem.eql(u8, entry.app, app) or !std.mem.eql(u8, entry.name, name) or !sameOwner(entry.owner_token, token) or entry.cluster_generation != generation) continue;
         if (!sameConfig(entry.config, config) or entry.local_restarts != local_restarts) {
             if (entry.references != 0) return error.AlertConfigConflict;
             if (hasDelivery(entry)) return error.AlertDeliveryInProgress;
@@ -182,12 +194,37 @@ fn registerLocked(app: []const u8, name: []const u8, config: spec.AlertSpec, loc
     errdefer owned_config.deinit(alloc);
     const owned_token = if (token) |owner| try alloc.dupe(u8, owner) else null;
     errdefer if (owned_token) |owner| alloc.free(owner);
-    entry.* = .{ .app = owned_app, .name = owned_name, .config = owned_config, .local_restarts = local_restarts, .owner_token = owned_token };
+    entry.* = .{ .app = owned_app, .name = owned_name, .config = owned_config, .local_restarts = local_restarts, .owner_token = owned_token, .cluster_generation = generation };
     for (metrics, 0..) |metric, index| if (metric.threshold(config)) |threshold| {
         entry.rules[index] = .{ .rule = .{ .threshold = threshold } };
     };
     try entries.append(alloc, entry);
     return entry;
+}
+
+// callbacks hold the runtime mutex. a generation switch updates the database
+// guard before any old worker can persist a late delivery or stopped state.
+fn updateClusterOwner(app: []const u8, name: []const u8) !void {
+    var selected: ?u64 = null;
+    for (entries.items) |entry| {
+        if (entry.references == 0 or !std.mem.eql(u8, entry.app, app) or !std.mem.eql(u8, entry.name, name)) continue;
+        if (entry.cluster_generation) |generation| selected = if (selected) |previous| @max(previous, generation) else generation;
+    }
+    if (!try status_store.setClusterGeneration(app, name, selected)) return;
+    for (entries.items) |entry| {
+        if (entry.cluster_generation == null or !std.mem.eql(u8, entry.app, app) or !std.mem.eql(u8, entry.name, name)) continue;
+        for (metrics, 0..) |_, index| {
+            if (entry.rules[index]) |*state| {
+                state.* = .{ .rule = .{ .threshold = state.rule.threshold, .revision = state.rule.revision +| 1, .in_flight = state.rule.in_flight } };
+                if (entry.references > 0 and entry.cluster_generation == selected) entry.persist(index);
+            }
+        }
+    }
+}
+
+fn hasRules(entry: *const Service) bool {
+    for (entry.rules) |rule| if (rule != null) return true;
+    return false;
 }
 
 fn hasDelivery(entry: *const Service) bool {
@@ -272,7 +309,7 @@ fn sampleLoop() void {
         @import("../../network/proxy/observations.zig").flush();
         mutex.lockUncancelable(debug_io);
         for (entries.items) |entry| {
-            if (entry.references == 0 or !entry.isCurrent()) continue;
+            if (entry.references == 0 or !hasRules(entry) or !entry.isCurrent()) continue;
             const values = entry.sampler.collect(entry.app, entry.name, nowMs(), if (entry.local_restarts) entry.restart_total else null);
             inline for (metrics, 0..) |metric, index| {
                 if (entry.rules[index]) |*state| {
@@ -371,11 +408,11 @@ test "alert registrations own configuration and reject conflicting replicas" {
         entries = .empty;
     }
     const config: spec.AlertSpec = .{ .cpu_percent = 90, .webhook = "https://example.com/hook" };
-    const first = try registerLocked("app", "web", config, true, null);
-    const second = try registerLocked("app", "web", config, true, null);
+    const first = try registerLocked("app", "web", config, true, null, null);
+    const second = try registerLocked("app", "web", config, true, null, null);
     try std.testing.expect(first == second);
     try std.testing.expectEqual(@as(usize, 2), first.references);
-    try std.testing.expectError(error.AlertConfigConflict, registerLocked("app", "web", .{ .cpu_percent = 80 }, true, null));
+    try std.testing.expectError(error.AlertConfigConflict, registerLocked("app", "web", .{ .cpu_percent = 80 }, true, null, null));
 }
 
 test "alert runtime joins workers and persists stopped status after last registration" {
@@ -383,7 +420,7 @@ test "alert runtime joins workers and persists stopped status after last registr
     try store.initTestDb();
     defer store.deinitTestDb();
     defer shutdown();
-    const registration = try registerCluster("alerts-runtime", "api", .{ .restart_count = 1 });
+    const registration = try registerCluster("alerts-runtime", "api", .{ .restart_count = 1 }, 0);
     var released = false;
     defer if (!released) registration.release();
     var observed = false;
@@ -418,14 +455,14 @@ test "alert registry reclaims inactive entries but retains active registrations 
     const config: spec.AlertSpec = .{ .cpu_percent = 80 };
     for (0..max_services) |index| {
         var name: [32]u8 = undefined;
-        _ = try registerLocked("app", try std.fmt.bufPrint(&name, "service-{d}", .{index}), config, false, null);
+        _ = try registerLocked("app", try std.fmt.bufPrint(&name, "service-{d}", .{index}), config, false, null, null);
     }
-    try std.testing.expectError(error.TooManyAlertServices, registerLocked("app", "new-service", config, false, null));
+    try std.testing.expectError(error.TooManyAlertServices, registerLocked("app", "new-service", config, false, null, null));
     entries.items[0].references = 0;
     entries.items[0].rules[0].?.rule.in_flight = true;
-    try std.testing.expectError(error.TooManyAlertServices, registerLocked("app", "new-service", config, false, null));
+    try std.testing.expectError(error.TooManyAlertServices, registerLocked("app", "new-service", config, false, null, null));
     entries.items[0].rules[0].?.rule.in_flight = false;
-    const added = try registerLocked("app", "new-service", config, false, null);
+    const added = try registerLocked("app", "new-service", config, false, null, null);
     try std.testing.expectEqualStrings("new-service", added.name);
     try std.testing.expectEqual(@as(usize, max_services), entries.items.len);
 }
@@ -439,7 +476,7 @@ test "superseded local alerts cannot deliver or overwrite replacement status on 
     const old = blk: {
         mutex.lockUncancelable(debug_io);
         defer mutex.unlock(debug_io);
-        const entry = try registerLocked("app", "web", .{ .cpu_percent = 80, .webhook = "https://example.com/old" }, true, "old-owner");
+        const entry = try registerLocked("app", "web", .{ .cpu_percent = 80, .webhook = "https://example.com/old" }, true, "old-owner", null);
         for (0..evaluator.consecutive_samples) |_| entry.rules[0].?.rule.observe(90);
         entry.persist(0);
         break :blk entry;
@@ -448,7 +485,7 @@ test "superseded local alerts cannot deliver or overwrite replacement status on 
     {
         mutex.lockUncancelable(debug_io);
         defer mutex.unlock(debug_io);
-        const replacement = try registerLocked("app", "web", .{ .cpu_percent = 50, .webhook = "https://example.com/new" }, true, "new-owner");
+        const replacement = try registerLocked("app", "web", .{ .cpu_percent = 50, .webhook = "https://example.com/new" }, true, "new-owner", null);
         for (0..evaluator.consecutive_samples) |_| replacement.rules[0].?.rule.observe(60);
         replacement.persist(0);
         try std.testing.expect(!old.isCurrent());
@@ -469,4 +506,49 @@ test "superseded local alerts cannot deliver or overwrite replacement status on 
     try std.testing.expectEqual(@as(f64, 50), parsed.value[0].threshold);
     try std.testing.expectEqualStrings("firing", parsed.value[0].state);
     try std.testing.expectError(error.SupervisorSuperseded, registerOwned("app", "web", .{ .cpu_percent = 80 }, "old-owner"));
+}
+
+test "cluster alert generations tolerate overlap late arrivals and retirement without reviving pending delivery" {
+    const store = @import("../../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    defer shutdown();
+    const old_config: spec.AlertSpec = .{ .cpu_percent = 80, .webhook = "https://example.com/old" };
+    const new_config: spec.AlertSpec = .{ .cpu_percent = 50, .webhook = "https://example.com/new" };
+    const old = try registerLocked("app", "web", old_config, false, null, 1);
+    try updateClusterOwner("app", "web");
+    for (0..evaluator.consecutive_samples) |_| old.rules[0].?.rule.observe(90);
+    const newer = try registerLocked("app", "web", new_config, false, null, 2);
+    const same_group = try registerLocked("app", "web", new_config, false, null, 2);
+    try std.testing.expect(newer == same_group);
+    try updateClusterOwner("app", "web");
+    const late = try registerLocked("app", "web", old_config, false, null, 0);
+    try updateClusterOwner("app", "web");
+    try std.testing.expect(!old.isCurrent() and !late.isCurrent() and newer.isCurrent());
+    try std.testing.expect(old.rules[0].?.rule.pending == null);
+    for (0..evaluator.consecutive_samples) |_| newer.rules[0].?.rule.observe(60);
+    newer.persist(0);
+    (Registration{ .service = old }).release();
+    (Registration{ .service = same_group }).release();
+    old.persist(0);
+    var cursor: usize = 0;
+    const selected = selectDelivery(&cursor).?;
+    try std.testing.expect(selected.service == newer);
+    newer.rules[0].?.rule.in_flight = false;
+    const current = try status_store.listJson(std.testing.allocator, "app");
+    defer std.testing.allocator.free(current);
+    try std.testing.expect(std.mem.indexOf(u8, current, "\"threshold\":50") != null);
+
+    // if the newer group is retired, the highest remaining group starts a fresh
+    // debounce period. its previously queued firing notification stays cleared.
+    (Registration{ .service = newer }).release();
+    try std.testing.expect(late.isCurrent());
+    try std.testing.expect(late.rules[0].?.rule.pending == null);
+    try std.testing.expect(selectDelivery(&cursor) == null);
+    const empty = try registerLocked("app", "web", .{}, false, null, 3);
+    try updateClusterOwner("app", "web");
+    try std.testing.expect(empty.isCurrent() and !late.isCurrent());
+    const cleared = try status_store.listJson(std.testing.allocator, "app");
+    defer std.testing.allocator.free(cleared);
+    try std.testing.expectEqualStrings("[]", cleared);
 }
