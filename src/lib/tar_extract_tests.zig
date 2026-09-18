@@ -23,7 +23,7 @@ fn archiveBytes(entries: []const Entry) ![]u8 {
                 try tar.writeLink(entry.name, entry.content, .{});
                 const header = output.writer.buffer[output.writer.end - 512 .. output.writer.end];
                 header[156] = '1';
-                updateChecksum(header);
+                try updateChecksum(header);
             },
         }
     }
@@ -309,11 +309,11 @@ test "gzip tar extraction uses the same confinement for archive-created symlinks
     try expectContents(tmp.dir, "outside/marker", "outside remains intact");
 }
 
-fn updateChecksum(header: []u8) void {
+fn updateChecksum(header: []u8) !void {
     @memset(header[148..156], ' ');
     var checksum: u32 = 0;
     for (header) |byte| checksum += byte;
-    _ = std.fmt.bufPrint(header[148..156], "{o:0>6}\x00 ", .{checksum}) catch unreachable;
+    _ = try std.fmt.bufPrint(header[148..156], "{o:0>6}\x00 ", .{checksum});
 }
 
 fn expectSameInode(dir: std.Io.Dir, first: []const u8, second: []const u8) !void {
@@ -459,7 +459,7 @@ test "tar image hard links share the target mode without applying link metadata"
     });
     defer alloc.free(bytes);
     @memcpy(bytes[100..108], "0000755\x00");
-    updateChecksum(bytes[0..512]);
+    try updateChecksum(bytes[0..512]);
     try tmp.dir.writeFile(io, .{ .sub_path = "input.tar", .data = bytes });
     var archive_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const archive_length = try tmp.dir.realPathFile(io, "input.tar", &archive_buffer);
