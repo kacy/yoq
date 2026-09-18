@@ -37,7 +37,7 @@ pub const IntegerDecode = struct {
     consumed: usize,
 };
 
-const dynamic_table_default_max_size = 4096;
+pub const dynamic_table_default_max_size = 4096;
 
 // DoS bounds for decoding attacker-controlled header blocks. HPACK integers
 // and string lengths are otherwise unbounded; a malicious peer could drive a

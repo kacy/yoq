@@ -295,9 +295,15 @@ pub fn handleTlsSession(
 
         if (poll_fds[1].revents & posix.POLL.IN != 0) {
             var plaintext: [record.max_record_size]u8 = undefined;
-            const n = (transport.Stream{ .fd = backend_fd, .deadline = deadline }).read(&plaintext) catch break;
+            const capacity = plaintext.len - if (is_h2) @import("../../network/proxy/http2_settings_relay.zig").max_carry else @as(usize, 0);
+            const n = (transport.Stream{ .fd = backend_fd, .deadline = deadline }).read(plaintext[0..capacity]) catch break;
             if (n == 0) break;
-            try record_transport.write(.{ .fd = client_fd, .deadline = deadline }, app_keys.server, &server_app_seq, .application_data, plaintext[0..n]);
+            const forwarded = if (is_h2)
+                try h2_rewrite_state.server_settings.rewrite(std.heap.page_allocator, plaintext[0..n])
+            else
+                plaintext[0..n];
+            defer if (is_h2) std.heap.page_allocator.free(forwarded);
+            if (forwarded.len > 0) try record_transport.write(.{ .fd = client_fd, .deadline = deadline }, app_keys.server, &server_app_seq, .application_data, forwarded);
         }
         // Keep draining records when readable data accompanies a half-close.
         if (poll_fds[0].revents & posix.POLL.IN == 0 and poll_fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) break;

@@ -124,6 +124,7 @@ comptime {
     _ = @import("network/proxy/http2_connection_router.zig");
     _ = @import("network/proxy/http2_response.zig");
     _ = @import("network/proxy/http2_passthrough.zig");
+    _ = @import("network/proxy/http2_settings_relay.zig");
     _ = @import("network/proxy/request_plan.zig");
     _ = @import("network/proxy/http2_request.zig");
     _ = @import("network/proxy/hpack.zig");

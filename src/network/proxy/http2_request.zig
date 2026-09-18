@@ -42,6 +42,7 @@ pub const ParseResult = struct {
 pub const StreamRewriteState = struct {
     saw_client_preface: bool = false,
     decoder: hpack.Decoder = .{},
+    server_settings: @import("http2_settings_relay.zig").Rewriter = .{},
 
     pub fn deinit(self: *StreamRewriteState, alloc: std.mem.Allocator) void {
         self.decoder.deinit(alloc);
