@@ -73,7 +73,7 @@ def inside(directory):
         result = start(name, check=False)
         assert result.returncode != 0, f"configured policy allowed {name} to start"
         with connection() as db:
-            row = db.execute("SELECT startup_outcome,pid FROM containers WHERE hostname=?", (name,)).fetchone()
+            row = db.execute("SELECT c.startup_outcome,c.pid FROM containers c JOIN local_containers l ON l.container_id=c.id WHERE l.name=?", (name,)).fetchone()
             assert row == (2, None), row  # StartupOutcome.failed, with no live child
             assert db.execute("SELECT COUNT(*) FROM service_names WHERE name=?", (name,)).fetchone()[0] == 0
             assert db.execute("SELECT COUNT(*) FROM service_endpoints WHERE service_name=?", (name,)).fetchone()[0] == 0
@@ -82,7 +82,7 @@ def inside(directory):
         start("web")
         start("api")
         with connection() as db:
-            target = db.execute("SELECT ip_address FROM containers WHERE hostname='web'").fetchone()[0]
+            target = db.execute("SELECT c.ip_address FROM containers c JOIN local_containers l ON l.container_id=c.id WHERE l.name='web'").fetchone()[0]
         wait_for("standalone service traffic", lambda: success("web") and success(target))
         cli("policy", "deny", "api", "web")
         wait_for("standalone VIP deny", lambda: denied("web"))
