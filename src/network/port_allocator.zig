@@ -142,8 +142,8 @@ pub fn reserve(id: []const u8, mappings: []common.PortMap) Error!void {
                 }
             };
             if (busy) {
-                platform.posix.close(bound.fd);
                 if (!ephemeral) return error.PortInUse;
+                platform.posix.close(bound.fd);
                 continue;
             }
             sockets.sockets.appendAssumeCapacity(bound.fd);
