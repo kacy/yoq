@@ -78,10 +78,10 @@ fn runOutcome(fd: posix.fd_t) !Outcome {
     var last_size: ?terminal.Size = null;
     while (true) {
         const signal = pending_signal.swap(0, .acq_rel);
-        if (signal != 0) try protocol.send(fd, .signal, &.{signal}, false);
+        if (signal != 0) protocol.send(fd, .signal, &.{signal}, false) catch |err| return drainExit(fd, err);
         if (tty and stdin_open) if (terminal.size(posix.STDIN_FILENO)) |size| {
             if (last_size == null or !std.meta.eql(last_size.?, size)) {
-                try protocol.send(fd, .resize, std.mem.asBytes(&size), false);
+                protocol.send(fd, .resize, std.mem.asBytes(&size), false) catch |err| return drainExit(fd, err);
                 last_size = size;
             }
         };
@@ -107,19 +107,37 @@ fn runOutcome(fd: posix.fd_t) !Outcome {
         if (stdin_open and polls[1].revents != 0) {
             const count = try platform.read(posix.STDIN_FILENO, &input);
             if (count == 0) {
-                if (detach.pending) try protocol.send(fd, .stdin, "\x10", false);
-                try protocol.send(fd, .eof, "", false);
+                if (detach.pending) protocol.send(fd, .stdin, "\x10", false) catch |err| return drainExit(fd, err);
+                protocol.send(fd, .eof, "", false) catch |err| return drainExit(fd, err);
                 stdin_open = false;
                 continue;
             }
             if (raw != null) {
                 const result = detach.consume(input[0..count], &filtered);
-                if (result.count != 0) try protocol.send(fd, .stdin, filtered[0..result.count], false);
+                if (result.count != 0) protocol.send(fd, .stdin, filtered[0..result.count], false) catch |err| return drainExit(fd, err);
                 if (result.detached) {
-                    try protocol.send(fd, .detach, "", false);
+                    protocol.send(fd, .detach, "", false) catch |err| return drainExit(fd, err);
                     return .detached;
                 }
-            } else try protocol.send(fd, .stdin, input[0..count], false);
+            } else protocol.send(fd, .stdin, input[0..count], false) catch |err| return drainExit(fd, err);
+        }
+    }
+}
+
+// The server sends exit before closing its socket. A simultaneous stdin,
+// resize, or signal write can fail while that exit is still queued.
+fn drainExit(fd: posix.fd_t, write_error: anyerror) !Outcome {
+    var packet: protocol.Packet = .{};
+    while (true) {
+        protocol.receive(fd, &packet, true) catch return write_error;
+        switch (try packet.kind()) {
+            .stdout => try foreground.writeAll(posix.STDOUT_FILENO, packet.payload()),
+            .stderr => try foreground.writeAll(posix.STDERR_FILENO, packet.payload()),
+            .exit => {
+                if (packet.payload().len != 1) return error.InvalidPacket;
+                return .{ .exited = packet.payload()[0] };
+            },
+            else => return error.InvalidPacket,
         }
     }
 }
@@ -166,4 +184,33 @@ test "session client restores terminal on remote exit and detach" {
         const waited = try @import("../process.zig").waitForExit(pid);
         try std.testing.expectEqual(@import("../process.zig").ExitStatus{ .exited = if (detach) 0 else 23 }, waited.status);
     }
+}
+
+test "session client preserves a queued exit when its final stdin write fails" {
+    var sockets: [2]posix.fd_t = undefined;
+    if (linux.socketpair(posix.AF.UNIX, posix.SOCK.SEQPACKET | posix.SOCK.CLOEXEC, 0, &sockets) != 0) return error.SocketFailed;
+    defer platform.close(sockets[0]);
+    const input = try platform.pipe();
+    defer platform.close(input[0]);
+    _ = try platform.write(input[1], "pending input");
+    platform.close(input[1]);
+    try protocol.send(sockets[1], .ready, &.{ 0, 1 }, false);
+    try protocol.send(sockets[1], .stdout, "", false);
+    try protocol.send(sockets[1], .exit, &.{23}, false);
+    platform.close(sockets[1]);
+    const forked = linux.fork();
+    if (linux.errno(forked) != .SUCCESS) return error.ForkFailed;
+    if (forked == 0) {
+        platform.dup2(input[0], posix.STDIN_FILENO) catch linux.exit_group(125);
+        platform.close(input[0]);
+        const code = run(sockets[0]) catch linux.exit_group(124);
+        linux.exit_group(code);
+    }
+    const pid: posix.pid_t = @intCast(forked);
+    defer {
+        @import("../process.zig").kill(pid) catch {};
+        _ = @import("../process.zig").waitForExit(pid) catch {};
+    }
+    const result = try @import("../process.zig").waitForExit(pid);
+    try std.testing.expectEqual(@import("../process.zig").ExitStatus{ .exited = 23 }, result.status);
 }
