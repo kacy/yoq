@@ -48,10 +48,10 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "diff", .group = .runtime, .usage = "diff <id|name>", .description = "list changes in a container writable layer", .handler = @import("../runtime/cli/container/filesystem_commands.zig").diff },
     .{ .name = "__container-filesystem", .group = .runtime, .usage = "__container-filesystem", .description = "internal filesystem helper", .handler = @import("../runtime/cli/container/filesystem_commands.zig").helper, .hidden = true },
     .{ .name = "rename", .group = .runtime, .usage = "rename <id|name> <new-name>", .description = "change a container name", .handler = @import("../runtime/cli/container/list_commands.zig").rename },
-    .{ .name = "top", .group = .runtime, .usage = "top [opts] <id|name>", .description = "show container processes", .handler = container_resources.top },
-    .{ .name = "stats", .group = .runtime, .usage = "stats [opts] <id|name>", .description = "show container resource usage", .handler = container_resources.stats },
-    .{ .name = "pause", .group = .runtime, .usage = "pause [opts] <id|name>", .description = "freeze a running container", .handler = container_resources.pause },
-    .{ .name = "unpause", .group = .runtime, .usage = "unpause [opts] <id|name>", .description = "resume a paused container", .handler = container_resources.unpause },
+    .{ .name = "top", .group = .runtime, .usage = "top [--json] <id|name>", .description = "show container processes", .handler = container_resources.top },
+    .{ .name = "stats", .group = .runtime, .usage = "stats [--json] <id|name>", .description = "show container resource usage", .handler = container_resources.stats },
+    .{ .name = "pause", .group = .runtime, .usage = "pause <id|name>", .description = "freeze a running container", .handler = container_resources.pause },
+    .{ .name = "unpause", .group = .runtime, .usage = "unpause <id|name>", .description = "resume a paused container", .handler = container_resources.unpause },
     .{ .name = "update", .group = .runtime, .usage = "update [opts] <id|name>", .description = "update resource limits or restart policy", .handler = container_resources.update },
     .{ .name = "attach", .group = .runtime, .usage = "attach [--no-stdin] <id|name>", .description = "attach to a running container", .handler = container_cmds.attach },
     .{ .name = "save", .group = .image, .usage = "save [-o PATH] <image>...", .description = "write an oci image archive", .handler = image_cmds.save },
@@ -66,11 +66,11 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "tag", .group = .image, .usage = "tag <source> <target>", .description = "add a local image reference", .handler = image_cmds.tag },
     .{ .name = "run", .group = .runtime, .usage = "run [opts] <image|rootfs> [cmd]", .description = "create and run a container", .handler = container_cmds.run },
     .{ .name = "ps", .group = .runtime, .usage = "ps [-a] [-q] [--filter key=value] [--json]", .description = "list active containers, or all with -a", .handler = psHandler },
-    .{ .name = "logs", .group = .runtime, .usage = "logs <id|name>", .description = "show container output", .handler = container_cmds.log },
+    .{ .name = "logs", .group = .runtime, .usage = "logs <id|name> [--tail N] [-f]", .description = "show container output", .handler = container_cmds.log },
     .{ .name = "stop", .group = .runtime, .usage = "stop <id|name>", .description = "stop a running container", .handler = container_cmds.stop },
-    .{ .name = "rm", .group = .runtime, .usage = "rm <id|name>", .description = "remove a stopped container", .handler = container_cmds.rm },
+    .{ .name = "rm", .group = .runtime, .usage = "rm [-v] <id|name>", .description = "remove a stopped container", .handler = container_cmds.rm },
     .{ .name = "restart", .group = .runtime, .usage = "restart <id|name>", .description = "restart a container", .handler = container_cmds.restart },
-    .{ .name = "exec", .group = .runtime, .usage = "exec <id|name> <cmd> [args...]", .description = "run a command in a running container", .handler = container_cmds.exec_cmd },
+    .{ .name = "exec", .group = .runtime, .usage = "exec [-i] [-t] <id|name> <cmd> [args...]", .description = "run a command in a running container", .handler = container_cmds.exec_cmd },
     .{ .name = "status", .group = .runtime, .usage = "status [--app [name]] [--alerts] [--verbose] [--server h:p]", .description = "show service, app, or alert status", .handler = runtime_cmds.status },
     .{ .name = "audit", .group = .runtime, .usage = "audit [--limit N] [--server h:p] [--json]", .description = "show recent audit log entries", .handler = runtime_cmds.audit },
     .{ .name = "apps", .group = .runtime, .usage = "apps [--server h:p] [--json] [--status s|--failed|--in-progress]", .description = "list app release summaries", .handler = runtime_cmds.apps },
@@ -79,9 +79,9 @@ pub const command_specs = [_]CommandSpec{
 
     .{ .name = "pull", .group = .image, .usage = "pull <image>", .description = "pull an image from a registry", .handler = image_cmds.pull },
     .{ .name = "push", .group = .image, .usage = "push <source> [target]", .description = "push an image to a registry", .handler = image_cmds.push },
-    .{ .name = "images", .group = .image, .usage = "images", .description = "list pulled images", .handler = imagesHandler },
-    .{ .name = "rmi", .group = .image, .usage = "rmi <image>", .description = "remove a pulled image", .handler = image_cmds.rmi },
-    .{ .name = "prune", .group = .image, .usage = "prune", .description = "remove unused blobs and layers", .handler = pruneHandler },
+    .{ .name = "images", .group = .image, .usage = "images [--json]", .description = "list local images", .handler = imagesHandler },
+    .{ .name = "rmi", .group = .image, .usage = "rmi <image>", .description = "remove a local image reference", .handler = image_cmds.rmi },
+    .{ .name = "prune", .group = .image, .usage = "prune [--json]", .description = "remove unused blobs and layers", .handler = pruneHandler },
     .{ .name = "inspect", .group = .image, .usage = "inspect <image>", .description = "show image details", .handler = image_cmds.inspect },
 
     .{ .name = "build", .group = .build_manifest, .usage = "build [opts] <path>", .description = "build an image from a Dockerfile", .handler = build_cmds.build_cmd },
@@ -150,7 +150,7 @@ pub fn printUsage() void {
 
     write(
         \\
-        \\run options:
+        \\run and create options:
         \\  --name NAME, --hostname HOST  set lookup name and process hostname
         \\  --pull missing|always|never   choose local or registry image resolution
         \\  --entrypoint COMMAND         replace the image entrypoint
@@ -160,8 +160,8 @@ pub fn printUsage() void {
         \\  --env-file PATH             read literal environment entries
         \\  -v, --volume SOURCE:TARGET  mount a bind path or named volume
         \\  --mount type=...,dst=...     configure a bind or volume mount
-        \\  -p, --publish [IP:]HOST:PORT[/tcp|udp]
-        \\                              publish a port (HOST 0 assigns one)
+        \\  -p, --publish [IP:][HOST:]PORT[/tcp|udp]
+        \\                              publish a port (omit HOST or use 0 to assign one)
         \\  --network NAME|default|none  select a local network
         \\  --network-alias NAME        add a name within a named network
         \\  --memory SIZE|unlimited      memory limit (default 512 mib)
@@ -171,6 +171,9 @@ pub fn printUsage() void {
         \\  --shm-size SIZE             shared-memory tmpfs size (default 64 mib)
         \\  --tmpfs PATH[:OPTIONS]      mount a temporary filesystem
         \\  --cpu-weight WEIGHT          scheduling weight from 1 to 10000
+        \\  --cpuset-cpus LIST           allowed cpu numbers and ranges
+        \\  --shm-size SIZE              /dev/shm capacity (default 64 mib)
+        \\  --tmpfs PATH[:OPTIONS]       add a temporary filesystem
         \\  -d, --detach                start in the background
         \\  -i, --interactive           keep stdin available
         \\  -t, --tty                   allocate a terminal
