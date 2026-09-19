@@ -184,9 +184,7 @@ pub fn resolveMount(alloc: std.mem.Allocator, id: []const u8, spec: cli.VolumeMo
     }) catch return error.DbError;
     const record = try inspectInDb(alloc, lease.db, name);
     defer record.deinit(alloc);
-    const canonical = std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, record.path, alloc) catch return error.IoError;
-    defer alloc.free(canonical);
-    const source = alloc.dupe(u8, canonical) catch return error.OutOfMemory;
+    const source = std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, record.path, alloc) catch return error.IoError;
     errdefer alloc.free(source);
     const target = alloc.dupe(u8, spec.target) catch return error.OutOfMemory;
     errdefer alloc.free(target);
@@ -261,19 +259,36 @@ fn initializeEmptyVolume(io: std.Io, alloc: std.mem.Allocator, rootfs: []const u
     var iterator = dir.iterate();
     if ((iterator.next(io) catch return error.CopyFailed) != null) return true;
 
+    const source = try resolveInitialContents(io, alloc, rootfs, target) orelse return false;
+    defer alloc.free(source);
+    try copyInitialContents(io, alloc, source, destination, id);
+    return true;
+}
+
+// a missing image directory leaves the volume available for a later container
+// to populate. an existing source must resolve inside the merged rootfs.
+fn resolveInitialContents(io: std.Io, alloc: std.mem.Allocator, rootfs: []const u8, target: []const u8) VolumeError!?[]u8 {
     const root = std.Io.Dir.cwd().realPathFileAlloc(io, rootfs, alloc) catch return error.CopyFailed;
     defer alloc.free(root);
     const source_input = std.fs.path.resolve(alloc, &.{ root, std.mem.trimStart(u8, target, "/") }) catch return error.OutOfMemory;
     defer alloc.free(source_input);
     const source = std.Io.Dir.cwd().realPathFileAlloc(io, source_input, alloc) catch |err| switch (err) {
-        error.FileNotFound => return false,
+        error.FileNotFound => return null,
         else => return error.CopyFailed,
     };
-    defer alloc.free(source);
-    if (!std.mem.eql(u8, root, "/") and !std.mem.eql(u8, source, root) and !(std.mem.startsWith(u8, source, root) and source.len > root.len and source[root.len] == '/')) return error.CopyFailed;
+    errdefer alloc.free(source);
+    if (!isWithinRootfs(root, source)) return error.CopyFailed;
     const stat = std.Io.Dir.cwd().statFile(io, source, .{}) catch return error.CopyFailed;
     if (stat.kind != .directory) return error.CopyFailed;
+    return source;
+}
 
+fn isWithinRootfs(root: []const u8, source: []const u8) bool {
+    if (std.mem.eql(u8, root, "/") or std.mem.eql(u8, source, root)) return true;
+    return std.mem.startsWith(u8, source, root) and source.len > root.len and source[root.len] == '/';
+}
+
+fn copyInitialContents(io: std.Io, alloc: std.mem.Allocator, source: []const u8, destination: []const u8, id: []const u8) VolumeError!void {
     const staging = std.fmt.allocPrint(alloc, "{s}.init-{s}", .{ destination, id }) catch return error.OutOfMemory;
     defer alloc.free(staging);
     std.Io.Dir.cwd().deleteTree(io, staging) catch return error.CopyFailed;
@@ -291,7 +306,6 @@ fn initializeEmptyVolume(io: std.Io, alloc: std.mem.Allocator, rootfs: []const u
     // rename atomically replaces the empty destination directory. it refuses
     // replacement if another writer has added a file in the meantime.
     std.Io.Dir.cwd().rename(staging, std.Io.Dir.cwd(), destination, io) catch return error.CopyFailed;
-    return true;
 }
 
 pub fn needsInitialization(id: []const u8) VolumeError!bool {
