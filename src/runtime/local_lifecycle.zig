@@ -187,21 +187,28 @@ fn cleanupRuntime(alloc: std.mem.Allocator, record: *const store.ContainerRecord
     if (std.Io.Dir.cwd().access(io, cg.path(), .{})) |_| {
         try cg.destroy();
     } else |err| if (err != error.FileNotFound) return err;
-    if (record.ip_address) |address| {
-        const cfg = try run_state.loadConfig(alloc, record.id);
-        defer cfg.deinit(alloc);
-        const setup = @import("../network/setup.zig");
-        var info: setup.NetworkInfo = .{ .ip = ip.parseIp(address) orelse return error.InvalidAddress, .veth_host = undefined, .veth_host_len = 0 };
-        if (record.veth_host) |name| {
-            if (name.len > info.veth_host.len) return error.InvalidAddress;
-            @memcpy(info.veth_host[0..name.len], name);
-            info.veth_host_len = name.len;
-        }
-        var db = try store.openDb();
-        defer db.deinit();
-        try setup.teardownContainerChecked(record.id, &info, .{ .port_maps = cfg.port_maps, .network_name = cfg.network_name }, &db);
-        try store.updateNetwork(record.id, null, null);
-    }
+    var db = try store.openDb();
+    defer db.deinit();
+    // allocation can commit just before the container record is updated.
+    // retain that ownership across a crash so recovery can finish teardown.
+    const address = if (record.ip_address) |value|
+        ip.parseIp(value) orelse return error.InvalidAddress
+    else
+        ip.lookupChecked(&db, alloc, record.id) catch |err| switch (err) {
+            error.NotFound => return,
+            else => return err,
+        };
+    const cfg = try run_state.loadConfig(alloc, record.id);
+    defer cfg.deinit(alloc);
+    const setup = @import("../network/setup.zig");
+    var info: setup.NetworkInfo = .{ .ip = address, .veth_host = undefined, .veth_host_len = 0 };
+    var name_buffer: [32]u8 = undefined;
+    const name = record.veth_host orelse @import("../network/bridge.zig").vethName(record.id, &name_buffer);
+    if (name.len > info.veth_host.len) return error.InvalidAddress;
+    @memcpy(info.veth_host[0..name.len], name);
+    info.veth_host_len = name.len;
+    try setup.teardownContainerChecked(record.id, &info, .{ .port_maps = cfg.port_maps, .network_name = cfg.network_name }, &db);
+    try store.updateNetwork(record.id, null, null);
 }
 
 fn removeSavedConfig(id: []const u8) !void {
