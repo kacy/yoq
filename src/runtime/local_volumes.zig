@@ -76,7 +76,8 @@ pub fn create(alloc: std.mem.Allocator, requested_name: ?[]const u8) VolumeError
     var name_buf: [17]u8 = undefined;
     const name = requested_name orelse blk: {
         container.generateId(&id) catch return error.IoError;
-        break :blk std.fmt.bufPrint(&name_buf, "anon-{s}", .{id}) catch unreachable;
+        name_buf = "anon-".* ++ id;
+        break :blk &name_buf;
     };
     var lease = store.leaseDb() catch return error.DbError;
     defer lease.deinit();
@@ -167,7 +168,8 @@ pub fn resolveMount(alloc: std.mem.Allocator, id: []const u8, spec: cli.VolumeMo
     const anonymous = spec.source.len == 0;
     const name = if (!anonymous) spec.source else blk: {
         container.generateId(&random_id) catch return error.IoError;
-        break :blk std.fmt.bufPrint(&name_buf, "anon-{s}", .{random_id}) catch unreachable;
+        name_buf = "anon-".* ++ random_id;
+        break :blk &name_buf;
     };
     var lease = store.leaseDb() catch return error.DbError;
     defer lease.deinit();

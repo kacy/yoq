@@ -106,8 +106,8 @@ fn createWithRoutes(alloc: std.mem.Allocator, name: []const u8, requested_subnet
     var random: [4]u8 = undefined;
     platform.randomBytes(&random);
     const random_id = std.fmt.bytesToHex(random, .lower);
-    var bridge_buf: [13]u8 = undefined;
-    const bridge_name = std.fmt.bufPrint(&bridge_buf, "yoqn-{s}", .{random_id[0..]}) catch unreachable;
+    const bridge_buf = "yoqn-".* ++ random_id;
+    const bridge_name: []const u8 = &bridge_buf;
     lease.db.exec("INSERT INTO local_networks (name, bridge, subnet, created_at) VALUES (?, ?, ?, ?);", .{}, .{
         sqlite.Text{ .data = name }, sqlite.Text{ .data = bridge_name }, std.mem.readInt(u32, &base, .big), std.Io.Clock.real.now(std.Options.debug_io).toSeconds(),
     }) catch return error.DbError;

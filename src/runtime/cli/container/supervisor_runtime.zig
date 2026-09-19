@@ -216,7 +216,7 @@ fn spawnSupervisorWithAttach(io: std.Io, alloc: std.mem.Allocator, id: []const u
     const exe_path = readSelfExePathAlloc(io, alloc) catch return ContainerError.OutOfMemory;
     defer alloc.free(exe_path);
     var generation_buf: [32]u8 = undefined;
-    const generation_text = std.fmt.bufPrint(&generation_buf, "{d}", .{generation}) catch unreachable;
+    const generation_text = std.fmt.bufPrint(&generation_buf, "{d}", .{generation}) catch return ContainerError.ConfigSaveFailed;
     store.setStartupOutcome(id, .pending) catch return ContainerError.ConfigSaveFailed;
     _ = std.process.spawn(io, .{
         .argv = &.{ exe_path, "__run-supervisor", id, generation_text, if (attach) "attach" else "detached" },
