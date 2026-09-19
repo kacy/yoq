@@ -137,9 +137,13 @@ pub fn removeWithVolumes(id: []const u8, alloc: std.mem.Allocator, remove_anonym
     return removeLocked(id, alloc, remove_anonymous);
 }
 
-pub fn removeAutomatic(id: []const u8, alloc: std.mem.Allocator, generation: ?i64) !void {
+pub fn removeAutomatic(id: []const u8, alloc: std.mem.Allocator, generation: i64) !void {
     const command_lock = try control.lock(id, .command, true);
     defer command_lock.deinit();
+    if ((try control.currentGeneration(id)) != generation) return;
+    // The exit packet is sent before the supervisor releases ownership.
+    // Holding the command lock prevents a new start while cleanup finishes.
+    try waitForOwner(id);
     if (!try control.finishedGeneration(id, generation)) return;
     try removeLocked(id, alloc, true);
 }
@@ -256,4 +260,20 @@ test "host recovery respects manual stop and failure-only policies" {
     try std.testing.expect(!recoverPolicy(.unless_stopped, false));
     try std.testing.expect(!recoverPolicy(.on_failure, true));
     try std.testing.expect(!recoverPolicy(.no, true));
+}
+
+test "delayed automatic removal leaves a newer created container intact" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const id = "a1b2c3d4e5f6";
+    try store.save(.{ .id = id, .rootfs = "/fixture", .command = "sh", .hostname = "new-run", .status = "created", .pid = null, .exit_code = null, .created_at = 1 });
+    try control.register(id, null);
+    const old = try control.request(id, true);
+    try control.finish(id, old);
+    const current = try control.request(id, true);
+    try removeAutomatic(id, std.testing.allocator, old);
+    try std.testing.expect(try control.shouldRun(id, current));
+    const record = try store.load(std.testing.allocator, id);
+    defer record.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("created", record.status);
 }

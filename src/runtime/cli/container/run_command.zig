@@ -584,11 +584,11 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
         return;
     }
 
-    {
+    const generation = blk: {
         const lock = try @import("../../local_control.zig").lock(id, .command, true);
         defer lock.deinit();
-        try supervisor_runtime.spawnAttachedSupervisor(ctx.io, alloc, id);
-    }
+        break :blk try supervisor_runtime.spawnAttachedSupervisor(ctx.io, alloc, id);
+    };
     const outcome = try @import("../../session.zig").attachOutcome(id, saved.interactive);
     const exit_code: u8 = switch (outcome) {
         .detached => 0,
@@ -596,7 +596,7 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
             if (saved.auto_remove) {
                 // Either caller can finish removal; command locking makes it
                 // idempotent. A detached session must leave its workload alive.
-                @import("../../local_lifecycle.zig").removeWithVolumes(id, alloc, true) catch |err| {
+                @import("../../local_lifecycle.zig").removeAutomatic(id, alloc, generation) catch |err| {
                     if (err != error.NotFound) return err;
                 };
             }

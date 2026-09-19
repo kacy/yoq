@@ -110,6 +110,13 @@ pub fn finishedGeneration(id: []const u8, generation: ?i64) !bool {
     return row.desired_running == 0 and (generation == null or row.generation == generation.?);
 }
 
+pub fn currentGeneration(id: []const u8) !?i64 {
+    var lease = try db_store.leaseDb();
+    defer lease.deinit();
+    const row = try lease.db.one(struct { generation: i64 }, "SELECT generation FROM local_containers WHERE container_id = ?;", .{}, .{id}) orelse return null;
+    return row.generation;
+}
+
 test "automatic removal only accepts the completed current generation" {
     const store = @import("../state/store.zig");
     try store.initTestDb();

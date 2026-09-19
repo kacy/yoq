@@ -184,14 +184,14 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
 }
 
 pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
-    return spawnSupervisorWithAttach(io, alloc, id, false);
+    _ = try spawnSupervisorWithAttach(io, alloc, id, false);
 }
 
-pub fn spawnAttachedSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
+pub fn spawnAttachedSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) ContainerError!i64 {
     return spawnSupervisorWithAttach(io, alloc, id, true);
 }
 
-fn spawnSupervisorWithAttach(io: std.Io, alloc: std.mem.Allocator, id: []const u8, attach: bool) ContainerError!void {
+fn spawnSupervisorWithAttach(io: std.Io, alloc: std.mem.Allocator, id: []const u8, attach: bool) ContainerError!i64 {
     control.ensureRegistered(id) catch return ContainerError.ConfigSaveFailed;
     const generation = control.request(id, true) catch return ContainerError.ConfigSaveFailed;
     errdefer control.finish(id, generation) catch {};
@@ -209,6 +209,7 @@ fn spawnSupervisorWithAttach(io: std.Io, alloc: std.mem.Allocator, id: []const u
         writeErr("failed to spawn detached supervisor: {}\n", .{err});
         return ContainerError.ProcessNotFound;
     };
+    return generation;
 }
 
 pub fn stopProcess(pid: i32) ContainerError!void {
