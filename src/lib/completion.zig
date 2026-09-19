@@ -195,7 +195,6 @@ const command_meta = [_]CommandMeta{
     .{ .name = "version" },
     .{ .name = "help" },
     .{ .name = "completion" },
-    .{ .name = "__run-supervisor" }, // internal hidden command
 };
 
 fn findMeta(name: []const u8) ?*const CommandMeta {
@@ -465,10 +464,14 @@ fn generateFish() void {
 
 // -- tests --
 
-test "metadata covers all registered commands" {
-    // every command in the registry should have a metadata entry
+test "metadata covers public commands and excludes internal helpers" {
+    // internal helpers are implementation details, not completion candidates.
     for (registry.command_specs) |spec| {
         const found = findMeta(spec.name);
+        if (spec.hidden) {
+            try std.testing.expect(found == null);
+            continue;
+        }
         if (found == null) {
             std.debug.print("missing completion metadata for command: {s}\n", .{spec.name});
         }
