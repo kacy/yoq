@@ -872,3 +872,17 @@ test "run flags parse cpu affinity shared memory and typed tmpfs" {
         try std.testing.expectError(ContainerError.InvalidArgument, parseRunFlags(&invalid, alloc, std.testing.io));
     }
 }
+
+test "run name parser enforces hostname-compatible boundaries" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{ "a", "A1", "web-2", "a" ** 63 }) |name| {
+        var args: TestArgs = .{ .values = &.{ "--name", name, "image" } };
+        var flags = try parseRunFlags(&args, alloc, std.testing.io);
+        defer flags.deinit(alloc);
+        try std.testing.expectEqualStrings(name, flags.container_name.?);
+    }
+    for ([_][]const u8{ "", "a" ** 64, "-web", "web-", "web_api", "web.api", "web api", "a\x00b", "caf\xc3\xa9" }) |name| {
+        var args: TestArgs = .{ .values = &.{ "--name", name, "image" } };
+        try std.testing.expectError(ContainerError.InvalidArgument, parseRunFlags(&args, alloc, std.testing.io));
+    }
+}

@@ -9,6 +9,7 @@ const sqlite = @import("sqlite");
 const paths = @import("../lib/paths.zig");
 const db_store = @import("../state/store/common.zig");
 const container = @import("container.zig");
+const isValidContainerName = @import("../lib/cli.zig").isValidContainerName;
 
 pub const LockKind = enum { command, transition, owner };
 pub const Lock = struct {
@@ -42,6 +43,7 @@ pub fn lock(id: []const u8, kind: LockKind, wait: bool) !Lock {
 }
 
 pub fn register(id: []const u8, name: ?[]const u8) !void {
+    if (name) |value| if (!isValidContainerName(value)) return error.InvalidName;
     var lease = try db_store.leaseDb();
     defer lease.deinit();
     if (name) |value| {
@@ -157,12 +159,11 @@ pub fn nameForId(alloc: std.mem.Allocator, id: []const u8) !?[]const u8 {
 }
 
 pub fn rename(id: []const u8, name: []const u8) !void {
-    if (name.len == 0 or name.len > 128) return error.InvalidName;
-    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-' and c != '.') return error.InvalidName;
+    if (!isValidContainerName(name)) return error.InvalidName;
     try ensureRegistered(id);
     var lease = try db_store.leaseDb();
     defer lease.deinit();
-    // The unique index arbitrates concurrent renames. Legacy hostnames also
+    // the unique index arbitrates concurrent renames. legacy hostnames also
     // reserve their names until those containers are renamed or removed.
     const row = try lease.db.one(struct { updated: i64 }, "UPDATE OR IGNORE local_containers SET name = ? WHERE container_id = ? AND NOT EXISTS (SELECT 1 FROM containers WHERE hostname = ? AND id != ? AND id NOT IN (SELECT container_id FROM local_containers WHERE name IS NOT NULL)) RETURNING 1 AS updated;", .{}, .{ name, id, name, id });
     if (row == null) return error.NameInUse;
@@ -240,4 +241,31 @@ test "legacy container names stay reserved after lazy lifecycle registration" {
     try std.testing.expectError(error.NameInUse, register("222222222222", "legacy"));
     try removeRecord("111111111111");
     try register("222222222222", "legacy");
+}
+
+test "container rename and registration share hostname-compatible name limits" {
+    const store = @import("../state/store.zig");
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const id = "0123456789ab";
+    try store.save(.{ .id = id, .rootfs = "", .command = "sh", .hostname = "original", .status = "stopped", .pid = null, .exit_code = 0, .created_at = 0 });
+    try register(id, "initial");
+    for ([_][]const u8{ "a", "A1", "web-2", "a" ** 63 }) |name| {
+        try rename(id, name);
+        const actual = (try nameForId(alloc, id)).?;
+        defer alloc.free(actual);
+        try std.testing.expectEqualStrings(name, actual);
+    }
+    for ([_][]const u8{ "", "a" ** 64, "-web", "web-", "web_api", "web.api", "web api", "a\x00b", "caf\xc3\xa9" }) |name| {
+        try std.testing.expectError(error.InvalidName, rename(id, name));
+        try std.testing.expectError(error.InvalidName, register("abcdef012345", name));
+        const unchanged = (try nameForId(alloc, id)).?;
+        defer alloc.free(unchanged);
+        try std.testing.expectEqualStrings("a" ** 63, unchanged);
+        try std.testing.expect((try nameForId(alloc, "abcdef012345")) == null);
+    }
+    const record = try store.load(alloc, id);
+    defer record.deinit(alloc);
+    try std.testing.expectEqualStrings("original", record.hostname);
 }
