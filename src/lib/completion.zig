@@ -33,7 +33,7 @@ const CommandMeta = struct {
 /// flags and subcommands are listed here rather than in each command module
 /// so that completion logic stays in one place and doesn't leak into the
 /// rest of the codebase.
-const run_flags = &.{ "--name", "--hostname", "--pull", "--entrypoint", "--workdir", "-w", "--user", "-u", "--env", "-e", "--env-file", "--volume", "-v", "--mount", "--publish", "-p", "--network", "--network-alias", "--net", "--no-net", "--memory", "--pids", "--cpus", "--cpu-weight", "--detach", "-d", "--interactive", "-i", "--tty", "-t", "-it", "--rm", "--restart", "--stop-signal", "--stop-timeout", "--health-cmd", "--health-interval", "--health-timeout", "--health-start-period", "--health-start-interval", "--health-retries", "--no-healthcheck" };
+const run_flags = &.{ "--name", "--hostname", "--pull", "--entrypoint", "--workdir", "-w", "--user", "-u", "--env", "-e", "--env-file", "--volume", "-v", "--mount", "--publish", "-p", "--network", "--network-alias", "--net", "--no-net", "--memory", "--pids", "--cpus", "--cpuset-cpus", "--shm-size", "--tmpfs", "--cpu-weight", "--detach", "-d", "--interactive", "-i", "--tty", "-t", "-it", "--rm", "--restart", "--stop-signal", "--stop-timeout", "--health-cmd", "--health-interval", "--health-timeout", "--health-start-period", "--health-start-interval", "--health-retries", "--no-healthcheck" };
 const list_flags = &.{ "-a", "--all", "-q", "--quiet", "-f", "--filter", "--json" };
 const update_flags = &.{ "--memory", "--memory-high", "--cpus", "--cpu-weight", "--pids", "--restart" };
 
@@ -51,7 +51,7 @@ const command_meta = [_]CommandMeta{
     .{ .name = "top", .flags = &.{"--json"} },
     .{ .name = "stats", .flags = &.{"--json"} },
     .{ .name = "update", .flags = update_flags },
-    .{ .name = "volume", .subcommands = &.{ .{ .name = "create" }, .{ .name = "ls", .flags = &.{"--json"} }, .{ .name = "inspect" }, .{ .name = "rm" } } },
+    .{ .name = "volume", .subcommands = &.{ .{ .name = "create" }, .{ .name = "ls" }, .{ .name = "inspect" }, .{ .name = "rm" } } },
     .{ .name = "network", .subcommands = &.{ .{ .name = "create", .flags = &.{"--subnet"} }, .{ .name = "ls", .flags = &.{"--json"} }, .{ .name = "inspect" }, .{ .name = "rm" } } },
     .{ .name = "container", .subcommands = &.{
         .{ .name = "run", .flags = run_flags },

@@ -167,12 +167,15 @@ pub fn printUsage() void {
         \\  --memory SIZE|unlimited      memory limit (default 512 mib)
         \\  --pids COUNT|unlimited       process limit (default 4096)
         \\  --cpus COUNT|unlimited       cpu quota in cores
+        \\  --cpuset-cpus LIST          limit execution to cpu ids or ranges
+        \\  --shm-size SIZE             shared-memory tmpfs size (default 64 mib)
+        \\  --tmpfs PATH[:OPTIONS]      mount a temporary filesystem
         \\  --cpu-weight WEIGHT          scheduling weight from 1 to 10000
         \\  -d, --detach                start in the background
         \\  -i, --interactive           keep stdin available
         \\  -t, --tty                   allocate a terminal
         \\  --rm                       remove after exit, including anonymous volumes
-        \\  --restart POLICY            no, always, on-failure, unless-stopped
+        \\  --restart POLICY            no, always, on-failure[:N], unless-stopped
         \\  --stop-signal SIGNAL         override the image stop signal
         \\  --stop-timeout SECONDS       termination grace period (default 10)
         \\  --health-cmd COMMAND         override or add a shell healthcheck

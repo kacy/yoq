@@ -1,6 +1,6 @@
 # local containers
 
-this guide describes the current source tree, reviewed 2026-09-18. published 0.2.1 binaries do not include all of these commands. the [compatibility table](container-compatibility.md) records the remaining gaps.
+this guide describes the current source tree, reviewed 2026-09-19. published 0.2.1 binaries do not include all of these commands. the [compatibility table](container-compatibility.md) records the remaining gaps.
 
 standalone containers use `run`, `create`, and `container` commands. manifest services use `up` and `down`, with app releases and dependency ordering. both use the same runtime, but their supervisors own different lifecycles.
 
@@ -48,7 +48,7 @@ names are unique across stopped and running containers. `--hostname` sets the pr
 
 `wait NAME` prints the process exit code. `kill --signal TERM NAME` sends a signal without changing restart policy. `stop NAME` records a stop request before signaling, so an automatic restart cannot undo it. `--stop-signal` overrides the image's stop signal; `--stop-timeout` sets the grace period in seconds before forced termination. new containers default to 10 seconds.
 
-restart policies are `no`, `always`, `on-failure`, and `unless-stopped`. automatic restarts back off from one second to 30 seconds. an explicit stop suppresses them for the current host session. `--rm` removes a container and its anonymous volumes after its final exit; it cannot be combined with a restart policy. named volumes remain.
+restart policies are `no`, `always`, `on-failure`, and `unless-stopped`. automatic restarts back off from one second to 30 seconds. `on-failure:N` permits at most N automatic retries after an initial failure; inspect reports the restart count. an explicit stop suppresses them for the current host session. `--rm` removes a container and its anonymous volumes after its final exit; it cannot be combined with a restart policy. named volumes remain.
 
 cleanup failures leave a `cleanup_failed` record. retry `stop` or `rm` after correcting the reported failure. a new start cannot overwrite resources still awaiting cleanup.
 
@@ -96,10 +96,12 @@ stopped containers retain volume references, so `volume rm` rejects a referenced
 
 ## ports and host recovery
 
-`-p 127.0.0.1:8080:80` publishes tcp on a specific ipv4 address. add `/udp` for udp. `-p 80` or `-p 0:80` assigns a host port; read the assignment with `container inspect`. reservations remain stable across stop/start and are released on removal. a running container holds host sockets for its published ports, and startup fails if another process already owns them. `--no-net` disables container networking and cannot be combined with published ports.
+`-p 127.0.0.1:8080:80` publishes tcp on a specific ipv4 address. add `/udp` for udp. `-p 80` or `-p 0:80` assigns a host port; read the assignment with `container inspect`. reservations remain stable across stop/start and are released on removal. a running container holds host sockets for its published ports, and startup fails if another process already owns them. `--no-net` disables container networking and cannot be combined with published ports. matching ranges such as `8000-8003:80-83/tcp` expand to individual mappings, with at most 256 mappings per container.
+
+use `network create NAME`, then `run --network NAME`, for a named ipv4 bridge. `--network-alias` adds names visible within that network. stopped containers retain references, so remove them before `network rm`. see [local networks](container-networks.md) for subnet allocation, dns scope, and cleanup.
 
 standalone supervisors are independent processes; there is no required central daemon. after a host reboot, `yoq container recover` retries `always` containers and `unless-stopped` containers whose saved desired state is running. it does not restart `no` or `on-failure` containers. recovery is a boot action, not a periodic reconciliation command: periodically invoking it would undo a manual stop under `always`.
 
 an optional boot unit is provided at `packaging/yoq-containers.service`. set its binary path and `HOME` to match the installation and state directory before installing it. it is not enabled automatically. this unit handles standalone containers; it does not replace manifest or cluster recovery.
 
-see [resource controls](container-resources.md), [health checks](container-healthchecks.md), and [image archives](image-archives.md) for their exact behavior and limits.
+see [temporary mounts and cpu affinity](container-temporary-mounts.md), [resource controls](container-resources.md), [health checks](container-healthchecks.md), and [image archives](image-archives.md) for their exact behavior and limits.

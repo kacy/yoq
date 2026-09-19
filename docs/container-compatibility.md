@@ -1,6 +1,6 @@
 # local container compatibility
 
-reviewed 2026-09-18 against the current source tree. this table describes native yoq behavior, not a claim that arbitrary docker clients or workloads are interchangeable. use the installed binary's help when running a published release.
+reviewed 2026-09-19 against the current source tree. this table describes native yoq behavior, not a claim that arbitrary docker clients or workloads are interchangeable. use the installed binary's help when running a published release.
 
 | area | status | behavior and limits |
 | --- | --- | --- |
@@ -11,13 +11,13 @@ reviewed 2026-09-18 against the current source tree. this table describes native
 | inspection | implemented | container inspect shows saved config/state/health; ps supports all/quiet/json and status/name/id filters |
 | process overrides | implemented | entrypoint, command, env/env-file, workdir, user, hostname, stop signal/timeout |
 | sessions | implemented | stdin pipes, raw stdout/stderr, terminals, resize, detach, attach; eight clients and one stdin owner |
-| restart | partial | no/always/on-failure/unless-stopped, bounded backoff, optional boot recovery; no retry-count syntax |
+| restart | partial | no/always/on-failure/unless-stopped, bounded backoff, optional boot recovery; `on-failure:N` limits automatic retries |
 | volumes | implemented | named/anonymous local volumes, image VOLUME initialization, nocopy, reference tracking, explicit anonymous cleanup |
 | bind mounts | partial | structured mounts default writable; legacy colon mounts retain yoq's read-only default |
-| ports | partial | tcp/udp, ipv4 bind address, stable ephemeral host assignments; no ipv6 publishing |
+| ports | partial | tcp/udp, ipv4 bind address, stable ephemeral host assignments and equal-length ranges; no ipv6 publishing |
 | named networks | partial | one named ipv4 bridge attachment, scoped names/aliases, references across stop/start; no live connect/disconnect or multiple attachments |
 | health | implemented | image and run overrides, grace/retries/timeouts, status reporting, cancellation and orphan cleanup; output discarded; unhealthy does not trigger restart |
-| resources | partial | hard/soft memory, pids, cpu quota/weight, explicit unlimited settings, live updates, pause/unpause; stats is a snapshot with cumulative cpu time |
+| resources | partial | hard/soft memory, pids, cpu quota/weight, cpu sets, shared-memory sizing, tmpfs, explicit unlimited settings, live updates, pause/unpause; stats is a snapshot with cumulative cpu time |
 | filesystem tools | partial | cp and diff work on running and stopped image containers; cp excludes archives, ownership/xattrs, device nodes and hardlink topology; mounted volumes are outside diff |
 | image metadata | implemented | command arrays, shell forms, user/workdir/env, labels, exposed ports, volumes, stop signal, healthcheck, target architecture |
 | image archives | partial | tag and uncompressed single-platform oci image-layout save/load; no legacy docker archive format, nested multi-platform indexes, or rootfs import/export |
