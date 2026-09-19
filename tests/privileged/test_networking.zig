@@ -386,6 +386,15 @@ test "named networks scope DNS aliases and retain stopped attachments" {
         try response.expectExitCode(0);
         try helpers.expectContains(response.stdout, body);
     }
+    var inspected = try fixture.env.runYoq(&.{ "network", "inspect", "--json", first_network });
+    defer inspected.deinit();
+    try inspected.expectExitCode(0);
+    const report = try std.json.parseFromSlice(std.json.Value, alloc, inspected.stdout, .{});
+    defer report.deinit();
+    try std.testing.expectEqual(@as(i64, 1), report.value.object.get("references").?.integer);
+    const member = report.value.object.get("containers").?.array.items[0].object;
+    try std.testing.expectEqualStrings("shared", member.get("aliases").?.array.items[0].string);
+    try std.testing.expectEqual(@as(usize, 0), member.get("ports").?.array.items.len);
     var other_scope = try fixture.env.runYoq(&.{ "run", "--rm", "--network", second_network, fixture.rootfs.rootfs_path, "/bin/yoq-test-net-probe", "resolve", first_server });
     defer other_scope.deinit();
     try std.testing.expect(other_scope.exit_code != 0);
@@ -402,4 +411,94 @@ test "named networks scope DNS aliases and retain stopped attachments" {
     var network_removed = try fixture.env.runYoq(&.{ "network", "rm", first_network });
     defer network_removed.deinit();
     try network_removed.expectExitCode(0);
+}
+
+fn inspectedPublishedPort(env: *helpers.TestEnv, name: []const u8, protocol: []const u8) !u16 {
+    var result = try env.runYoq(&.{ "container", "inspect", name });
+    defer result.deinit();
+    try result.expectExitCode(0);
+    const document = try std.json.parseFromSlice(std.json.Value, alloc, result.stdout, .{});
+    defer document.deinit();
+    const config = document.value.object.get("config").?.object;
+    const mappings = config.get("port_maps").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), mappings.len);
+    const mapping = mappings[0].object;
+    try std.testing.expectEqualStrings(protocol, mapping.get("protocol").?.string);
+    try std.testing.expectEqualStrings("127.0.0.1", mapping.get("host_ip").?.string);
+    const port = mapping.get("host_port").?.integer;
+    try std.testing.expect(port > 0 and port <= 65535);
+    return @intCast(port);
+}
+
+fn probePublishedPort(env: *helpers.TestEnv, address: []const u8, port: []const u8, protocol: []const u8, success: bool) !void {
+    var attempt: usize = 0;
+    while (true) : (attempt += 1) {
+        var result = if (std.mem.eql(u8, protocol, "udp"))
+            try env.run(&.{ "zig-out/bin/yoq-test-net-probe", "udp-get", address, port, "published-response" })
+        else blk: {
+            const url = try std.fmt.allocPrint(alloc, "http://{s}:{s}/", .{ address, port });
+            defer alloc.free(url);
+            break :blk try env.run(&.{ "curl", "--noproxy", "*", "-fsS", "--connect-timeout", "1", "--max-time", "2", url });
+        };
+        defer result.deinit();
+        if (success and result.exit_code != 0 and attempt < 19) {
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake);
+            continue;
+        }
+        if (success) {
+            try result.expectExitCode(0);
+            try helpers.expectContains(result.stdout, "published-response");
+        } else try std.testing.expect(result.exit_code != 0);
+        return;
+    }
+}
+
+test "loopback tcp and udp ephemeral ports survive restart and retain stopped reservations" {
+    var fixture = try initNetworkingFixture();
+    defer fixture.env.deinit();
+    defer fixture.rootfs.deinit();
+    for ([_][]const u8{ "tcp", "udp" }) |protocol| {
+        const name = try helpers.uniqueName(alloc, "ephemeral-port");
+        defer alloc.free(name);
+        defer stopAndRemoveContainer(&fixture.env, name);
+        const mapping = try std.fmt.allocPrint(alloc, "127.0.0.1:0:8080/{s}", .{protocol});
+        defer alloc.free(mapping);
+        var started = if (std.mem.eql(u8, protocol, "udp"))
+            try fixture.env.runYoq(&.{ "run", "-d", "--name", name, "-p", mapping, fixture.rootfs.rootfs_path, "/bin/yoq-test-net-probe", "udp-serve", "8080" })
+        else
+            try fixture.env.runYoq(&.{ "run", "-d", "--name", name, "-p", mapping, fixture.rootfs.rootfs_path, "/bin/yoq-test-http-server", "8080", "published-response" });
+        defer started.deinit();
+        try started.expectExitCode(0);
+        try waitForContainerRunning(&fixture.env, name);
+        const assigned = try inspectedPublishedPort(&fixture.env, name, protocol);
+        const port = try std.fmt.allocPrint(alloc, "{d}", .{assigned});
+        defer alloc.free(port);
+        try probePublishedPort(&fixture.env, "127.0.0.1", port, protocol, true);
+        try probePublishedPort(&fixture.env, "127.0.0.2", port, protocol, false);
+        var held = try fixture.env.run(&.{ "zig-out/bin/yoq-test-net-probe", "bind-probe", "127.0.0.1", port, protocol });
+        defer held.deinit();
+        try std.testing.expect(held.exit_code != 0);
+        var restarted = try fixture.env.runYoq(&.{ "restart", name });
+        defer restarted.deinit();
+        try restarted.expectExitCode(0);
+        try std.testing.expectEqual(assigned, try inspectedPublishedPort(&fixture.env, name, protocol));
+        try probePublishedPort(&fixture.env, "127.0.0.1", port, protocol, true);
+        var stopped = try fixture.env.runYoq(&.{ "stop", name });
+        defer stopped.deinit();
+        try stopped.expectExitCode(0);
+        var released_socket = try fixture.env.run(&.{ "zig-out/bin/yoq-test-net-probe", "bind-probe", "127.0.0.1", port, protocol });
+        defer released_socket.deinit();
+        try released_socket.expectExitCode(0);
+        const same_mapping = try std.fmt.allocPrint(alloc, "127.0.0.1:{s}:8080/{s}", .{ port, protocol });
+        defer alloc.free(same_mapping);
+        var conflict = try fixture.env.runYoq(&.{ "create", "-p", same_mapping, fixture.rootfs.rootfs_path, "/bin/sh" });
+        defer conflict.deinit();
+        try std.testing.expect(conflict.exit_code != 0);
+        var removed = try fixture.env.runYoq(&.{ "rm", name });
+        defer removed.deinit();
+        try removed.expectExitCode(0);
+        var reused = try fixture.env.runYoq(&.{ "create", "--name", name, "-p", same_mapping, fixture.rootfs.rootfs_path, "/bin/sh" });
+        defer reused.deinit();
+        try reused.expectExitCode(0);
+    }
 }

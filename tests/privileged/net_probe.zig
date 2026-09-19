@@ -30,11 +30,31 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (std.mem.eql(u8, cmd, "udp-serve")) {
+        if (argv.len != 3) usage();
+        return udpServe(try std.fmt.parseUnsigned(u16, argv[2], 10));
+    }
+    if (std.mem.eql(u8, cmd, "udp-get")) {
+        if (argv.len != 5) usage();
+        const address = try resolveHost(argv[2]);
+        return udpGet(address, try std.fmt.parseUnsigned(u16, argv[3], 10), argv[4]);
+    }
+    if (std.mem.eql(u8, cmd, "bind-probe")) {
+        if (argv.len != 5) usage();
+        const address = try resolveHost(argv[2]);
+        const kind: u32 = if (std.mem.eql(u8, argv[4], "tcp")) posix.SOCK.STREAM else if (std.mem.eql(u8, argv[4], "udp")) posix.SOCK.DGRAM else usage();
+        const fd = try lposix.socket(posix.AF.INET, kind, 0);
+        defer lposix.close(fd);
+        const socket_address = linux_platform.net.Address.initIp4(address, try std.fmt.parseUnsigned(u16, argv[3], 10));
+        try lposix.bind(fd, &socket_address.any, socket_address.getOsSockLen());
+        return;
+    }
+
     usage();
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: yoq-test-net-probe <resolve host|http-get host port path>\n", .{});
+    std.debug.print("usage: yoq-test-net-probe <resolve host|http-get host port path|udp-serve port|udp-get host port payload|bind-probe host port tcp|udp>\n", .{});
     std.process.exit(1);
 }
 
@@ -258,4 +278,31 @@ fn writeStdout(comptime fmt: []const u8, args: anytype) !void {
     const out = &writer.interface;
     try out.print(fmt, args);
     try out.flush();
+}
+
+fn udpServe(port: u16) !void {
+    const fd = try lposix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0);
+    defer lposix.close(fd);
+    const address = linux_platform.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+    try lposix.bind(fd, &address.any, address.getOsSockLen());
+    var buffer: [512]u8 = undefined;
+    while (true) {
+        var peer: posix.sockaddr.in = undefined;
+        var length: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+        const n = try lposix.recvfrom(fd, &buffer, 0, @ptrCast(&peer), &length);
+        _ = try lposix.sendto(fd, buffer[0..n], 0, @ptrCast(&peer), length);
+    }
+}
+
+fn udpGet(host: [4]u8, port: u16, payload: []const u8) !void {
+    const fd = try lposix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0);
+    defer lposix.close(fd);
+    const timeout = posix.timeval{ .sec = 1, .usec = 0 };
+    try lposix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+    const address = linux_platform.net.Address.initIp4(host, port);
+    try lposix.connect(fd, &address.any, address.getOsSockLen());
+    _ = try lposix.sendto(fd, payload, 0, &address.any, address.getOsSockLen());
+    var response: [512]u8 = undefined;
+    const n = try lposix.recv(fd, &response, 0);
+    try writeStdout("{s}", .{response[0..n]});
 }
