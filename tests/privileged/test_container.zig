@@ -691,3 +691,33 @@ fn readProcessFile(path: []const u8) ![]u8 {
     var reader = file.readerStreaming(std.testing.io, &buffer);
     return reader.interface.allocRemaining(alloc, .limited(1024 * 1024));
 }
+
+test "local parity live resource updates persist and stopping thaws a paused container" {
+    var fixture = try ImageFixture.init();
+    defer fixture.deinit();
+    defer cleanupContainer(&fixture.env, "resource-owner");
+    try expectCommand(&fixture.env, &.{ "run", "--no-net", "-d", "--name", "resource-owner", ImageFixture.tag, "sleep", "60" });
+    try expectCommand(&fixture.env, &.{ "update", "resource-owner", "--memory", "64m", "--pids", "32", "--cpus", "0.5" });
+    try expectResourceLimits(&fixture.env, "resource-owner", false);
+    try expectCommand(&fixture.env, &.{ "pause", "resource-owner" });
+    try expectResourceLimits(&fixture.env, "resource-owner", true);
+    try expectCommand(&fixture.env, &.{ "unpause", "resource-owner" });
+    try expectResourceLimits(&fixture.env, "resource-owner", false);
+    try expectCommand(&fixture.env, &.{ "pause", "resource-owner" });
+    try expectCommand(&fixture.env, &.{ "stop", "resource-owner" });
+    try expectCommand(&fixture.env, &.{ "start", "resource-owner" });
+    try expectResourceLimits(&fixture.env, "resource-owner", false);
+}
+
+fn expectResourceLimits(env: *helpers.TestEnv, name: []const u8, paused: bool) !void {
+    var result = try env.runYoq(&.{ "stats", name, "--json" });
+    defer result.deinit();
+    try result.expectExitCode(0);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, result.stdout, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(paused, parsed.value.object.get("paused").?.bool);
+    const limits = parsed.value.object.get("limits").?.object;
+    try std.testing.expectEqualStrings("67108864", limits.get("memory_max").?.string);
+    try std.testing.expectEqualStrings("32", limits.get("pids_max").?.string);
+    try std.testing.expectEqualStrings("50000 100000", limits.get("cpu_max").?.string);
+}
