@@ -68,7 +68,11 @@ pub const Cgroup = struct {
     pub fn setLimits(self: *const Cgroup, limits: ResourceLimits) CgroupError!void {
         if (limits.cpuset_cpus) |requested| {
             var available_buffer: [512]u8 = undefined;
-            const available_text = self.readFile("cpuset.cpus.effective", &available_buffer) catch return error.NotSupported;
+            const available_text = self.readFile("cpuset.cpus.effective", &available_buffer) catch blk: {
+                try enableCpusetController(cgroup_root);
+                try enableCpusetController(cgroup_root ++ "/" ++ yoq_prefix);
+                break :blk self.readFile("cpuset.cpus.effective", &available_buffer) catch return error.NotSupported;
+            };
             const available = common.CpuSet.parse(available_text) catch return error.InvalidLimit;
             if (!requested.isSubsetOf(&available)) return error.InvalidLimit;
             self.writeFile("cpuset.cpus", requested.text()) catch return error.WriteFailed;
@@ -362,6 +366,14 @@ pub const Cgroup = struct {
         return metrics_support.parsePsiFromContent(content) orelse CgroupError.ReadFailed;
     }
 };
+
+fn enableCpusetController(directory: []const u8) CgroupError!void {
+    var path_buffer: [512]u8 = undefined;
+    const filename = std.fmt.bufPrint(&path_buffer, "{s}/cgroup.subtree_control", .{directory}) catch return error.NotSupported;
+    const file = std.Io.Dir.cwd().openFile(std.Options.debug_io, filename, .{ .mode = .write_only }) catch return error.NotSupported;
+    defer file.close(std.Options.debug_io);
+    file.writeStreamingAll(std.Options.debug_io, "+cpuset") catch return error.NotSupported;
+}
 
 fn enableSubtreeControllers(dir_path: []const u8) bool {
     var ctrl_buf: [512]u8 = undefined;
