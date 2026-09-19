@@ -209,7 +209,9 @@ const RuleRunner = struct {
             argv[count] = arg orelse break;
             count += 1;
         }
-        const io = std.Options.debug_io;
+        var helper_io = @import("../lib/helper_io.zig").init();
+        defer helper_io.deinit();
+        const io = helper_io.io();
         var child = std.process.spawn(io, .{ .argv = argv[0..count], .stdin = .ignore, .stdout = .ignore, .stderr = .ignore }) catch return error.ExecFailed;
         defer child.kill(io);
         const term = child.wait(io) catch return error.ExecFailed;
@@ -596,4 +598,12 @@ test "checked nat removal accepts absence and preserves command failures" {
         var fake: Fake = .{ .statuses = statuses };
         try std.testing.expectError(error.ExecFailed, removeRuleChecked(args, &fake));
     }
+}
+
+test "nat cleanup subprocesses allocate arguments and preserve absent-rule exit status" {
+    var args: ArgList = .{null} ** max_args;
+    args[0] = "sh";
+    args[1] = "-c";
+    args[2] = "test -n \"$PATH\" && exit 1";
+    try std.testing.expectEqual(@as(u8, 1), try RuleRunner.run(.{}, &args));
 }

@@ -6,7 +6,9 @@ const chain = "YOQ-LOCAL-ISOLATION";
 const Error = error{RuleFailed};
 
 fn run(args: []const []const u8) Error!u8 {
-    const io = std.Options.debug_io;
+    var helper_io = @import("../lib/helper_io.zig").init();
+    defer helper_io.deinit();
+    const io = helper_io.io();
     var child = std.process.spawn(io, .{ .argv = args, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore }) catch return error.RuleFailed;
     defer child.kill(io);
     const term = child.wait(io) catch return error.RuleFailed;
@@ -65,4 +67,9 @@ pub fn remove(bridge_name: []const u8, base: [4]u8) !void {
     try rule(&.{ "iptables", "--wait", "5", "-t", "nat", "-D", "POSTROUTING", "-s", subnet, "!", "-o", bridge_name, "-j", "MASQUERADE" }, true);
     try rule(&.{ "iptables", "--wait", "5", "-D", "FORWARD", "-i", bridge_name, "-s", subnet, "-j", "ACCEPT" }, true);
     try rule(&.{ "iptables", "--wait", "5", "-D", "FORWARD", "-o", bridge_name, "-d", subnet, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT" }, true);
+}
+
+test "named network subprocesses inherit PATH and preserve command exit codes" {
+    try std.testing.expectEqual(@as(u8, 0), try run(&.{ "sh", "-c", "test -n \"$PATH\"" }));
+    try std.testing.expectEqual(@as(u8, 1), try run(&.{ "sh", "-c", "exit 1" }));
 }
