@@ -123,19 +123,22 @@ pub fn exec_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !voi
         exec_args.append(alloc, arg) catch return ContainerError.OutOfMemory;
     }
 
-    const saved = run_state.loadConfig(alloc, record.id) catch |err| {
+    const saved = run_state.loadConfig(alloc, record.id) catch |err| blk: {
+        // app and assignment owners do not write standalone run configuration.
+        // preserve their existing exec defaults when no saved settings exist.
+        if (err == error.NotFound) break :blk null;
         writeErr("failed to load process configuration for {s}: {}\n", .{ id, err });
         return ContainerError.StoreError;
     };
-    defer saved.deinit(alloc);
+    defer if (saved) |config| config.deinit(alloc);
 
     const exit_code = exec.execInContainer(.{
         .pid = pid,
         .command = command,
         .args = exec_args.items,
-        .env = saved.env,
-        .working_dir = saved.working_dir,
-        .user = saved.user,
+        .env = if (saved) |config| config.env else &.{},
+        .working_dir = if (saved) |config| config.working_dir else "/",
+        .user = if (saved) |config| config.user else null,
         .cgroup_id = record.id,
         .interactive = interactive,
         .tty = tty,
