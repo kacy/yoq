@@ -44,25 +44,27 @@ sudo -H "$(command -v yoq)" rm worker
 
 stopping a container releases its process resources and network endpoint. its name, configuration, volume references, and writable image layer remain. starting or restarting it uses that same layer. removal deletes the layer and logs. a rootfs path supplied directly to `run` remains a host-owned directory.
 
-names are unique across stopped and running containers. `--hostname` sets the process hostname independently. `yoq rename ID NEW-NAME` changes the lookup name without changing that hostname or an existing network alias. older records with duplicate hostnames must be addressed by id and renamed before lookup by name becomes unambiguous.
+names are unique across stopped and running containers. names contain 1–63 letters, digits, or hyphens, without a leading or trailing hyphen. commands accept a name or full container id; shortened id lookup is not supported. `--hostname` sets the process hostname independently. `yoq rename ID NEW-NAME` changes the lookup name without changing that hostname or an existing network alias. older records with duplicate hostnames must be addressed by id and renamed before lookup by name becomes unambiguous.
 
-`wait NAME` prints the process exit code. `kill --signal TERM NAME` sends a signal without changing restart policy. `stop NAME` records a stop request before signaling, so an automatic restart cannot undo it. `--stop-signal` overrides the image's stop signal; `--stop-timeout` sets the grace period in seconds before forced termination. new containers default to 10 seconds.
+`wait NAME` prints an exit code once the saved record has no running process. an already stopped container returns its saved exit code; under automatic restart, the command can observe the exit between attempts. it does not reserve a particular future attempt. `kill --signal TERM NAME` sends a signal without changing restart policy. `stop NAME` records a stop request before signaling, so an automatic restart cannot undo it. `--stop-signal` overrides the image's stop signal; `--stop-timeout` sets the grace period in seconds before forced termination. new containers default to 10 seconds.
 
-restart policies are `no`, `always`, `on-failure`, and `unless-stopped`. automatic restarts back off from one second to 30 seconds. `on-failure:N` permits at most N automatic retries after an initial failure; inspect reports the restart count. an explicit stop suppresses them for the current host session. `--rm` removes a container and its anonymous volumes after its final exit; it cannot be combined with a restart policy. named volumes remain.
+restart policies are `no`, `always`, `on-failure`, and `unless-stopped`. `on-failure:N` permits at most N automatic retries after the initial attempt; N must be positive. `on-failure` without a count retries without a count limit. an explicit start or restart begins a new retry count. automatic restarts back off from one second to 30 seconds. an explicit stop suppresses them for the current host session. `--rm` removes a container and its anonymous volumes after its final exit; it cannot be combined with a restart policy. named volumes remain.
 
 cleanup failures leave a `cleanup_failed` record. retry `stop` or `rm` after correcting the reported failure. a new start cannot overwrite resources still awaiting cleanup.
 
 ## process settings and sessions
 
-`--entrypoint` replaces the image entrypoint and clears the inherited command. arguments after the image become its command arguments. `--workdir`/`-w` and `--user`/`-u` override image settings. exec uses the saved environment, working directory, user, and executable search path.
+`--entrypoint` replaces the image entrypoint and clears the inherited command. arguments after the image become its command arguments. `--workdir`/`-w` and `--user`/`-u` override image settings. the working directory must already exist inside the container. exec uses the saved environment, working directory, user, and executable search path.
 
-use `-e KEY=value` to set a value or `-e KEY` to copy it from the invoking environment. an unset host variable removes an inherited image value. `--env-file PATH` reads literal `KEY=value` lines, blank lines, and comments beginning with `#`. it accepts windows line endings. it does not expand shell expressions or strip quotes. explicit `-e` values take precedence over env-file values, regardless of flag order.
+use `-e KEY=value` to set a value or `-e KEY` to copy it from the invoking environment. an unset host variable removes an inherited image value. `--env-file PATH` accepts literal `KEY=value` lines and bare `KEY` names with the same host-environment behavior as `-e KEY`. blank lines and comments beginning with `#` are ignored. it accepts windows line endings. it does not expand shell expressions or strip quotes. explicit `-e` values take precedence over env-file values, regardless of flag order.
 
 ```bash
-sudo -H "$(command -v yoq)" run -dit --name shell local-demo:latest sh
+sudo -H "$(command -v yoq)" run -d -it --name shell local-demo:latest sh
 sudo -H "$(command -v yoq)" attach shell
 sudo -H "$(command -v yoq)" exec -it shell sh
 ```
+
+run options must precede the image or rootfs argument; arguments after it belong to the process. value options accept `--option=value`. switches such as `--rm`, `--detach`, and `--no-healthcheck` do not accept `=true` or `=false`. use `-d -it` for a detached terminal; arbitrary short-option clusters such as `-dit` are not supported.
 
 `-i` keeps stdin available; `-t` allocates a terminal. terminal sessions merge stdout and stderr, handle terminal size changes, and restore the caller's terminal on exit. press ctrl-p, then ctrl-q to detach from an attached terminal without stopping the process. these bytes remain ordinary input in a pipe. `attach --no-stdin` observes output without claiming stdin. one client owns stdin; up to eight clients can observe a session.
 
@@ -72,11 +74,12 @@ without `-t`, foreground output preserves raw bytes and separates stderr from st
 
 ## storage
 
-structured bind mounts are writable by default:
+structured bind mounts are writable by default. this example uses a host directory under `/srv`; bind sources under `/home` and other protected host directories are rejected:
 
 ```bash
+sudo mkdir -p /srv/yoq-project
 sudo -H "$(command -v yoq)" run --rm \
-  --mount type=bind,src="$PWD",dst=/project,readonly \
+  --mount type=bind,src=/srv/yoq-project,dst=/project,readonly \
   local-demo:latest ls /project
 ```
 
@@ -94,11 +97,23 @@ named and anonymous volumes are writable by default. `--mount type=volume,dst=/d
 
 stopped containers retain volume references, so `volume rm` rejects a referenced volume. ordinary `rm` preserves volumes. `rm -v` additionally removes anonymous volumes; named volumes require `volume rm`. use [cp and diff](container-filesystems.md) to copy files or inspect changes in an image container's writable layer.
 
+`--tmpfs /cache:size=32m,mode=750` adds an empty temporary filesystem.
+`--shm-size 128m` changes `/dev/shm` from its 64 mib default; `/tmp` also defaults
+to 64 mib. these contents disappear on stop. `--cpuset-cpus 0-2,4` restricts a
+container to available host CPUs. these settings are chosen at creation and
+retained for later starts; `update` does not change them. see
+[cpu sets and temporary mounts](container-temporary-mounts.md) for supported options.
+
 ## ports and host recovery
 
 `-p 127.0.0.1:8080:80` publishes tcp on a specific ipv4 address. add `/udp` for udp. `-p 80` or `-p 0:80` assigns a host port; read the assignment with `container inspect`. reservations remain stable across stop/start and are released on removal. a running container holds host sockets for its published ports, and startup fails if another process already owns them. `--no-net` disables container networking and cannot be combined with published ports. matching ranges such as `8000-8003:80-83/tcp` expand to individual mappings, with at most 256 mappings per container.
 
 use `network create NAME`, then `run --network NAME`, for a named ipv4 bridge. `--network-alias` adds names visible within that network. stopped containers retain references, so remove them before `network rm`. see [local networks](container-networks.md) for subnet allocation, dns scope, and cleanup.
+
+use `network create NAME` and `run --network NAME` for a named ipv4 bridge.
+`--network-alias` adds names within that network. a container has one attachment,
+chosen at creation; stopped containers keep the network reference. see
+[local networks](container-networks.md) for subnet, DNS, and port-range behavior.
 
 standalone supervisors are independent processes; there is no required central daemon. after a host reboot, `yoq container recover` retries `always` containers and `unless-stopped` containers whose saved desired state is running. it does not restart `no` or `on-failure` containers. recovery is a boot action, not a periodic reconciliation command: periodically invoking it would undo a manual stop under `always`.
 

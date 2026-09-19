@@ -34,7 +34,9 @@ Targets must be absolute paths without `.` or `..` components. The root,
 `/proc`, `/sys`, `/dev`, and `/dev/pts` are reserved. An explicit tmpfs overrides
 an image's `VOLUME` declaration for the same target. Specifying both a bind or
 volume mount and a tmpfs at the same target is an error. Parent mounts are applied
-before their children, even when options appear in another order.
+before their children, even when options appear in another order. a read-only
+tmpfs cannot contain a nested mount: its empty filesystem cannot create the child
+mountpoint.
 
 Temporary filesystem contents disappear when the container stops. Starting the
 same container creates fresh temporary filesystems with the saved settings.

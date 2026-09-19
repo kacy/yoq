@@ -78,7 +78,9 @@ for a larger example with postgres, redis, workers, and health checks, see [exam
 
 use `yoq build` and `yoq run` for a single container without a manifest. locally built images can run with `--pull never`; stop/start keeps the same writable layer. `yoq container inspect` shows the effective configuration, and `run -it`, `exec -it`, and `attach` support terminal sessions.
 
-see [local containers](docs/local-containers.md) for build/run, volumes, ports, and cleanup, and the [compatibility table](docs/container-compatibility.md) for the supported scope.
+these commands describe the current source tree; published 0.2.1 binaries do not include every local-container feature.
+
+see [local containers](docs/local-containers.md) for build/run, volumes, named networks, temporary mounts, and cleanup, and the [compatibility table](docs/container-compatibility.md) for the supported scope.
 
 ## what you get
 
