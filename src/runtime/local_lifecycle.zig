@@ -52,34 +52,13 @@ pub fn stop(id: []const u8, alloc: std.mem.Allocator) !void {
 }
 
 fn stopLocked(id: []const u8, alloc: std.mem.Allocator) !void {
-    stopping: {
-        const transition = try control.lock(id, .transition, true);
-        defer transition.deinit();
-        var record = try store.load(alloc, id);
-        defer record.deinit(alloc);
-        try control.ensureRegistered(id);
-        _ = try control.request(id, false);
-        if (record.pid != null) {
-            const pid = state_support.currentOwnedRunningPid(&record) orelse {
-                const latest = try store.load(alloc, id);
-                defer latest.deinit(alloc);
-                if (latest.pid != null) return error.StateUnknown;
-                break :stopping;
-            };
-            const cfg = run_state.loadConfig(alloc, id) catch null;
-            defer if (cfg) |value| value.deinit(alloc);
-            if (std.mem.eql(u8, record.status, "paused")) {
-                const cg = try @import("cgroups.zig").Cgroup.open(id);
-                try cg.setFrozen(false);
-            }
-            try supervisor.stopProcessWithOptions(pid, if (cfg) |value| value.stop_signal else 15, if (cfg) |value| value.stop_timeout_seconds else 5);
-        }
-    }
-    try waitForOwner(id);
+    try requestStop(id, alloc);
+
+    // the supervisor finishes teardown before handing cleanup ownership to us.
+    const owner = try acquireStoppedOwner(id);
+    defer owner.deinit();
     const record = try store.load(alloc, id);
     defer record.deinit(alloc);
-    const owner = try control.lock(id, .owner, true);
-    defer owner.deinit();
     cleanupRuntime(alloc, &record) catch |err| {
         store.updateStatus(id, "cleanup_failed", null, record.exit_code) catch {};
         return err;
@@ -87,18 +66,47 @@ fn stopLocked(id: []const u8, alloc: std.mem.Allocator) !void {
     try store.updateStatus(id, "stopped", null, record.exit_code);
 }
 
-fn waitForOwner(id: []const u8) !void {
-    var attempts: usize = 0;
-    while (attempts < 240) : (attempts += 1) {
-        const owner = control.lock(id, .owner, false) catch |err| {
+fn requestStop(id: []const u8, alloc: std.mem.Allocator) !void {
+    const transition = try control.lock(id, .transition, true);
+    defer transition.deinit();
+    const record = try store.load(alloc, id);
+    defer record.deinit(alloc);
+    try control.ensureRegistered(id);
+    _ = try control.request(id, false);
+    if (record.pid == null) return;
+
+    const pid = state_support.currentOwnedRunningPid(&record) orelse {
+        // liveness checks clear an exited pid, but leave an uncertain one intact.
+        const latest = try store.load(alloc, id);
+        defer latest.deinit(alloc);
+        if (latest.pid != null) return error.StateUnknown;
+        return;
+    };
+    const cfg = run_state.loadConfig(alloc, id) catch null;
+    defer if (cfg) |value| value.deinit(alloc);
+    if (std.mem.eql(u8, record.status, "paused")) {
+        const cg = try @import("cgroups.zig").Cgroup.open(id);
+        try cg.setFrozen(false);
+    }
+    const signal = if (cfg) |value| value.stop_signal else 15;
+    const timeout_seconds = if (cfg) |value| value.stop_timeout_seconds else 5;
+    try supervisor.stopProcessWithOptions(pid, signal, timeout_seconds);
+}
+
+fn acquireStoppedOwner(id: []const u8) !control.Lock {
+    for (0..240) |_| {
+        return control.lock(id, .owner, false) catch |err| {
             if (err != error.Busy) return err;
-            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container owner shutdown")) return error.StateUnknown;
+            if (!runtime_wait.sleep(.fromMilliseconds(50), "container owner shutdown")) return error.StateUnknown;
             continue;
         };
-        owner.deinit();
-        return;
     }
     return error.StateUnknown;
+}
+
+fn waitForOwner(id: []const u8) !void {
+    const owner = try acquireStoppedOwner(id);
+    owner.deinit();
 }
 
 pub fn start(io: std.Io, alloc: std.mem.Allocator, id: []const u8) !void {

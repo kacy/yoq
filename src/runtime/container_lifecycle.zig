@@ -1,6 +1,6 @@
-// Native API and CLI operations share owner selection. Standalone containers
+// native api and cli operations share owner selection. standalone containers
 // use durable lifecycle recovery; manifest and assignment owners finalize their
-// own runtime resources when their Container exits.
+// own runtime resources when their container exits.
 const std = @import("std");
 const store = @import("../state/store.zig");
 const standalone = @import("local_lifecycle.zig");
@@ -9,6 +9,8 @@ const run_state = @import("run_state.zig");
 const process = @import("process.zig");
 const cgroups = @import("cgroups.zig");
 const runtime_wait = @import("../lib/runtime_wait.zig");
+const state_support = @import("cli/container/state_support.zig");
+const supervisor = @import("cli/container/supervisor_runtime.zig");
 
 pub const StopWait = enum { brief, complete };
 pub const StopResult = enum { stopped, stopping };
@@ -31,11 +33,16 @@ pub fn stop(alloc: std.mem.Allocator, id: []const u8, wait: StopWait) !StopResul
         try standalone.stop(id, alloc);
         return .stopped;
     }
+    return stopManaged(alloc, &record, wait);
+}
+
+fn stopManaged(alloc: std.mem.Allocator, record: *const store.ContainerRecord, wait: StopWait) !StopResult {
+    const id = record.id;
     if (!std.mem.eql(u8, record.status, "running")) return error.InvalidStatus;
     if (wait == .complete) {
-        const pid = @import("cli/container/state_support.zig").currentOwnedRunningPid(&record) orelse return error.NotRunning;
-        try @import("cli/container/supervisor_runtime.zig").stopProcess(pid);
-        if (!@import("cli/container/state_support.zig").waitForStoppedState(alloc, id)) return error.StateUnknown;
+        const pid = state_support.currentOwnedRunningPid(record) orelse return error.NotRunning;
+        try supervisor.stopProcess(pid);
+        if (!state_support.waitForStoppedState(alloc, id)) return error.StateUnknown;
         return .stopped;
     }
     const pid = record.pid orelse return error.NotRunning;
@@ -90,7 +97,7 @@ test "container owner selection recognizes standalone metadata and managed apps"
     try std.testing.expect(!try isStandalone(std.testing.allocator, &record));
     try control.register(id, null);
     try std.testing.expect(try isStandalone(std.testing.allocator, &record));
-    // An app owner remains authoritative even if an older API call previously
+    // an app owner remains authoritative even if an older api call previously
     // registered this container in the standalone control table.
     record.app_name = "managed-app";
     try std.testing.expect(!try isStandalone(std.testing.allocator, &record));
