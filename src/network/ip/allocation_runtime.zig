@@ -110,6 +110,11 @@ pub fn release(db: *sqlite.Db, container_id: []const u8) common.IpError!void {
 }
 
 pub fn lookup(db: *sqlite.Db, alloc: std.mem.Allocator, container_id: []const u8) common.IpError![4]u8 {
+    return lookupChecked(db, alloc, container_id) catch return common.IpError.NotFound;
+}
+
+/// Recovery must distinguish an absent allocation from a failed database read.
+pub fn lookupChecked(db: *sqlite.Db, alloc: std.mem.Allocator, container_id: []const u8) common.IpError![4]u8 {
     if (container_id.len == 0) return common.IpError.NotFound;
 
     const IpRow = struct { ip_address: sqlite.Text };
@@ -119,8 +124,8 @@ pub fn lookup(db: *sqlite.Db, alloc: std.mem.Allocator, container_id: []const u8
         "SELECT ip_address FROM ip_allocations WHERE container_id = ?;",
         .{},
         .{container_id},
-    ) catch return common.IpError.NotFound) orelse return common.IpError.NotFound;
+    ) catch return common.IpError.DbOpenFailed) orelse return common.IpError.NotFound;
     defer alloc.free(row.ip_address.data);
 
-    return parse_support.parseIp(row.ip_address.data) orelse common.IpError.NotFound;
+    return parse_support.parseIp(row.ip_address.data) orelse common.IpError.AllocationFailed;
 }
