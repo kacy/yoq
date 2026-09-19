@@ -86,6 +86,8 @@ pub const Server = struct {
             self.exit_code = null;
             self.history_len = 0;
             self.history_next = 0;
+            self.input_len = 0;
+            self.eof_pending = false;
         }
         self.forking = true;
         io.close_in_child[0] = self.listener;
@@ -173,7 +175,13 @@ pub const Server = struct {
             const entry = &self.history[(oldest + i) % history_count];
             try protocol.send(client.fd, try entry.kind(), entry.payload(), true);
         }
-        if (self.exit_code) |code| try protocol.send(client.fd, .exit, &.{code}, true);
+        if (self.exit_code) |code| {
+            try protocol.send(client.fd, .exit, &.{code}, true);
+            // This attachment belongs to the completed attempt. It must not
+            // enqueue stdin or retain ownership for the next automatic run.
+            self.disconnect(client);
+            return;
+        }
         client.ready = true;
         self.ever_attached.store(true, .release);
     }
@@ -317,4 +325,36 @@ test "session server replays raw output and grants stdin to one client" {
     try protocol.receive(client, &packet, false);
     try std.testing.expectEqual(protocol.Kind.exit, try packet.kind());
     try std.testing.expectEqualSlices(u8, &.{23}, packet.payload());
+}
+
+test "session attachment after exit cannot feed the next attempt" {
+    var server = try Server.init("fe1234567890", true, false);
+    defer server.deinit();
+    Server.output(&server, "stdout", "first attempt");
+    server.finish(23);
+    var sockets: [2]posix.fd_t = undefined;
+    if (linux.socketpair(posix.AF.UNIX, posix.SOCK.SEQPACKET | posix.SOCK.CLOEXEC, 0, &sockets) != 0) return error.SocketFailed;
+    defer platform.close(sockets[1]);
+    var client: Client = .{ .fd = sockets[0] };
+    defer channels.close(&client.fd);
+    try server.hello(&client, &.{1});
+    try std.testing.expectEqual(@as(posix.fd_t, -1), client.fd);
+    try std.testing.expect(server.input_client == null);
+    var packet: protocol.Packet = .{};
+    try protocol.receive(sockets[1], &packet, false);
+    try std.testing.expectEqual(protocol.Kind.ready, try packet.kind());
+    try protocol.receive(sockets[1], &packet, false);
+    try std.testing.expectEqualStrings("first attempt", packet.payload());
+    try protocol.receive(sockets[1], &packet, false);
+    try std.testing.expectEqual(protocol.Kind.exit, try packet.kind());
+    server.input_len = 3;
+    server.eof_pending = true;
+    var io = try channels.ProcessIo.init(true, false);
+    defer io.deinit();
+    server.prepareChild(&io);
+    server.childStarted();
+    try std.testing.expectEqual(@as(usize, 0), server.input_len);
+    try std.testing.expectEqual(@as(usize, 0), server.history_len);
+    try std.testing.expect(!server.eof_pending);
+    try std.testing.expect(server.exit_code == null);
 }
