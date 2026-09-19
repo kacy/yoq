@@ -491,6 +491,10 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
 
     const is_image = !isFilesystemTarget(flags.target);
 
+    // Keep resolved layers alive until the saved configuration pins them.
+    var image_lease = try @import("../../../image/store_lock.zig").Lock.acquire(.shared);
+    defer image_lease.deinit();
+
     var img = if (is_image)
         try image_cmds.resolveImage(ctx.io, alloc, flags.target, flags.pull_policy)
     else
@@ -569,6 +573,7 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
     }
 
     created = true;
+    image_lease.deinit();
     if (create_only) {
         write("{s}\n", .{id});
         return;
