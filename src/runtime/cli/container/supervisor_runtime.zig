@@ -83,8 +83,8 @@ fn acquireOwner(id: []const u8, generation: i64) !control.Lock {
 fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, attach: bool, generation: i64) u8 {
     const owner = acquireOwner(id, generation) catch return 255;
     defer owner.deinit();
-    @import("../../local_health.zig").cleanupOrphans(id) catch return 255;
     defer control.finish(id, generation) catch {};
+    @import("../../local_health.zig").cleanupOrphans(id) catch return 255;
     var backoff_ms: u32 = 1000;
     var first_start = true;
     var last_exit: u8 = 255;
@@ -280,7 +280,7 @@ pub fn runSupervisor(args: *std.process.Args.Iterator, alloc: std.mem.Allocator)
     const mode = args.next() orelse "detached";
     const exit_code = superviseGeneration(id, &cfg, std.mem.eql(u8, mode, "attach"), generation);
     if (cfg.auto_remove) {
-        @import("../../local_lifecycle.zig").removeWithVolumes(id, alloc, true) catch |err| {
+        @import("../../local_lifecycle.zig").removeAutomatic(id, alloc, generation) catch |err| {
             writeErr("automatic removal failed for {s}: {}\n", .{ id, err });
         };
     }

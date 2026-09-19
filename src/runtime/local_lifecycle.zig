@@ -134,6 +134,17 @@ pub fn remove(id: []const u8, alloc: std.mem.Allocator) !void {
 pub fn removeWithVolumes(id: []const u8, alloc: std.mem.Allocator, remove_anonymous: bool) !void {
     const command_lock = try control.lock(id, .command, true);
     defer command_lock.deinit();
+    return removeLocked(id, alloc, remove_anonymous);
+}
+
+pub fn removeAutomatic(id: []const u8, alloc: std.mem.Allocator, generation: ?i64) !void {
+    const command_lock = try control.lock(id, .command, true);
+    defer command_lock.deinit();
+    if (!try control.finishedGeneration(id, generation)) return;
+    try removeLocked(id, alloc, true);
+}
+
+fn removeLocked(id: []const u8, alloc: std.mem.Allocator, remove_anonymous: bool) !void {
     const record = try store.load(alloc, id);
     defer record.deinit(alloc);
     if (record.pid != null or std.mem.eql(u8, record.status, "running")) return error.ContainerRunning;

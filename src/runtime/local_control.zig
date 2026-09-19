@@ -100,6 +100,35 @@ pub fn finish(id: []const u8, generation: i64) !void {
     try lease.db.exec("UPDATE local_containers SET desired_running = 0 WHERE container_id = ? AND generation = ?;", .{}, .{ id, generation });
 }
 
+// Automatic removal runs after the owner releases its lock. A new start may
+// already have claimed the container, so completion alone is not permission
+// to remove it. Call while holding the command lock.
+pub fn finishedGeneration(id: []const u8, generation: ?i64) !bool {
+    var lease = try db_store.leaseDb();
+    defer lease.deinit();
+    const row = try lease.db.one(struct { desired_running: i64, generation: i64 }, "SELECT desired_running, generation FROM local_containers WHERE container_id = ?;", .{}, .{id}) orelse return false;
+    return row.desired_running == 0 and (generation == null or row.generation == generation.?);
+}
+
+test "automatic removal only accepts the completed current generation" {
+    const store = @import("../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const id = "a0b1c2d3e4f5";
+    try register(id, null);
+    const first = try request(id, true);
+    try std.testing.expect(!try finishedGeneration(id, first));
+    try finish(id, first);
+    try std.testing.expect(try finishedGeneration(id, first));
+    const next = try request(id, true);
+    try std.testing.expect(!try finishedGeneration(id, first));
+    try std.testing.expect(!try finishedGeneration(id, null));
+    try finish(id, next);
+    try std.testing.expect(!try finishedGeneration(id, first));
+    try std.testing.expect(try finishedGeneration(id, next));
+    try std.testing.expect(try finishedGeneration(id, null));
+}
+
 pub fn remove(id: []const u8) !void {
     var lease = try db_store.leaseDb();
     defer lease.deinit();
