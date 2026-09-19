@@ -14,14 +14,16 @@ pub fn initialize(io: std.Io, id: []const u8, pid: std.posix.pid_t, rootfs: []co
     const pid_text = try std.fmt.bufPrint(&pid_buf, "{d}", .{pid});
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try std.Io.Dir.cwd().realPathFile(io, rootfs, &root_buf);
-    var helper = try std.process.spawn(io, .{
+    var helper_io = @import("../helper_io.zig").init();
+    defer helper_io.deinit();
+    var helper = try std.process.spawn(helper_io.io(), .{
         .argv = &.{ "/proc/self/exe", "__init-volumes", id, pid_text, root_buf[0..root_len] },
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .inherit,
     });
-    defer helper.kill(io);
-    const result = try helper.wait(io);
+    defer helper.kill(helper_io.io());
+    const result = try helper.wait(helper_io.io());
     if (result != .exited or result.exited != 0) return error.VolumeInitializationFailed;
 }
 

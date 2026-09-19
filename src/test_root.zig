@@ -298,3 +298,12 @@ test {
 test {
     _ = @import("runtime/local_health.zig");
 }
+
+test {
+    _ = @import("runtime/container/exec_runtime.zig");
+    _ = @import("image/store_lock.zig");
+}
+
+test {
+    _ = @import("runtime/helper_io.zig");
+}

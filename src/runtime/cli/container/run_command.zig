@@ -15,7 +15,6 @@ const supervisor_runtime = @import("supervisor_runtime.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
-const parsePortMap = cli.parsePortMap;
 const parseVolumeMount = cli.parseVolumeMount;
 const parseMemorySize = cli.parseMemorySize;
 const isValidContainerName = cli.isValidContainerName;
@@ -159,11 +158,13 @@ fn parseRunFlags(args: anytype, alloc: std.mem.Allocator, io: std.Io) ContainerE
             };
         } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--publish")) {
             const value = try optionValue(args, arg, inline_value);
-            const mapping = parsePortMap(value) orelse {
-                writeErr("invalid port mapping: {s}; expected host:container[/tcp|udp]\n", .{value});
-                return ContainerError.InvalidArgument;
+            const mappings = cli.parsePortMaps(alloc, value) catch |err| {
+                writeErr("invalid port mapping {s}: {}\n", .{ value, err });
+                return if (err == error.OutOfMemory) ContainerError.OutOfMemory else ContainerError.InvalidArgument;
             };
-            flags.port_maps.append(alloc, mapping) catch return ContainerError.OutOfMemory;
+            defer alloc.free(mappings);
+            if (flags.port_maps.items.len + mappings.len > 256) return ContainerError.InvalidArgument;
+            flags.port_maps.appendSlice(alloc, mappings) catch return ContainerError.OutOfMemory;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--env")) {
             try appendEnv(alloc, &flags.env, try optionValue(args, arg, inline_value));
         } else if (std.mem.eql(u8, arg, "--env-file")) {

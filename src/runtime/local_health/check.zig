@@ -73,7 +73,9 @@ pub fn awaitCheck(runner: anytype, timeout_ns: u64) !Outcome {
 }
 
 pub fn run(monitor: anytype, timeout_ns: u64) !Outcome {
-    const io = std.Options.debug_io;
+    var helper_io = @import("../helper_io.zig").init();
+    defer helper_io.deinit();
+    const io = helper_io.io();
     var group = try Group.create(monitor.id, monitor.pid, monitor.generation, monitor.cfg.limits);
     var group_owned = true;
     defer if (group_owned) {

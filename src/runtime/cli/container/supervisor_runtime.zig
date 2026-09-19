@@ -89,6 +89,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
     @import("../../local_health.zig").cleanupOrphans(id) catch return 255;
     var backoff_ms: u32 = 1000;
     var first_start = true;
+    var restart_count: u32 = 0;
     var last_exit: u8 = 255;
     var server = session.Server.init(id, cfg.interactive, cfg.tty) catch return 255;
     defer server.deinit();
@@ -136,7 +137,10 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
                 session.Server.output(&server, "stderr", message);
                 return 255;
             };
-            if (!first_start) control.countRestart(id, generation) catch {};
+            if (!first_start) {
+                restart_count +|= 1;
+                control.countRestart(id, generation) catch {};
+            }
             server.childStarted();
             server.setInput(&channels, c.pid.?);
             monitor = @import("../../local_health.zig").Monitor.start(id, c.pid.?, generation, &current_cfg) catch |err| {
@@ -172,6 +176,9 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         const policy_cfg = run_state.loadConfig(std.heap.page_allocator, id) catch return 255;
         defer policy_cfg.deinit(std.heap.page_allocator);
         if (!shouldRestart(policy_cfg.restart_policy, last_exit)) break;
+        if (policy_cfg.restart_policy == .on_failure) {
+            if (policy_cfg.restart_max_retries) |limit| if (restart_count >= limit) break;
+        }
         if (!(control.shouldRun(id, generation) catch return 255)) break;
         store.updateStatus(id, "restarting", null, last_exit) catch return 255;
         var elapsed: u32 = 0;

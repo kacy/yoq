@@ -168,7 +168,7 @@ const Patch = struct {
     pids: ?[]const u8 = null,
     cpu_weight: ?[]const u8 = null,
     cpus: ?[]const u8 = null,
-    restart: ?run_state.RestartPolicy = null,
+    restart: ?run_state.RestartPolicy.Parsed = null,
 
     fn apply(self: Patch, config: *run_state.SavedRunConfig, fields: *[5]admin.Field) ![]const admin.Field {
         var count: usize = 0;
@@ -200,7 +200,10 @@ const Patch = struct {
             fields[count] = .pids_max;
             count += 1;
         }
-        if (self.restart) |policy| config.restart_policy = policy;
+        if (self.restart) |value| {
+            config.restart_policy = value.policy;
+            config.restart_max_retries = value.max_retries;
+        }
         if (config.auto_remove and config.restart_policy != .no) return error.InvalidArgument;
         try config.limits.validate();
         return fields[0..count];
@@ -230,7 +233,7 @@ fn parsePatch(args: anytype) !Patch {
         } else if (std.mem.eql(u8, option, "--cpus")) {
             patch.cpus = value;
         } else if (std.mem.eql(u8, option, "--restart")) {
-            patch.restart = run_state.RestartPolicy.parse(value) orelse return error.InvalidArgument;
+            patch.restart = run_state.RestartPolicy.parseWithRetries(value) catch return error.InvalidArgument;
         } else return error.InvalidArgument;
         changed = true;
     }
