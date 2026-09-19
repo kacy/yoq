@@ -231,10 +231,10 @@ test "run detached and cleanup" {
     // wait a bit for it to complete
     std.Io.sleep(std.testing.io, std.Io.Duration.fromNanoseconds(@intCast(200 * std.time.ns_per_ms)), .awake) catch unreachable;
 
-    // stop should fail since it's already stopped
+    // stop is idempotent after the detached process has already exited
     var stop_result = try env.runYoq(&.{ "stop", name });
     defer stop_result.deinit();
-    try std.testing.expect(stop_result.exit_code != 0);
+    try stop_result.expectExitCode(0);
 
     // rm should succeed
     var rm_result = try env.runYoq(&.{ "rm", name });
