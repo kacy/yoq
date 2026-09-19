@@ -20,4 +20,5 @@ pub fn parseIoStat(content: []const u8) IoStats {
 
 test {
     _ = @import("cgroups/cpuset.zig");
+    _ = @import("cgroups/lifecycle_support.zig");
 }
