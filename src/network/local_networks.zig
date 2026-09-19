@@ -68,9 +68,18 @@ fn routeOverlaps(base: [4]u8, routes: []const u8) bool {
     return false;
 }
 
+fn readHostRoutes(alloc: std.mem.Allocator) ![]u8 {
+    const io = std.Options.debug_io;
+    const file = try std.Io.Dir.cwd().openFile(io, "/proc/net/route", .{});
+    defer file.close(io);
+    // Proc route tables report size zero and must be read as streams.
+    var reader = file.readerStreaming(io, &.{});
+    return reader.interface.allocRemaining(alloc, .limited(1024 * 1024));
+}
+
 pub fn create(alloc: std.mem.Allocator, name: []const u8, requested_subnet: ?[]const u8) Error!Record {
     if (!cli.isValidContainerName(name) or std.mem.eql(u8, name, "default") or std.mem.eql(u8, name, "none")) return error.InvalidName;
-    const routes = std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, "/proc/net/route", alloc, .limited(1024 * 1024)) catch return error.InvalidSubnet;
+    const routes = readHostRoutes(alloc) catch return error.InvalidSubnet;
     defer alloc.free(routes);
     return createWithRoutes(alloc, name, requested_subnet, routes);
 }
@@ -440,4 +449,13 @@ test "named network removal keeps metadata when kernel cleanup fails" {
     try std.testing.expect(retained.provisioned);
     try removeWith(record.name, Cleanup{ .fail = false });
     try std.testing.expectError(error.NotFound, inspect(alloc, record.name));
+}
+
+test "named networks read routes from the zero-size proc table" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const routes = try readHostRoutes(std.testing.allocator);
+    defer std.testing.allocator.free(routes);
+    try std.testing.expect(std.mem.startsWith(u8, routes, "Iface"));
+    try std.testing.expect(std.mem.indexOf(u8, routes, "Destination") != null);
+    try std.testing.expect(std.mem.indexOf(u8, routes, "Mask") != null);
 }
