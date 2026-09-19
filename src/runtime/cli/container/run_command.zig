@@ -409,7 +409,21 @@ fn buildSavedRunConfig(
     img: *const image_cmds.ImageResolution,
     resolved: *const oci.ResolvedCommand,
     id: ?[]const u8,
-) ContainerError!run_state.SavedRunConfig {
+) !run_state.SavedRunConfig {
+    try validateRunOptions(flags);
+    const stop_signal = flags.stop_signal orelse if (img.stop_signal) |value|
+        @import("../../signals.zig").parse(value) orelse return ContainerError.InvalidArgument
+    else
+        15;
+    const healthcheck_json = try effectiveHealthcheck(alloc, flags, img.healthcheck);
+    errdefer if (healthcheck_json) |value| alloc.free(value);
+    const network_name = if (flags.network_name) |value| try alloc.dupe(u8, value) else null;
+    errdefer if (network_name) |value| alloc.free(value);
+    const network_aliases = try dupStringList(alloc, flags.network_aliases.items);
+    errdefer freeOwnedStringList(alloc, network_aliases);
+    const image_reference = if (img.manifest_digest.len > 0) try alloc.dupe(u8, img.manifest_digest) else null;
+    errdefer if (image_reference) |value| alloc.free(value);
+
     const merged_env = mergeEnv(alloc, img.image_env, flags.env.items) catch |e| return e;
     errdefer freeOwnedStringList(alloc, merged_env);
 
@@ -453,6 +467,15 @@ fn buildSavedRunConfig(
     errdefer alloc.free(port_maps);
 
     return .{
+        .image_reference = image_reference,
+        .healthcheck_json = healthcheck_json,
+        .network_name = network_name,
+        .network_aliases = network_aliases,
+        .auto_remove = flags.auto_remove,
+        .interactive = flags.interactive,
+        .tty = flags.tty,
+        .stop_timeout_seconds = flags.stop_timeout_seconds,
+        .stop_signal = stop_signal,
         .rootfs = rootfs,
         .command = command,
         .hostname = hostname,
@@ -523,7 +546,7 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
         writeErr("warning: yoq run requires root privileges for cgroups and networking\n", .{});
     }
 
-    var flags = parseRunFlags(args, alloc, ctx.io) catch |e| return e;
+    var flags = try parseRunFlags(args, alloc, ctx.io);
     defer flags.deinit(alloc);
 
     const is_image = !isFilesystemTarget(flags.target);
@@ -552,6 +575,42 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
     errdefer if (!created) @import("../../local_volumes.zig").releaseContainer(id, true) catch {};
     errdefer if (!created) @import("../../../network/port_allocator.zig").release(id) catch {};
     errdefer if (!created) @import("../../../network/local_networks.zig").release(id) catch {};
+    try inheritImageVolumes(alloc, &flags, &img);
+
+    var saved = try buildSavedRunConfig(alloc, &flags, &img, &resolved, id);
+    defer saved.deinit(alloc);
+    try reserveContainerResources(id, &flags, &saved);
+    try publishContainer(id, flags.container_name, &saved);
+
+    created = true;
+    image_lease.deinit();
+    if (create_only) {
+        write("{s}\n", .{id});
+        return;
+    }
+    if (flags.detach) {
+        try @import("../../local_lifecycle.zig").start(ctx.io, alloc, id);
+        write("{s}\n", .{id});
+        return;
+    }
+
+    try runAttached(ctx, id, &saved);
+}
+
+fn validateRunOptions(flags: *const RunFlags) !void {
+    if (flags.network_aliases.items.len > 0 and flags.network_name == null) return error.NamedNetworkRequired;
+    if (!flags.networking_enabled and flags.port_maps.items.len > 0) return error.NetworkRequired;
+    if (flags.auto_remove and flags.restart_policy != .no) {
+        writeErr("--rm cannot be combined with a restart policy\n", .{});
+        return ContainerError.InvalidArgument;
+    }
+    flags.limits.validate() catch |err| {
+        writeErr("invalid resource limits: {}\n", .{err});
+        return ContainerError.InvalidLimits;
+    };
+}
+
+fn inheritImageVolumes(alloc: std.mem.Allocator, flags: *RunFlags, img: *const image_cmds.ImageResolution) !void {
     if (img.volumes) |volumes| {
         if (volumes == .object) {
             var it = volumes.object.iterator();
@@ -567,63 +626,36 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
             }
         }
     }
+}
 
-    var saved = buildSavedRunConfig(alloc, &flags, &img, &resolved, id) catch |e| return e;
-    defer saved.deinit(alloc);
+// the caller owns rollback until both the record and saved configuration exist.
+fn reserveContainerResources(id: []const u8, flags: *const RunFlags, saved: *run_state.SavedRunConfig) !void {
     try @import("../../../network/port_allocator.zig").reserve(id, saved.port_maps);
-    saved.healthcheck_json = try effectiveHealthcheck(alloc, &flags, img.healthcheck);
-    if (flags.network_aliases.items.len > 0 and flags.network_name == null) return error.NamedNetworkRequired;
-    if (!flags.networking_enabled and saved.port_maps.len > 0) return error.NetworkRequired;
-    if (flags.network_name) |name| saved.network_name = try alloc.dupe(u8, name);
-    saved.network_aliases = try duplicateStrings(alloc, flags.network_aliases.items);
     if (saved.network_name) |name| {
         try @import("../../../network/local_networks.zig").reserve(name, id, flags.container_name orelse id);
         try @import("../../../network/local_networks.zig").reserveAliases(id, saved.network_aliases);
     }
-    saved.auto_remove = flags.auto_remove;
-    saved.interactive = flags.interactive;
-    saved.tty = flags.tty;
-    saved.stop_timeout_seconds = flags.stop_timeout_seconds;
-    saved.stop_signal = flags.stop_signal orelse if (img.stop_signal) |value| @import("../../signals.zig").parse(value) orelse return ContainerError.InvalidArgument else 15;
-    if (img.manifest_digest.len > 0) saved.image_reference = try alloc.dupe(u8, img.manifest_digest);
-    if (saved.auto_remove and saved.restart_policy != .no) {
-        writeErr("--rm cannot be combined with a restart policy\n", .{});
-        return ContainerError.InvalidArgument;
-    }
-    saved.limits.validate() catch |err| {
-        writeErr("invalid resource limits: {}\n", .{err});
-        return ContainerError.InvalidLimits;
+}
+
+fn publishContainer(id: []const u8, name: ?[]const u8, saved: *const run_state.SavedRunConfig) !void {
+    const control = @import("../../local_control.zig");
+    const creation_lock = try control.lock(id, .command, true);
+    defer creation_lock.deinit();
+    control.register(id, name) catch |err| {
+        writeErr("cannot reserve container name: {}\n", .{err});
+        return ContainerError.ConfigSaveFailed;
     };
+    errdefer control.remove(id) catch {};
+    try saveCreatedRecord(id, saved);
+    run_state.saveConfig(id, saved.*) catch |err| {
+        @import("../../../state/store.zig").remove(id) catch {};
+        writeErr("failed to save container config: {}\n", .{err});
+        return ContainerError.ConfigSaveFailed;
+    };
+}
 
-    {
-        const control = @import("../../local_control.zig");
-        const creation_lock = try control.lock(id, .command, true);
-        defer creation_lock.deinit();
-        control.register(id, flags.container_name) catch |err| {
-            writeErr("cannot reserve container name: {}\n", .{err});
-            return ContainerError.ConfigSaveFailed;
-        };
-        errdefer control.remove(id) catch {};
-        saveCreatedRecord(id, &saved) catch |e| return e;
-        run_state.saveConfig(id, saved) catch |err| {
-            @import("../../../state/store.zig").remove(id) catch {};
-            writeErr("failed to save container config: {}\n", .{err});
-            return ContainerError.ConfigSaveFailed;
-        };
-    }
-
-    created = true;
-    image_lease.deinit();
-    if (create_only) {
-        write("{s}\n", .{id});
-        return;
-    }
-    if (flags.detach) {
-        try @import("../../local_lifecycle.zig").start(ctx.io, alloc, id);
-        write("{s}\n", .{id});
-        return;
-    }
-
+fn runAttached(ctx: AppContext, id: []const u8, saved: *const run_state.SavedRunConfig) !void {
+    const alloc = ctx.alloc;
     const generation = blk: {
         const lock = try @import("../../local_control.zig").lock(id, .command, true);
         defer lock.deinit();
@@ -644,18 +676,6 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
         },
     };
     std.process.exit(exit_code);
-}
-
-fn duplicateStrings(alloc: std.mem.Allocator, source: []const []const u8) ![][]const u8 {
-    const result = try alloc.alloc([]const u8, source.len);
-    errdefer alloc.free(result);
-    var count: usize = 0;
-    errdefer for (result[0..count]) |value| alloc.free(value);
-    for (source, 0..) |value, i| {
-        result[i] = try alloc.dupe(u8, value);
-        count += 1;
-    }
-    return result;
 }
 
 fn effectiveHealthcheck(alloc: std.mem.Allocator, flags: *const RunFlags, image: ?@import("../../../image/spec.zig").Healthcheck) !?[]const u8 {
@@ -823,11 +843,12 @@ test "run accepts equals values and rejects values on switches" {
     try std.testing.expectError(ContainerError.InvalidArgument, parseRunFlags(&invalid, std.testing.allocator, std.testing.io));
 }
 
-test "saved run configuration inherits the image user and working directory" {
+test "saved run configuration preserves image metadata and process options" {
     const alloc = std.testing.allocator;
-    var flags: RunFlags = .{ .container_name = "named-container" };
+    var flags: RunFlags = .{ .container_name = "named-container", .network_name = "local", .interactive = true, .tty = true, .stop_timeout_seconds = 23 };
     defer flags.deinit(alloc);
-    const img: image_cmds.ImageResolution = .{ .rootfs = "/rootfs", .user = "app:staff", .working_dir = "/work", .default_cmd = &.{ "echo", "hello" } };
+    try flags.network_aliases.append(alloc, "alias");
+    const img: image_cmds.ImageResolution = .{ .rootfs = "/rootfs", .user = "app:staff", .working_dir = "/work", .default_cmd = &.{ "echo", "hello" }, .manifest_digest = "sha256:example", .stop_signal = "SIGQUIT" };
     var resolved = try resolveRunCommand(alloc, &flags, &img);
     defer resolved.args.deinit(alloc);
     const saved = try buildSavedRunConfig(alloc, &flags, &img, &resolved, null);
@@ -835,6 +856,12 @@ test "saved run configuration inherits the image user and working directory" {
     try std.testing.expectEqualStrings("app:staff", saved.user.?);
     try std.testing.expectEqualStrings("/work", saved.working_dir);
     try std.testing.expectEqualStrings("container", saved.hostname);
+    try std.testing.expectEqualStrings("sha256:example", saved.image_reference.?);
+    try std.testing.expectEqualStrings("local", saved.network_name.?);
+    try std.testing.expectEqualStrings("alias", saved.network_aliases[0]);
+    try std.testing.expect(saved.interactive and saved.tty);
+    try std.testing.expectEqual(@as(u32, 23), saved.stop_timeout_seconds);
+    try std.testing.expectEqual(@as(u8, 3), saved.stop_signal);
 }
 
 test "environment passthrough copies the current host value" {

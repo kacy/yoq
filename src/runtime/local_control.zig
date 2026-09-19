@@ -11,12 +11,23 @@ const db_store = @import("../state/store/common.zig");
 const container = @import("container.zig");
 const isValidContainerName = @import("../lib/cli.zig").isValidContainerName;
 
-pub const LockKind = enum { command, transition, owner };
+pub const LockKind = enum {
+    // held by a caller through startup acknowledgement or final cleanup.
+    command,
+    // held while publishing a pid or changing the requested run state.
+    transition,
+    // held by one supervisor, then by the caller recovering its resources.
+    owner,
+};
+const lock_exclusive: i32 = 2;
+const lock_nonblocking: i32 = 4;
+const lock_unlock: i32 = 8;
+
 pub const Lock = struct {
     fd: std.posix.fd_t,
 
     pub fn deinit(self: Lock) void {
-        _ = linux.flock(self.fd, 8);
+        _ = linux.flock(self.fd, lock_unlock);
         linux_platform.posix.close(self.fd);
     }
 };
@@ -32,8 +43,9 @@ pub fn lock(id: []const u8, kind: LockKind, wait: bool) !Lock {
     if (linux.errno(rc) != .SUCCESS) return error.LockFailed;
     const fd: std.posix.fd_t = @intCast(rc);
     errdefer linux_platform.posix.close(fd);
+    const operation = lock_exclusive | (if (wait) @as(i32, 0) else lock_nonblocking);
     while (true) {
-        switch (linux.errno(linux.flock(fd, 2 | @as(i32, if (wait) 0 else 4)))) {
+        switch (linux.errno(linux.flock(fd, operation))) {
             .SUCCESS => return .{ .fd = fd },
             .INTR => continue,
             .AGAIN => return error.Busy,

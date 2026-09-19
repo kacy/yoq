@@ -98,7 +98,7 @@ test "stop container refuses stale pid not owned by container cgroup" {
 }
 
 test "waitForProcessExit returns true when cgroup is missing" {
-    try testing.expect(waitForProcessExit("deadbeefcafe", 12345));
+    try testing.expect(try waitForProcessExit("deadbeefcafe", 12345));
 }
 
 // Test that validateContainerId works correctly

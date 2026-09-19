@@ -201,12 +201,14 @@ pub const Server = struct {
             },
             .stdin => {
                 if (self.input_client != client.fd or self.eof_pending) return error.InputNotOwned;
+                if (self.pid != null and self.input_fd < 0) return error.InputClosed;
                 if (data.len > self.input_buffer.len - self.input_len) return error.InputOverflow;
                 @memcpy(self.input_buffer[self.input_len..][0..data.len], data);
                 self.input_len += data.len;
             },
             .eof => {
                 if (self.input_client != client.fd) return error.InputNotOwned;
+                if (self.pid != null and self.input_fd < 0) return error.InputClosed;
                 self.eof_pending = true;
             },
             .resize => {
@@ -222,19 +224,28 @@ pub const Server = struct {
     fn flushInput(self: *Server) void {
         if (self.input_fd < 0) return;
         if (self.input_len != 0) {
-            const count = platform.write(self.input_fd, self.input_buffer[0..self.input_len]) catch |err| {
-                if (err != error.WouldBlock) channels.close(&self.input_fd);
-                return;
-            };
+            const count = self.writeInput(self.input_buffer[0..self.input_len]) orelse return;
             std.mem.copyForwards(u8, &self.input_buffer, self.input_buffer[count..self.input_len]);
             self.input_len -= count;
         }
         if (self.input_len == 0 and self.eof_pending) {
             if (self.tty) {
-                _ = platform.write(self.input_fd, "\x04") catch return;
+                const count = self.writeInput("\x04") orelse return;
+                if (count == 0) return;
             } else channels.close(&self.input_fd);
             self.eof_pending = false;
         }
+    }
+
+    fn writeInput(self: *Server, bytes: []const u8) ?usize {
+        return platform.write(self.input_fd, bytes) catch |err| {
+            if (err == error.WouldBlock or err == error.Interrupted) return null;
+            // no future write can drain this queue once the input is closed.
+            channels.close(&self.input_fd);
+            self.input_len = 0;
+            self.eof_pending = false;
+            return null;
+        };
     }
 
     fn run(self: *Server) void {
@@ -245,8 +256,11 @@ pub const Server = struct {
             var polls: [max_clients + 1]linux.pollfd = undefined;
             self.mutex.lockUncancelable(std.Options.debug_io);
             polls[0] = .{ .fd = self.listener, .events = linux.POLL.IN, .revents = 0 };
+            // only the stdin owner can add to the queue. observers must still
+            // be able to attach, send signals, and detach while it is full.
+            const input_full = self.input_len > self.input_buffer.len - protocol.max_payload;
             for (self.clients, 1..) |client, i| polls[i] = .{
-                .fd = if (self.input_len <= self.input_buffer.len - protocol.max_payload) client.fd else -1,
+                .fd = if (input_full and self.input_client == client.fd) -1 else client.fd,
                 .events = linux.POLL.IN,
                 .revents = 0,
             };
@@ -357,4 +371,65 @@ test "session attachment after exit cannot feed the next attempt" {
     try std.testing.expectEqual(@as(usize, 0), server.history_len);
     try std.testing.expect(!server.eof_pending);
     try std.testing.expect(server.exit_code == null);
+}
+
+test "session observers attach and detach while stdin is backpressured" {
+    var server = try Server.init("fe2345678901", true, false);
+    defer server.deinit();
+    try server.start();
+    const owner = try testConnect("fe2345678901");
+    defer platform.close(owner);
+    try protocol.send(owner, .hello, &.{1}, false);
+    var packet: protocol.Packet = .{};
+    try protocol.receive(owner, &packet, false);
+    try std.testing.expectEqual(protocol.Kind.ready, try packet.kind());
+
+    // hold a full queue before the child has supplied its input fd.
+    server.mutex.lockUncancelable(std.Options.debug_io);
+    @memset(&server.input_buffer, 'i');
+    server.input_len = server.input_buffer.len;
+    server.mutex.unlock(std.Options.debug_io);
+
+    const observer = try testConnect("fe2345678901");
+    defer platform.close(observer);
+    try protocol.send(observer, .hello, &.{0}, false);
+    try protocol.receive(observer, &packet, false);
+    try std.testing.expectEqual(protocol.Kind.ready, try packet.kind());
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, packet.payload());
+    try protocol.send(observer, .detach, "", false);
+    try std.testing.expectError(error.Disconnected, protocol.receive(observer, &packet, false));
+}
+
+test "session discards pending stdin when the child closes its input" {
+    const ignored: posix.Sigaction = .{ .handler = .{ .handler = posix.SIG.IGN }, .mask = posix.sigemptyset(), .flags = 0 };
+    var previous: posix.Sigaction = undefined;
+    posix.sigaction(.PIPE, &ignored, &previous);
+    defer posix.sigaction(.PIPE, &previous, null);
+
+    var server = try Server.init("fe3456789012", true, false);
+    defer server.deinit();
+    var io = try channels.ProcessIo.init(true, false);
+    defer io.deinit();
+    server.setInput(&io, 1);
+    channels.close(&io.child_input);
+    @memset(&server.input_buffer, 'i');
+    server.input_len = server.input_buffer.len;
+    server.eof_pending = true;
+    server.flushInput();
+    try std.testing.expectEqual(@as(posix.fd_t, -1), server.input_fd);
+    try std.testing.expectEqual(@as(usize, 0), server.input_len);
+    try std.testing.expect(!server.eof_pending);
+
+    var sockets: [2]posix.fd_t = undefined;
+    if (linux.socketpair(posix.AF.UNIX, posix.SOCK.SEQPACKET | posix.SOCK.CLOEXEC, 0, &sockets) != 0) return error.SocketFailed;
+    defer platform.close(sockets[0]);
+    defer platform.close(sockets[1]);
+    var client: Client = .{ .fd = sockets[0], .ready = true };
+    server.input_client = client.fd;
+    try protocol.send(sockets[1], .stdin, "more input", false);
+    try std.testing.expectError(error.InputClosed, server.receive(&client));
+    try protocol.send(sockets[1], .eof, "", false);
+    try std.testing.expectError(error.InputClosed, server.receive(&client));
+    try std.testing.expectEqual(@as(usize, 0), server.input_len);
+    try std.testing.expect(!server.eof_pending);
 }
