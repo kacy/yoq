@@ -53,6 +53,8 @@ pub fn initChildContext(config: anytype, overlay: *const OverlayRuntime) exec_ru
         .working_dir = config.working_dir,
         .hostname = config.hostname,
         .mounts = config.mounts,
+        .shm_size = config.shm_size,
+        .tmpfs_mounts = config.tmpfs_mounts,
     };
 }
 

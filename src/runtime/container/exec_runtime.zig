@@ -50,6 +50,8 @@ pub const ChildExecContext = struct {
     working_dir: []const u8,
     hostname: []const u8,
     mounts: []const BindMount,
+    shm_size: u64 = filesystem.default_shm_size,
+    tmpfs_mounts: []const filesystem.TmpfsMount = &.{},
 };
 
 pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
@@ -127,15 +129,39 @@ fn prepareFilesystemRoot(ctx: *const ChildExecContext) ExitCode {
 
 fn mountContainerFilesystems(ctx: *const ChildExecContext) ExitCode {
     const root = if (ctx.has_overlay) ctx.fs_config.merged_dir else ctx.rootfs;
-    for (ctx.mounts) |mount| {
-        if (!mount.isSourceAllowed()) return .permission_denied;
-        if (!isCanonicalBindSource(mount.source)) return .bind_mount_denied;
-        filesystem.bindMount(root, mount.source, mount.target, mount.read_only) catch |err| {
-            log.err("container: bind mount failed for {s}: {}", .{ mount.source, err });
-            return .filesystem_error;
-        };
-    }
-    filesystem.mountEssentialAt(root) catch return .essential_mount_failed;
+    filesystem.mountEssentialWithShm(root, ctx.shm_size) catch return .essential_mount_failed;
+    const Mount = union(enum) {
+        bind: *const BindMount,
+        tmpfs: *const filesystem.TmpfsMount,
+        fn target(self: @This()) []const u8 {
+            return switch (self) {
+                .bind => |mount| mount.target,
+                .tmpfs => |mount| mount.target,
+            };
+        }
+        fn less(_: void, a: @This(), b: @This()) bool {
+            return std.mem.lessThan(u8, a.target(), b.target());
+        }
+    };
+    var ordered: [512]Mount = undefined;
+    const count = ctx.mounts.len + ctx.tmpfs_mounts.len;
+    if (count > ordered.len) return .filesystem_error;
+    for (ctx.mounts, 0..) |*mount, index| ordered[index] = .{ .bind = mount };
+    for (ctx.tmpfs_mounts, ctx.mounts.len..) |*mount, index| ordered[index] = .{ .tmpfs = mount };
+    // Essential mounts exist first; explicit mounts then follow parent-before-
+    // child order across both kinds so nested bind mounts remain visible.
+    std.mem.sort(Mount, ordered[0..count], {}, Mount.less);
+    for (ordered[0..count]) |entry| switch (entry) {
+        .bind => |mount| {
+            if (!mount.isSourceAllowed()) return .permission_denied;
+            if (!isCanonicalBindSource(mount.source)) return .bind_mount_denied;
+            filesystem.bindMount(root, mount.source, mount.target, mount.read_only) catch |err| {
+                log.err("container: bind mount failed for {s}: {}", .{ mount.source, err });
+                return .filesystem_error;
+            };
+        },
+        .tmpfs => |mount| filesystem.mountTmpfsAt(root, mount.*) catch return .filesystem_error,
+    };
     return .success;
 }
 
@@ -207,6 +233,26 @@ test "startup mounted overlay and raw root retain generated network and device f
             return std.mem.indexOf(u8, bytes[0..count], expected) != null;
         }
 
+        fn mountOption(target: []const u8, expected: []const u8) bool {
+            const fd = linux_platform.posix.open("/proc/self/mountinfo", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return false;
+            defer linux_platform.posix.close(fd);
+            var buffer: [65536]u8 = undefined;
+            var count: usize = 0;
+            while (count < buffer.len) {
+                const read = linux_platform.posix.read(fd, buffer[count..]) catch return false;
+                if (read == 0) break;
+                count += read;
+            }
+            var lines = std.mem.splitScalar(u8, buffer[0..count], '\n');
+            while (lines.next()) |line| {
+                var fields = std.mem.tokenizeScalar(u8, line, ' ');
+                for (0..4) |_| _ = fields.next() orelse return false;
+                const mounted_at = fields.next() orelse return false;
+                if (std.mem.eql(u8, mounted_at, target) and std.mem.indexOf(u8, line, expected) != null) return true;
+            }
+            return false;
+        }
+
         fn run(ctx: *const ChildExecContext) u8 {
             if (linux.errno(linux.unshare(linux.CLONE.NEWNS)) != .SUCCESS) return 10;
             const prepared = prepareFilesystemRoot(ctx);
@@ -222,6 +268,18 @@ test "startup mounted overlay and raw root retain generated network and device f
             if (!contains("/etc/hosts", "10.42.0.7\tstartup-test")) return 20;
             if (!contains("/etc/resolv.conf", "nameserver 10.42.0.1")) return 21;
             if (!contains("/dev/startup-gpu", "visible")) return 22;
+            if (!mountOption("/dev/shm", "size=12288k")) return 23;
+            if (!mountOption("/tmp", "size=65536k")) return 24;
+            if (!mountOption("/cache", "size=8192k")) return 25;
+            if (!mountOption("/cache/sub", "size=4096k")) return 26;
+            if (!mountOption("/readonly", "ro,")) return 27;
+            if (!mountOption("/cache", "noexec")) return 28;
+            const cache = linux_platform.posix.open("/cache", .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch return 29;
+            const stat = linux_platform.posix.fstat(cache) catch return 30;
+            linux_platform.posix.close(cache);
+            if (stat.mode & 0o7777 != 0o750) return 31;
+            const denied = linux.open("/readonly/file", .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true }, 0o600);
+            if (linux.errno(denied) != .ROFS) return 32;
             return 0;
         }
     };
@@ -256,6 +314,12 @@ test "startup mounted overlay and raw root retain generated network and device f
             .hostname = "startup-test",
             .mounts = &.{},
             .gpu_indices = &.{0},
+            .shm_size = 12 * 1024 * 1024,
+            .tmpfs_mounts = &.{
+                .{ .target = "/cache/sub", .size_bytes = 4 * 1024 * 1024 },
+                .{ .target = "/cache", .size_bytes = 8 * 1024 * 1024, .mode = 0o750, .noexec = true },
+                .{ .target = "/readonly", .read_only = true },
+            },
         };
         const rc = linux.fork();
         if (linux.errno(rc) != .SUCCESS) return error.ForkFailed;

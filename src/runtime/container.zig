@@ -116,6 +116,8 @@ pub const ContainerConfig = struct {
     network: ?net_setup.NetworkConfig = null,
     /// bind mounts (host path -> container path)
     mounts: []const BindMount = &.{},
+    shm_size: u64 = filesystem.default_shm_size,
+    tmpfs_mounts: []const filesystem.TmpfsMount = &.{},
     /// dev mode: service name for colored log output (null = no dev output)
     dev_service_name: ?[]const u8 = null,
     /// dev mode: color index for this service
