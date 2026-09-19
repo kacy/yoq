@@ -9,6 +9,7 @@ const common = @import("common.zig");
 const control = @import("../../local_control.zig");
 const runtime_wait = @import("../../../lib/runtime_wait.zig");
 const session = @import("../../session.zig");
+const health = @import("../../local_health.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -71,13 +72,17 @@ pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, a
 
 fn acquireOwner(id: []const u8, generation: i64) !control.Lock {
     while (try control.shouldRun(id, generation)) {
-        return control.lock(id, .owner, false) catch |err| switch (err) {
+        const owner = control.lock(id, .owner, false) catch |err| switch (err) {
             error.Busy => {
                 if (!runtime_wait.sleep(.fromMilliseconds(50), "waiting for container owner")) return error.Cancelled;
                 continue;
             },
             else => return err,
         };
+        errdefer owner.deinit();
+        // stop may have cancelled this run while we acquired the owner lock.
+        if (!try control.shouldRun(id, generation)) return error.StaleGeneration;
+        return owner;
     }
     return error.StaleGeneration;
 }
@@ -108,6 +113,12 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
     const owner = acquireOwner(id, generation) catch return 255;
     defer owner.deinit();
     defer control.finish(id, generation) catch {};
+    return superviseOwnedGeneration(id, cfg, attach, generation);
+}
+
+// the owner lock covers configuration loading, each process attempt, and cleanup.
+// callers release it before automatic removal takes the command lock.
+fn superviseOwnedGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, attach: bool, generation: i64) u8 {
     var startup_acknowledged = false;
     defer if (!startup_acknowledged) {
         // setup can fail before an execution attempt exists (session socket,
@@ -116,7 +127,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         if ((control.currentGeneration(id) catch null) == generation)
             store.recordStartupFailure(id) catch {};
     };
-    @import("../../local_health.zig").cleanupOrphans(id) catch return 255;
+    health.cleanupOrphans(id) catch return 255;
     var backoff_ms: u32 = 1000;
     var first_start = true;
     var restart_count: u32 = 0;
@@ -125,19 +136,14 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
     defer server.deinit();
     defer server.finish(last_exit);
     server.start() catch return 255;
-    if (attach) {
-        var attempts: usize = 0;
-        while (!server.ever_attached.load(.acquire)) : (attempts += 1) {
-            if (attempts == 200 or !(control.shouldRun(id, generation) catch return 255)) return 255;
-            if (!runtime_wait.sleep(.fromMilliseconds(50), "waiting for foreground session")) return 255;
-        }
-    }
+    if (attach) waitForAttachment(&server, id, generation) catch return 255;
 
     while (true) {
         // update and stop use this lock too. read the effective configuration
-        // after acquiring it and retain the lock through PID publication.
+        // after acquiring it and retain the lock through pid publication.
         var startup_config = StartupConfig.load(std.heap.page_allocator, id) catch return 255;
         defer startup_config.deinit();
+        if (!(control.shouldRun(id, generation) catch return 255)) return last_exit;
         const current_cfg = &startup_config.value;
         var ports = @import("../../../network/port_allocator.zig").hold(current_cfg.port_maps) catch |err| {
             store.recordStartupFailure(id) catch {};
@@ -149,7 +155,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         defer ports.deinit();
         var channels = session.ProcessIo.init(current_cfg.interactive, current_cfg.tty) catch return 255;
         defer channels.deinit();
-        var monitor: ?*@import("../../local_health.zig").Monitor = null;
+        var monitor: ?*health.Monitor = null;
         const local_name = control.nameForId(std.heap.page_allocator, id) catch return 255;
         defer if (local_name) |name| std.heap.page_allocator.free(name);
         var c = containerFromSaved(id, current_cfg, false, local_name);
@@ -157,42 +163,37 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         c.config.session_output = .{ .context = &server, .write = session.Server.output };
         server.prepareChild(&channels);
         defer server.childStarted();
-        {
-            // stop takes this same lock before changing the requested state.
-            // it either cancels this attempt or observes its published pid.
-            if (!(control.shouldRun(id, generation) catch return 255)) return last_exit;
-            store.updateStatus(id, "created", null, null) catch return 255;
-            c.start() catch |err| {
-                // startup rollback may have retained resources for cleanup.
-                store.recordStartupFailure(id) catch {};
-                var error_buf: [256]u8 = undefined;
-                const message = std.fmt.bufPrint(&error_buf, "failed to start container: {}\n", .{err}) catch "failed to start container\n";
-                session.Server.output(&server, "stderr", message);
-                return 255;
-            };
-            if (!first_start) {
-                restart_count +|= 1;
-                control.countRestart(id, generation) catch {};
-            }
-            server.childStarted();
-            server.setInput(&channels, c.pid.?);
-            monitor = @import("../../local_health.zig").Monitor.start(id, c.pid.?, generation, current_cfg) catch |err| {
+        store.updateStatus(id, "created", null, null) catch return 255;
+        c.start() catch |err| {
+            // startup rollback may have retained resources for cleanup.
+            store.recordStartupFailure(id) catch {};
+            var error_buf: [256]u8 = undefined;
+            const message = std.fmt.bufPrint(&error_buf, "failed to start container: {}\n", .{err}) catch "failed to start container\n";
+            session.Server.output(&server, "stderr", message);
+            return 255;
+        };
+        if (!first_start) {
+            restart_count +|= 1;
+            control.countRestart(id, generation) catch {};
+        }
+        server.childStarted();
+        server.setInput(&channels, c.pid.?);
+        monitor = health.Monitor.start(id, c.pid.?, generation, current_cfg) catch |err| {
+            c.forceStop() catch {};
+            _ = c.wait() catch 255;
+            store.recordStartupFailure(id) catch {};
+            writeErr("failed to start container healthcheck: {}\n", .{err});
+            return 255;
+        };
+        if (first_start) {
+            store.setStartupOutcome(id, .succeeded) catch |err| {
                 c.forceStop() catch {};
                 _ = c.wait() catch 255;
-                store.recordStartupFailure(id) catch {};
-                writeErr("failed to start container healthcheck: {}\n", .{err});
+                if (monitor) |worker| worker.stop() catch {};
+                writeErr("failed to record container startup: {}\n", .{err});
                 return 255;
             };
-            if (first_start) {
-                store.setStartupOutcome(id, .succeeded) catch |err| {
-                    c.forceStop() catch {};
-                    _ = c.wait() catch 255;
-                    if (monitor) |worker| worker.stop() catch {};
-                    writeErr("failed to record container startup: {}\n", .{err});
-                    return 255;
-                };
-                startup_acknowledged = true;
-            }
+            startup_acknowledged = true;
         }
         startup_config.releaseTransition();
 
@@ -216,15 +217,29 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         }
         if (!(control.shouldRun(id, generation) catch return 255)) break;
         store.updateStatus(id, "restarting", null, last_exit) catch return 255;
-        var elapsed: u32 = 0;
-        while (elapsed < backoff_ms) : (elapsed += 50) {
-            if (!(control.shouldRun(id, generation) catch return 255)) return last_exit;
-            if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container restart backoff")) return last_exit;
-        }
+        if (!(waitForRestart(id, generation, backoff_ms) catch return 255)) return last_exit;
         backoff_ms = @min(backoff_ms * 2, 30_000);
         first_start = false;
     }
     return last_exit;
+}
+
+fn waitForAttachment(server: *session.Server, id: []const u8, generation: i64) !void {
+    var attempts: usize = 0;
+    while (!server.ever_attached.load(.acquire)) : (attempts += 1) {
+        if (attempts == 200) return error.AttachmentTimeout;
+        if (!try control.shouldRun(id, generation)) return error.StaleGeneration;
+        if (!runtime_wait.sleep(.fromMilliseconds(50), "waiting for foreground session")) return error.Cancelled;
+    }
+}
+
+fn waitForRestart(id: []const u8, generation: i64, delay_ms: u32) !bool {
+    var elapsed: u32 = 0;
+    while (elapsed < delay_ms) : (elapsed += 50) {
+        if (!try control.shouldRun(id, generation)) return false;
+        if (!runtime_wait.sleep(.fromMilliseconds(50), "container restart backoff")) return false;
+    }
+    return true;
 }
 
 pub fn spawnSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
@@ -319,21 +334,38 @@ pub fn runSupervisor(args: *std.process.Args.Iterator, alloc: std.mem.Allocator)
     const id = requireArg(args, "usage: yoq __run-supervisor <container-id>\n");
     const generation_text = requireArg(args, "missing supervisor generation\n");
     const generation = std.fmt.parseInt(i64, generation_text, 10) catch return ContainerError.InvalidArgument;
-    var cfg = run_state.loadConfig(alloc, id) catch |err| {
-        store.recordStartupFailure(id) catch {};
-        writeErr("failed to load container config for {s}: {}\n", .{ id, err });
-        return ContainerError.ConfigSaveFailed;
-    };
-    defer cfg.deinit(alloc);
-
     const mode = args.next() orelse "detached";
-    const exit_code = superviseGeneration(id, &cfg, std.mem.eql(u8, mode, "attach"), generation);
-    if (cfg.auto_remove) {
+    const result = superviseStoredGeneration(id, alloc, std.mem.eql(u8, mode, "attach"), generation);
+    if (result.auto_remove) {
         @import("../../local_lifecycle.zig").removeAutomatic(id, alloc, generation) catch |err| {
             writeErr("automatic removal failed for {s}: {}\n", .{ id, err });
         };
     }
-    std.process.exit(exit_code);
+    std.process.exit(result.exit_code);
+}
+
+const SupervisionResult = struct {
+    exit_code: u8 = 255,
+    auto_remove: bool = false,
+};
+
+fn superviseStoredGeneration(id: []const u8, alloc: std.mem.Allocator, attach: bool, generation: i64) SupervisionResult {
+    const owner = acquireOwner(id, generation) catch return .{};
+    defer owner.deinit();
+    defer control.finish(id, generation) catch {};
+
+    // loading outside ownership lets a delayed supervisor mark a newer run as
+    // failed. keep this failure and the requested state within the same run.
+    const cfg = run_state.loadConfig(alloc, id) catch |err| {
+        store.recordStartupFailure(id) catch {};
+        writeErr("failed to load container config for {s}: {}\n", .{ id, err });
+        return .{};
+    };
+    defer cfg.deinit(alloc);
+    return .{
+        .exit_code = superviseOwnedGeneration(id, &cfg, attach, generation),
+        .auto_remove = cfg.auto_remove,
+    };
 }
 
 fn readSelfExePathAlloc(io: std.Io, alloc: std.mem.Allocator) ![:0]u8 {
@@ -434,4 +466,31 @@ test "startup reads resource updates after acquiring the transition lock" {
     try std.testing.expect(!loader.failed);
     try std.testing.expectEqual(@as(?u64, 128 * 1024 * 1024), loader.memory_max);
     try std.testing.expectEqual(@as(?u32, 2), loader.retries);
+}
+
+test "supervisor config failure belongs to its requested generation" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const alloc = std.testing.allocator;
+    var random: [6]u8 = undefined;
+    @import("linux_platform").randomBytes(&random);
+    const id = std.fmt.bytesToHex(random, .lower);
+    try store.save(.{ .id = &id, .rootfs = "/fixture", .command = "sh", .hostname = "missing-config", .status = "created", .pid = null, .exit_code = null, .created_at = 1 });
+    try control.register(&id, null);
+    const previous = try control.request(&id, true);
+    const current = try control.request(&id, true);
+
+    // a delayed supervisor must leave the new launch pending and requested.
+    try std.testing.expectEqual(@as(u8, 255), superviseStoredGeneration(&id, alloc, false, previous).exit_code);
+    const pending = try store.load(alloc, &id);
+    defer pending.deinit(alloc);
+    try std.testing.expectEqual(store.StartupOutcome.pending, pending.startup_outcome);
+    try std.testing.expect(try control.shouldRun(&id, current));
+
+    // the current supervisor reports the missing config and ends its request.
+    try std.testing.expectEqual(@as(u8, 255), superviseStoredGeneration(&id, alloc, false, current).exit_code);
+    const failed = try store.load(alloc, &id);
+    defer failed.deinit(alloc);
+    try std.testing.expectEqual(store.StartupOutcome.failed, failed.startup_outcome);
+    try std.testing.expect(!try control.wantsRunning(&id));
 }
