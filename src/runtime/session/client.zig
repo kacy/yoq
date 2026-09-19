@@ -94,15 +94,7 @@ fn runOutcome(fd: posix.fd_t) !Outcome {
         if (linux.errno(rc) != .SUCCESS) return error.PollFailed;
         if (polls[0].revents != 0) {
             try protocol.receive(fd, &packet, false);
-            switch (try packet.kind()) {
-                .stdout => try foreground.writeAll(posix.STDOUT_FILENO, packet.payload()),
-                .stderr => try foreground.writeAll(posix.STDERR_FILENO, packet.payload()),
-                .exit => {
-                    if (packet.payload().len != 1) return error.InvalidPacket;
-                    return .{ .exited = packet.payload()[0] };
-                },
-                else => return error.InvalidPacket,
-            }
+            if (try handleOutput(&packet)) |code| return .{ .exited = code };
         }
         if (stdin_open and polls[1].revents != 0) {
             const count = try platform.read(posix.STDIN_FILENO, &input);
@@ -130,16 +122,24 @@ fn drainExit(fd: posix.fd_t, write_error: anyerror) !Outcome {
     var packet: protocol.Packet = .{};
     while (true) {
         protocol.receive(fd, &packet, true) catch return write_error;
-        switch (try packet.kind()) {
-            .stdout => try foreground.writeAll(posix.STDOUT_FILENO, packet.payload()),
-            .stderr => try foreground.writeAll(posix.STDERR_FILENO, packet.payload()),
-            .exit => {
-                if (packet.payload().len != 1) return error.InvalidPacket;
-                return .{ .exited = packet.payload()[0] };
-            },
-            else => return error.InvalidPacket,
-        }
+        if (try handleOutput(&packet)) |code| return .{ .exited = code };
     }
+}
+
+// output and exit packets have the same meaning during normal reads and
+// after a failed write. an exit code is returned only for a valid exit packet.
+fn handleOutput(packet: *const protocol.Packet) !?u8 {
+    const data = packet.payload();
+    switch (try packet.kind()) {
+        .stdout => try foreground.writeAll(posix.STDOUT_FILENO, data),
+        .stderr => try foreground.writeAll(posix.STDERR_FILENO, data),
+        .exit => {
+            if (data.len != 1) return error.InvalidPacket;
+            return data[0];
+        },
+        else => return error.InvalidPacket,
+    }
+    return null;
 }
 
 test "session client restores terminal on remote exit and detach" {
