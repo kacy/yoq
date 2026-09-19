@@ -86,6 +86,14 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
     const owner = acquireOwner(id, generation) catch return 255;
     defer owner.deinit();
     defer control.finish(id, generation) catch {};
+    var startup_acknowledged = false;
+    defer if (!startup_acknowledged) {
+        // Setup can fail before an execution attempt exists (session socket,
+        // channels, or orphan cleanup). Do not leave its caller waiting on a
+        // pending outcome, and do not overwrite a newer generation's launch.
+        if ((control.currentGeneration(id) catch null) == generation)
+            store.recordStartupFailure(id) catch {};
+    };
     @import("../../local_health.zig").cleanupOrphans(id) catch return 255;
     var backoff_ms: u32 = 1000;
     var first_start = true;
@@ -107,7 +115,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         const current_cfg = run_state.loadConfig(std.heap.page_allocator, id) catch return 255;
         defer current_cfg.deinit(std.heap.page_allocator);
         var ports = @import("../../../network/port_allocator.zig").hold(current_cfg.port_maps) catch |err| {
-            store.setStartupOutcome(id, .failed) catch {};
+            store.recordStartupFailure(id) catch {};
             var error_buf: [192]u8 = undefined;
             const message = std.fmt.bufPrint(&error_buf, "published port is unavailable: {}\n", .{err}) catch "published port unavailable\n";
             session.Server.output(&server, "stderr", message);
@@ -131,7 +139,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
             store.updateStatus(id, "created", null, null) catch return 255;
             c.start() catch |err| {
                 // startup rollback may have retained resources for cleanup.
-                store.setStartupOutcome(id, .failed) catch {};
+                store.recordStartupFailure(id) catch {};
                 var error_buf: [256]u8 = undefined;
                 const message = std.fmt.bufPrint(&error_buf, "failed to start container: {}\n", .{err}) catch "failed to start container\n";
                 session.Server.output(&server, "stderr", message);
@@ -146,7 +154,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
             monitor = @import("../../local_health.zig").Monitor.start(id, c.pid.?, generation, &current_cfg) catch |err| {
                 c.forceStop() catch {};
                 _ = c.wait() catch 255;
-                store.setStartupOutcome(id, .failed) catch {};
+                store.recordStartupFailure(id) catch {};
                 writeErr("failed to start container healthcheck: {}\n", .{err});
                 return 255;
             };
@@ -158,6 +166,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
                     writeErr("failed to record container startup: {}\n", .{err});
                     return 255;
                 };
+                startup_acknowledged = true;
             }
         }
 
