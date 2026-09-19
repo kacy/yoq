@@ -46,7 +46,7 @@ pub const PortMap = struct {
     pub fn jsonStringify(self: PortMap, writer: anytype) !void {
         const address = self.bindIp() orelse .{ 0, 0, 0, 0 };
         var buf: [16]u8 = undefined;
-        const text = try std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] });
+        const text = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] }) catch return error.WriteFailed;
         try writer.write(.{ .host_ip = text, .host_port = self.host_port, .container_port = self.container_port, .protocol = self.protocol });
     }
 
