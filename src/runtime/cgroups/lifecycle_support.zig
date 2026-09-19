@@ -492,3 +492,39 @@ test "isEmpty returns false for non-whitespace cgroup.procs content" {
         try std.testing.expect(has_non_whitespace);
     }
 }
+
+test "cpuset controller restricts child affinity and rejects unavailable cpus" {
+    if (std.os.linux.geteuid() != 0) return error.SkipZigTest;
+    const linux = std.os.linux;
+    var available_buffer: [512]u8 = undefined;
+    const available = try std.Io.Dir.cwd().readFile(std.testing.io, "/sys/fs/cgroup/cpuset.cpus.effective", &available_buffer);
+    var cpu_numbers = std.mem.tokenizeAny(u8, available, "-,\n");
+    const first = cpu_numbers.next() orelse return error.SkipZigTest;
+    const cpu = try std.fmt.parseUnsigned(usize, first, 10);
+    if (cpu >= @bitSizeOf(linux.cpu_set_t)) return error.SkipZigTest;
+    var id: [12]u8 = undefined;
+    try container.generateId(&id);
+    const group = try Cgroup.create(&id);
+    defer group.destroy() catch {};
+    var limits = ResourceLimits.unlimited;
+    limits.cpuset_cpus = try common.CpuSet.parse(first);
+    try group.setLimits(limits);
+    var actual_buffer: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(first, try group.readFile("cpuset.cpus.effective", &actual_buffer));
+    limits.cpuset_cpus = try common.CpuSet.parse("1048575");
+    try std.testing.expectError(error.InvalidLimit, group.setLimits(limits));
+    try std.testing.expectEqualStrings(first, try group.readFile("cpuset.cpus.effective", &actual_buffer));
+    const child = linux.fork();
+    if (linux.errno(child) != .SUCCESS) return error.ForkFailed;
+    if (child == 0) {
+        group.addProcess(linux.getpid()) catch linux.exit_group(1);
+        var mask: linux.cpu_set_t = std.mem.zeroes(linux.cpu_set_t);
+        if (linux.errno(linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &mask)) != .SUCCESS) linux.exit_group(2);
+        var total: usize = 0;
+        for (mask) |word| total += @popCount(word);
+        if (total != 1 or mask[cpu / @bitSizeOf(usize)] & (@as(usize, 1) << @intCast(cpu % @bitSizeOf(usize))) == 0) linux.exit_group(3);
+        linux.exit_group(0);
+    }
+    const result = try process.waitForExit(@intCast(child));
+    try std.testing.expectEqual(process.ExitStatus{ .exited = 0 }, result.status);
+}
