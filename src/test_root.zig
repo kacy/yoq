@@ -45,6 +45,7 @@ comptime {
     _ = @import("runtime/run_state.zig");
     _ = @import("runtime/local_control.zig");
     _ = @import("runtime/local_lifecycle.zig");
+    _ = @import("runtime/container_lifecycle.zig");
     _ = @import("runtime/cli/container/run_command.zig");
     _ = @import("runtime/cli/container/supervisor_runtime.zig");
     _ = @import("build/engine/command_config.zig");
