@@ -116,7 +116,7 @@ fn setupContainerImpl(container_id: []const u8, pid: posix.pid_t, config: common
 
     if (!config.skip_dns) {
         service_registry_bridge.registerContainerService(
-            hostname,
+            config.dns_name orelse hostname,
             container_id,
             container_ip,
             if (config.node_id) |node_id| @as(i64, node_id) else null,

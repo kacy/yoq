@@ -15,9 +15,9 @@ const writeErr = cli.writeErr;
 const requireArg = cli.requireArg;
 const ContainerError = common.ContainerError;
 
-fn containerFromSaved(id: []const u8, cfg: *const run_state.SavedRunConfig, mirror_output: bool) container.Container {
+fn containerFromSaved(id: []const u8, cfg: *const run_state.SavedRunConfig, mirror_output: bool, local_name: ?[]const u8) container.Container {
     const net_config: ?net_setup.NetworkConfig = if (cfg.network_enabled)
-        .{ .port_maps = cfg.port_maps, .network_name = cfg.network_name }
+        .{ .port_maps = cfg.port_maps, .network_name = cfg.network_name, .dns_name = local_name orelse id }
     else
         null;
 
@@ -125,7 +125,9 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         var channels = session.ProcessIo.init(current_cfg.interactive, current_cfg.tty) catch return 255;
         defer channels.deinit();
         var monitor: ?*@import("../../local_health.zig").Monitor = null;
-        var c = containerFromSaved(id, &current_cfg, false);
+        const local_name = control.nameForId(std.heap.page_allocator, id) catch return 255;
+        defer if (local_name) |name| std.heap.page_allocator.free(name);
+        var c = containerFromSaved(id, &current_cfg, false, local_name);
         c.config.session_io = &channels;
         c.config.session_output = .{ .context = &server, .write = session.Server.output };
         server.prepareChild(&channels);
@@ -327,4 +329,20 @@ fn readSelfExePathAlloc(io: std.Io, alloc: std.mem.Allocator) ![:0]u8 {
         }
     }
     return error.NameTooLong;
+}
+
+test "standalone DNS uses saved names and IDs independently of the UTS hostname" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const alloc = std.testing.allocator;
+    try control.register("0123456789ab", "web");
+    try control.register("abcdef012345", null);
+    const cfg: run_state.SavedRunConfig = .{ .rootfs = "/", .command = "/bin/sh", .hostname = "custom-hostname", .working_dir = "/", .args = &.{}, .env = &.{}, .lower_dirs = &.{}, .mounts = &.{}, .network_enabled = true, .port_maps = &.{}, .limits = .{}, .restart_policy = .no };
+    for ([_][]const u8{ "0123456789ab", "abcdef012345" }, [_][]const u8{ "web", "abcdef012345" }) |id, expected| {
+        const local_name = try control.nameForId(alloc, id);
+        defer if (local_name) |name| alloc.free(name);
+        const instance = containerFromSaved(id, &cfg, false, local_name);
+        try std.testing.expectEqualStrings(expected, instance.config.network.?.dns_name.?);
+        try std.testing.expectEqualStrings("custom-hostname", instance.config.hostname);
+    }
 }
