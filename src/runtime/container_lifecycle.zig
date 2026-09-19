@@ -46,25 +46,38 @@ fn stopManaged(alloc: std.mem.Allocator, record: *const store.ContainerRecord, w
         return .stopped;
     }
     const pid = record.pid orelse return error.NotRunning;
-    const cg = cgroups.Cgroup.open(id) catch return error.NotRunning;
-    if (!cg.containsProcess(pid)) {
+    const cg = try cgroups.Cgroup.open(id);
+    if (!try containsProcess(&cg, pid)) {
         store.updateStatus(id, "stopped", null, null) catch {};
         return error.NotRunning;
     }
     try process.terminate(pid);
-    if (!waitForProcessExit(id, pid)) return .stopping;
+    if (!try waitForProcessExit(id, pid)) return .stopping;
     store.updateStatus(id, "stopped", null, null) catch {};
     return .stopped;
 }
 
-pub fn waitForProcessExit(id: []const u8, pid: i32) bool {
+pub fn waitForProcessExit(id: []const u8, pid: i32) !bool {
+    const cg = try cgroups.Cgroup.open(id);
     for (0..10) |_| {
-        const cg = cgroups.Cgroup.open(id) catch return true;
-        if (!cg.containsProcess(pid)) return true;
-        process.sendSignal(pid, 0) catch return true;
+        if (!try containsProcess(&cg, pid)) return true;
+        if (process.hasExited(pid)) return true;
+        try process.sendSignal(pid, 0);
         if (!runtime_wait.sleep(.fromMilliseconds(50), "container stop wait")) return false;
     }
     return false;
+}
+
+fn containsProcess(cg: *const cgroups.Cgroup, pid: i32) !bool {
+    return cg.containsProcessChecked(pid) catch |err| {
+        // teardown can remove the group during a stop. only a missing group
+        // confirms exit; an existing group with unreadable membership does not.
+        std.Io.Dir.cwd().access(std.Options.debug_io, cg.path(), .{}) catch |access_err| switch (access_err) {
+            error.FileNotFound => return false,
+            else => return access_err,
+        };
+        return err;
+    };
 }
 
 pub fn remove(alloc: std.mem.Allocator, id: []const u8, remove_anonymous: bool) !void {
@@ -111,4 +124,32 @@ test "managed container removal does not require standalone recovery state" {
     try remove(std.testing.allocator, id, false);
     try std.testing.expectError(error.NotFound, store.load(std.testing.allocator, id));
     try std.testing.expect((try control.currentGeneration(id)) == null);
+}
+
+test "managed stop preserves running state when ownership cannot be checked" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const id = "invalid-owner";
+    try store.save(.{ .id = id, .rootfs = "/fixture", .command = "serve", .hostname = "web", .app_name = "managed-app", .status = "running", .pid = 999999, .exit_code = null, .created_at = 0 });
+    try std.testing.expectError(error.InvalidId, stop(std.testing.allocator, id, .brief));
+    try std.testing.expectError(error.InvalidId, waitForProcessExit(id, 999999));
+    const record = try store.load(std.testing.allocator, id);
+    defer record.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("running", record.status);
+    try std.testing.expectEqual(@as(?i32, 999999), record.pid);
+}
+
+test "managed stop distinguishes missing cgroups from unreadable membership" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "group");
+    var cg: cgroups.Cgroup = .{ .path_buf = undefined, .path_len = 0 };
+    cg.path_len = try tmp.dir.realPathFile(std.testing.io, "group", &cg.path_buf);
+    try std.testing.expectError(error.ReadFailed, containsProcess(&cg, 42));
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "group/cgroup.procs", .data = "42\n" });
+    try std.testing.expect(try containsProcess(&cg, 42));
+    try std.testing.expect(!try containsProcess(&cg, 43));
+    try tmp.dir.deleteTree(std.testing.io, "group");
+    try std.testing.expect(!try containsProcess(&cg, 42));
 }
