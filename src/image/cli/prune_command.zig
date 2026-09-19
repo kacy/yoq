@@ -66,7 +66,7 @@ fn markManifest(alloc: std.mem.Allocator, referenced: *DigestSet, manifest_text:
     }
 }
 
-// Older configurations only recorded extracted paths. Their final components
+// older configurations only recorded extracted paths. their final components
 // identify the layer digest even when the cache directory version has changed.
 fn markLayerPath(referenced: *DigestSet, path: []const u8) !void {
     if (!std.mem.eql(u8, std.fs.path.basename(path), "rootfs")) return;
@@ -92,7 +92,7 @@ fn markContainers(alloc: std.mem.Allocator, referenced: *DigestSet) !void {
         const id = entry.name[0 .. entry.name.len - 4];
         if (!@import("../../runtime/container.zig").isValidContainerId(id)) continue;
         const config = run_state.loadConfig(alloc, id) catch |err| switch (err) {
-            // Container removal can finish while the directory is being read.
+            // container removal can finish while the directory is being read.
             error.NotFound => continue,
             else => return err,
         };

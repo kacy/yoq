@@ -44,7 +44,7 @@ pub fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
     }
 }
 
-/// A foreground exec owns its process. Disconnect closes pipe stdin; terminal
+/// a foreground exec owns its process. disconnect closes pipe stdin; terminal
 /// detach keys are reserved for the durable supervisor client.
 pub fn run(channels: *process_io.ProcessIo, pid: posix.pid_t) !u8 {
     const signals = Signals.install(pid);
@@ -100,8 +100,8 @@ pub fn run(channels: *process_io.ProcessIo, pid: posix.pid_t) !u8 {
             }
         }
         if (input_len > 0 and channels.input >= 0) {
-            // A child may write a full output pipe before reading stdin.
-            // Keep draining its output while input is backpressured.
+            // a child may write a full output pipe before reading stdin.
+            // keep draining its output while input is backpressured.
             const count = platform.write(channels.input, input_buffer[0..input_len]) catch |err| blk: {
                 if (err != error.WouldBlock and err != error.Interrupted) {
                     stdin_open = false;

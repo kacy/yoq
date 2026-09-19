@@ -253,7 +253,7 @@ pub const Container = struct {
         self.runtime.cgroup.?.setLimits(config.limits) catch return ContainerError.StartFailed;
         start_support.startLogCapture(config, &self.runtime, child) catch return ContainerError.StartFailed;
 
-        // Prepare the image root before managed volumes hide their target paths.
+        // prepare the image root before managed volumes hide their target paths.
         child.signalReady();
         startup.expect(channel.parent, .overlay_ready) catch return ContainerError.StartFailed;
         if (!config.host_mode) {

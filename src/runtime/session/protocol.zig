@@ -37,7 +37,7 @@ pub fn receive(fd: posix.fd_t, packet: *Packet, nonblocking: bool) !void {
 pub const DetachKeys = struct {
     pending: bool = false,
 
-    /// Ctrl-P Ctrl-Q may cross reads. A lone Ctrl-P stays pending until the
+    /// detach keys (Ctrl-P Ctrl-Q) may span reads. a lone Ctrl-P waits for the
     /// next byte or EOF; unrelated bytes are forwarded unchanged.
     pub fn consume(self: *DetachKeys, input: []const u8, output: []u8) struct { count: usize, detached: bool } {
         var count: usize = 0;

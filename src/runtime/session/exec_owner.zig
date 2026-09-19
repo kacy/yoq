@@ -9,7 +9,7 @@ var child_target = std.atomic.Value(i32).init(0);
 fn cancel(_: linux.SIG) callconv(.c) void {
     const pid = child_target.load(.acquire);
     if (pid > 0) {
-        // Ordinary children inherit this group. The direct child is also
+        // ordinary children inherit this group. the direct child is also
         // killed if cancellation arrived before it established its group.
         _ = linux.kill(-pid, .KILL);
         _ = linux.kill(pid, .KILL);
@@ -19,7 +19,7 @@ fn cancel(_: linux.SIG) callconv(.c) void {
 pub const CancellationMask = struct {
     previous: posix.sigset_t,
 
-    // Block before fork so cancellation cannot take the helper's default
+    // block before fork so cancellation cannot take the helper's default
     // action before it has installed its handler and recorded the child.
     pub fn block() CancellationMask {
         var mask = posix.sigemptyset();
@@ -48,8 +48,8 @@ pub fn parentHandle() !posix.fd_t {
     return @intCast(fd);
 }
 
-// Setting credentials clears PDEATHSIG, so arm it again after identity setup.
-// The pidfd closes the race where the helper died before prctl took effect.
+// setting credentials clears PDEATHSIG, so arm it again after identity setup.
+// the pidfd closes the race where the helper died before prctl took effect.
 pub fn armChild(parent: posix.fd_t) !void {
     if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_PDEATHSIG), @intFromEnum(linux.SIG.KILL), 0, 0, 0)) != .SUCCESS)
         return error.ParentWatchFailed;
@@ -59,8 +59,8 @@ pub fn armChild(parent: posix.fd_t) !void {
 }
 
 pub fn abort(helper: posix.pid_t) void {
-    // The relay may already have reaped the helper before an output error.
-    // Do not signal a recycled PID in that case.
+    // the relay may already have reaped the helper before an output error.
+    // do not signal a recycled PID in that case.
     if (!stillOwned(helper)) return;
     process.sendSignal(helper, linux.SIG.USR2) catch {};
     process.sendSignal(helper, linux.SIG.CONT) catch {};

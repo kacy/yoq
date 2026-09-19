@@ -89,7 +89,7 @@ const Fixture = struct {
         }};
         const index = try std.json.Stringify.valueAlloc(alloc, common.Index{ .manifests = &descriptors }, .{});
         defer alloc.free(index);
-        // Put index last to cover archives from tools with a different ordering.
+        // put index last to cover archives from tools with a different ordering.
         try tar.writeFileBytes("oci-layout", "{\"imageLayoutVersion\":\"1.0.0\"}", .{});
         try writeBlob(&tar, self.manifest_digest, self.manifest);
         try writeBlob(&tar, self.config_digest, self.config);
@@ -153,7 +153,7 @@ test "image archive rejects corrupt missing and size mismatched content before p
         defer bytes.deinit();
         try fixture.archive(&bytes.writer, false, 0);
         var reader = std.Io.Reader.fixed(bytes.written());
-        // Existing local blobs cannot conceal an incomplete transfer archive.
+        // existing local blobs cannot conceal an incomplete transfer archive.
         try std.testing.expectError(error.MissingBlob, load_archive.load(io, alloc, &reader));
     }
     {

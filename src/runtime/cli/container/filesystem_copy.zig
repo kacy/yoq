@@ -1,8 +1,8 @@
 const std = @import("std");
 const linux = std.os.linux;
 
-/// Resolve container paths from its root, including absolute symlink targets.
-/// The returned directory remains usable if the container exits during copying.
+/// resolve container paths from its root, including absolute symlink targets.
+/// the returned directory remains usable if the container exits during copying.
 pub fn openContainerDir(root: std.Io.Dir, path: []const u8) !std.Io.Dir {
     const how = extern struct { flags: u64, mode: u64 = 0, resolve: u64 }{
         .flags = @as(u32, @bitCast(linux.O{ .DIRECTORY = true, .CLOEXEC = true })),
@@ -45,7 +45,7 @@ fn openDestination(io: std.Io, root: ?std.Io.Dir, path: []const u8) !?std.Io.Dir
     };
 }
 
-/// Exactly one endpoint is container-relative. Directories copied to an
+/// exactly one endpoint is container-relative. directories copied to an
 /// existing directory retain their basename; a source ending in /. copies contents.
 pub fn copy(io: std.Io, source_root: ?std.Io.Dir, source_path: []const u8, destination_root: ?std.Io.Dir, destination_path: []const u8) !void {
     if (source_path.len == 0 or destination_path.len == 0) return error.InvalidPath;

@@ -124,7 +124,7 @@ fn runOutcome(fd: posix.fd_t) !Outcome {
     }
 }
 
-// The server sends exit before closing its socket. A simultaneous stdin,
+// the server sends exit before closing its socket. a simultaneous stdin,
 // resize, or signal write can fail while that exit is still queued.
 fn drainExit(fd: posix.fd_t, write_error: anyerror) !Outcome {
     var packet: protocol.Packet = .{};
@@ -171,7 +171,7 @@ test "session client restores terminal on remote exit and detach" {
         io.closeChild();
         try protocol.send(sockets[0], .ready, &.{ 1, 1 }, false);
         var packet: protocol.Packet = .{};
-        // Resize is sent after entering raw mode and installing signal handlers.
+        // resize is sent after entering raw mode and installing signal handlers.
         try protocol.receive(sockets[0], &packet, false);
         try std.testing.expectEqual(protocol.Kind.resize, try packet.kind());
         const raw = try posix.tcgetattr(io.input);

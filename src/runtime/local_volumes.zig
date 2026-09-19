@@ -8,7 +8,7 @@ const cmd = @import("../lib/cmd.zig");
 const paths = @import("../lib/paths.zig");
 const container = @import("container.zig");
 
-// Standalone volumes use a separate namespace from manifest-managed apps.
+// standalone volumes use a separate namespace from manifest-managed apps.
 const app_name = ".containers";
 pub const VolumeError = error{ InvalidName, InvalidMount, NotFound, InUse, DbError, CopyFailed, OutOfMemory } || volumes.VolumeError;
 
@@ -134,7 +134,7 @@ pub fn list(alloc: std.mem.Allocator) VolumeError![]Record {
 
 fn removeInDb(db: *sqlite.Db, record: Record) VolumeError!void {
     if (record.references != 0) return error.InUse;
-    // Keep the database transaction open through filesystem cleanup. A failed
+    // keep the database transaction open through filesystem cleanup. a failed
     // cleanup leaves the volume record available for a later retry.
     const exists = blk: {
         std.Io.Dir.cwd().access(std.Options.debug_io, record.path, .{}) catch |err| switch (err) {
@@ -159,7 +159,7 @@ pub fn remove(name: []const u8) VolumeError!void {
     try commit(lease.db);
 }
 
-/// Reserve a volume reference before saving or starting the container. The
+/// reserve a volume reference before saving or starting the container. the
 /// caller owns both strings in the returned bind mount.
 pub fn resolveMount(alloc: std.mem.Allocator, id: []const u8, spec: cli.VolumeMountSpec) VolumeError!container.BindMount {
     if (!container.isValidContainerId(id) or spec.kind != .volume or spec.target.len == 0 or spec.target[0] != '/') return error.InvalidMount;
@@ -194,7 +194,7 @@ pub fn resolveMount(alloc: std.mem.Allocator, id: []const u8, spec: cli.VolumeMo
     return .{ .source = source, .target = target, .read_only = spec.read_only };
 }
 
-/// Release references only after the container's mounts are gone. Ordinary
+/// release references only after the container's mounts are gone. ordinary
 /// removal retains volumes; --rm or rm -v may remove unreferenced anonymous ones.
 pub fn releaseContainer(id: []const u8, remove_anonymous: bool) VolumeError!void {
     var lease = store.leaseDb() catch return error.DbError;
@@ -219,9 +219,8 @@ pub fn releaseContainer(id: []const u8, remove_anonymous: bool) VolumeError!void
     try commit(lease.db);
 }
 
-/// Populate empty volumes from the prepared, merged rootfs before installing
-/// bind mounts. Copying through a sibling directory keeps failed copies out of
-/// the volume. Existing data is never replaced.
+/// populate empty volumes from the merged rootfs before binding them. copy into
+/// a sibling directory first so a failed copy leaves the volume unchanged.
 pub fn initializeContainer(io: std.Io, alloc: std.mem.Allocator, id: []const u8, rootfs: []const u8) VolumeError!void {
     var lease = store.leaseDb() catch return error.DbError;
     defer lease.deinit();
@@ -245,7 +244,7 @@ pub fn initializeContainer(io: std.Io, alloc: std.mem.Allocator, id: []const u8,
     for (rows) |row| {
         try begin(lease.db);
         errdefer rollback(lease.db);
-        // Recheck after acquiring the write lock: another container may have
+        // recheck after acquiring the write lock: another container may have
         // populated this shared volume since the initial query.
         const initialized = (lease.db.one(i64, "SELECT initialized FROM local_volumes WHERE name = ?;", .{}, .{row.name}) catch return error.DbError) orelse return error.NotFound;
         if (initialized == 0) {
@@ -289,7 +288,7 @@ fn initializeEmptyVolume(io: std.Io, alloc: std.mem.Allocator, rootfs: []const u
     argv[3] = contents;
     argv[4] = staging;
     cmd.exec(&argv) catch return error.CopyFailed;
-    // rename atomically replaces the empty destination directory. It refuses
+    // rename atomically replaces the empty destination directory. it refuses
     // replacement if another writer has added a file in the meantime.
     std.Io.Dir.cwd().rename(staging, std.Io.Dir.cwd(), destination, io) catch return error.CopyFailed;
     return true;

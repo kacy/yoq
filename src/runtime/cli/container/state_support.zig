@@ -96,8 +96,8 @@ pub fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
 
 pub fn waitForContainerStart(alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
     var attempts: usize = 0;
-    // Include volume initialization and both sides of the startup handshake.
-    // Each child handshake can take up to 30 seconds.
+    // include volume initialization and both sides of the startup handshake.
+    // each child handshake can take up to 30 seconds.
     while (attempts < 1800) : (attempts += 1) {
         const record = store.load(alloc, id) catch {
             if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container start load wait")) break;

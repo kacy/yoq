@@ -3,7 +3,7 @@ const spec = @import("../spec.zig");
 const blobs = @import("../store.zig");
 
 pub const max_metadata: usize = 20 * 1024 * 1024;
-// The portable ustar size field holds eleven octal digits.
+// the portable ustar size field holds eleven octal digits.
 pub const max_blob: u64 = 8 * 1024 * 1024 * 1024 - 1;
 pub const max_total: u64 = 1024 * 1024 * 1024 * 1024;
 pub const max_entries: usize = 65536;

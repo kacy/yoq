@@ -54,7 +54,7 @@ fn invoke(ctx: AppContext, reference: []const u8, operation: []const u8, source:
     defer record.deinit(ctx.alloc);
     const running = state_support.currentOwnedRunningPid(&record);
     if (running == null and (std.mem.eql(u8, record.status, "running") or try control.wantsRunning(record.id))) return error.ContainerStateUnknown;
-    // A stopped writable layer must be free of any previous owner's cleanup.
+    // a stopped writable layer must be free of any previous owner's cleanup.
     const owner = if (running == null) try control.lock(record.id, .owner, false) else null;
     defer if (owner) |lock| lock.deinit();
     var pid_buf: [32]u8 = undefined;
@@ -70,8 +70,8 @@ fn invoke(ctx: AppContext, reference: []const u8, operation: []const u8, source:
     if (result != .exited or result.exited != 0) return error.FilesystemOperationFailed;
 }
 
-/// Reexec permits normal allocation after namespace entry. The parent holds
-/// lifecycle locks until this helper exits; unmounting never removes upper data.
+/// this helper can allocate after namespace entry without inherited fork locks.
+/// the parent holds lifecycle locks until the helper exits; unmounting preserves upper data.
 pub fn helper(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const id = args.next() orelse return error.InvalidArgument;
     const operation = args.next() orelse return error.InvalidArgument;
@@ -88,7 +88,7 @@ pub fn helper(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     if (!copying_in and !copying_out and !showing_diff) return error.InvalidArgument;
     if (showing_diff and config.lower_dirs.len == 0) return error.DiffRequiresImage;
 
-    // Only the helper's current thread performs filesystem work in this namespace.
+    // only the helper's current thread performs filesystem work in this namespace.
     if ((pid == 0 and config.lower_dirs.len > 0) or showing_diff) {
         if (linux.errno(linux.unshare(linux.CLONE.NEWNS | linux.CLONE.FS)) != .SUCCESS) return error.MountNamespaceFailed;
         if (linux.errno(linux.mount(null, "/", null, linux.MS.REC | linux.MS.PRIVATE, 0)) != .SUCCESS) return error.MountNamespaceFailed;

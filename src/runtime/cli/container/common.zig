@@ -22,7 +22,7 @@ pub const ContainerError = error{
 
 pub const RunFlags = struct {
     port_maps: std.ArrayList(net_setup.PortMap) = .empty,
-    // Environment entries are owned. A bare name removes an inherited variable.
+    // environment entries are owned. an unset bare name removes an inherited value.
     env: std.ArrayList([]const u8) = .empty,
     volume_specs: std.ArrayList(cli.VolumeMountSpec) = .empty,
     tmpfs_mounts: std.ArrayList(@import("../../filesystem.zig").TmpfsMount) = .empty,

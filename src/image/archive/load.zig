@@ -50,7 +50,7 @@ pub fn load(io: std.Io, alloc: std.mem.Allocator, reader: *std.Io.Reader) !usize
             iterator.unread_file_bytes = 0;
             try present.put(digest, entry.size);
         }
-        // Other regular files are allowed by OCI layout extensions. The
+        // other regular files are allowed by OCI layout extensions. the
         // iterator discards their contents without creating archive paths.
     }
     var layout = try spec.parseJson(common.Layout, scratch, layout_bytes orelse return error.UnsupportedArchive);
@@ -114,8 +114,8 @@ pub fn load(io: std.Io, alloc: std.mem.Allocator, reader: *std.Io.Reader) !usize
             .created_at = std.Io.Clock.real.now(io).toSeconds(),
         });
     }
-    // No image reference changes until every descriptor and blob is validated.
-    // Verified blobs from an interrupted import are harmless cache entries.
+    // no image reference changes until every descriptor and blob is validated.
+    // verified blobs from an interrupted import are harmless cache entries.
     try store.saveImages(records.items);
     return records.items.len;
 }

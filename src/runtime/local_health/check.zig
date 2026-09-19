@@ -13,8 +13,8 @@ pub const Group = struct {
         group.cgroup.path_len = path.len;
         try std.Io.Dir.cwd().createDir(std.Options.debug_io, path, .default_dir);
         errdefer std.Io.Dir.cwd().deleteDir(std.Options.debug_io, path) catch {};
-        // The check is a sibling so ordinary container teardown does not race
-        // deletion of its cgroup. Apply the container's configured bounds here.
+        // the check is a sibling so ordinary container teardown does not race
+        // deletion of its cgroup. apply the container's configured bounds here.
         try group.cgroup.setLimits(limits);
         return group;
     }
@@ -24,7 +24,7 @@ pub const Group = struct {
     }
 };
 
-/// Call only with the container owner lock held and no active monitor. Recovery
+/// call only with the container owner lock held and no active monitor. recovery
 /// removes groups left by a supervisor that could not run its normal cleanup.
 pub fn cleanupOrphans(id: []const u8) !void {
     if (!@import("../container.zig").isValidContainerId(id)) return error.InvalidId;
@@ -48,7 +48,7 @@ pub fn cleanupOrphans(id: []const u8) !void {
 
 pub const Outcome = union(enum) { exited: u8, timed_out, cancelled };
 
-/// The injected runner owns the helper and all check descendants. Every return
+/// the injected runner owns the helper and all check descendants. every return
 /// path calls cleanup before returning the result to the monitor.
 pub fn awaitCheck(runner: anytype, timeout_ns: u64) !Outcome {
     errdefer runner.cleanup() catch {};
@@ -98,7 +98,7 @@ pub fn run(monitor: anytype, timeout_ns: u64) !Outcome {
     defer child.kill(io);
     const helper_pid = child.id.?;
     try group.cgroup.addProcess(helper_pid);
-    // No check process can fork before its helper has joined the owned group.
+    // no check process can fork before its helper has joined the owned group.
     try child.stdin.?.writeStreamingAll(io, "1");
     child.stdin.?.close(io);
     child.stdin = null;

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// CPU lists are values so copied resource configurations do not borrow argv.
+/// copied CPU lists own their storage instead of borrowing argv.
 pub const CpuSet = struct {
     buffer: [512]u8 = undefined,
     len: u16 = 0,

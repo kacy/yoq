@@ -5,7 +5,7 @@ const AppContext = @import("../../lib/app_context.zig").AppContext;
 const volumes = @import("../local_volumes.zig");
 const id_paths = @import("id_paths.zig");
 
-/// The runtime child waits with only its image overlay mounted. Reexec keeps
+/// the runtime child waits with only its image overlay mounted. reexec keeps
 /// allocations and copying out of the child created by clone, which may have
 /// inherited allocator or database locks from other threads.
 pub fn initialize(io: std.Io, id: []const u8, pid: std.posix.pid_t, rootfs: []const u8) !void {
@@ -27,7 +27,7 @@ pub fn initialize(io: std.Io, id: []const u8, pid: std.posix.pid_t, rootfs: []co
     if (result != .exited or result.exited != 0) return error.VolumeInitializationFailed;
 }
 
-/// Join only the mount namespace. The helper still needs host executables and
+/// join only the mount namespace. the helper still needs host executables and
 /// state paths; it must finish before the runtime child binds volumes or pivots.
 pub fn initVolumes(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const id = args.next() orelse return error.InvalidArgument;
@@ -42,7 +42,7 @@ pub fn initVolumes(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     defer platform.posix.close(fd);
     if (linux.errno(linux.unshare(linux.CLONE.FS)) != .SUCCESS) return error.SetNsFailed;
     if (linux.errno(linux.syscall2(.setns, @intCast(fd), linux.CLONE.NEWNS)) != .SUCCESS) return error.SetNsFailed;
-    // All filesystem work stays on this thread after setns.
+    // all filesystem work stays on this thread after setns.
     const io = std.Io.Threaded.global_single_threaded.io();
     try volumes.initializeContainer(io, ctx.alloc, id, rootfs);
 }

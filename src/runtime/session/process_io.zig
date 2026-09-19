@@ -9,8 +9,8 @@ pub fn close(fd: *posix.fd_t) void {
     fd.* = -1;
 }
 
-/// Parent and child endpoints are owned separately so a capture worker may own
-/// output while the session server owns stdin. Transfer a descriptor by setting
+/// parent and child endpoints are owned separately so a capture worker may own
+/// output while the session server owns stdin. transfer a descriptor by setting
 /// its source field to -1.
 pub const ProcessIo = struct {
     input: posix.fd_t = -1,
@@ -74,7 +74,7 @@ pub const ProcessIo = struct {
         close(&self.stderr);
     }
 
-    /// Called once in the final child, before its root changes.
+    /// called once in the final child, before its root changes.
     pub fn applyChild(self: *ProcessIo) !void {
         for (self.close_in_child) |fd| if (fd >= 0) platform.close(fd);
         close(&self.input);

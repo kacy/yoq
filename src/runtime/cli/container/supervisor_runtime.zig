@@ -110,8 +110,8 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
     defer control.finish(id, generation) catch {};
     var startup_acknowledged = false;
     defer if (!startup_acknowledged) {
-        // Setup can fail before an execution attempt exists (session socket,
-        // channels, or orphan cleanup). Do not leave its caller waiting on a
+        // setup can fail before an execution attempt exists (session socket,
+        // channels, or orphan cleanup). do not leave its caller waiting on a
         // pending outcome, and do not overwrite a newer generation's launch.
         if ((control.currentGeneration(id) catch null) == generation)
             store.recordStartupFailure(id) catch {};
@@ -134,7 +134,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
     }
 
     while (true) {
-        // Update and stop use this lock too. Read the effective configuration
+        // update and stop use this lock too. read the effective configuration
         // after acquiring it and retain the lock through PID publication.
         var startup_config = StartupConfig.load(std.heap.page_allocator, id) catch return 255;
         defer startup_config.deinit();
@@ -203,7 +203,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
             return last_exit;
         };
         server.clearInput();
-        // Attached callers observe this attempt's exit, even if policy restarts it.
+        // attached callers observe this attempt's exit, even if policy restarts it.
         server.finish(last_exit);
         // the writable layer belongs to the container, not this process run.
         // failed teardown retains its handles and must never be overwritten.

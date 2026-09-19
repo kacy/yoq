@@ -42,9 +42,9 @@ fn line(writer: *std.Io.Writer, kind: u8, path: []const u8) !void {
     try writer.print("{c} /{s}\n", .{ kind, path });
 }
 
-/// Compare upper metadata against the merged immutable image view. Native
+/// compare upper metadata against the merged immutable image view. native
 /// whiteouts and opaque directories represent deletions, including directories
-/// removed as a whole. Bind mounts and volumes are outside this writable layer.
+/// removed as a whole. bind mounts and volumes are outside this writable layer.
 pub fn diff(io: std.Io, alloc: std.mem.Allocator, upper: std.Io.Dir, lower: std.Io.Dir, writer: *std.Io.Writer) !void {
     try walk(io, alloc, upper, lower, "", writer, 0);
 }

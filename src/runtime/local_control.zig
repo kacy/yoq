@@ -54,8 +54,8 @@ pub fn register(id: []const u8, name: ?[]const u8) !void {
     if (inserted == null) return error.NameInUse;
 }
 
-// old standalone records acquire lifecycle state lazily. leave legacy names
-// unreserved so an upgrade can report duplicates without choosing an owner.
+// old standalone records acquire lifecycle state lazily. leave the explicit
+// name unset so legacy hostname lookup can report duplicates.
 pub fn ensureRegistered(id: []const u8) !void {
     var lease = try db_store.leaseDb();
     defer lease.deinit();
@@ -102,9 +102,9 @@ pub fn finish(id: []const u8, generation: i64) !void {
     try lease.db.exec("UPDATE local_containers SET desired_running = 0 WHERE container_id = ? AND generation = ?;", .{}, .{ id, generation });
 }
 
-// Automatic removal runs after the owner releases its lock. A new start may
+// automatic removal runs after the owner releases its lock. a new start may
 // already have claimed the container, so completion alone is not permission
-// to remove it. Call while holding the command lock.
+// to remove it. call while holding the command lock.
 pub fn finishedGeneration(id: []const u8, generation: ?i64) !bool {
     var lease = try db_store.leaseDb();
     defer lease.deinit();

@@ -1,5 +1,5 @@
-// Producers keep a shared lease until their blobs have a durable reference.
-// Pruning takes the exclusive lease for its entire mark and sweep. Keep this
+// producers keep a shared lease until their blobs have a durable reference.
+// pruning takes the exclusive lease for its entire mark and sweep. keep this
 // lock file in place so every process always locks the same inode.
 const std = @import("std");
 const linux = std.os.linux;

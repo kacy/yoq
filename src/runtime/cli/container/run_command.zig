@@ -51,7 +51,7 @@ fn appendEnv(alloc: std.mem.Allocator, env: *std.ArrayList([]const u8), value: [
         if (std.c.getenv(key)) |host_value| {
             break :blk std.fmt.allocPrint(alloc, "{s}={s}", .{ name, std.mem.span(host_value) }) catch return ContainerError.OutOfMemory;
         }
-        // Keep an unset name so it also removes a value inherited from the image.
+        // keep an unset name so it also removes a value inherited from the image.
         break :blk alloc.dupe(u8, name) catch return ContainerError.OutOfMemory;
     };
     errdefer alloc.free(owned);
@@ -80,7 +80,7 @@ fn parseRunFlags(args: anytype, alloc: std.mem.Allocator, io: std.Io) ContainerE
         const eq = if (std.mem.startsWith(u8, raw_arg, "--")) std.mem.indexOfScalar(u8, raw_arg, '=') else null;
         const option = if (eq) |i| raw_arg[0..i] else raw_arg;
         const inline_value = if (eq) |i| raw_arg[i + 1 ..] else null;
-        // Flags without a value must reject forms such as --detach=false.
+        // flags without a value must reject forms such as --detach=false.
         const takes_no_value = std.mem.eql(u8, option, "--detach") or std.mem.eql(u8, option, "--net") or
             std.mem.eql(u8, option, "--no-net") or std.mem.eql(u8, option, "--rm") or
             std.mem.eql(u8, option, "--interactive") or std.mem.eql(u8, option, "--tty") or
@@ -265,7 +265,7 @@ fn parseRunFlags(args: anytype, alloc: std.mem.Allocator, io: std.Io) ContainerE
     };
     while (args.next()) |arg| flags.user_argv.append(alloc, arg) catch return ContainerError.OutOfMemory;
 
-    // File values precede explicit -e values regardless of option order.
+    // file values precede explicit -e values regardless of option order.
     file_env.appendSlice(alloc, flags.env.items) catch return ContainerError.OutOfMemory;
     flags.env.clearRetainingCapacity();
     std.mem.swap(std.ArrayList([]const u8), &file_env, &flags.env);
@@ -479,7 +479,7 @@ fn resolveRunCommand(alloc: std.mem.Allocator, flags: *const RunFlags, img: *con
         entrypoint_buffer[0] = value;
         break :blk &entrypoint_buffer;
     } else img.entrypoint;
-    // An explicit entrypoint also clears the image's default arguments.
+    // an explicit entrypoint also clears the image's default arguments.
     const default_cmd: []const []const u8 = if (flags.entrypoint != null) &.{} else img.default_cmd;
     return oci.resolveCommand(alloc, entrypoint, default_cmd, flags.user_argv.items) catch |err| {
         writeErr("failed to resolve command: {}\n", .{err});
@@ -528,7 +528,7 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
 
     const is_image = !isFilesystemTarget(flags.target);
 
-    // Keep resolved layers alive until the saved configuration pins them.
+    // keep resolved layers alive until the saved configuration pins them.
     var image_lease = try @import("../../../image/store_lock.zig").Lock.acquire(.shared);
     defer image_lease.deinit();
 
@@ -634,8 +634,8 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
         .detached => 0,
         .exited => |code| blk: {
             if (saved.auto_remove) {
-                // Either caller can finish removal; command locking makes it
-                // idempotent. A detached session must leave its workload alive.
+                // either caller can finish removal; command locking makes it
+                // idempotent. a detached session must leave its workload alive.
                 @import("../../local_lifecycle.zig").removeAutomatic(id, alloc, generation) catch |err| {
                     if (err != error.NotFound) return err;
                 };

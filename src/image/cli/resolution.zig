@@ -100,8 +100,8 @@ fn resolveWithPull(io: std.Io, alloc: std.mem.Allocator, target: []const u8, pol
     return result;
 }
 
-// Overlay mounts need a lower directory even for an image with no layers.
-// Use a complete empty tar so its extraction shares the ordinary cache lifetime.
+// overlay mounts need a lower directory even for an image with no layers.
+// use a complete empty tar so its extraction shares the ordinary cache lifetime.
 fn assembleLayers(alloc: std.mem.Allocator, descriptors: []const spec.Descriptor) ![]const []const u8 {
     if (descriptors.len > 0) return layer.assembleRootfsDescriptors(alloc, descriptors);
     const empty_tar = [_]u8{0} ** 1024;
@@ -115,7 +115,7 @@ fn assembleLayers(alloc: std.mem.Allocator, descriptors: []const spec.Descriptor
     return layer.assembleRootfsDescriptors(alloc, &.{empty_layer});
 }
 
-// Keep the same owned blob and parsed-manifest lifetime for cached and pulled
+// keep the same owned blob and parsed-manifest lifetime for cached and pulled
 // images so callers can use either without special cleanup.
 fn loadLocalImage(alloc: std.mem.Allocator, target: []const u8, ref: spec.ImageRef) common.ImageCommandsError!?registry.PullResult {
     const record = (if (blob_store.Digest.parse(target) != null)

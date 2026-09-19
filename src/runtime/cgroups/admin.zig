@@ -28,7 +28,7 @@ pub const Change = struct {
     new_len: usize = 0,
 };
 
-/// Capture actual kernel values before changing any controller. The caller keeps
+/// capture actual kernel values before changing any controller. the caller keeps
 /// this snapshot until its saved configuration has also been committed.
 pub const Update = struct {
     changes: [5]Change = undefined,
@@ -61,7 +61,7 @@ pub const Update = struct {
 
     pub fn apply(self: *Update, cgroup: anytype) !void {
         for (self.changes[0..self.count], 0..) |*change, index| {
-            // Include the current write in rollback: a short/failed write may
+            // include the current write in rollback: a short/failed write may
             // already have reached the kernel.
             self.applied = index + 1;
             cgroup.writeFile(change.field.file(), change.new[0..change.new_len]) catch |err| {

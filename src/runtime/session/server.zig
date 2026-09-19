@@ -22,8 +22,8 @@ const Client = struct { fd: posix.fd_t = -1, ready: bool = false };
 const max_clients = 8;
 const history_count = 16;
 
-/// The supervisor owns this object until every capture worker has joined.
-/// Slow readers are disconnected; log storage never waits on an attach client.
+/// the supervisor owns this object until every capture worker has joined.
+/// slow readers are disconnected; log storage never waits on an attach client.
 pub const Server = struct {
     listener: posix.fd_t,
     path: [paths.max_path]u8,
@@ -52,7 +52,7 @@ pub const Server = struct {
         try paths.ensureDataDirStrict("sessions");
         var path_buf: [paths.max_path]u8 = undefined;
         const endpoint = try address(id, &path_buf);
-        // The caller already holds the durable container owner lock.
+        // the caller already holds the durable container owner lock.
         std.Io.Dir.cwd().deleteFile(std.Options.debug_io, endpoint.path) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
@@ -81,7 +81,7 @@ pub const Server = struct {
     pub fn prepareChild(self: *Server, io: *channels.ProcessIo) void {
         self.mutex.lockUncancelable(std.Options.debug_io);
         defer self.mutex.unlock(std.Options.debug_io);
-        // A new execution attempt starts a new attachment history.
+        // a new execution attempt starts a new attachment history.
         if (self.exit_code != null) {
             self.exit_code = null;
             self.history_len = 0;
@@ -177,7 +177,7 @@ pub const Server = struct {
         }
         if (self.exit_code) |code| {
             try protocol.send(client.fd, .exit, &.{code}, true);
-            // This attachment belongs to the completed attempt. It must not
+            // this attachment belongs to the completed attempt. it must not
             // enqueue stdin or retain ownership for the next automatic run.
             self.disconnect(client);
             return;

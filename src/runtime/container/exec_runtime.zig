@@ -148,8 +148,8 @@ fn mountContainerFilesystems(ctx: *const ChildExecContext) ExitCode {
     if (count > ordered.len) return .filesystem_error;
     for (ctx.mounts, 0..) |*mount, index| ordered[index] = .{ .bind = mount };
     for (ctx.tmpfs_mounts, ctx.mounts.len..) |*mount, index| ordered[index] = .{ .tmpfs = mount };
-    // Essential mounts exist first; explicit mounts then follow parent-before-
-    // child order across both kinds so nested bind mounts remain visible.
+    // mount essentials first, then explicit mounts with parents before children
+    // so nested bind mounts remain visible.
     std.mem.sort(Mount, ordered[0..count], {}, Mount.less);
     for (ordered[0..count]) |entry| switch (entry) {
         .bind => |mount| {

@@ -155,7 +155,7 @@ fn changePause(args: *std.process.Args.Iterator, ctx: AppContext, frozen: bool) 
 fn savePausedStatus(id: []const u8, pid: i32, frozen: bool) !void {
     var lease = try @import("../../../state/store/common.zig").leaseDb();
     defer lease.deinit();
-    // Thawing can let the process exit before this write. Never restore a PID
+    // thawing can let the process exit before this write. never restore a PID
     // that the supervisor has already reaped and cleared.
     try lease.db.exec("UPDATE containers SET status = ? WHERE id = ? AND pid = ? AND status IN ('running', 'paused');", .{}, .{ if (frozen) "paused" else "running", id, pid });
     if (lease.db.rowsAffected() != 1) return error.NotRunning;

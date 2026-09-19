@@ -142,11 +142,11 @@ pub fn removeAutomatic(id: []const u8, alloc: std.mem.Allocator, generation: i64
     defer command_lock.deinit();
     const current = (try control.currentGeneration(id)) orelse return;
     if (current < generation) return;
-    // Explicit stop advances the generation to cancel restarts. It still
+    // explicit stop advances the generation to cancel restarts. it still
     // permits --rm, but a newer requested run must retain its container.
     if (current != generation and !try control.finishedGeneration(id, null)) return;
-    // The exit packet is sent before the supervisor releases ownership.
-    // Holding the command lock prevents a new start while cleanup finishes.
+    // the exit packet is sent before the supervisor releases ownership.
+    // holding the command lock prevents a new start while cleanup finishes.
     try waitForOwner(id);
     if (!try control.finishedGeneration(id, current)) return;
     try removeLocked(id, alloc, true);

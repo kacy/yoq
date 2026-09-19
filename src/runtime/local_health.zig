@@ -29,8 +29,8 @@ pub const Monitor = struct {
     worker: ?std.Thread = null,
     failed_group: ?check.Group = null,
 
-    /// The caller retains cfg until stop returns. The worker owns its parser,
-    /// subprocesses and cgroup, and is always joined before those are released.
+    /// the caller retains cfg until stop returns. stop cancels checks and joins
+    /// the worker before releasing the monitor.
     pub fn start(id: []const u8, pid: i32, generation: i64, cfg: *const run_state.SavedRunConfig) !?*Monitor {
         const bytes = cfg.healthcheck_json orelse {
             try health_store.clearCurrent(id, pid, generation);
@@ -133,7 +133,7 @@ fn nowNs() i64 {
     return @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds());
 }
 
-/// Internal subprocess entrypoint. The supervisor owns its lifetime and cgroup.
+/// internal subprocess entrypoint. the supervisor owns its lifetime and cgroup.
 pub fn helper(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const id = args.next() orelse return error.InvalidArgument;
     const pid = try std.fmt.parseInt(i32, args.next() orelse return error.InvalidArgument, 10);

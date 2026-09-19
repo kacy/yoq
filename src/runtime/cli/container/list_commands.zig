@@ -113,7 +113,7 @@ pub fn rename(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     if (args.next() != null) return error.InvalidArgument;
     const record = try state.resolveContainerRef(ctx.alloc, ref);
     defer record.deinit(ctx.alloc);
-    // A running process keeps its hostname and current network alias.
+    // a running process keeps its hostname and current network alias.
     const command_lock = try control.lock(record.id, .command, true);
     defer command_lock.deinit();
     const current = try store.load(ctx.alloc, record.id);
