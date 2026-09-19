@@ -184,7 +184,10 @@ pub fn resolveMount(alloc: std.mem.Allocator, id: []const u8, spec: cli.VolumeMo
     }) catch return error.DbError;
     const record = try inspectInDb(alloc, lease.db, name);
     defer record.deinit(alloc);
-    const source = std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, record.path, alloc) catch return error.IoError;
+    const canonical = std.Io.Dir.cwd().realPathFileAlloc(std.Options.debug_io, record.path, alloc) catch return error.IoError;
+    defer alloc.free(canonical);
+    // bind mounts own ordinary slices; realPathFileAlloc also allocates a sentinel.
+    const source = alloc.dupe(u8, canonical) catch return error.OutOfMemory;
     errdefer alloc.free(source);
     const target = alloc.dupe(u8, spec.target) catch return error.OutOfMemory;
     errdefer alloc.free(target);
@@ -267,7 +270,7 @@ fn initializeEmptyVolume(io: std.Io, alloc: std.mem.Allocator, rootfs: []const u
 
 // a missing image directory leaves the volume available for a later container
 // to populate. an existing source must resolve inside the merged rootfs.
-fn resolveInitialContents(io: std.Io, alloc: std.mem.Allocator, rootfs: []const u8, target: []const u8) VolumeError!?[]u8 {
+fn resolveInitialContents(io: std.Io, alloc: std.mem.Allocator, rootfs: []const u8, target: []const u8) VolumeError!?[:0]u8 {
     const root = std.Io.Dir.cwd().realPathFileAlloc(io, rootfs, alloc) catch return error.CopyFailed;
     defer alloc.free(root);
     const source_input = std.fs.path.resolve(alloc, &.{ root, std.mem.trimStart(u8, target, "/") }) catch return error.OutOfMemory;
