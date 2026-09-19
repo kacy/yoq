@@ -235,13 +235,16 @@ pub fn stopProcess(pid: i32) ContainerError!void {
 }
 
 pub fn stopProcessWithOptions(pid: i32, signal: u8, timeout_seconds: u32) ContainerError!void {
+    if (process.hasExited(pid)) return;
     process.sendSignal(pid, signal) catch |err| {
+        if (process.hasExited(pid)) return;
         writeErr("failed to stop container process: {}\n", .{err});
         return ContainerError.ProcessNotFound;
     };
 
     var attempts: usize = 0;
     while (attempts < @as(u64, timeout_seconds) * 20) : (attempts += 1) {
+        if (process.hasExited(pid)) return;
         if (process.sendSignal(pid, 0)) |_| {
             if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container process terminate wait")) break;
         } else |_| {
@@ -253,6 +256,7 @@ pub fn stopProcessWithOptions(pid: i32, signal: u8, timeout_seconds: u32) Contai
 
     attempts = 0;
     while (attempts < 40) : (attempts += 1) {
+        if (process.hasExited(pid)) return;
         if (process.sendSignal(pid, 0)) |_| {
             if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container process kill wait")) break;
         } else |_| {

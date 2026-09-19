@@ -169,7 +169,7 @@ fn removeArtifacts(id: []const u8) !void {
     var path_buf: [paths.max_path]u8 = undefined;
     const directory = try paths.dataPathFmt(&path_buf, "containers/{s}", .{id});
     try std.Io.Dir.cwd().deleteTree(io, directory);
-    inline for (.{ "logs/{s}.log", "logs/{s}.log.1" }) |pattern| {
+    inline for (.{ "logs/{s}.log", "logs/{s}.log.1", "sessions/{s}.sock" }) |pattern| {
         const path = try paths.dataPathFmt(&path_buf, pattern, .{id});
         std.Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
             error.FileNotFound => {},
