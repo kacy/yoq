@@ -58,11 +58,7 @@ fn shouldRestart(policy: run_state.RestartPolicy, exit_code: u8) bool {
 
 pub fn superviseSavedRun(id: []const u8, cfg: *const run_state.SavedRunConfig, attach: bool) u8 {
     const command_lock = control.lock(id, .command, true) catch return 255;
-    control.ensureRegistered(id) catch {
-        command_lock.deinit();
-        return 255;
-    };
-    const generation = control.request(id, true) catch {
+    const generation = requestRun(id) catch {
         command_lock.deinit();
         return 255;
     };
@@ -250,15 +246,25 @@ pub fn spawnAttachedSupervisor(io: std.Io, alloc: std.mem.Allocator, id: []const
     return spawnSupervisorWithAttach(io, alloc, id, true);
 }
 
+// callers hold the command lock. keep generation publication under ownership
+// too: a delayed old supervisor may acquire it after start's initial wait.
+fn requestRun(id: []const u8) !i64 {
+    const owner = try control.lock(id, .owner, true);
+    defer owner.deinit();
+    try control.ensureRegistered(id);
+    const generation = try control.request(id, true);
+    errdefer control.finish(id, generation) catch {};
+    try store.setStartupOutcome(id, .pending);
+    return generation;
+}
+
 fn spawnSupervisorWithAttach(io: std.Io, alloc: std.mem.Allocator, id: []const u8, attach: bool) ContainerError!i64 {
-    control.ensureRegistered(id) catch return ContainerError.ConfigSaveFailed;
-    const generation = control.request(id, true) catch return ContainerError.ConfigSaveFailed;
+    const generation = requestRun(id) catch return ContainerError.ConfigSaveFailed;
     errdefer control.finish(id, generation) catch {};
     const exe_path = readSelfExePathAlloc(io, alloc) catch return ContainerError.OutOfMemory;
     defer alloc.free(exe_path);
     var generation_buf: [32]u8 = undefined;
     const generation_text = std.fmt.bufPrint(&generation_buf, "{d}", .{generation}) catch return ContainerError.ConfigSaveFailed;
-    store.setStartupOutcome(id, .pending) catch return ContainerError.ConfigSaveFailed;
     _ = std.process.spawn(io, .{
         .argv = &.{ exe_path, "__run-supervisor", id, generation_text, if (attach) "attach" else "detached" },
         .stdin = .ignore,
@@ -493,4 +499,59 @@ test "supervisor config failure belongs to its requested generation" {
     defer failed.deinit(alloc);
     try std.testing.expectEqual(store.StartupOutcome.failed, failed.startup_outcome);
     try std.testing.expect(!try control.wantsRunning(&id));
+}
+
+test "a new supervisor request waits for the previous owner's failure publication" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const alloc = std.testing.allocator;
+    var random: [6]u8 = undefined;
+    @import("linux_platform").randomBytes(&random);
+    const id = std.fmt.bytesToHex(random, .lower);
+    try store.save(.{ .id = &id, .rootfs = "/fixture", .command = "sh", .hostname = "owner-handoff", .status = "created", .pid = null, .exit_code = null, .created_at = 1 });
+    try control.register(&id, null);
+    const previous = try control.request(&id, true);
+    var owner: ?control.Lock = try acquireOwner(&id, previous);
+    var worker: ?std.Thread = null;
+    defer {
+        if (owner) |lock| lock.deinit();
+        if (worker) |thread| thread.join();
+    }
+
+    const Requester = struct {
+        id: []const u8,
+        started: std.atomic.Value(bool) = .init(false),
+        finished: std.atomic.Value(bool) = .init(false),
+        generation: ?i64 = null,
+
+        fn run(self: *@This()) void {
+            self.started.store(true, .release);
+            defer self.finished.store(true, .release);
+            const command = control.lock(self.id, .command, true) catch return;
+            defer command.deinit();
+            self.generation = requestRun(self.id) catch return;
+        }
+    };
+    var requester: Requester = .{ .id = &id };
+    worker = try std.Thread.spawn(.{}, Requester.run, .{&requester});
+    while (!requester.started.load(.acquire)) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(25), .awake);
+    try std.testing.expect(!requester.finished.load(.acquire));
+    try std.testing.expectEqual(@as(?i64, previous), try control.currentGeneration(&id));
+
+    // the old supervisor fails before releasing ownership. only then may the
+    // next caller publish its generation and reset the startup result.
+    try store.recordStartupFailure(&id);
+    try control.finish(&id, previous);
+    owner.?.deinit();
+    owner = null;
+    worker.?.join();
+    worker = null;
+    const current = requester.generation orelse return error.RequestFailed;
+    try std.testing.expect(current > previous);
+    try std.testing.expect(try control.shouldRun(&id, current));
+    try std.testing.expectError(error.StaleGeneration, acquireOwner(&id, previous));
+    const record = try store.load(alloc, &id);
+    defer record.deinit(alloc);
+    try std.testing.expectEqual(store.StartupOutcome.pending, record.startup_outcome);
 }
