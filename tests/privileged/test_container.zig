@@ -721,3 +721,33 @@ fn expectResourceLimits(env: *helpers.TestEnv, name: []const u8, paused: bool) !
     try std.testing.expectEqualStrings("32", limits.get("pids_max").?.string);
     try std.testing.expectEqualStrings("50000 100000", limits.get("cpu_max").?.string);
 }
+
+test "local parity restores tagged images and metadata from an offline CLI archive" {
+    var fixture = try ImageFixture.init();
+    defer fixture.deinit();
+    const alias = "127.0.0.1:1/parity:restored";
+    const archive = try std.fmt.allocPrint(alloc, "{s}/images.tar", .{fixture.env.tmp.slice()});
+    defer alloc.free(archive);
+    try expectCommand(&fixture.env, &.{ "tag", ImageFixture.tag, alias });
+    try expectCommand(&fixture.env, &.{ "save", "-o", archive, ImageFixture.tag, alias });
+    const saved = try std.Io.Dir.cwd().statFile(std.testing.io, archive, .{});
+    try std.testing.expect(saved.size > 0);
+    for ([_][]const u8{ ImageFixture.tag, alias }) |tag| {
+        try expectCommand(&fixture.env, &.{ "rmi", tag });
+        var missing = try fixture.env.runYoq(&.{ "inspect", tag });
+        defer missing.deinit();
+        try std.testing.expect(missing.exit_code != 0);
+    }
+    var loaded = try fixture.env.runYoq(&.{ "load", "-i", archive });
+    defer loaded.deinit();
+    try loaded.expectExitCode(0);
+    try helpers.expectContains(loaded.stdout, "loaded 2 image reference(s)");
+    var defaults = try fixture.env.runYoq(&.{ "run", "--no-net", "--pull", "never", "--rm", ImageFixture.tag });
+    defer defaults.deinit();
+    try defaults.expectExitCode(0);
+    try std.testing.expectEqualStrings("offline", defaults.stdout);
+    var restored = try fixture.env.runYoq(&.{ "run", "--no-net", "--pull", "never", "--rm", alias, "sh", "-c", "IFS= read -r seed < /data/seed; printf '%s|%s|%s|%s\\000\\r' \"$FIXTURE_ENV\" \"$PATH\" \"$PWD\" \"$seed\"" });
+    defer restored.deinit();
+    try restored.expectExitCode(0);
+    try std.testing.expectEqualStrings("image-value|/bin|/work|image-seed\x00\r", restored.stdout);
+}
