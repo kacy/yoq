@@ -53,7 +53,7 @@ pub fn ps(args: *std.process.Args.Iterator, ctx: AppContext) !void {
         ids.deinit(ctx.alloc);
     }
     const json = cli.output_mode == .json;
-    if (json) cli.write("[", .{}) else if (!quiet) cli.write("{s:<14} {s:<16} {s:<24} {s:<8} {s}\n", .{ "container id", "status", "name", "exit", "command" });
+    if (json) cli.write("[", .{}) else if (!quiet) cli.write("{s:<14} {s:<16} {s:<24} {s:<16} {s:<8} {s}\n", .{ "container id", "status", "name", "ip", "exit", "command" });
     var first = true;
     for (ids.items) |id| {
         const record = try store.load(ctx.alloc, id);
@@ -100,7 +100,7 @@ pub fn ps(args: *std.process.Args.Iterator, ctx: AppContext) !void {
         } else {
             var exit_buf: [8]u8 = undefined;
             const code = if (record.exit_code) |exit| try std.fmt.bufPrint(&exit_buf, "{d}", .{exit}) else "-";
-            cli.write("{s:<14} {s:<16} {s:<24} {s:<8} {s}\n", .{ id, status, name, code, record.command });
+            cli.write("{s:<14} {s:<16} {s:<24} {s:<16} {s:<8} {s}\n", .{ id, status, name, record.ip_address orelse "-", code, record.command });
         }
         first = false;
     }
