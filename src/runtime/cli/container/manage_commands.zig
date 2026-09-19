@@ -73,6 +73,7 @@ pub fn inspect(args: *std.process.Args.Iterator, ctx: AppContext) !void {
         .state = record,
         .health = try @import("../../local_health.zig").read(ctx.alloc, record.id),
         .desired_running = try control.wantsRunning(record.id),
+        .restart_count = try control.restartCount(record.id),
         .config = cfg,
     }, .{ .whitespace = .indent_2 });
     defer ctx.alloc.free(output);

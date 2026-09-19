@@ -23,7 +23,8 @@ pub fn initCoreTables(db: *sqlite.Db) SchemaError!void {
         \\    container_id TEXT PRIMARY KEY,
         \\    name TEXT UNIQUE,
         \\    desired_running INTEGER NOT NULL DEFAULT 0,
-        \\    generation INTEGER NOT NULL DEFAULT 0
+        \\    generation INTEGER NOT NULL DEFAULT 0,
+        \\    restart_count INTEGER NOT NULL DEFAULT 0
         \\);
     );
     try exec(db, "CREATE TABLE IF NOT EXISTS cluster_alert_owners (app TEXT NOT NULL, service TEXT NOT NULL, generation INTEGER NOT NULL, PRIMARY KEY(app, service));");

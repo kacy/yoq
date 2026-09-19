@@ -40,6 +40,7 @@ fn migrateTrainingJobs(db: *sqlite.Db) SchemaError!void {
 }
 
 fn migrateContainers(db: *sqlite.Db) SchemaError!void {
+    try addColumnIfMissing(db, "ALTER TABLE local_containers ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0;");
     try addColumnIfMissing(db, "ALTER TABLE containers ADD COLUMN startup_outcome INTEGER NOT NULL DEFAULT 0;");
     try addColumnIfMissing(db, "ALTER TABLE containers ADD COLUMN app_name TEXT;");
 }

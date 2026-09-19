@@ -88,6 +88,7 @@ pub fn ps(args: *std.process.Args.Iterator, ctx: AppContext) !void {
                 .pid = if (active) record.pid else null,
                 .exit_code = record.exit_code,
                 .created_at = record.created_at,
+                .restart_count = try control.restartCount(id),
                 .health = try @import("../../local_health.zig").read(ctx.alloc, record.id),
                 .ports = if (cfg) |value| value.port_maps else &.{},
                 .mounts = if (cfg) |value| value.mounts else &.{},

@@ -134,6 +134,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
                 session.Server.output(&server, "stderr", message);
                 return 255;
             };
+            if (!first_start) control.countRestart(id, generation) catch {};
             server.childStarted();
             server.setInput(&channels, c.pid.?);
             monitor = @import("../../local_health.zig").Monitor.start(id, c.pid.?, generation, &current_cfg) catch |err| {

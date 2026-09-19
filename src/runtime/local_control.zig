@@ -63,8 +63,21 @@ pub fn ensureRegistered(id: []const u8) !void {
 pub fn request(id: []const u8, running: bool) !i64 {
     var lease = try db_store.leaseDb();
     defer lease.deinit();
-    const row = try lease.db.one(struct { generation: i64 }, "UPDATE local_containers SET desired_running = ?, generation = generation + 1 WHERE container_id = ? RETURNING generation;", .{}, .{ @intFromBool(running), id }) orelse return error.NotFound;
+    const row = try lease.db.one(struct { generation: i64 }, "UPDATE local_containers SET desired_running = ?, generation = generation + 1, restart_count = CASE WHEN ? = 1 THEN 0 ELSE restart_count END WHERE container_id = ? RETURNING generation;", .{}, .{ @intFromBool(running), @intFromBool(running), id }) orelse return error.NotFound;
     return row.generation;
+}
+
+pub fn countRestart(id: []const u8, generation: i64) !void {
+    var lease = try db_store.leaseDb();
+    defer lease.deinit();
+    try lease.db.exec("UPDATE local_containers SET restart_count = restart_count + 1 WHERE container_id = ? AND generation = ? AND desired_running = 1;", .{}, .{ id, generation });
+}
+
+pub fn restartCount(id: []const u8) !i64 {
+    var lease = try db_store.leaseDb();
+    defer lease.deinit();
+    const row = try lease.db.one(struct { count: i64 }, "SELECT restart_count AS count FROM local_containers WHERE container_id = ?;", .{}, .{id});
+    return if (row) |value| value.count else 0;
 }
 
 pub fn shouldRun(id: []const u8, generation: i64) !bool {
