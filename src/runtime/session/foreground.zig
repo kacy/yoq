@@ -52,20 +52,32 @@ pub fn run(channels: *process_io.ProcessIo, pid: posix.pid_t) !u8 {
     const raw = if (channels.tty and channels.interactive) terminal.Raw.enter(posix.STDIN_FILENO) catch null else null;
     defer if (raw) |value| value.deinit();
     var stdin_open = channels.interactive;
+    var stdin_eof = false;
     var buffer: [protocol.max_payload]u8 = undefined;
+    var input_buffer: [64 * 1024]u8 = undefined;
+    var input_len: usize = 0;
+    if (channels.input >= 0) {
+        const flags = linux.fcntl(channels.input, linux.F.GETFL, 0);
+        if (linux.errno(flags) != .SUCCESS or linux.errno(linux.fcntl(channels.input, linux.F.SETFL, flags | @as(u32, @bitCast(linux.O{ .NONBLOCK = true })))) != .SUCCESS)
+            return error.InputSetupFailed;
+    }
     var result: ?u8 = null;
     while (true) {
         var polls = [_]linux.pollfd{
-            .{ .fd = if (stdin_open) posix.STDIN_FILENO else -1, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = if (stdin_open and input_len <= input_buffer.len - buffer.len) posix.STDIN_FILENO else -1, .events = linux.POLL.IN, .revents = 0 },
             .{ .fd = channels.stdout, .events = linux.POLL.IN, .revents = 0 },
             .{ .fd = channels.stderr, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = if (input_len > 0) channels.input else -1, .events = linux.POLL.OUT, .revents = 0 },
         };
         const rc = linux.poll(&polls, polls.len, 100);
         if (linux.errno(rc) != .SUCCESS and linux.errno(rc) != .INTR) return error.PollFailed;
         var saw_output = false;
-        for (polls[1..], 0..) |poll, stream| {
+        for (polls[1..3], 0..) |poll, stream| {
             if (poll.fd < 0 or poll.revents == 0) continue;
-            const count = platform.read(poll.fd, &buffer) catch 0; // A closed PTY returns EIO.
+            const count = platform.read(poll.fd, &buffer) catch |err| switch (err) {
+                error.WouldBlock, error.Interrupted => continue,
+                else => 0, // A closed PTY returns EIO.
+            };
             if (count == 0) {
                 if (stream == 0) process_io.close(&channels.stdout) else process_io.close(&channels.stderr);
             } else {
@@ -77,14 +89,31 @@ pub fn run(channels: *process_io.ProcessIo, pid: posix.pid_t) !u8 {
             const count = try platform.read(posix.STDIN_FILENO, &buffer);
             if (count == 0) {
                 stdin_open = false;
+                stdin_eof = true;
                 if (channels.tty) {
-                    try writeAll(channels.input, "\x04");
-                } else process_io.close(&channels.input);
-            } else writeAll(channels.input, buffer[0..count]) catch {
-                stdin_open = false;
-                process_io.close(&channels.input);
-            };
+                    input_buffer[input_len] = 4;
+                    input_len += 1;
+                }
+            } else {
+                @memcpy(input_buffer[input_len..][0..count], buffer[0..count]);
+                input_len += count;
+            }
         }
+        if (input_len > 0 and channels.input >= 0) {
+            // A child may write a full output pipe before reading stdin.
+            // Keep draining its output while input is backpressured.
+            const count = platform.write(channels.input, input_buffer[0..input_len]) catch |err| blk: {
+                if (err != error.WouldBlock and err != error.Interrupted) {
+                    stdin_open = false;
+                    input_len = 0;
+                    process_io.close(&channels.input);
+                }
+                break :blk 0;
+            };
+            std.mem.copyForwards(u8, &input_buffer, input_buffer[count..input_len]);
+            input_len -= count;
+        }
+        if (stdin_eof and input_len == 0 and !channels.tty) process_io.close(&channels.input);
         if (channels.tty) if (terminal.size(posix.STDIN_FILENO)) |size| terminal.resize(channels.input, size);
         if (result == null) {
             const waited = try process.wait(pid, true);
@@ -93,9 +122,85 @@ pub fn run(channels: *process_io.ProcessIo, pid: posix.pid_t) !u8 {
                 .signaled => |sig| @intCast(128 + sig),
                 .running, .stopped => null,
             };
+            if (result != null) signal_target.store(0, .release);
         }
         if (result) |code| {
             if (!saw_output) return code;
         }
     }
+}
+
+test "foreground relay drains output while a child delays reading large stdin" {
+    const source = try platform.pipe();
+    const sink = try platform.pipe();
+    const relay_fork = linux.fork();
+    if (linux.errno(relay_fork) != .SUCCESS) return error.ForkFailed;
+    if (relay_fork == 0) {
+        platform.close(source[1]);
+        platform.close(sink[0]);
+        platform.dup2(source[0], posix.STDIN_FILENO) catch linux.exit_group(125);
+        platform.dup2(sink[1], posix.STDOUT_FILENO) catch linux.exit_group(124);
+        platform.close(source[0]);
+        platform.close(sink[1]);
+        var channels = process_io.ProcessIo.init(true, false) catch linux.exit_group(123);
+        const relay_pid = linux.getpid();
+        const command_fork = linux.fork();
+        if (linux.errno(command_fork) != .SUCCESS) linux.exit_group(122);
+        if (command_fork == 0) {
+            if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_PDEATHSIG), @intFromEnum(linux.SIG.KILL), 0, 0, 0)) != .SUCCESS or linux.getppid() != relay_pid)
+                linux.exit_group(114);
+            channels.applyChild() catch linux.exit_group(121);
+            const output = [_]u8{'o'} ** 4096;
+            for (0..64) |_| writeAll(posix.STDOUT_FILENO, &output) catch linux.exit_group(120);
+            var input: [4096]u8 = undefined;
+            var total: usize = 0;
+            while (true) {
+                const count = platform.read(posix.STDIN_FILENO, &input) catch linux.exit_group(119);
+                if (count == 0) break;
+                for (input[0..count]) |byte| if (byte != 'i') linux.exit_group(118);
+                total += count;
+            }
+            linux.exit_group(if (total == 64 * 4096) 7 else 117);
+        }
+        channels.closeChild();
+        const code = run(&channels, @intCast(command_fork)) catch linux.exit_group(116);
+        channels.deinit();
+        linux.exit_group(code);
+    }
+    platform.close(source[0]);
+    platform.close(sink[1]);
+    defer platform.close(sink[0]);
+    const relay: posix.pid_t = @intCast(relay_fork);
+    defer {
+        process.kill(relay) catch {};
+        _ = process.waitForExit(relay) catch {};
+    }
+    const feeder_fork = linux.fork();
+    if (linux.errno(feeder_fork) != .SUCCESS) return error.ForkFailed;
+    if (feeder_fork == 0) {
+        platform.close(sink[0]);
+        const input = [_]u8{'i'} ** 4096;
+        for (0..64) |_| writeAll(source[1], &input) catch linux.exit_group(115);
+        platform.close(source[1]);
+        linux.exit_group(0);
+    }
+    platform.close(source[1]);
+    const feeder: posix.pid_t = @intCast(feeder_fork);
+    defer {
+        process.kill(feeder) catch {};
+        _ = process.waitForExit(feeder) catch {};
+    }
+    var total: usize = 0;
+    var output: [4096]u8 = undefined;
+    while (true) {
+        var poll = [_]linux.pollfd{.{ .fd = sink[0], .events = linux.POLL.IN, .revents = 0 }};
+        try std.testing.expectEqual(@as(usize, 1), linux.poll(&poll, 1, 2000));
+        const count = try platform.read(sink[0], &output);
+        if (count == 0) break;
+        for (output[0..count]) |byte| try std.testing.expectEqual(@as(u8, 'o'), byte);
+        total += count;
+    }
+    try std.testing.expectEqual(@as(usize, 64 * 4096), total);
+    try std.testing.expectEqual(process.ExitStatus{ .exited = 7 }, (try process.waitForExit(relay)).status);
+    try std.testing.expectEqual(process.ExitStatus{ .exited = 0 }, (try process.waitForExit(feeder)).status);
 }

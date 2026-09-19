@@ -18,6 +18,7 @@ const syscall_util = @import("../lib/syscall.zig");
 const exec_helpers = @import("../lib/exec_helpers.zig");
 const process_config = @import("process_config.zig");
 const session = @import("session.zig");
+const exec_owner = @import("session/exec_owner.zig");
 
 pub const ExecError = error{
     /// the target container is not in a running state
@@ -88,15 +89,23 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
 
     // Namespace entry stays in a helper process. The client retains its host
     // terminal and namespace context while relaying input and output.
-    const helper_pid = try sysFork();
+    const cancellation_mask = exec_owner.CancellationMask.block();
+    const helper_pid = sysFork() catch |err| {
+        cancellation_mask.restore();
+        return err;
+    };
     if (helper_pid == 0) {
         if (config.cgroup_id) |id| {
             const group = @import("cgroups.zig").Cgroup.open(id) catch linux.exit_group(126);
             group.addProcess(linux.getpid()) catch linux.exit_group(126);
         }
         for (ns_fds) |fd| sysSetns(fd, 0) catch linux.exit_group(126);
+        const parent_handle = exec_owner.parentHandle() catch linux.exit_group(126);
         const child_pid = sysFork() catch linux.exit_group(126);
         if (child_pid == 0) {
+            exec_owner.armChild(parent_handle) catch linux.exit_group(126);
+            cancellation_mask.restore();
+            if (!config.tty and linux.errno(linux.setpgid(0, 0)) != .SUCCESS) linux.exit_group(126);
             for (ns_fds) |fd| linux_platform.posix.close(fd);
             channels.applyChild() catch linux.exit_group(126);
             if (linux.errno(linux.fchdir(root_fd)) != .SUCCESS) linux.exit_group(126);
@@ -107,18 +116,20 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
             const account = identity.resolve(config.user) catch linux.exit_group(126);
             security.apply() catch linux.exit_group(1);
             identity.apply(account, false) catch linux.exit_group(126);
+            exec_owner.armChild(parent_handle) catch linux.exit_group(126);
+            linux_platform.posix.close(parent_handle);
             linux.exit_group(process_config.execCommand(config.command, config.args, config.env));
         }
+        linux_platform.posix.close(parent_handle);
         channels.deinit();
-        const signals = session.foreground.Signals.install(child_pid);
-        _ = signals;
+        exec_owner.installHelper(child_pid, cancellation_mask);
         const result = process.waitForExit(child_pid) catch linux.exit_group(126);
         linux.exit_group(exitCode(result.status));
     }
+    cancellation_mask.restore();
     channels.closeChild();
     return session.foreground.run(&channels, helper_pid) catch {
-        process.sendSignal(helper_pid, linux.SIG.TERM) catch {};
-        _ = process.waitForExit(helper_pid) catch {};
+        exec_owner.abort(helper_pid);
         return ExecError.SessionFailed;
     };
 }
