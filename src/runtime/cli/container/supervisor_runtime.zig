@@ -34,6 +34,8 @@ fn containerFromSaved(id: []const u8, cfg: *const run_state.SavedRunConfig, mirr
             .network = net_config,
             .hostname = cfg.hostname,
             .mounts = cfg.mounts,
+            .shm_size = cfg.shm_size,
+            .tmpfs_mounts = cfg.tmpfs_mounts,
             .limits = cfg.limits,
             .host_mode = false,
         },

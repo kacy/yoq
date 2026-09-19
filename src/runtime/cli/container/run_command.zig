@@ -190,6 +190,18 @@ fn parseRunFlags(args: anytype, alloc: std.mem.Allocator, io: std.Io) ContainerE
             flags.network_name = null;
         } else if (std.mem.eql(u8, arg, "--net")) {
             flags.networking_enabled = true;
+        } else if (std.mem.eql(u8, arg, "--cpuset-cpus")) {
+            const value = try optionValue(args, arg, inline_value);
+            flags.limits.cpuset_cpus = @import("../../cgroups.zig").CpuSet.parse(value) catch return ContainerError.InvalidArgument;
+        } else if (std.mem.eql(u8, arg, "--shm-size")) {
+            const value = try optionValue(args, arg, inline_value);
+            flags.shm_size = parseMemorySize(value) orelse return ContainerError.InvalidArgument;
+            if (flags.shm_size == 0 or flags.shm_size > std.math.maxInt(i64)) return ContainerError.InvalidArgument;
+        } else if (std.mem.eql(u8, arg, "--tmpfs")) {
+            const value = try optionValue(args, arg, inline_value);
+            if (flags.tmpfs_mounts.items.len >= 256) return ContainerError.InvalidArgument;
+            const mount = @import("../../filesystem.zig").TmpfsMount.parse(value) catch return ContainerError.InvalidArgument;
+            flags.tmpfs_mounts.append(alloc, mount) catch return ContainerError.OutOfMemory;
         } else if (std.mem.eql(u8, arg, "--memory")) {
             const value = try optionValue(args, arg, inline_value);
             flags.limits.memory_max = if (std.mem.eql(u8, value, "unlimited")) null else parseMemorySize(value) orelse {
@@ -220,10 +232,12 @@ fn parseRunFlags(args: anytype, alloc: std.mem.Allocator, io: std.Io) ContainerE
             flags.detach = true;
         } else if (std.mem.eql(u8, arg, "--restart")) {
             const value = try optionValue(args, arg, inline_value);
-            flags.restart_policy = run_state.RestartPolicy.parse(value) orelse {
+            const restart = run_state.RestartPolicy.parseWithRetries(value) catch {
                 writeErr("invalid restart policy: {s}\n", .{value});
                 return ContainerError.InvalidArgument;
             };
+            flags.restart_policy = restart.policy;
+            flags.restart_max_retries = restart.max_retries;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             writeErr("unknown run option: {s}\n", .{arg});
             return ContainerError.InvalidArgument;
@@ -235,6 +249,14 @@ fn parseRunFlags(args: anytype, alloc: std.mem.Allocator, io: std.Io) ContainerE
     if (flags.target.len == 0) {
         writeErr("usage: yoq run [options] <image|rootfs> [command [args...]]\n", .{});
         return ContainerError.InvalidArgument;
+    }
+    for (flags.tmpfs_mounts.items, 0..) |mount, index| {
+        for (flags.tmpfs_mounts.items[0..index]) |other| {
+            if (std.mem.eql(u8, mount.target, other.target)) return ContainerError.InvalidArgument;
+        }
+        for (flags.volume_specs.items) |other| {
+            if (std.mem.eql(u8, mount.target, other.target)) return ContainerError.InvalidArgument;
+        }
     }
     flags.limits.validate() catch |err| {
         writeErr("invalid resource limits: {}\n", .{err});
@@ -415,6 +437,17 @@ fn buildSavedRunConfig(
     const mounts = buildMounts(alloc, flags.volume_specs.items, id) catch |e| return e;
     errdefer freeOwnedMounts(alloc, mounts);
 
+    const tmpfs_mounts = alloc.alloc(@import("../../filesystem.zig").TmpfsMount, flags.tmpfs_mounts.items.len) catch return ContainerError.OutOfMemory;
+    var tmpfs_loaded: usize = 0;
+    errdefer {
+        for (tmpfs_mounts[0..tmpfs_loaded]) |mount| alloc.free(mount.target);
+        alloc.free(tmpfs_mounts);
+    }
+    for (tmpfs_mounts, flags.tmpfs_mounts.items) |*mount, original| {
+        mount.* = original;
+        mount.target = alloc.dupe(u8, original.target) catch return ContainerError.OutOfMemory;
+        tmpfs_loaded += 1;
+    }
     const port_maps = alloc.dupe(net_setup.PortMap, flags.port_maps.items) catch return ContainerError.OutOfMemory;
     errdefer alloc.free(port_maps);
 
@@ -428,10 +461,13 @@ fn buildSavedRunConfig(
         .env = merged_env,
         .lower_dirs = lower_dirs,
         .mounts = mounts,
+        .shm_size = flags.shm_size,
+        .tmpfs_mounts = tmpfs_mounts,
         .network_enabled = flags.networking_enabled,
         .port_maps = port_maps,
         .limits = flags.limits,
         .restart_policy = flags.restart_policy,
+        .restart_max_retries = flags.restart_max_retries,
     };
 }
 
@@ -521,6 +557,9 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
             while (it.next()) |entry| {
                 var overridden = false;
                 for (flags.volume_specs.items) |mount| {
+                    if (std.mem.eql(u8, mount.target, entry.key_ptr.*)) overridden = true;
+                }
+                for (flags.tmpfs_mounts.items) |mount| {
                     if (std.mem.eql(u8, mount.target, entry.key_ptr.*)) overridden = true;
                 }
                 if (!overridden) try flags.volume_specs.append(alloc, .{ .kind = .volume, .source = "", .target = entry.key_ptr.*, .read_only = false });
@@ -808,4 +847,27 @@ test "environment passthrough copies the current host value" {
     try appendEnv(alloc, &env, "PATH");
     try std.testing.expect(std.mem.startsWith(u8, env.items[0], "PATH="));
     try std.testing.expectEqualStrings(std.mem.span(value), env.items[0][5..]);
+}
+
+test "run flags parse cpu affinity shared memory and typed tmpfs" {
+    const alloc = std.testing.allocator;
+    var args: TestArgs = .{ .values = &.{ "--restart", "on-failure:2", "--cpuset-cpus=1-3,5", "--shm-size", "128m", "--tmpfs", "/cache:size=16m,mode=750,noexec", "image" } };
+    var flags = try parseRunFlags(&args, alloc, std.testing.io);
+    defer flags.deinit(alloc);
+    try std.testing.expectEqualStrings("1-3,5", flags.limits.cpuset_cpus.?.text());
+    try std.testing.expectEqual(@as(?u32, 2), flags.restart_max_retries);
+    try std.testing.expectEqual(@as(u64, 128 * 1024 * 1024), flags.shm_size);
+    try std.testing.expectEqual(@as(usize, 1), flags.tmpfs_mounts.items.len);
+    try std.testing.expectEqual(@as(u16, 0o750), flags.tmpfs_mounts.items[0].mode);
+    try std.testing.expect(flags.tmpfs_mounts.items[0].noexec);
+    for ([_][]const []const u8{
+        &.{ "--cpuset-cpus", "3-1", "image" },
+        &.{ "--shm-size", "0", "image" },
+        &.{ "--tmpfs", "/cache:mode=888", "image" },
+        &.{ "--tmpfs", "/cache", "--tmpfs", "/cache:ro", "image" },
+        &.{ "--tmpfs", "/cache", "-v", "data:/cache", "image" },
+    }) |values| {
+        var invalid: TestArgs = .{ .values = values };
+        try std.testing.expectError(ContainerError.InvalidArgument, parseRunFlags(&invalid, alloc, std.testing.io));
+    }
 }

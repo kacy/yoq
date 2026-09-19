@@ -25,6 +25,8 @@ pub const RunFlags = struct {
     // Environment entries are owned. A bare name removes an inherited variable.
     env: std.ArrayList([]const u8) = .empty,
     volume_specs: std.ArrayList(cli.VolumeMountSpec) = .empty,
+    tmpfs_mounts: std.ArrayList(@import("../../filesystem.zig").TmpfsMount) = .empty,
+    shm_size: u64 = @import("../../filesystem.zig").default_shm_size,
     networking_enabled: bool = true,
     container_name: ?[]const u8 = null,
     hostname: ?[]const u8 = null,
@@ -49,6 +51,7 @@ pub const RunFlags = struct {
     stop_timeout_seconds: u32 = 10,
     limits: cgroups.ResourceLimits = .{},
     restart_policy: run_state.RestartPolicy = .no,
+    restart_max_retries: ?u32 = null,
     target: []const u8 = "",
     user_argv: std.ArrayList([]const u8) = .empty,
 
@@ -58,6 +61,7 @@ pub const RunFlags = struct {
         for (self.env.items) |value| alloc.free(value);
         self.env.deinit(alloc);
         self.volume_specs.deinit(alloc);
+        self.tmpfs_mounts.deinit(alloc);
         self.user_argv.deinit(alloc);
     }
 };

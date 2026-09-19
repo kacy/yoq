@@ -2,6 +2,7 @@ const std = @import("std");
 const linux_platform = @import("linux_platform");
 const paths = @import("../lib/paths.zig");
 const cgroups = @import("cgroups.zig");
+const filesystem = @import("filesystem.zig");
 const container = @import("container.zig");
 const net_setup = @import("../network/setup.zig");
 const log = @import("../lib/log.zig");
@@ -23,6 +24,18 @@ pub const RestartPolicy = enum {
             .on_failure => "on-failure",
             .unless_stopped => "unless-stopped",
         };
+    }
+
+    pub const Parsed = struct { policy: RestartPolicy, max_retries: ?u32 = null };
+
+    pub fn parseWithRetries(value: []const u8) !Parsed {
+        if (std.mem.indexOfScalar(u8, value, ':')) |colon| {
+            if (!std.mem.eql(u8, value[0..colon], "on-failure")) return error.InvalidRestartPolicy;
+            const count = std.fmt.parseUnsigned(u32, value[colon + 1 ..], 10) catch return error.InvalidRestartPolicy;
+            if (count == 0) return error.InvalidRestartPolicy;
+            return .{ .policy = .on_failure, .max_retries = count };
+        }
+        return .{ .policy = parse(value) orelse return error.InvalidRestartPolicy };
     }
 
     pub fn parse(value: []const u8) ?RestartPolicy {
@@ -53,10 +66,13 @@ pub const SavedRunConfig = struct {
     env: [][]const u8,
     lower_dirs: [][]const u8,
     mounts: []container.BindMount,
+    shm_size: u64 = filesystem.default_shm_size,
+    tmpfs_mounts: []const filesystem.TmpfsMount = &.{},
     network_enabled: bool,
     port_maps: []net_setup.PortMap,
     limits: cgroups.ResourceLimits,
     restart_policy: RestartPolicy,
+    restart_max_retries: ?u32 = null,
 
     pub fn deinit(self: SavedRunConfig, alloc: std.mem.Allocator) void {
         alloc.free(self.rootfs);
@@ -76,6 +92,7 @@ pub const SavedRunConfig = struct {
             alloc.free(mount.target);
         }
         alloc.free(self.mounts);
+        freeTmpfsMounts(alloc, self.tmpfs_mounts);
         alloc.free(self.port_maps);
     }
 };
@@ -91,7 +108,7 @@ pub const RunStateError = error{
 };
 
 const configs_subdir = "run_configs";
-const format_version: u32 = 6;
+const format_version: u32 = 7;
 const max_serialized_string_bytes: u32 = 64 * 1024;
 const max_serialized_list_items: u32 = 1024;
 const max_serialized_mounts: u32 = 256;
@@ -106,6 +123,12 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     // validate container ID to prevent path traversal
     if (!container.isValidContainerId(id)) return RunStateError.InvalidId;
 
+    if (cfg.limits.cpuset_cpus) |*cpus| {
+        if (cpus.len > cpus.buffer.len) return RunStateError.InvalidFormat;
+        _ = cgroups.CpuSet.parse(cpus.text()) catch return RunStateError.InvalidFormat;
+    }
+    if (cfg.restart_max_retries) |count| if (count == 0 or cfg.restart_policy != .on_failure) return RunStateError.InvalidFormat;
+    if (cfg.shm_size == 0 or cfg.shm_size > std.math.maxInt(i64)) return RunStateError.InvalidFormat;
     paths.ensureDataDirStrict(configs_subdir) catch return RunStateError.CreateFailed;
 
     var path_buf: [paths.max_path]u8 = undefined;
@@ -145,6 +168,10 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     writeString(out, cfg.healthcheck_json orelse "") catch return RunStateError.WriteFailed;
     writeString(out, cfg.network_name orelse "") catch return RunStateError.WriteFailed;
     writeStringList(out, cfg.network_aliases) catch return RunStateError.WriteFailed;
+    writeString(out, if (cfg.limits.cpuset_cpus) |*cpus| cpus.text() else "") catch return RunStateError.WriteFailed;
+    writeInt(out, u64, cfg.shm_size) catch return RunStateError.WriteFailed;
+    writeTmpfsMounts(out, cfg.tmpfs_mounts) catch return RunStateError.WriteFailed;
+    writeOptionalInt(out, u32, cfg.restart_max_retries) catch return RunStateError.WriteFailed;
     out.flush() catch return RunStateError.WriteFailed;
     file.sync(std.Options.debug_io) catch return RunStateError.WriteFailed;
     cwd().rename(tmp_path, cwd(), path, std.Options.debug_io) catch return RunStateError.WriteFailed;
@@ -195,7 +222,7 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     const network_enabled = (readByte(input) catch return RunStateError.ReadFailed) != 0;
     const port_maps = readPortMaps(alloc, input, version) catch |err| return mapReadError(err);
     errdefer alloc.free(port_maps);
-    const limits = readLimits(input) catch |err| return mapReadError(err);
+    var limits = readLimits(input) catch |err| return mapReadError(err);
     const restart_raw = readByte(input) catch return RunStateError.ReadFailed;
     const restart_policy = std.enums.fromInt(RestartPolicy, restart_raw) orelse
         return RunStateError.InvalidFormat;
@@ -232,6 +259,17 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
     errdefer if (network_name) |value| alloc.free(value);
     const network_aliases: []const []const u8 = if (version >= 6) readStringList(alloc, input) catch |err| return mapReadError(err) else &.{};
     errdefer freeStringList(alloc, network_aliases);
+    if (version >= 7) {
+        const cpuset_text = readString(alloc, input) catch |err| return mapReadError(err);
+        defer alloc.free(cpuset_text);
+        if (cpuset_text.len > 0) limits.cpuset_cpus = cgroups.CpuSet.parse(cpuset_text) catch return RunStateError.InvalidFormat;
+    }
+    const shm_size = if (version >= 7) readInt(input, u64) catch return RunStateError.ReadFailed else filesystem.default_shm_size;
+    if (shm_size == 0 or shm_size > std.math.maxInt(i64)) return RunStateError.InvalidFormat;
+    const tmpfs_mounts: []const filesystem.TmpfsMount = if (version >= 7) readTmpfsMounts(alloc, input) catch |err| return mapReadError(err) else &.{};
+    errdefer freeTmpfsMounts(alloc, tmpfs_mounts);
+    const restart_max_retries = if (version >= 7) readOptionalInt(input, u32) catch |err| return mapReadError(err) else null;
+    if (restart_max_retries) |count| if (count == 0 or restart_policy != .on_failure) return RunStateError.InvalidFormat;
     if (stop_signal == 0 or stop_signal > 64) return RunStateError.InvalidFormat;
 
     return .{
@@ -253,10 +291,13 @@ pub fn loadConfig(alloc: std.mem.Allocator, id: []const u8) RunStateError!SavedR
         .env = env,
         .lower_dirs = lower_dirs,
         .mounts = mounts,
+        .shm_size = shm_size,
+        .tmpfs_mounts = tmpfs_mounts,
         .network_enabled = network_enabled,
         .port_maps = port_maps,
         .limits = limits,
         .restart_policy = restart_policy,
+        .restart_max_retries = restart_max_retries,
     };
 }
 
@@ -315,6 +356,49 @@ fn readStringList(alloc: std.mem.Allocator, reader: anytype) ![][]const u8 {
 fn freeStringList(alloc: std.mem.Allocator, values: []const []const u8) void {
     for (values) |value| alloc.free(value);
     alloc.free(values);
+}
+
+fn freeTmpfsMounts(alloc: std.mem.Allocator, mounts: []const filesystem.TmpfsMount) void {
+    for (mounts) |mount| alloc.free(mount.target);
+    alloc.free(mounts);
+}
+
+fn writeTmpfsMounts(writer: anytype, mounts: []const filesystem.TmpfsMount) !void {
+    if (mounts.len > max_serialized_mounts) return error.InvalidFormat;
+    try writeInt(writer, u32, @intCast(mounts.len));
+    for (mounts) |mount| {
+        try mount.validate();
+        try writeString(writer, mount.target);
+        try writeInt(writer, u64, mount.size_bytes);
+        try writeInt(writer, u16, mount.mode);
+        const flags: u8 = @as(u8, @intFromBool(mount.read_only)) | (@as(u8, @intFromBool(mount.noexec)) << 1) | (@as(u8, @intFromBool(mount.nosuid)) << 2) | (@as(u8, @intFromBool(mount.nodev)) << 3);
+        try writer.writeByte(flags);
+    }
+}
+
+fn readTmpfsMounts(alloc: std.mem.Allocator, reader: anytype) ![]filesystem.TmpfsMount {
+    const count = try readInt(reader, u32);
+    if (count > max_serialized_mounts) return error.InvalidFormat;
+    const mounts = try alloc.alloc(filesystem.TmpfsMount, count);
+    var loaded: usize = 0;
+    errdefer {
+        for (mounts[0..loaded]) |mount| alloc.free(mount.target);
+        alloc.free(mounts);
+    }
+    for (mounts) |*mount| {
+        mount.* = .{ .target = try readString(alloc, reader) };
+        loaded += 1;
+        mount.size_bytes = try readInt(reader, u64);
+        mount.mode = try readInt(reader, u16);
+        const flags = try readByte(reader);
+        if (flags & 0xf0 != 0) return error.InvalidFormat;
+        mount.read_only = flags & 1 != 0;
+        mount.noexec = flags & 2 != 0;
+        mount.nosuid = flags & 4 != 0;
+        mount.nodev = flags & 8 != 0;
+        mount.validate() catch return error.InvalidFormat;
+    }
+    return mounts;
 }
 
 fn writeMounts(writer: anytype, mounts: []const container.BindMount) !void {
@@ -498,8 +582,11 @@ test "save and load config round-trips" {
         .mounts = mounts,
         .network_enabled = true,
         .port_maps = port_maps,
-        .limits = .{ .cpu_max_usec = 200_000, .memory_max = 256 * 1024 * 1024 },
-        .restart_policy = .always,
+        .limits = .{ .cpuset_cpus = try cgroups.CpuSet.parse("0-2,4"), .cpu_max_usec = 200_000, .memory_max = 256 * 1024 * 1024 },
+        .shm_size = 128 * 1024 * 1024,
+        .tmpfs_mounts = &.{.{ .target = "/cache", .size_bytes = 32 * 1024 * 1024, .mode = 0o750, .read_only = true, .noexec = true }},
+        .restart_policy = .on_failure,
+        .restart_max_retries = 3,
     };
 
     removeConfig(&config_id);
@@ -510,6 +597,13 @@ test "save and load config round-trips" {
     defer loaded.deinit(alloc);
 
     try std.testing.expectEqualStrings("/tmp/rootfs", loaded.rootfs);
+    try std.testing.expectEqualStrings("0-2,4", loaded.limits.cpuset_cpus.?.text());
+    try std.testing.expectEqual(cfg.shm_size, loaded.shm_size);
+    try std.testing.expectEqual(@as(usize, 1), loaded.tmpfs_mounts.len);
+    try std.testing.expectEqualStrings("/cache", loaded.tmpfs_mounts[0].target);
+    try std.testing.expectEqual(@as(u64, 32 * 1024 * 1024), loaded.tmpfs_mounts[0].size_bytes);
+    try std.testing.expectEqual(@as(u16, 0o750), loaded.tmpfs_mounts[0].mode);
+    try std.testing.expect(loaded.tmpfs_mounts[0].read_only and loaded.tmpfs_mounts[0].noexec);
     try std.testing.expectEqualStrings("/bin/sh", loaded.command);
     try std.testing.expectEqualStrings("test", loaded.hostname);
     try std.testing.expectEqualStrings("/work", loaded.working_dir);
@@ -525,7 +619,8 @@ test "save and load config round-trips" {
     try std.testing.expect(loaded.mounts[0].read_only);
     try std.testing.expectEqual(@as(usize, 1), loaded.port_maps.len);
     try std.testing.expectEqual(@as(?u64, 256 * 1024 * 1024), loaded.limits.memory_max);
-    try std.testing.expectEqual(RestartPolicy.always, loaded.restart_policy);
+    try std.testing.expectEqual(RestartPolicy.on_failure, loaded.restart_policy);
+    try std.testing.expectEqual(@as(?u32, 3), loaded.restart_max_retries);
 }
 
 test "saveConfig validates container ID" {
@@ -642,6 +737,9 @@ test "legacy run config version 1 retains effective defaults" {
     try std.testing.expectEqual(@as(u32, 5), cfg.stop_timeout_seconds);
     try std.testing.expect(!cfg.interactive and !cfg.tty and !cfg.auto_remove);
     try std.testing.expect(cfg.user == null);
+    try std.testing.expect(cfg.limits.cpuset_cpus == null);
+    try std.testing.expectEqual(filesystem.default_shm_size, cfg.shm_size);
+    try std.testing.expectEqual(@as(usize, 0), cfg.tmpfs_mounts.len);
 }
 
 test "legacy run config version 2 retains effective defaults" {
@@ -664,4 +762,13 @@ test "legacy run config version 2 retains effective defaults" {
     try std.testing.expectEqual(@as(u32, 5), cfg.stop_timeout_seconds);
     try std.testing.expect(!cfg.interactive and !cfg.tty and !cfg.auto_remove);
     try std.testing.expectEqualStrings("app", cfg.user.?);
+}
+
+test "restart retry limits apply only to on-failure and require positive count" {
+    const policy = try RestartPolicy.parseWithRetries("on-failure:3");
+    try std.testing.expectEqual(RestartPolicy.on_failure, policy.policy);
+    try std.testing.expectEqual(@as(?u32, 3), policy.max_retries);
+    try std.testing.expect((try RestartPolicy.parseWithRetries("always")).max_retries == null);
+    for ([_][]const u8{ "always:3", "no:2", "on-failure:0", "on-failure:-1", "on-failure:", "on-failure:3:2", "on-failure:4294967296" }) |value|
+        try std.testing.expectError(error.InvalidRestartPolicy, RestartPolicy.parseWithRetries(value));
 }
