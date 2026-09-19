@@ -176,6 +176,7 @@ test "rename resolves legacy duplicate names without changing hostname" {
     for ([_][]const u8{ "0123456789ab", "abcdef012345" }) |id| {
         try store.save(.{ .id = id, .rootfs = "", .command = "sh", .hostname = "old", .status = "stopped", .pid = null, .exit_code = 0, .created_at = 0 });
     }
+    try std.testing.expectError(error.AmbiguousName, store.findByHostname(std.testing.allocator, "old"));
     try std.testing.expectError(error.NameInUse, rename("0123456789ab", "old"));
     try rename("0123456789ab", "first");
     try rename("abcdef012345", "old");

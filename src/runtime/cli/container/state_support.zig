@@ -23,15 +23,17 @@ pub fn resolveContainerRef(alloc: std.mem.Allocator, ref: []const u8) ContainerE
         defer alloc.free(id);
         return store.load(alloc, id) catch return ContainerError.ContainerNotFound;
     }
-    return store.load(alloc, ref) catch {
-        const record = store.findByHostname(alloc, ref) catch |err| {
-            writeErr("container not found: {s} ({})", .{ ref, err });
-            return ContainerError.ContainerNotFound;
-        };
-        return record orelse {
-            writeErr("container not found: {s}\n", .{ref});
-            return ContainerError.ContainerNotFound;
-        };
+    const record = store.findByHostname(alloc, ref) catch |err| {
+        if (err == error.AmbiguousName) {
+            writeErr("container name is ambiguous: {s}; use a full id and rename the duplicate containers\n", .{ref});
+        } else {
+            writeErr("failed to look up container {s}: {}\n", .{ ref, err });
+        }
+        return ContainerError.StoreError;
+    };
+    return record orelse {
+        writeErr("container not found: {s}\n", .{ref});
+        return ContainerError.ContainerNotFound;
     };
 }
 
