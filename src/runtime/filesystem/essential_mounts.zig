@@ -7,6 +7,10 @@ const common = @import("common.zig");
 pub const FilesystemError = common.FilesystemError;
 
 pub fn mountEssentialAt(target_root: []const u8) FilesystemError!void {
+    return mountEssentialWithShm(target_root, @import("tmpfs.zig").default_size);
+}
+
+pub fn mountEssentialWithShm(target_root: []const u8, shm_size: u64) FilesystemError!void {
     var proc_path_buf: [4096]u8 = undefined;
     const proc_path = joinTargetPath(target_root, "/proc", &proc_path_buf) catch return FilesystemError.PathTooLong;
     mkdirIfNeeded(proc_path) catch return FilesystemError.MkdirFailed;
@@ -78,6 +82,7 @@ pub fn mountEssentialAt(target_root: []const u8) FilesystemError!void {
     const dev_fd = platform.posix.open(dev_path, .{ .PATH = true, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0) catch return FilesystemError.MountFailed;
     defer platform.posix.close(dev_fd);
     @import("devices.zig").populate(dev_fd) catch return FilesystemError.MountFailed;
+    @import("tmpfs.zig").mountAt(target_root, .{ .target = "/dev/shm", .size_bytes = shm_size, .noexec = true }) catch return FilesystemError.MountFailed;
 }
 
 fn mkdirIfNeeded(path: []const u8) !void {

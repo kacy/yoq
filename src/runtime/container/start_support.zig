@@ -53,18 +53,20 @@ pub fn initChildContext(config: anytype, overlay: *const OverlayRuntime) exec_ru
         .working_dir = config.working_dir,
         .hostname = config.hostname,
         .mounts = config.mounts,
+        .shm_size = config.shm_size,
+        .tmpfs_mounts = config.tmpfs_mounts,
     };
 }
 
 pub fn setupNetwork(config: anytype, pid: posix.pid_t, net_info: *?net_setup.NetworkInfo, db: *sqlite.Db) !startup.NetworkFiles {
     const net_config = config.network orelse return .{};
-    const gateway = try gatewayForNode(net_config.node_id);
-    net_info.* = try net_setup.setupContainer(config.id, pid, net_config, db, config.hostname);
-    // Keep ownership even if persistence fails: rollback must remove the veth,
-    // mappings, service registration, and allocated IP.
+    const gateway = if (net_config.network_name) |name| blk: {
+        const network = try @import("../../network/local_networks.zig").inspect(std.heap.page_allocator, name);
+        defer network.deinit(std.heap.page_allocator);
+        break :blk network.subnet.gateway;
+    } else try gatewayForNode(net_config.node_id);
+    net_info.* = try net_setup.setupContainerTracked(config.id, pid, net_config, db, config.hostname, net_info);
     const info = &net_info.*.?;
-    var ip_buf: [16]u8 = undefined;
-    try store.updateNetwork(config.id, ip.formatIp(info.ip, &ip_buf), info.vethName());
     return .{ .enabled = true, .address = info.ip, .gateway = gateway };
 }
 
@@ -87,15 +89,16 @@ pub fn startLogCapture(config: anytype, runtime: anytype, spawn_result: *namespa
 
 const CaptureThreads = struct {
     fn spawn(_: @This(), args: anytype) !std.Thread {
-        return std.Thread.spawn(.{}, logs.captureStream, args);
+        return std.Thread.spawn(.{}, logs.captureSessionStream, args);
     }
 };
 
 fn startCaptureWorkers(config: anytype, runtime: anytype, child: *namespaces.SpawnResult, threads: anytype) !void {
     const log_file = &runtime.log_file.?;
-    runtime.stdout_thread = try threads.spawn(.{ log_file, child.stdout_fd, "stdout", config.dev_service_name, config.dev_color_idx, runtime.mirror_output });
+    runtime.stdout_thread = try threads.spawn(.{ log_file, child.stdout_fd, "stdout", config.dev_service_name, config.dev_color_idx, runtime.mirror_output, config.session_output });
     child.stdout_fd = -1;
-    runtime.stderr_thread = try threads.spawn(.{ log_file, child.stderr_fd, "stderr", config.dev_service_name, config.dev_color_idx, runtime.mirror_output });
+    if (child.stderr_fd < 0) return;
+    runtime.stderr_thread = try threads.spawn(.{ log_file, child.stderr_fd, "stderr", config.dev_service_name, config.dev_color_idx, runtime.mirror_output, config.session_output });
     child.stderr_fd = -1;
 }
 
@@ -126,10 +129,15 @@ pub fn cleanupFailedStart(self: anytype, spawned: *?namespaces.SpawnResult, netw
     finishCapture(&self.runtime);
     if (self.net_info) |*info| {
         if (self.config.network) |config| {
-            if (network_db) |db| net_setup.teardownContainer(self.config.id, info, config, db);
+            if (network_db) |db| {
+                if (net_setup.teardownContainerChecked(self.config.id, info, config, db)) |_| {
+                    self.net_info = null;
+                    store.updateNetwork(self.config.id, null, null) catch {};
+                } else |err| {
+                    log.warn("failed to roll back network for {s}: {}", .{ self.config.id, err });
+                }
+            }
         }
-        self.net_info = null;
-        store.updateNetwork(self.config.id, null, null) catch {};
     }
     if (self.runtime.cgroup) |cgroup| {
         if (cgroup.destroy()) |_| {
@@ -141,7 +149,8 @@ pub fn cleanupFailedStart(self: anytype, spawned: *?namespaces.SpawnResult, netw
     self.pid = null;
     self.status = .created;
     active_pid.store(0, .release);
-    store.updateStatus(self.config.id, if (self.runtime.cgroup == null) "created" else "cleanup_failed", null, null) catch {};
+    const clean = self.runtime.cgroup == null and self.net_info == null;
+    store.updateStatus(self.config.id, if (clean) "created" else "cleanup_failed", null, null) catch {};
 }
 
 fn finishCapture(runtime: anytype) void {
@@ -162,9 +171,12 @@ pub fn finalizeRuntime(self: anytype, exit_code: u8) void {
             var db = store.openDb() catch null;
             defer if (db) |*d| d.deinit();
             if (db) |*d| {
-                net_setup.teardownContainer(self.config.id, info, net_config, d);
-                self.net_info = null;
-                store.updateNetwork(self.config.id, null, null) catch {};
+                if (net_setup.teardownContainerChecked(self.config.id, info, net_config, d)) |_| {
+                    self.net_info = null;
+                    store.updateNetwork(self.config.id, null, null) catch {};
+                } else |_| {
+                    final_status = "cleanup_failed";
+                }
             } else {
                 // Retain ownership so a restart cannot overwrite leaked state.
                 final_status = "cleanup_failed";
@@ -236,7 +248,7 @@ test "startup rollback reaps child and joins partial or complete capture ownersh
         fn spawn(self: *@This(), args: anytype) !std.Thread {
             if (self.started == self.fail_after) return error.InjectedFailure;
             self.started += 1;
-            return std.Thread.spawn(.{}, logs.captureStream, args);
+            return std.Thread.spawn(.{}, logs.captureSessionStream, args);
         }
     };
     for (0..3) |fail_after| {

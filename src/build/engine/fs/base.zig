@@ -34,6 +34,9 @@ pub fn processFrom(
     const ref = spec.parseImageRef(image_str);
     log.info("FROM {s}", .{image_str});
 
+    // scratch is an empty build root, not a registry image.
+    if (std.mem.eql(u8, image_str, "scratch")) return;
+
     const local = state_store.findImage(alloc, ref.host, ref.repository, ref.reference) catch null;
     if (local) |img| {
         defer img.deinit(alloc);

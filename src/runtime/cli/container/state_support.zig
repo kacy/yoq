@@ -16,15 +16,24 @@ const LivenessState = enum {
 };
 
 pub fn resolveContainerRef(alloc: std.mem.Allocator, ref: []const u8) ContainerError!store.ContainerRecord {
-    return store.load(alloc, ref) catch {
-        const record = store.findByHostname(alloc, ref) catch |err| {
-            writeErr("container not found: {s} ({})", .{ ref, err });
-            return ContainerError.ContainerNotFound;
-        };
-        return record orelse {
-            writeErr("container not found: {s}\n", .{ref});
-            return ContainerError.ContainerNotFound;
-        };
+    if (store.load(alloc, ref)) |record| return record else |err| {
+        if (err != error.NotFound) return ContainerError.StoreError;
+    }
+    if (@import("../../local_control.zig").findName(alloc, ref) catch return ContainerError.StoreError) |id| {
+        defer alloc.free(id);
+        return store.load(alloc, id) catch return ContainerError.ContainerNotFound;
+    }
+    const record = store.findByHostname(alloc, ref) catch |err| {
+        if (err == error.AmbiguousName) {
+            writeErr("container name is ambiguous: {s}; use a full id and rename the duplicate containers\n", .{ref});
+        } else {
+            writeErr("failed to look up container {s}: {}\n", .{ ref, err });
+        }
+        return ContainerError.StoreError;
+    };
+    return record orelse {
+        writeErr("container not found: {s}\n", .{ref});
+        return ContainerError.ContainerNotFound;
     };
 }
 
@@ -87,7 +96,9 @@ pub fn waitForStoppedState(alloc: std.mem.Allocator, id: []const u8) bool {
 
 pub fn waitForContainerStart(alloc: std.mem.Allocator, id: []const u8) ContainerError!void {
     var attempts: usize = 0;
-    while (attempts < 100) : (attempts += 1) {
+    // include volume initialization and both sides of the startup handshake.
+    // each child handshake can take up to 30 seconds.
+    while (attempts < 1800) : (attempts += 1) {
         const record = store.load(alloc, id) catch {
             if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(50), "container start load wait")) break;
             continue;

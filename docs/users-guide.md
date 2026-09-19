@@ -6,7 +6,7 @@ this is a guide to how yoq works under the hood. it's not a CLI tutorial — it'
 
 ## containers
 
-yoq runs containers directly on Linux kernel primitives. there's no daemon — the `yoq` binary forks the container process itself.
+yoq runs containers directly on linux kernel primitives. each active standalone container has one supervisor process, with a durable ownership lock and saved configuration. a central daemon is not required. see [local containers](local-containers.md) for the command-line workflow.
 
 ### namespaces
 
@@ -18,22 +18,25 @@ each container gets its own set of namespaces via `clone3()`:
 - **UTS** — separate hostname
 - **IPC** — separate shared memory and semaphores
 - **USER** — UID/GID mapping; this alone does not make the complete runtime rootless
-- **CGROUP** — dedicated cgroup subtree
+- **CGROUP** — a separate view of the cgroup hierarchy
 
 ### filesystem
 
-the container root is an overlayfs mount: image layers are the read-only lower dirs, with a writable upper dir on top. `pivot_root` switches into this merged view. inside, yoq mounts `/proc`, `/dev`, `/sys`, and `/tmp`. symlinks in overlay paths are rejected to prevent escape.
+the container root is an overlayfs mount: image layers are the read-only lower dirs, with a writable upper dir on top. `pivot_root` switches into this merged view. inside, yoq mounts `/proc`, `/dev`, `/dev/pts`, `/dev/shm`, `/sys`, and `/tmp`. `/dev/shm` and `/tmp` default to 64 mib. standalone containers can choose a different shared-memory size and add temporary mounts with `--tmpfs`; their contents disappear on stop. a direct rootfs path uses that directory rather than an image overlay. symlinks in overlay paths are rejected to prevent escape.
 
 Native image whiteout preparation on Linux 6.1 requires privilege, as do the usual cgroup and networking setup. Unprivileged `yoq pull` downloads verified blobs without preparing native layer filesystems; see [image layer storage](image-layers.md) for the extraction contract.
 
 ### resource limits
 
 cgroups v2 enforces:
-- **CPU weight** — proportional CPU scheduling
-- **memory max** — hard limit (default 512MB, minimum 4MB)
+
+- **CPU weight and quota** — proportional scheduling and a maximum CPU budget
+- **CPU set** — optional CPU numbers/ranges chosen at container creation
+- **memory max** — hard limit (default 512 mib, minimum 4 mib)
+- **memory high** — a soft threshold, configurable with `update --memory-high`
 - **pids max** — process count limit (default 4096, minimum 1)
 
-PSI (pressure stall information) metrics are read from cgroups for resource monitoring.
+PSI (pressure stall information) metrics are read from cgroups for resource monitoring. `stats` returns a snapshot; CPU time is cumulative, not a utilization percentage. most limits can be updated live, but CPU sets and filesystem mount settings are fixed at creation.
 
 ### security
 
@@ -43,9 +46,11 @@ PSI (pressure stall information) metrics are read from cgroups for resource moni
 
 ### lifecycle
 
-containers follow a simple state machine: create → start → running → stop → removed.
+container identity outlives a process attempt. stop/start preserves its writable layer, configuration, name, and volume references; removal deletes its private storage. command locks serialize mutations, and a saved generation prevents a delayed supervisor from reviving a stopped container. teardown failures remain visible as `cleanup_failed` until cleanup succeeds.
 
-yoq supervises the container process, captures stdout/stderr through pipes for `yoq logs`, and handles restart policies (none, always, on_failure). `yoq exec` runs additional commands inside a running container by entering its namespaces.
+restart policies are `no`, `always`, `on-failure`, and `unless-stopped`; `on-failure:N` limits retries after the initial attempt. an explicit start or restart resets the retry count. manual stop records the requested state before signaling. an optional boot recovery unit restores eligible standalone containers after reboot. cli and native api stop/remove use the same lifecycle service.
+
+process output feeds raw attachment streams and separate bounded log storage. sessions support pipes, terminals, resize, and detach. exec uses the saved environment, working directory, and user. image health checks report starting, healthy, or unhealthy status independently of restart policy.
 
 ---
 
@@ -73,7 +78,7 @@ cache keys include content, ordered parent layers, and execution context such as
 
 ### bridge and IPs
 
-yoq creates a `yoq0` bridge on first use. each container gets a veth pair: one end on the bridge, the other moved into the container namespace as `eth0`. IPs are allocated from `10.42.0.0/16` and tracked in SQLite.
+the default network creates a `yoq0` bridge on first use. each container gets a veth pair: one end on the bridge, the other moved into the container namespace as `eth0`. IPs on the default bridge are allocated from `10.42.0.0/16` and tracked in SQLite. standalone named networks use separate bridges, private ipv4 `/24` subnets, and scoped DNS names. each container chooses one network at creation; live connect/disconnect and multiple attachments are not supported. see [local networks](container-networks.md).
 
 ### DNS
 

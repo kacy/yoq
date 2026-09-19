@@ -139,10 +139,14 @@ fn reconcileExistingBridge(fd: posix.fd_t, bridge_idx: u32, config: BridgeConfig
 
 /// delete a bridge interface
 pub fn deleteBridge(name: []const u8) BridgeError!void {
+    return deleteBridgeChecked(name);
+}
+
+pub fn deleteBridgeChecked(name: []const u8) BridgeError!void {
     const fd = nl.openSocket() catch return BridgeError.DeleteFailed;
     defer linux_platform.posix.close(fd);
 
-    const idx = nl.getIfIndex(fd, name) catch return;
+    const idx = nl.getIfIndexChecked(fd, name) catch return BridgeError.DeleteFailed;
     if (idx == 0) return; // doesn't exist
 
     var buf: [nl.buf_size]u8 align(4) = undefined;
@@ -157,7 +161,9 @@ pub fn deleteBridge(name: []const u8) BridgeError!void {
     const info = mb.getPayload(hdr, linux.ifinfomsg);
     info.index = @bitCast(idx);
 
-    nl.sendAndCheck(fd, mb.message()) catch return BridgeError.DeleteFailed;
+    nl.sendAndCheck(fd, mb.message()) catch {
+        if ((nl.getIfIndexChecked(fd, name) catch return BridgeError.DeleteFailed) != 0) return BridgeError.DeleteFailed;
+    };
 }
 
 // -- veth pair operations --
@@ -269,10 +275,14 @@ pub fn moveToNamespace(if_name: []const u8, pid: posix.pid_t) BridgeError!void {
 /// delete a veth pair by removing the host-side interface.
 /// the kernel automatically removes the peer when one end is deleted.
 pub fn deleteVeth(host_name: []const u8) BridgeError!void {
+    return deleteVethChecked(host_name);
+}
+
+pub fn deleteVethChecked(host_name: []const u8) BridgeError!void {
     const fd = nl.openSocket() catch return BridgeError.VethDeleteFailed;
     defer linux_platform.posix.close(fd);
 
-    const idx = nl.getIfIndex(fd, host_name) catch return;
+    const idx = nl.getIfIndexChecked(fd, host_name) catch return BridgeError.VethDeleteFailed;
     if (idx == 0) return; // already gone
 
     var buf: [nl.buf_size]u8 align(4) = undefined;
@@ -287,7 +297,10 @@ pub fn deleteVeth(host_name: []const u8) BridgeError!void {
     const info = mb.getPayload(hdr, linux.ifinfomsg);
     info.index = @bitCast(idx);
 
-    nl.sendAndCheck(fd, mb.message()) catch return BridgeError.VethDeleteFailed;
+    nl.sendAndCheck(fd, mb.message()) catch {
+        // A concurrent cleanup can delete the link after lookup.
+        if ((nl.getIfIndexChecked(fd, host_name) catch return BridgeError.VethDeleteFailed) != 0) return BridgeError.VethDeleteFailed;
+    };
 }
 
 // -- container namespace operations --

@@ -1,8 +1,11 @@
 const std = @import("std");
 const spec = @import("../../image/spec.zig");
 const types = @import("types.zig");
+const command_config = @import("command_config.zig");
 
 pub fn inheritConfig(alloc: std.mem.Allocator, state: *types.BuildState, config: spec.ImageConfig) types.BuildError!void {
+    if (config.architecture) |arch| try replaceString(alloc, &state.architecture, arch);
+    if (config.os) |os| try replaceString(alloc, &state.os, os);
     if (config.config) |cc| {
         if (cc.Env) |envs| {
             for (envs) |env| {
@@ -24,19 +27,35 @@ pub fn inheritConfig(alloc: std.mem.Allocator, state: *types.BuildState, config:
             }
         }
 
-        if (cc.Cmd) |cmds| {
-            if (cmds.len > 0) {
-                const owned = try alloc.dupe(u8, cmds[0]);
-                if (state.cmd) |old| alloc.free(old);
-                state.cmd = owned;
-            }
+        if (cc.Cmd) |cmd| {
+            const owned = try command_config.copy(alloc, cmd);
+            if (state.cmd) |old| command_config.free(alloc, old);
+            state.cmd = owned;
         }
-
         if (cc.Entrypoint) |ep| {
-            if (ep.len > 0) {
-                const owned = try alloc.dupe(u8, ep[0]);
-                if (state.entrypoint) |old| alloc.free(old);
-                state.entrypoint = owned;
+            const owned = try command_config.copy(alloc, ep);
+            if (state.entrypoint) |old| command_config.free(alloc, old);
+            state.entrypoint = owned;
+        }
+        if (cc.Shell) |shell| {
+            const owned = try std.json.Stringify.valueAlloc(alloc, shell, .{});
+            if (state.shell) |old| alloc.free(old);
+            state.shell = owned;
+        }
+        if (cc.StopSignal) |signal| try replaceString(alloc, &state.stop_signal, signal);
+        if (cc.Healthcheck) |healthcheck| {
+            const owned = try std.json.Stringify.valueAlloc(alloc, healthcheck, .{ .emit_null_optional_fields = false });
+            if (state.healthcheck) |old| alloc.free(old);
+            state.healthcheck = owned;
+        }
+        try inheritKeys(alloc, &state.exposed_ports, cc.ExposedPorts);
+        try inheritKeys(alloc, &state.volumes, cc.Volumes);
+        if (cc.Labels) |labels| {
+            if (labels != .object) return error.MetadataFailed;
+            var iter = labels.object.iterator();
+            while (iter.next()) |entry| {
+                if (entry.value_ptr.* != .string) return error.MetadataFailed;
+                try @import("handlers_meta.zig").setLabel(alloc, state, entry.key_ptr.*, entry.value_ptr.string);
             }
         }
 
@@ -58,5 +77,22 @@ pub fn inheritConfig(alloc: std.mem.Allocator, state: *types.BuildState, config:
                 };
             }
         }
+    }
+}
+
+fn replaceString(alloc: std.mem.Allocator, field: *?[]const u8, value: []const u8) !void {
+    const owned = try alloc.dupe(u8, value);
+    if (field.*) |old| alloc.free(old);
+    field.* = owned;
+}
+
+fn inheritKeys(alloc: std.mem.Allocator, target: *std.ArrayListUnmanaged([]const u8), value: ?std.json.Value) types.BuildError!void {
+    const object = value orelse return;
+    if (object != .object) return error.MetadataFailed;
+    var iter = object.object.iterator();
+    while (iter.next()) |entry| {
+        const owned = try alloc.dupe(u8, entry.key_ptr.*);
+        errdefer alloc.free(owned);
+        try target.append(alloc, owned);
     }
 }

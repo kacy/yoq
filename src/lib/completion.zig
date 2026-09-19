@@ -33,15 +33,58 @@ const CommandMeta = struct {
 /// flags and subcommands are listed here rather than in each command module
 /// so that completion logic stays in one place and doesn't leak into the
 /// rest of the codebase.
+const run_flags = &.{ "--name", "--hostname", "--pull", "--entrypoint", "--workdir", "-w", "--user", "-u", "--env", "-e", "--env-file", "--volume", "-v", "--mount", "--publish", "-p", "--network", "--network-alias", "--net", "--no-net", "--memory", "--pids", "--cpus", "--cpu-weight", "--cpuset-cpus", "--shm-size", "--tmpfs", "--detach", "-d", "--interactive", "-i", "--tty", "-t", "-it", "-ti", "--rm", "--restart", "--stop-signal", "--stop-timeout", "--health-cmd", "--health-interval", "--health-timeout", "--health-start-period", "--health-start-interval", "--health-retries", "--no-healthcheck" };
+const list_flags = &.{ "-a", "--all", "-q", "--quiet", "-f", "--filter", "--json" };
+const update_flags = &.{ "--memory", "--memory-high", "--cpus", "--cpu-weight", "--pids", "--restart" };
+
 const command_meta = [_]CommandMeta{
     // runtime
-    .{ .name = "run", .flags = &.{ "--name", "-p", "--no-net" } },
-    .{ .name = "ps" },
-    .{ .name = "logs", .flags = &.{"--tail"} },
+    .{ .name = "start" },
+    .{ .name = "wait" },
+    .{ .name = "rename" },
+    .{ .name = "cp" },
+    .{ .name = "diff" },
+    .{ .name = "pause" },
+    .{ .name = "unpause" },
+    .{ .name = "kill", .flags = &.{ "--signal", "-s" } },
+    .{ .name = "attach", .flags = &.{"--no-stdin"} },
+    .{ .name = "top", .flags = &.{"--json"} },
+    .{ .name = "stats", .flags = &.{"--json"} },
+    .{ .name = "update", .flags = update_flags },
+    .{ .name = "volume", .subcommands = &.{ .{ .name = "create" }, .{ .name = "ls" }, .{ .name = "inspect" }, .{ .name = "rm" } } },
+    .{ .name = "network", .subcommands = &.{ .{ .name = "create", .flags = &.{"--subnet"} }, .{ .name = "ls", .flags = &.{"--json"} }, .{ .name = "inspect", .flags = &.{"--json"} }, .{ .name = "rm" } } },
+    .{ .name = "container", .subcommands = &.{
+        .{ .name = "run", .flags = run_flags },
+        .{ .name = "create", .flags = run_flags },
+        .{ .name = "ls", .flags = list_flags },
+        .{ .name = "inspect" },
+        .{ .name = "start" },
+        .{ .name = "stop" },
+        .{ .name = "restart" },
+        .{ .name = "rm", .flags = &.{ "-v", "--volumes" } },
+        .{ .name = "rename" },
+        .{ .name = "wait" },
+        .{ .name = "kill", .flags = &.{ "--signal", "-s" } },
+        .{ .name = "exec", .flags = &.{ "-i", "-t", "-it", "-ti", "--interactive", "--tty" } },
+        .{ .name = "attach", .flags = &.{"--no-stdin"} },
+        .{ .name = "logs", .flags = &.{ "--tail", "-f", "--follow" } },
+        .{ .name = "cp" },
+        .{ .name = "diff" },
+        .{ .name = "top", .flags = &.{"--json"} },
+        .{ .name = "stats", .flags = &.{"--json"} },
+        .{ .name = "pause" },
+        .{ .name = "unpause" },
+        .{ .name = "update", .flags = update_flags },
+        .{ .name = "recover" },
+    } },
+    .{ .name = "run", .flags = run_flags },
+    .{ .name = "create", .flags = run_flags },
+    .{ .name = "ps", .flags = list_flags },
+    .{ .name = "logs", .flags = &.{ "--tail", "-f", "--follow" } },
     .{ .name = "stop" },
-    .{ .name = "rm" },
+    .{ .name = "rm", .flags = &.{ "-v", "--volumes" } },
     .{ .name = "restart" },
-    .{ .name = "exec" },
+    .{ .name = "exec", .flags = &.{ "-i", "-t", "-it", "-ti", "--interactive", "--tty" } },
     .{ .name = "status", .flags = &.{ "--app", "--alerts", "--verbose", "-v", "--server" } },
     .{ .name = "apps", .flags = &.{ "--server", "--json", "--status", "--failed", "--in-progress" } },
     .{ .name = "metrics", .flags = &.{ "--server", "--pairs" } },
@@ -50,11 +93,14 @@ const command_meta = [_]CommandMeta{
     } },
 
     // image
+    .{ .name = "tag" },
+    .{ .name = "save", .flags = &.{ "-o", "--output" } },
+    .{ .name = "load", .flags = &.{ "-i", "--input" } },
     .{ .name = "pull" },
     .{ .name = "push" },
-    .{ .name = "images" },
+    .{ .name = "images", .flags = &.{"--json"} },
     .{ .name = "rmi" },
-    .{ .name = "prune" },
+    .{ .name = "prune", .flags = &.{"--json"} },
     .{ .name = "inspect" },
 
     // build and manifest
@@ -149,7 +195,6 @@ const command_meta = [_]CommandMeta{
     .{ .name = "version" },
     .{ .name = "help" },
     .{ .name = "completion" },
-    .{ .name = "__run-supervisor" }, // internal hidden command
 };
 
 fn findMeta(name: []const u8) ?*const CommandMeta {
@@ -385,7 +430,7 @@ fn generateFish() void {
                     "complete -c yoq -n '__fish_seen_subcommand_from {s}' -l '{s}'\n",
                     .{ meta.name, flag[2..] },
                 );
-            } else if (std.mem.startsWith(u8, flag, "-")) {
+            } else if (flag.len == 2 and flag[0] == '-') {
                 write(
                     "complete -c yoq -n '__fish_seen_subcommand_from {s}' -s '{s}'\n",
                     .{ meta.name, flag[1..] },
@@ -406,7 +451,7 @@ fn generateFish() void {
                         "complete -c yoq -n '__fish_seen_subcommand_from {s}; and __fish_seen_subcommand_from {s}' -l '{s}'\n",
                         .{ meta.name, sub.name, flag[2..] },
                     );
-                } else if (std.mem.startsWith(u8, flag, "-")) {
+                } else if (flag.len == 2 and flag[0] == '-') {
                     write(
                         "complete -c yoq -n '__fish_seen_subcommand_from {s}; and __fish_seen_subcommand_from {s}' -s '{s}'\n",
                         .{ meta.name, sub.name, flag[1..] },
@@ -419,10 +464,14 @@ fn generateFish() void {
 
 // -- tests --
 
-test "metadata covers all registered commands" {
-    // every command in the registry should have a metadata entry
+test "metadata covers public commands and excludes internal helpers" {
+    // internal helpers are implementation details, not completion candidates.
     for (registry.command_specs) |spec| {
         const found = findMeta(spec.name);
+        if (spec.hidden) {
+            try std.testing.expect(found == null);
+            continue;
+        }
         if (found == null) {
             std.debug.print("missing completion metadata for command: {s}\n", .{spec.name});
         }

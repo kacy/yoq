@@ -10,6 +10,8 @@ const net_cmds = @import("../network/commands.zig");
 const runtime_cmds = @import("../runtime/commands.zig");
 const tls_cmds = @import("../tls/commands.zig");
 const container_cmds = @import("../runtime/container_commands.zig");
+const container_resources = @import("../runtime/cli/container/resource_commands.zig");
+const container_manage = @import("../runtime/cli/container/manage_commands.zig");
 const build_cmds = @import("../build/commands.zig");
 const manifest_cmds = @import("../manifest/commands.zig");
 const gpu_cmds = @import("../gpu/commands.zig");
@@ -40,13 +42,35 @@ pub const CommandSpec = struct {
 };
 
 pub const command_specs = [_]CommandSpec{
+    .{ .name = "network", .group = .runtime, .usage = "network <create|ls|inspect|rm>", .description = "manage named local bridge networks", .handler = @import("../runtime/cli/network_command.zig").network },
+    .{ .name = "__healthcheck", .group = .runtime, .usage = "__healthcheck", .description = "internal healthcheck helper", .handler = @import("../runtime/local_health.zig").helper, .hidden = true },
+    .{ .name = "cp", .group = .runtime, .usage = "cp <source> <destination>", .description = "copy files to or from a container", .handler = @import("../runtime/cli/container/filesystem_commands.zig").cp },
+    .{ .name = "diff", .group = .runtime, .usage = "diff <id|name>", .description = "list changes in a container writable layer", .handler = @import("../runtime/cli/container/filesystem_commands.zig").diff },
+    .{ .name = "__container-filesystem", .group = .runtime, .usage = "__container-filesystem", .description = "internal filesystem helper", .handler = @import("../runtime/cli/container/filesystem_commands.zig").helper, .hidden = true },
+    .{ .name = "rename", .group = .runtime, .usage = "rename <id|name> <new-name>", .description = "change a container name", .handler = @import("../runtime/cli/container/list_commands.zig").rename },
+    .{ .name = "top", .group = .runtime, .usage = "top [--json] <id|name>", .description = "show container processes", .handler = container_resources.top },
+    .{ .name = "stats", .group = .runtime, .usage = "stats [--json] <id|name>", .description = "show container resource usage", .handler = container_resources.stats },
+    .{ .name = "pause", .group = .runtime, .usage = "pause <id|name>", .description = "freeze a running container", .handler = container_resources.pause },
+    .{ .name = "unpause", .group = .runtime, .usage = "unpause <id|name>", .description = "resume a paused container", .handler = container_resources.unpause },
+    .{ .name = "update", .group = .runtime, .usage = "update [opts] <id|name>", .description = "update resource limits or restart policy", .handler = container_resources.update },
+    .{ .name = "attach", .group = .runtime, .usage = "attach [--no-stdin] <id|name>", .description = "attach to a running container", .handler = container_cmds.attach },
+    .{ .name = "save", .group = .image, .usage = "save [-o PATH] <image>...", .description = "write an oci image archive", .handler = image_cmds.save },
+    .{ .name = "load", .group = .image, .usage = "load [-i PATH]", .description = "load an oci image archive", .handler = image_cmds.load },
+    .{ .name = "volume", .group = .runtime, .usage = "volume <create|ls|inspect|rm>", .description = "manage local container volumes", .handler = @import("../runtime/cli/volume_command.zig").volume },
+    .{ .name = "__init-volumes", .group = .runtime, .usage = "__init-volumes", .description = "internal volume initializer", .handler = @import("../runtime/container/volume_init.zig").initVolumes, .hidden = true },
+    .{ .name = "container", .group = .runtime, .usage = "container <command>", .description = "manage or inspect local containers", .handler = container_manage.containerCommand },
+    .{ .name = "create", .group = .runtime, .usage = "create [opts] <image|rootfs> [cmd]", .description = "create a stopped container", .handler = @import("../runtime/cli/container/run_command.zig").create },
+    .{ .name = "start", .group = .runtime, .usage = "start <id|name>", .description = "start an existing container", .handler = container_manage.start },
+    .{ .name = "wait", .group = .runtime, .usage = "wait <id|name>", .description = "wait for a container exit and print its code", .handler = container_manage.wait },
+    .{ .name = "kill", .group = .runtime, .usage = "kill [--signal SIGNAL] <id|name>", .description = "send a signal to a running container", .handler = container_manage.kill },
+    .{ .name = "tag", .group = .image, .usage = "tag <source> <target>", .description = "add a local image reference", .handler = image_cmds.tag },
     .{ .name = "run", .group = .runtime, .usage = "run [opts] <image|rootfs> [cmd]", .description = "create and run a container", .handler = container_cmds.run },
-    .{ .name = "ps", .group = .runtime, .usage = "ps", .description = "list containers", .handler = psHandler },
-    .{ .name = "logs", .group = .runtime, .usage = "logs <id|name>", .description = "show container output", .handler = container_cmds.log },
+    .{ .name = "ps", .group = .runtime, .usage = "ps [-a] [-q] [--filter key=value] [--json]", .description = "list active containers, or all with -a", .handler = psHandler },
+    .{ .name = "logs", .group = .runtime, .usage = "logs <id|name> [--tail N] [-f]", .description = "show container output", .handler = container_cmds.log },
     .{ .name = "stop", .group = .runtime, .usage = "stop <id|name>", .description = "stop a running container", .handler = container_cmds.stop },
-    .{ .name = "rm", .group = .runtime, .usage = "rm <id|name>", .description = "remove a stopped container", .handler = container_cmds.rm },
+    .{ .name = "rm", .group = .runtime, .usage = "rm [-v] <id|name>", .description = "remove a stopped container", .handler = container_cmds.rm },
     .{ .name = "restart", .group = .runtime, .usage = "restart <id|name>", .description = "restart a container", .handler = container_cmds.restart },
-    .{ .name = "exec", .group = .runtime, .usage = "exec <id|name> <cmd> [args...]", .description = "run a command in a running container", .handler = container_cmds.exec_cmd },
+    .{ .name = "exec", .group = .runtime, .usage = "exec [-i] [-t] <id|name> <cmd> [args...]", .description = "run a command in a running container", .handler = container_cmds.exec_cmd },
     .{ .name = "status", .group = .runtime, .usage = "status [--app [name]] [--alerts] [--verbose] [--server h:p]", .description = "show service, app, or alert status", .handler = runtime_cmds.status },
     .{ .name = "audit", .group = .runtime, .usage = "audit [--limit N] [--server h:p] [--json]", .description = "show recent audit log entries", .handler = runtime_cmds.audit },
     .{ .name = "apps", .group = .runtime, .usage = "apps [--server h:p] [--json] [--status s|--failed|--in-progress]", .description = "list app release summaries", .handler = runtime_cmds.apps },
@@ -55,9 +79,9 @@ pub const command_specs = [_]CommandSpec{
 
     .{ .name = "pull", .group = .image, .usage = "pull <image>", .description = "pull an image from a registry", .handler = image_cmds.pull },
     .{ .name = "push", .group = .image, .usage = "push <source> [target]", .description = "push an image to a registry", .handler = image_cmds.push },
-    .{ .name = "images", .group = .image, .usage = "images", .description = "list pulled images", .handler = imagesHandler },
-    .{ .name = "rmi", .group = .image, .usage = "rmi <image>", .description = "remove a pulled image", .handler = image_cmds.rmi },
-    .{ .name = "prune", .group = .image, .usage = "prune", .description = "remove unused blobs and layers", .handler = pruneHandler },
+    .{ .name = "images", .group = .image, .usage = "images [--json]", .description = "list local images", .handler = imagesHandler },
+    .{ .name = "rmi", .group = .image, .usage = "rmi <image>", .description = "remove a local image reference", .handler = image_cmds.rmi },
+    .{ .name = "prune", .group = .image, .usage = "prune [--json]", .description = "remove unused blobs and layers", .handler = pruneHandler },
     .{ .name = "inspect", .group = .image, .usage = "inspect <image>", .description = "show image details", .handler = image_cmds.inspect },
 
     .{ .name = "build", .group = .build_manifest, .usage = "build [opts] <path>", .description = "build an image from a Dockerfile", .handler = build_cmds.build_cmd },
@@ -126,16 +150,45 @@ pub fn printUsage() void {
 
     write(
         \\
-        \\run options:
-        \\  --name <name>             assign a name (used for DNS service discovery)
-        \\  -e, --env KEY=VALUE       set an environment variable
-        \\  -v, --volume src:dst[:ro] bind mount a host path
-        \\  -p host:container         map host port to container port
-        \\  --memory <size>           set memory limit (e.g. 256m)
-        \\  --cpus <n>                set CPU quota in cores
-        \\  -d, --detach              run in the background
-        \\  --restart <policy>        restart policy: no, always, on-failure
-        \\  --no-net                  disable networking
+        \\run and create options:
+        \\  --name NAME, --hostname HOST  set lookup name and process hostname
+        \\  --pull missing|always|never   choose local or registry image resolution
+        \\  --entrypoint COMMAND         replace the image entrypoint
+        \\  -w, --workdir PATH           set the process working directory
+        \\  -u, --user USER[:GROUP]      set the process user
+        \\  -e, --env KEY[=VALUE]        override or copy an environment variable
+        \\  --env-file PATH             read literal environment entries
+        \\  -v, --volume SOURCE:TARGET  mount a bind path or named volume
+        \\  --mount type=...,dst=...     configure a bind or volume mount
+        \\  -p, --publish [IP:][HOST:]PORT[/tcp|udp]
+        \\                              publish a port (omit HOST or use 0 to assign one)
+        \\  --network NAME|default|none  select a local network
+        \\  --network-alias NAME        add a name within a named network
+        \\  --memory SIZE|unlimited      memory limit (default 512 mib)
+        \\  --pids COUNT|unlimited       process limit (default 4096)
+        \\  --cpus COUNT|unlimited       cpu quota in cores
+        \\  --cpuset-cpus LIST          limit execution to cpu ids or ranges
+        \\  --shm-size SIZE             shared-memory tmpfs size (default 64 mib)
+        \\  --tmpfs PATH[:OPTIONS]      mount a temporary filesystem
+        \\  --cpu-weight WEIGHT          scheduling weight from 1 to 10000
+        \\  --cpuset-cpus LIST           allowed cpu numbers and ranges
+        \\  --shm-size SIZE              /dev/shm capacity (default 64 mib)
+        \\  --tmpfs PATH[:OPTIONS]       add a temporary filesystem
+        \\  -d, --detach                start in the background
+        \\  -i, --interactive           keep stdin available
+        \\  -t, --tty                   allocate a terminal
+        \\  --rm                       remove after exit, including anonymous volumes
+        \\  --restart POLICY            no, always, on-failure[:N], unless-stopped
+        \\  --stop-signal SIGNAL         override the image stop signal
+        \\  --stop-timeout SECONDS       termination grace period (default 10)
+        \\  --health-cmd COMMAND         override or add a shell healthcheck
+        \\  --health-interval DURATION   interval between checks
+        \\  --health-timeout DURATION    deadline for a check
+        \\  --health-start-period DURATION  initial failure grace period
+        \\  --health-start-interval DURATION  interval during initial grace
+        \\  --health-retries COUNT       failures before unhealthy
+        \\  --no-healthcheck             disable image healthchecks
+        \\  --no-net                    disable networking
         \\
         \\build options:
         \\  -t <tag>                  image tag (e.g. myapp:latest)
@@ -152,7 +205,7 @@ pub fn printUsage() void {
         \\
         \\other options:
         \\  logs --tail N             show last N lines only
-        \\  logs -f, --follow         stream logs until the container exits
+        \\  logs -f, --follow         follow logs through container restarts
         \\
     , .{});
 }
@@ -200,10 +253,7 @@ fn helpHandler(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 }
 
 fn psHandler(args: *std.process.Args.Iterator, ctx: AppContext) !void {
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--json")) cli.output_mode = .json;
-    }
-    try container_cmds.ps(ctx.alloc);
+    try @import("../runtime/cli/container/list_commands.zig").ps(args, ctx);
 }
 
 fn imagesHandler(args: *std.process.Args.Iterator, ctx: AppContext) !void {

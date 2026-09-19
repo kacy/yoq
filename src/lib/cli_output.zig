@@ -15,7 +15,7 @@ pub fn write(comptime fmt: []const u8, args: anytype) void {
     defer _ = io.swapCancelProtection(prev);
 
     var buf: [4096]u8 = undefined;
-    var w = std.Io.File.stdout().writer(io, &buf);
+    var w = std.Io.File.stdout().writerStreaming(io, &buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stdout_write_failures += 1;
@@ -33,7 +33,7 @@ pub fn writeErr(comptime fmt: []const u8, args: anytype) void {
     defer _ = io.swapCancelProtection(prev);
 
     var buf: [4096]u8 = undefined;
-    var w = std.Io.File.stderr().writer(io, &buf);
+    var w = std.Io.File.stderr().writerStreaming(io, &buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stderr_write_failures += 1;

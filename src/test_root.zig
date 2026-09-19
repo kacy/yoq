@@ -15,6 +15,11 @@ comptime {
 
     _ = @import("test_socket_bind.zig");
     _ = @import("network/setup.zig");
+    _ = @import("network/setup/container_runtime.zig");
+    _ = @import("network/port_allocator.zig");
+    _ = @import("network/local_networks.zig");
+    _ = @import("network/local_network_rules.zig");
+    _ = @import("runtime/cli/network_command.zig");
     _ = @import("network/policy.zig");
     _ = @import("network/policy_rules.zig");
     _ = @import("network/setup/file_support.zig");
@@ -35,8 +40,17 @@ comptime {
     _ = @import("runtime/commands.zig");
     _ = @import("runtime/cli/status_command.zig");
     _ = @import("runtime/container_commands.zig");
+    _ = @import("runtime/cli/container/filesystem_commands.zig");
     _ = @import("runtime/cli/container/state_support.zig");
     _ = @import("runtime/run_state.zig");
+    _ = @import("runtime/local_control.zig");
+    _ = @import("runtime/local_lifecycle.zig");
+    _ = @import("runtime/cli/container/run_command.zig");
+    _ = @import("runtime/cli/container/supervisor_runtime.zig");
+    _ = @import("build/engine/command_config.zig");
+    _ = @import("build/engine/healthcheck.zig");
+    _ = @import("runtime/cli/container/resource_commands.zig");
+    _ = @import("runtime/local_volumes.zig");
     _ = @import("state/store.zig");
     _ = @import("image/cli/prune_command.zig");
     _ = @import("state/store/images.zig");
@@ -278,4 +292,21 @@ comptime {
     _ = @import("gpu/mig.zig");
     _ = @import("gpu/mps.zig");
     _ = @import("gpu/commands.zig");
+}
+
+test {
+    _ = @import("runtime/cli/container/list_commands.zig");
+}
+
+test {
+    _ = @import("runtime/local_health.zig");
+}
+
+test {
+    _ = @import("runtime/container/exec_runtime.zig");
+    _ = @import("image/store_lock.zig");
+}
+
+test {
+    _ = @import("runtime/helper_io.zig");
 }

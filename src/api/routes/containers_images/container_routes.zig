@@ -1,17 +1,10 @@
 const std = @import("std");
 const store = @import("../../../state/store.zig");
-const process = @import("../../../runtime/process.zig");
 const logs = @import("../../../runtime/logs.zig");
-const container = @import("../../../runtime/container.zig");
-const cgroups = @import("../../../runtime/cgroups.zig");
-const log = @import("../../../lib/log.zig");
 const common = @import("../common.zig");
 const writers = @import("writers.zig");
-const runtime_wait = @import("../../../lib/runtime_wait.zig");
 
 const Response = common.Response;
-const stop_poll_attempts: usize = 10;
-const stop_poll_interval_ms: u64 = 50;
 const ContainerListContext = struct {
     alloc: std.mem.Allocator,
     ids: []const []const u8,
@@ -67,66 +60,22 @@ pub fn handleGetLogs(alloc: std.mem.Allocator, id: []const u8) Response {
 }
 
 pub fn handleStopContainer(alloc: std.mem.Allocator, id: []const u8) Response {
-    const record = store.load(alloc, id) catch |err| {
-        if (err == store.StoreError.NotFound) return common.notFound();
-        return common.internalError();
+    const outcome = @import("../../../runtime/container_lifecycle.zig").stop(alloc, id, .brief) catch |err| return switch (err) {
+        error.NotFound => common.notFound(),
+        error.InvalidStatus, error.NotRunning => common.badRequest("container is not running"),
+        else => common.internalError(),
     };
-    defer record.deinit(alloc);
-
-    if (!std.mem.eql(u8, record.status, "running")) {
-        return common.badRequest("container is not running");
-    }
-
-    const pid = record.pid orelse return common.badRequest("container has no pid");
-
-    const cg = cgroups.Cgroup.open(id) catch {
-        store.updateStatus(id, "stopped", null, null) catch {};
-        return common.badRequest("container is not running");
-    };
-    if (!cg.containsProcess(pid)) {
-        store.updateStatus(id, "stopped", null, null) catch {};
-        return common.badRequest("container is not running");
-    }
-
-    process.terminate(pid) catch return common.internalError();
-
-    if (waitForProcessExit(id, pid)) {
-        store.updateStatus(id, "stopped", null, null) catch |err| {
-            log.warn("failed to update status after stopping {s}: {}", .{ id, err });
-        };
-        return .{ .status = .ok, .body = "{\"status\":\"stopped\"}", .allocated = false };
-    }
-
-    return .{ .status = .ok, .body = "{\"status\":\"stopping\"}", .allocated = false };
+    return .{ .status = .ok, .body = if (outcome == .stopped) "{\"status\":\"stopped\"}" else "{\"status\":\"stopping\"}", .allocated = false };
 }
 
-pub fn waitForProcessExit(id: []const u8, pid: i32) bool {
-    var attempts: usize = 0;
-    while (attempts < stop_poll_attempts) : (attempts += 1) {
-        const cg = cgroups.Cgroup.open(id) catch return true;
-        if (!cg.containsProcess(pid)) return true;
-        process.sendSignal(pid, 0) catch return true;
-        if (!runtime_wait.sleep(std.Io.Duration.fromMilliseconds(@intCast(stop_poll_interval_ms)), "container stop wait")) return false;
-    }
-    return false;
-}
+pub const waitForProcessExit = @import("../../../runtime/container_lifecycle.zig").waitForProcessExit;
 
 pub fn handleRemoveContainer(alloc: std.mem.Allocator, id: []const u8) Response {
-    const record = store.load(alloc, id) catch |err| {
-        if (err == store.StoreError.NotFound) return common.notFound();
-        return common.internalError();
+    @import("../../../runtime/container_lifecycle.zig").remove(alloc, id, false) catch |err| return switch (err) {
+        error.NotFound => common.notFound(),
+        error.ContainerRunning => common.badRequest("cannot remove running container"),
+        else => common.internalError(),
     };
-
-    if (std.mem.eql(u8, record.status, "running")) {
-        record.deinit(alloc);
-        return common.badRequest("cannot remove running container");
-    }
-    record.deinit(alloc);
-
-    store.remove(id) catch return common.internalError();
-    logs.deleteLogFile(id);
-    container.cleanupContainerDirs(id);
-
     return .{ .status = .ok, .body = "{\"status\":\"removed\"}", .allocated = false };
 }
 
@@ -152,4 +101,8 @@ fn writeContainerLogsJson(writer: *std.Io.Writer, ctx: ContainerLogsContext) !vo
     try writer.writeAll("{\"logs\":\"");
     try @import("../../../lib/json_helpers.zig").writeJsonEscaped(writer, ctx.log_data);
     try writer.writeAll("\"}");
+}
+
+test {
+    _ = @import("../../../runtime/container_lifecycle.zig");
 }

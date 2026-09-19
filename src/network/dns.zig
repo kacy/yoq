@@ -842,3 +842,5 @@ test "registerService rejects name with spaces" {
     registerService("bad name", "ctr_001", .{ 10, 42, 0, 50 });
     try std.testing.expect(lookupService("bad name") == null);
 }
+
+pub const startScopedResolverAt = resolver_runtime.startScopedResolverAt;

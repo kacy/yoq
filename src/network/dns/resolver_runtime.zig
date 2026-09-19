@@ -4,6 +4,8 @@ const posix = std.posix;
 const log = @import("../../lib/log.zig");
 const packet_support = @import("packet_support.zig");
 const registry_support = @import("registry_support.zig");
+const local_networks = @import("../local_networks.zig");
+const runtime_wait = @import("../../lib/runtime_wait.zig");
 const bridge = @import("../bridge.zig");
 
 const listen_port: u16 = 53;
@@ -19,15 +21,33 @@ const RateLimitEntry = struct {
 
 var upstream_dns: [4]u8 = .{ 8, 8, 8, 8 };
 var upstream_initialized: bool = false;
-const Listener = struct {
+const ListenerConfig = struct {
     address: [4]u8,
+    device: [16]u8 = [_]u8{0} ** 16,
+    device_len: usize,
+    scope: [63]u8 = undefined,
+    scope_len: usize = 0,
+
+    fn init(address: [4]u8, device: []const u8, scope: ?[]const u8) ListenerConfig {
+        var config: ListenerConfig = .{ .address = address, .device_len = device.len };
+        @memcpy(config.device[0..device.len], device);
+        if (scope) |name| {
+            @memcpy(config.scope[0..name.len], name);
+            config.scope_len = name.len;
+        }
+        return config;
+    }
+};
+const Listener = struct {
+    config: ListenerConfig,
     socket: ?linux_platform.posix.socket_t = null,
     thread: ?std.Thread = null,
     external: bool = false,
 };
-// A process serves local workloads and its own cluster subnet. Keep both
-// gateways available without a wildcard socket occupying host DNS addresses.
-var listeners: [2]?Listener = .{ null, null };
+// Gateway sockets stay bound to their own bridge, including named networks.
+var listeners: [256]?Listener = .{null} ** 256;
+var retry_running = std.atomic.Value(bool).init(false);
+var retry_thread: ?std.Thread = null;
 var resolver_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var resolver_mutex: std.Io.Mutex = .init;
 var rate_limits: [256]RateLimitEntry = [_]RateLimitEntry{.{
@@ -45,14 +65,39 @@ pub fn startResolverAt(address: [4]u8) void {
     resolver_mutex.lockUncancelable(std.Options.debug_io);
     defer resolver_mutex.unlock(std.Options.debug_io);
 
-    startResolverAtLocked(address);
+    startResolverAtLocked(ListenerConfig.init(address, bridge.default_bridge, null));
 }
 
-fn startResolverAtLocked(address: [4]u8) void {
+pub fn startScopedResolverAt(address: [4]u8, device: []const u8, scope: []const u8) void {
+    if (device.len >= 16 or scope.len == 0 or scope.len > 63) return;
+    resolver_mutex.lockUncancelable(std.Options.debug_io);
+    defer resolver_mutex.unlock(std.Options.debug_io);
+    startResolverAtLocked(ListenerConfig.init(address, device, scope));
+    // Every supervisor retries the shared listener. DNS survives when the
+    // supervisor that first bound the gateway exits before its peers.
+    if (retry_thread == null) {
+        retry_running.store(true, .release);
+        retry_thread = std.Thread.spawn(.{}, retryLoop, .{}) catch {
+            retry_running.store(false, .release);
+            return;
+        };
+    }
+}
+
+fn retryLoop() void {
+    while (retry_running.load(.acquire)) {
+        if (!runtime_wait.sleep(std.Io.Duration.fromSeconds(1), "named network dns retry")) return;
+        if (retry_running.load(.acquire)) _ = refreshResolvers();
+    }
+}
+
+fn startResolverAtLocked(config: ListenerConfig) void {
+    const address = config.address;
+    const device = config.device[0..config.device_len];
     var available: ?*?Listener = null;
     for (&listeners) |*entry| {
         if (entry.*) |listener| {
-            if (std.mem.eql(u8, &listener.address, &address)) {
+            if (std.mem.eql(u8, &listener.config.address, &address)) {
                 if (listener.socket != null) return;
                 available = entry;
                 break;
@@ -62,13 +107,13 @@ fn startResolverAtLocked(address: [4]u8) void {
         }
     }
     const slot = available orelse {
-        log.warn("dns: local and cluster gateway listeners are already occupied", .{});
+        log.warn("dns: gateway listener limit reached", .{});
         return;
     };
 
     const was_external = if (slot.*) |listener| listener.external else false;
     // retain the requested gateway so an audit can retry a failed bind.
-    slot.* = .{ .address = address };
+    slot.* = .{ .config = config };
     initUpstreamDns();
 
     const sock = linux_platform.posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.CLOEXEC, 0) catch |e| {
@@ -79,7 +124,7 @@ fn startResolverAtLocked(address: [4]u8) void {
     // Bind an explicit gateway so host DNS listeners on loopback can coexist.
     // Device binding also rejects packets arriving through unrelated interfaces.
     // Failure must close the socket, never expose an unrestricted DNS listener.
-    linux_platform.posix.setsockopt(sock, posix.SOL.SOCKET, posix.SO.BINDTODEVICE, bridge.default_bridge ++ "\x00") catch |e| {
+    linux_platform.posix.setsockopt(sock, posix.SOL.SOCKET, posix.SO.BINDTODEVICE, config.device[0 .. config.device_len + 1]) catch |e| {
         log.warn("dns: failed to bind socket to container bridge: {}", .{e});
         linux_platform.posix.close(sock);
         return;
@@ -91,25 +136,25 @@ fn startResolverAtLocked(address: [4]u8) void {
 
     linux_platform.posix.bind(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch |e| {
         if (e == error.AddressInUse) {
-            slot.* = .{ .address = address, .external = true };
-            if (!was_external) log.info("dns resolver already available on {s}:53", .{bridge.default_bridge});
+            slot.* = .{ .config = config, .external = true };
+            if (!was_external) log.info("dns resolver already available on {s}:53", .{device});
         } else {
-            log.warn("dns: failed to bind to {s}:53: {}", .{ bridge.default_bridge, e });
+            log.warn("dns: failed to bind to {s}:53: {}", .{ device, e });
         }
         linux_platform.posix.close(sock);
         return;
     };
 
     const was_running = resolver_running.swap(true, .acq_rel);
-    const thread = std.Thread.spawn(.{}, resolverLoop, .{sock}) catch |e| {
+    const thread = std.Thread.spawn(.{}, resolverLoop, .{ sock, config }) catch |e| {
         log.warn("dns: failed to spawn resolver thread: {}", .{e});
         resolver_running.store(was_running, .release);
         linux_platform.posix.close(sock);
         return;
     };
-    slot.* = .{ .address = address, .socket = sock, .thread = thread };
+    slot.* = .{ .config = config, .socket = sock, .thread = thread };
     log.info("dns resolver started on {d}.{d}.{d}.{d}:53 via {s}", .{
-        address[0], address[1], address[2], address[3], bridge.default_bridge,
+        address[0], address[1], address[2], address[3], device,
     });
 }
 
@@ -121,7 +166,7 @@ pub fn refreshResolvers() bool {
     for (&listeners) |*entry| {
         const listener = entry.* orelse continue;
         if (listener.socket != null) continue;
-        startResolverAtLocked(listener.address);
+        startResolverAtLocked(listener.config);
         if (entry.*.?.socket != null) acquired = true;
     }
     return acquired;
@@ -132,7 +177,7 @@ pub fn isRunningAt(address: [4]u8) bool {
     defer resolver_mutex.unlock(std.Options.debug_io);
     for (listeners) |entry| {
         if (entry) |listener| {
-            if (std.mem.eql(u8, &listener.address, &address)) return listener.socket != null or listener.external;
+            if (std.mem.eql(u8, &listener.config.address, &address)) return listener.socket != null or listener.external;
         }
     }
     return false;
@@ -154,6 +199,12 @@ pub fn isOwnedByCurrentProcess() bool {
 }
 
 pub fn stopResolver() void {
+    retry_running.store(false, .release);
+    resolver_mutex.lockUncancelable(std.Options.debug_io);
+    const retries = retry_thread;
+    retry_thread = null;
+    resolver_mutex.unlock(std.Options.debug_io);
+    if (retries) |thread| thread.join();
     resolver_mutex.lockUncancelable(std.Options.debug_io);
     defer resolver_mutex.unlock(std.Options.debug_io);
 
@@ -221,7 +272,7 @@ fn checkRateLimit(client_ip: u32) bool {
     return true;
 }
 
-fn resolverLoop(sock: linux_platform.posix.socket_t) void {
+fn resolverLoop(sock: linux_platform.posix.socket_t, config: ListenerConfig) void {
     var recv_buf: [512]u8 = undefined;
 
     while (resolver_running.load(.acquire)) {
@@ -246,7 +297,7 @@ fn resolverLoop(sock: linux_platform.posix.socket_t) void {
             continue;
         }
 
-        handleQuery(sock, recv_buf[0..recv_len], &client_addr, addr_len);
+        handleQuery(sock, recv_buf[0..recv_len], &client_addr, addr_len, config);
     }
 }
 
@@ -255,6 +306,7 @@ fn handleQuery(
     query: []const u8,
     client_addr: *const posix.sockaddr.in,
     addr_len: posix.socklen_t,
+    config: ListenerConfig,
 ) void {
     const header = packet_support.parseHeader(query) orelse return;
     if (header.qdcount != 1) {
@@ -270,12 +322,30 @@ fn handleQuery(
     }
 
     const question = packet_support.parseQuestion(query) orelse return;
+    const name = question.name[0..question.name_len];
+    if (config.scope_len != 0) {
+        const address = local_networks.lookupDns(config.scope[0..config.scope_len], name);
+        if (address != null or std.mem.indexOfScalar(u8, name, '.') == null) {
+            var response_buf: [512]u8 = undefined;
+            const length = if (address != null and question.qtype == packet_support.TYPE_A and question.qclass == packet_support.CLASS_IN)
+                packet_support.buildResponse(query, query.len, address.?, &response_buf)
+            else blk: {
+                const length = packet_support.buildNxDomain(query, query.len, &response_buf);
+                // Existing names without an A answer return NODATA, not NXDOMAIN.
+                if (address != null) packet_support.writeU16(response_buf[2..4], 0x8400);
+                break :blk length;
+            };
+            if (length) |n| _ = linux_platform.posix.sendto(sock, response_buf[0..n], 0, @ptrCast(client_addr), addr_len) catch {};
+            return;
+        }
+        forwardQuery(sock, query, client_addr, addr_len);
+        return;
+    }
     if (question.qtype != packet_support.TYPE_A or question.qclass != packet_support.CLASS_IN) {
         forwardQuery(sock, query, client_addr, addr_len);
         return;
     }
 
-    const name = question.name[0..question.name_len];
     if (registry_support.lookupServiceForDns(name)) |service_ip| {
         var response_buf: [512]u8 = undefined;
         if (packet_support.buildResponse(query, query.len, service_ip, &response_buf)) |resp_len| {

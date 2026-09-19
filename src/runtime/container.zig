@@ -9,6 +9,7 @@ const posix = std.posix;
 const linux = std.os.linux;
 
 const namespaces = @import("namespaces.zig");
+const session = @import("session.zig");
 const cgroups = @import("cgroups.zig");
 const filesystem = @import("filesystem.zig");
 const security = @import("security.zig");
@@ -86,6 +87,8 @@ pub const BindMount = exec_runtime.BindMount;
 
 /// configuration for creating a container
 pub const ContainerConfig = struct {
+    session_io: ?*session.ProcessIo = null,
+    session_output: ?session.Output = null,
     /// unique container identifier
     id: []const u8,
     /// path to the rootfs directory
@@ -113,6 +116,8 @@ pub const ContainerConfig = struct {
     network: ?net_setup.NetworkConfig = null,
     /// bind mounts (host path -> container path)
     mounts: []const BindMount = &.{},
+    shm_size: u64 = filesystem.default_shm_size,
+    tmpfs_mounts: []const filesystem.TmpfsMount = &.{},
     /// dev mode: service name for colored log output (null = no dev output)
     dev_service_name: ?[]const u8 = null,
     /// dev mode: color index for this service
@@ -161,7 +166,7 @@ pub const Container = struct {
         const result = process.wait(pid, true) catch return;
         const exit_code: u8 = switch (result.status) {
             .exited => |code| code,
-            .signaled => 128,
+            .signaled => |signal| @intCast(@min(128 + signal, 255)),
             .running, .stopped => return,
         };
         self.status = .stopped;
@@ -211,7 +216,8 @@ pub const Container = struct {
             if (!exec_runtime.isSafeRoot(lower)) return ContainerError.StartFailed;
         }
         if (!config.host_mode and !config.namespaces.mount) return ContainerError.StartFailed;
-        errdefer if (config.lower_dirs.len > 0) cleanupContainerDirs(config.id);
+        // a failed execution attempt still belongs to the existing container.
+        // removal owns its writable layer, including startup failure recovery.
         const overlay = start_support.prepareOverlayRuntime(config, containers_subdir) catch return ContainerError.StartFailed;
         var child_ctx = start_support.initChildContext(config, &overlay);
         var channel = startup.Channel.init() catch return ContainerError.StartFailed;
@@ -237,7 +243,7 @@ pub const Container = struct {
             .gid_count = std.math.maxInt(u32),
             .allow_setgroups = true,
         } else null;
-        spawned = namespaces.spawn(config.namespaces, mapping, exec_runtime.childMain, @ptrCast(&child_ctx)) catch return ContainerError.StartFailed;
+        spawned = namespaces.spawnWithIo(config.namespaces, mapping, exec_runtime.childMain, @ptrCast(&child_ctx), config.session_io) catch return ContainerError.StartFailed;
         const child = &spawned.?;
         startup.closeOwned(&channel.child);
         self.pid = child.pid;
@@ -247,9 +253,17 @@ pub const Container = struct {
         self.runtime.cgroup.?.setLimits(config.limits) catch return ContainerError.StartFailed;
         start_support.startLogCapture(config, &self.runtime, child) catch return ContainerError.StartFailed;
 
-        // Release namespace mapping first. The child mounts its root and final
-        // /dev, but cannot execute user code until the second explicit gate.
+        // prepare the image root before managed volumes hide their target paths.
         child.signalReady();
+        startup.expect(channel.parent, .overlay_ready) catch return ContainerError.StartFailed;
+        if (!config.host_mode) {
+            const root = if (child_ctx.has_overlay) child_ctx.fs_config.merged_dir else child_ctx.rootfs;
+            @import("container/volume_init.zig").initialize(std.Options.debug_io, config.id, child.pid, root) catch |err| {
+                log.err("container {s}: volume initialization failed: {}", .{ config.id, err });
+                return ContainerError.StartFailed;
+            };
+        }
+        startup.notify(channel.parent, .volumes_ready) catch return ContainerError.StartFailed;
         startup.expect(channel.parent, .filesystem_ready) catch |err| {
             log.err("container {s}: waiting for filesystem_ready failed: {}", .{ config.id, err });
             return ContainerError.StartFailed;
@@ -292,13 +306,13 @@ pub const Container = struct {
             self.pid = null;
             self.state_mutex.unlock(std.Options.debug_io);
             active_pid.store(0, .release);
-            store.updateStatus(self.config.id, "stopped", null, 255) catch {};
+            self.finalize(255);
             return 255;
         };
 
         const exit_code: u8 = switch (wait_result.status) {
             .exited => |code| code,
-            .signaled => 128,
+            .signaled => |signal| @intCast(@min(128 + signal, 255)),
             .running, .stopped => unreachable, // waitForExit only returns terminal states
         };
 

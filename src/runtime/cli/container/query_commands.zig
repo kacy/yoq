@@ -4,6 +4,7 @@ const json_out = @import("../../../lib/json_output.zig");
 const store = @import("../../../state/store.zig");
 const logs = @import("../../logs.zig");
 const exec = @import("../../exec.zig");
+const run_state = @import("../../run_state.zig");
 const state_support = @import("state_support.zig");
 const common = @import("common.zig");
 
@@ -79,7 +80,21 @@ pub fn ps(alloc: std.mem.Allocator) !void {
 }
 
 pub fn exec_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
-    const id = args.next() orelse {
+    var interactive = false;
+    var tty = false;
+    var reference = args.next();
+    while (reference) |option| {
+        if (std.mem.eql(u8, option, "-i") or std.mem.eql(u8, option, "--interactive")) {
+            interactive = true;
+        } else if (std.mem.eql(u8, option, "-t") or std.mem.eql(u8, option, "--tty")) {
+            tty = true;
+        } else if (std.mem.eql(u8, option, "-it") or std.mem.eql(u8, option, "-ti")) {
+            interactive = true;
+            tty = true;
+        } else break;
+        reference = args.next();
+    }
+    const id = reference orelse {
         writeErr("usage: yoq exec <container-id|name> <command> [args...]\n", .{});
         return ContainerError.InvalidArgument;
     };
@@ -108,12 +123,25 @@ pub fn exec_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !voi
         exec_args.append(alloc, arg) catch return ContainerError.OutOfMemory;
     }
 
+    const saved = run_state.loadConfig(alloc, record.id) catch |err| blk: {
+        // app and assignment owners do not write standalone run configuration.
+        // preserve their existing exec defaults when no saved settings exist.
+        if (err == error.NotFound) break :blk null;
+        writeErr("failed to load process configuration for {s}: {}\n", .{ id, err });
+        return ContainerError.StoreError;
+    };
+    defer if (saved) |config| config.deinit(alloc);
+
     const exit_code = exec.execInContainer(.{
         .pid = pid,
         .command = command,
         .args = exec_args.items,
-        .env = &.{},
-        .working_dir = "/",
+        .env = if (saved) |config| config.env else &.{},
+        .working_dir = if (saved) |config| config.working_dir else "/",
+        .user = if (saved) |config| config.user else null,
+        .cgroup_id = record.id,
+        .interactive = interactive,
+        .tty = tty,
     }) catch |err| {
         writeErr("failed to exec in container {s}: {}\n", .{ id, err });
         return ContainerError.ProcessNotFound;
@@ -127,7 +155,7 @@ pub fn log(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocato
     const record = try state_support.resolveContainerRef(alloc, ref);
     defer record.deinit(alloc);
 
-    var tail_lines: usize = 0;
+    var tail_lines: ?usize = null;
     var follow = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--tail")) {
@@ -141,6 +169,9 @@ pub fn log(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocato
             };
         } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--follow")) {
             follow = true;
+        } else {
+            writeErr("unknown logs option: {s}\n", .{arg});
+            return ContainerError.InvalidArgument;
         }
     }
 
@@ -152,21 +183,26 @@ pub fn log(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocato
         return;
     }
 
-    const content = if (tail_lines > 0)
-        logs.readTailWithIo(io, alloc, record.id, tail_lines)
-    else
-        logs.readLogsWithIo(io, alloc, record.id);
-
-    const data = content catch |err| {
-        writeErr("no logs found for container: {s} ({})\n", .{ record.id, err });
-        std.process.exit(1);
+    logs.streamLogsWithIo(io, record.id, tail_lines) catch |err| {
+        writeErr("failed to read logs for container: {s} ({})\n", .{ record.id, err });
+        return ContainerError.StoreError;
     };
-    defer alloc.free(data);
+}
 
-    if (data.len == 0) {
-        write("(no output)\n", .{});
-        return;
+pub fn attach_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
+    var interactive = true;
+    var reference = args.next() orelse return ContainerError.InvalidArgument;
+    if (std.mem.eql(u8, reference, "--no-stdin")) {
+        interactive = false;
+        reference = args.next() orelse return ContainerError.InvalidArgument;
     }
-
-    write("{s}", .{data});
+    if (args.next() != null) return ContainerError.InvalidArgument;
+    const record = try state_support.resolveContainerRef(alloc, reference);
+    defer record.deinit(alloc);
+    if (!std.mem.eql(u8, record.status, "running") and !std.mem.eql(u8, record.status, "restarting")) return ContainerError.InvalidStatus;
+    const code = @import("../../session.zig").attach(record.id, interactive) catch |err| {
+        writeErr("failed to attach to {s}: {}\n", .{ reference, err });
+        return ContainerError.ProcessNotFound;
+    };
+    std.process.exit(code);
 }

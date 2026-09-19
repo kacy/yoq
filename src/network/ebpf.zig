@@ -661,6 +661,10 @@ test "mapEntryCount counts inserted keys and respects the bound" {
     defer linux_platform.posix.close(fd);
 
     var i: u32 = 0;
+    mapUpdate(fd, std.mem.asBytes(&i), std.mem.asBytes(&i)) catch return error.SkipZigTest;
+    // Zero is a valid key, not an iteration sentinel.
+    try std.testing.expectEqual(@as(usize, 1), map_support.mapEntryCount(fd, 4, 16));
+    i = 1;
     while (i < 5) : (i += 1) {
         mapUpdate(fd, std.mem.asBytes(&i), std.mem.asBytes(&i)) catch return error.SkipZigTest;
     }

@@ -80,6 +80,8 @@ pub fn formatIp(ip: [4]u8, buf: *[16]u8) []const u8 {
     return parse_support.formatIp(ip, buf);
 }
 
+pub const lookupChecked = allocation_runtime.lookupChecked;
+
 /// parse a dotted-quad IP string into 4 bytes
 pub fn parseIp(str: []const u8) ?[4]u8 {
     return parse_support.parseIp(str);
@@ -350,4 +352,13 @@ test "incrementWithinRange increments within range" {
     const range_end = [4]u8{ 10, 42, 1, 254 };
     try std.testing.expect(incrementWithinRange(&current, range_end));
     try std.testing.expectEqual([4]u8{ 10, 42, 1, 11 }, current);
+}
+
+test "checked allocation lookup distinguishes missing state from database failure" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try schema.init(&db);
+    try std.testing.expectError(IpError.NotFound, lookupChecked(&db, std.testing.allocator, "missing"));
+    try db.exec("DROP TABLE ip_allocations;", .{}, .{});
+    try std.testing.expectError(IpError.DbOpenFailed, lookupChecked(&db, std.testing.allocator, "missing"));
 }

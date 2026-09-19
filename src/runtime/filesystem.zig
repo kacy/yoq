@@ -16,6 +16,9 @@ const essential_mounts = @import("filesystem/essential_mounts.zig");
 const mount_ops = @import("filesystem/mount_ops.zig");
 
 pub const FilesystemError = common.FilesystemError;
+pub const TmpfsMount = @import("filesystem/tmpfs.zig").TmpfsMount;
+pub const mountTmpfsAt = @import("filesystem/tmpfs.zig").mountAt;
+pub const default_shm_size = @import("filesystem/tmpfs.zig").default_size;
 
 /// configuration for a container's filesystem
 pub const FilesystemConfig = common.FilesystemConfig;
@@ -57,6 +60,10 @@ pub fn bindMount(target_root: []const u8, source: []const u8, target: []const u8
 /// Mount essential filesystems before pivot_root hides the host device sources.
 pub fn mountEssentialAt(target_root: []const u8) FilesystemError!void {
     return essential_mounts.mountEssentialAt(target_root);
+}
+
+pub fn mountEssentialWithShm(target_root: []const u8, shm_size: u64) FilesystemError!void {
+    return essential_mounts.mountEssentialWithShm(target_root, shm_size);
 }
 
 fn isPathSafe(path: []const u8) bool {
@@ -272,4 +279,8 @@ test "validatePathNoSymlink rejects symlinks" {
 
 test "validatePathNoSymlink rejects non-existent paths" {
     try std.testing.expectError(FilesystemError.BindSourceValidationFailed, validatePathNoSymlink("/nonexistent/path/12345"));
+}
+
+test {
+    _ = @import("filesystem/tmpfs.zig");
 }

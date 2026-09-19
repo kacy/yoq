@@ -75,6 +75,14 @@ pub fn mapGetNextKey(map_fd: posix.fd_t, key: []const u8, next_key: []u8) bool {
         return false;
     }
 
+    if (key.len == 0) {
+        // A null key starts at the first entry. An empty Zig slice can still
+        // have a non-null pointer, which the standard wrapper passes through.
+        var attr: BPF.Attr = .{ .map_elem = std.mem.zeroes(BPF.MapElemAttr) };
+        attr.map_elem.map_fd = map_fd;
+        attr.map_elem.result.next_key = @intFromPtr(next_key.ptr);
+        return linux.errno(linux.bpf(.map_get_next_key, &attr, @sizeOf(BPF.MapElemAttr))) == .SUCCESS;
+    }
     const found = BPF.map_get_next_key(map_fd, key, next_key) catch return false;
     return found;
 }
@@ -86,11 +94,12 @@ pub fn mapEntryCount(map_fd: posix.fd_t, key_size: usize, max_entries: u32) usiz
     if (comptime builtin.os.tag != .linux) return 0;
     if (key_size == 0 or key_size > resource_support.max_key_size) return 0;
 
-    var key: [resource_support.max_key_size]u8 = std.mem.zeroes([resource_support.max_key_size]u8);
+    var key: [resource_support.max_key_size]u8 = undefined;
     var next: [resource_support.max_key_size]u8 = undefined;
     var count: usize = 0;
     while (count < max_entries) {
-        if (!mapGetNextKey(map_fd, key[0..key_size], next[0..key_size])) break;
+        const previous: []const u8 = if (count == 0) &.{} else key[0..key_size];
+        if (!mapGetNextKey(map_fd, previous, next[0..key_size])) break;
         count += 1;
         @memcpy(key[0..key_size], next[0..key_size]);
     }

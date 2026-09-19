@@ -13,6 +13,8 @@ const common = @import("cli/common.zig");
 
 pub const ImageCommandsError = common.ImageCommandsError;
 pub const ImageResolution = resolution.ImageResolution;
+pub const PullPolicy = resolution.PullPolicy;
+pub const resolveImage = resolution.resolveImage;
 
 pub fn pullAndResolveImage(io: std.Io, alloc: std.mem.Allocator, target: []const u8) ImageCommandsError!ImageResolution {
     return resolution.pullAndResolveImage(io, alloc, target);
@@ -40,4 +42,25 @@ pub fn inspect(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 
 pub fn prune(alloc: std.mem.Allocator) !void {
     return prune_command.prune(alloc);
+}
+
+pub fn tag(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    return @import("cli/tag_command.zig").tag(args, ctx.alloc);
+}
+
+test {
+    _ = @import("cli/tag_command.zig");
+    _ = @import("cli/resolution.zig");
+}
+
+pub fn save(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    return @import("cli/archive_command.zig").save(ctx.io, args, ctx.alloc);
+}
+
+pub fn load(args: *std.process.Args.Iterator, ctx: AppContext) !void {
+    return @import("cli/archive_command.zig").load(ctx.io, args, ctx.alloc);
+}
+
+test {
+    _ = @import("cli/archive_command.zig");
 }

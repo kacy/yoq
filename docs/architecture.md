@@ -41,7 +41,9 @@ data flows top-down: CLI commands dispatch to subsystems, which use shared state
 
 container isolation using Linux primitives directly — no daemon, no shim.
 
-**container lifecycle:** create → start → running → stop → removed. each container gets its own set of namespaces (PID, NET, MNT, UTS, IPC, USER, CGROUP) created via `clone3()`. the child process's stdio is captured through pipes for log collection.
+**container lifecycle:** the durable container record owns its saved configuration and writable layer. each process attempt has an owner and a requested-state generation. command locks serialize cli/api mutations; transition locks order startup against stop. failed cleanup retains ownership until it can be retried. process exit preserves storage; explicit removal deletes it. see [local containers](local-containers.md).
+
+**sessions:** supervisors provide a unix attachment endpoint. pipes preserve stdout/stderr separately; terminals merge them and support resize. capture workers send raw bytes to attached clients and formatted records to bounded logs. slow attachment clients are disconnected without blocking capture.
 
 **filesystem:** overlayfs with image layers as lower dirs, a writable upper dir, and pivot_root into the merged view. `/proc`, `/dev`, `/sys`, `/tmp` are mounted inside. symlinks in overlay paths are rejected for security.
 
@@ -50,7 +52,11 @@ container isolation using Linux primitives directly — no daemon, no shim.
 **security:** seccomp filters (classic BPF) restrict syscalls to a safe allowlist. capabilities are dropped to a minimal set (CHOWN, DAC_OVERRIDE, NET_RAW, NET_BIND_SERVICE, SETUID/SETGID, KILL). `no_new_privs` prevents re-escalation.
 
 key files:
-- `container.zig` — lifecycle and config types
+- `container.zig` — process attempts and config types
+- `local_control.zig`, `local_lifecycle.zig` — durable ownership and shared mutations
+- `run_state.zig` — versioned effective configuration
+- `session.zig` — process stdio and attachment transport
+- `local_volumes.zig`, `local_health.zig` — standalone volume references and health checks
 - `namespaces.zig` — clone3, UID/GID mapping
 - `cgroups.zig` — resource limits, PSI metrics
 - `filesystem.zig` — overlayfs, pivot_root

@@ -13,6 +13,8 @@ pub fn build(
     tag: ?[]const u8,
     cli_build_args: ?[]const []const u8,
 ) BuildError!BuildResult {
+    var store_lease = @import("../image/store_lock.zig").Lock.acquire(.shared) catch return error.ImageStoreFailed;
+    defer store_lease.deinit();
     var engine = executor.Engine.init(alloc, instructions, context_dir, tag, cli_build_args);
     return engine.run();
 }

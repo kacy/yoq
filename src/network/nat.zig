@@ -78,14 +78,30 @@ pub fn ensureContainerForwarding(bridge: []const u8, subnet: []const u8) NatErro
 ///   iptables -t nat -A PREROUTING -p tcp --dport <host_port> -j DNAT --to-destination <ip>:<container_port>
 ///   iptables -t nat -A OUTPUT -d 127.0.0.1/32 -p tcp --dport <host_port> -j DNAT --to-destination <ip>:<container_port>
 ///   iptables -A FORWARD -p tcp -d <ip> --dport <container_port> -j ACCEPT
-pub fn addPortMap(
+pub fn addPortMap(host_port: u16, container_ip: []const u8, container_port: u16, protocol: Protocol) NatError!void {
+    return addPortMapAt(null, host_port, container_ip, container_port, protocol);
+}
+
+pub fn addPortMapAt(
+    host_ip: ?[]const u8,
     host_port: u16,
     container_ip: []const u8,
     container_port: u16,
     protocol: Protocol,
 ) NatError!void {
-    enableRouteLocalnet(network_bridge.default_bridge) catch |e| {
-        log.warn("nat: failed to enable route_localnet on {s}: {}", .{ network_bridge.default_bridge, e });
+    return addPortMapOnBridge(network_bridge.default_bridge, host_ip, host_port, container_ip, container_port, protocol);
+}
+
+pub fn addPortMapOnBridge(
+    bridge_name: []const u8,
+    host_ip: ?[]const u8,
+    host_port: u16,
+    container_ip: []const u8,
+    container_port: u16,
+    protocol: Protocol,
+) NatError!void {
+    enableRouteLocalnet(bridge_name) catch |e| {
+        log.warn("nat: failed to enable route_localnet on {s}: {}", .{ bridge_name, e });
         return NatError.RouteLocalnetFailed;
     };
 
@@ -93,7 +109,7 @@ pub fn addPortMap(
     var dest_buf: [32]u8 = undefined;
 
     // DNAT rule for external traffic
-    const prerouting_args = buildDnatArgs(.add, "PREROUTING", false, host_port, container_ip, container_port, protocol, &port_buf, &dest_buf);
+    const prerouting_args = buildDnatArgsAt(.add, "PREROUTING", false, host_ip, host_port, container_ip, container_port, protocol, &port_buf, &dest_buf);
     _ = exec(&prerouting_args) catch |e| {
         log.warn("nat: failed to add DNAT rule for port {d}: {}", .{ host_port, e });
         return NatError.ExecFailed;
@@ -102,12 +118,12 @@ pub fn addPortMap(
     // DNAT rule for host-local traffic (for example curl 127.0.0.1:<port>)
     var loopback_port_buf: [8]u8 = undefined;
     var loopback_dest_buf: [32]u8 = undefined;
-    const output_args = buildDnatArgs(.add, "OUTPUT", true, host_port, container_ip, container_port, protocol, &loopback_port_buf, &loopback_dest_buf);
+    const output_args = buildDnatArgsAt(.add, "OUTPUT", true, host_ip, host_port, container_ip, container_port, protocol, &loopback_port_buf, &loopback_dest_buf);
     _ = exec(&output_args) catch |e| {
         log.warn("nat: failed to add OUTPUT DNAT rule for port {d}: {}", .{ host_port, e });
         var cleanup_port_buf: [8]u8 = undefined;
         var cleanup_dest_buf: [32]u8 = undefined;
-        const cleanup = buildDnatArgs(.delete, "PREROUTING", false, host_port, container_ip, container_port, protocol, &cleanup_port_buf, &cleanup_dest_buf);
+        const cleanup = buildDnatArgsAt(.delete, "PREROUTING", false, host_ip, host_port, container_ip, container_port, protocol, &cleanup_port_buf, &cleanup_dest_buf);
         _ = exec(&cleanup) catch |cleanup_err| {
             log.warn("nat: failed to cleanup PREROUTING DNAT rule after OUTPUT failure: {}", .{cleanup_err});
         };
@@ -121,13 +137,13 @@ pub fn addPortMap(
         log.warn("nat: failed to add localhost hairpin MASQUERADE rule for {s}:{d}: {}", .{ container_ip, container_port, e });
         var cleanup_prerouting_port_buf: [8]u8 = undefined;
         var cleanup_prerouting_dest_buf: [32]u8 = undefined;
-        const cleanup_prerouting = buildDnatArgs(.delete, "PREROUTING", false, host_port, container_ip, container_port, protocol, &cleanup_prerouting_port_buf, &cleanup_prerouting_dest_buf);
+        const cleanup_prerouting = buildDnatArgsAt(.delete, "PREROUTING", false, host_ip, host_port, container_ip, container_port, protocol, &cleanup_prerouting_port_buf, &cleanup_prerouting_dest_buf);
         _ = exec(&cleanup_prerouting) catch |cleanup_err| {
             log.warn("nat: failed to cleanup PREROUTING DNAT rule after hairpin MASQUERADE failure: {}", .{cleanup_err});
         };
         var cleanup_output_port_buf: [8]u8 = undefined;
         var cleanup_output_dest_buf: [32]u8 = undefined;
-        const cleanup_output = buildDnatArgs(.delete, "OUTPUT", true, host_port, container_ip, container_port, protocol, &cleanup_output_port_buf, &cleanup_output_dest_buf);
+        const cleanup_output = buildDnatArgsAt(.delete, "OUTPUT", true, host_ip, host_port, container_ip, container_port, protocol, &cleanup_output_port_buf, &cleanup_output_dest_buf);
         _ = exec(&cleanup_output) catch |cleanup_err| {
             log.warn("nat: failed to cleanup OUTPUT DNAT rule after hairpin MASQUERADE failure: {}", .{cleanup_err});
         };
@@ -142,13 +158,13 @@ pub fn addPortMap(
         // try to clean up the DNAT rules we just added
         var cleanup_prerouting_port_buf: [8]u8 = undefined;
         var cleanup_prerouting_dest_buf: [32]u8 = undefined;
-        const cleanup_prerouting = buildDnatArgs(.delete, "PREROUTING", false, host_port, container_ip, container_port, protocol, &cleanup_prerouting_port_buf, &cleanup_prerouting_dest_buf);
+        const cleanup_prerouting = buildDnatArgsAt(.delete, "PREROUTING", false, host_ip, host_port, container_ip, container_port, protocol, &cleanup_prerouting_port_buf, &cleanup_prerouting_dest_buf);
         _ = exec(&cleanup_prerouting) catch |cleanup_err| {
             log.warn("nat: failed to cleanup PREROUTING DNAT rule after FORWARD failure: {}", .{cleanup_err});
         };
         var cleanup_output_port_buf: [8]u8 = undefined;
         var cleanup_output_dest_buf: [32]u8 = undefined;
-        const cleanup_output = buildDnatArgs(.delete, "OUTPUT", true, host_port, container_ip, container_port, protocol, &cleanup_output_port_buf, &cleanup_output_dest_buf);
+        const cleanup_output = buildDnatArgsAt(.delete, "OUTPUT", true, host_ip, host_port, container_ip, container_port, protocol, &cleanup_output_port_buf, &cleanup_output_dest_buf);
         _ = exec(&cleanup_output) catch |cleanup_err| {
             log.warn("nat: failed to cleanup OUTPUT DNAT rule after FORWARD failure: {}", .{cleanup_err});
         };
@@ -162,37 +178,64 @@ pub fn addPortMap(
 }
 
 /// remove port mapping rules
-pub fn removePortMap(
-    host_port: u16,
-    container_ip: []const u8,
-    container_port: u16,
-    protocol: Protocol,
-) void {
+pub fn removePortMap(host_port: u16, container_ip: []const u8, container_port: u16, protocol: Protocol) void {
+    removePortMapAt(null, host_port, container_ip, container_port, protocol);
+}
+
+pub fn removePortMapAt(host_ip: ?[]const u8, host_port: u16, container_ip: []const u8, container_port: u16, protocol: Protocol) void {
+    removePortMapChecked(host_ip, host_port, container_ip, container_port, protocol) catch |err| {
+        log.warn("nat: failed to remove port mapping {d}: {}", .{ host_port, err });
+    };
+}
+
+/// Removal may be retried after a partial teardown. A missing rule is already
+/// removed; command failures retain ownership so callers can retry safely.
+pub fn removePortMapChecked(host_ip: ?[]const u8, host_port: u16, container_ip: []const u8, container_port: u16, protocol: Protocol) NatError!void {
     var port_buf: [8]u8 = undefined;
     var dest_buf: [32]u8 = undefined;
-    const prerouting_args = buildDnatArgs(.delete, "PREROUTING", false, host_port, container_ip, container_port, protocol, &port_buf, &dest_buf);
-    _ = exec(&prerouting_args) catch |e| {
-        log.debug("nat: failed to remove PREROUTING DNAT rule for port {d}: {}", .{ host_port, e });
-    };
+    for ([_][]const u8{ "PREROUTING", "OUTPUT" }) |chain| {
+        const args = buildDnatArgsAt(.delete, chain, std.mem.eql(u8, chain, "OUTPUT"), host_ip, host_port, container_ip, container_port, protocol, &port_buf, &dest_buf);
+        try removeRuleChecked(args, RuleRunner{});
+    }
+    try removeRuleChecked(buildLoopbackMasqueradeArgs(.delete, container_ip, container_port, protocol, &port_buf), RuleRunner{});
+    try removeRuleChecked(buildForwardArgs(.delete, container_ip, container_port, protocol, &port_buf), RuleRunner{});
+}
 
-    var output_port_buf: [8]u8 = undefined;
-    var output_dest_buf: [32]u8 = undefined;
-    const output_args = buildDnatArgs(.delete, "OUTPUT", true, host_port, container_ip, container_port, protocol, &output_port_buf, &output_dest_buf);
-    _ = exec(&output_args) catch |e| {
-        log.debug("nat: failed to remove OUTPUT DNAT rule for port {d}: {}", .{ host_port, e });
-    };
+const RuleRunner = struct {
+    fn run(_: RuleRunner, args: *const ArgList) NatError!u8 {
+        var argv: [max_args][]const u8 = undefined;
+        var count: usize = 0;
+        for (args) |arg| {
+            argv[count] = arg orelse break;
+            count += 1;
+        }
+        var helper_io = @import("../lib/helper_io.zig").init();
+        defer helper_io.deinit();
+        const io = helper_io.io();
+        var child = std.process.spawn(io, .{ .argv = argv[0..count], .stdin = .ignore, .stdout = .ignore, .stderr = .ignore }) catch return error.ExecFailed;
+        defer child.kill(io);
+        const term = child.wait(io) catch return error.ExecFailed;
+        if (term != .exited) return error.ExecFailed;
+        return term.exited;
+    }
+};
 
-    var hairpin_port_buf: [8]u8 = undefined;
-    const hairpin_args = buildLoopbackMasqueradeArgs(.delete, container_ip, container_port, protocol, &hairpin_port_buf);
-    _ = exec(&hairpin_args) catch |e| {
-        log.debug("nat: failed to remove localhost hairpin MASQUERADE rule for {s}:{d}: {}", .{ container_ip, container_port, e });
-    };
-
-    var fwd_port_buf: [8]u8 = undefined;
-    const fwd_args = buildForwardArgs(.delete, container_ip, container_port, protocol, &fwd_port_buf);
-    _ = exec(&fwd_args) catch |e| {
-        log.debug("nat: failed to remove FORWARD rule for {s}:{d}: {}", .{ container_ip, container_port, e });
-    };
+fn removeRuleChecked(remove_args: ArgList, runner: anytype) NatError!void {
+    var check_args = remove_args;
+    for (&check_args) |*arg| {
+        if (arg.*) |value| if (std.mem.eql(u8, value, "-D")) {
+            arg.* = "-C";
+            break;
+        };
+    }
+    switch (try runner.run(&check_args)) {
+        0 => {},
+        1 => return,
+        else => return error.ExecFailed,
+    }
+    if (try runner.run(&remove_args) == 0) return;
+    // Another cleanup may remove the same rule after our existence check.
+    if (try runner.run(&check_args) != 1) return error.ExecFailed;
 }
 
 pub const Protocol = enum {
@@ -267,10 +310,15 @@ fn buildContainerForwardArgs(action: Action, bridge: []const u8, subnet: []const
     return args;
 }
 
-fn buildDnatArgs(
+fn buildDnatArgs(action: Action, chain: []const u8, loopback_only: bool, host_port: u16, container_ip: []const u8, container_port: u16, protocol: Protocol, port_buf: *[8]u8, dest_buf: *[32]u8) ArgList {
+    return buildDnatArgsAt(action, chain, loopback_only, null, host_port, container_ip, container_port, protocol, port_buf, dest_buf);
+}
+
+fn buildDnatArgsAt(
     action: Action,
     chain: []const u8,
     loopback_only: bool,
+    host_ip: ?[]const u8,
     host_port: u16,
     container_ip: []const u8,
     container_port: u16,
@@ -289,10 +337,10 @@ fn buildDnatArgs(
     args[4] = chain;
 
     var idx: usize = 5;
-    if (loopback_only) {
+    if (host_ip != null or loopback_only) {
         args[idx] = "-d";
         idx += 1;
-        args[idx] = "127.0.0.1/32";
+        args[idx] = host_ip orelse "127.0.0.1/32";
         idx += 1;
     }
 
@@ -515,4 +563,47 @@ test "dnat args with port 65535" {
     const args = buildDnatArgs(.add, "PREROUTING", false, 65535, "10.42.0.2", 65535, .tcp, &port_buf, &dest_buf);
     try std.testing.expectEqualStrings("65535", args[8].?);
     try std.testing.expectEqualStrings("10.42.0.2:65535", args[12].?);
+}
+
+test "address-specific dnat constrains both host and external traffic" {
+    var port_buf: [8]u8 = undefined;
+    var dest_buf: [32]u8 = undefined;
+    for ([_][]const u8{ "PREROUTING", "OUTPUT" }) |chain| {
+        const args = buildDnatArgsAt(.add, chain, std.mem.eql(u8, chain, "OUTPUT"), "127.0.0.2", 5353, "10.42.0.2", 53, .udp, &port_buf, &dest_buf);
+        try std.testing.expectEqualStrings("-d", args[5].?);
+        try std.testing.expectEqualStrings("127.0.0.2", args[6].?);
+        try std.testing.expectEqualStrings("udp", args[8].?);
+        try std.testing.expectEqualStrings("5353", args[10].?);
+    }
+}
+
+test "checked nat removal accepts absence and preserves command failures" {
+    const Fake = struct {
+        statuses: []const u8,
+        index: usize = 0,
+        fn run(self: *@This(), _: *const ArgList) NatError!u8 {
+            const result = self.statuses[self.index];
+            self.index += 1;
+            return result;
+        }
+    };
+    var buf: [8]u8 = undefined;
+    const args = buildForwardArgs(.delete, "10.42.0.2", 80, .tcp, &buf);
+    for ([_][]const u8{ &.{1}, &.{ 0, 0 }, &.{ 0, 1, 1 } }) |statuses| {
+        var fake: Fake = .{ .statuses = statuses };
+        try removeRuleChecked(args, &fake);
+        try std.testing.expectEqual(statuses.len, fake.index);
+    }
+    for ([_][]const u8{ &.{4}, &.{ 0, 4, 0 }, &.{ 0, 1, 4 } }) |statuses| {
+        var fake: Fake = .{ .statuses = statuses };
+        try std.testing.expectError(error.ExecFailed, removeRuleChecked(args, &fake));
+    }
+}
+
+test "nat cleanup subprocesses allocate arguments and preserve absent-rule exit status" {
+    var args: ArgList = .{null} ** max_args;
+    args[0] = "sh";
+    args[1] = "-c";
+    args[2] = "test -n \"$PATH\" && exit 1";
+    try std.testing.expectEqual(@as(u8, 1), try RuleRunner.run(.{}, &args));
 }

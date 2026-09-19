@@ -5,14 +5,16 @@ const container = @import("../container.zig");
 const process = @import("../process.zig");
 const common = @import("common.zig");
 const storage = @import("storage.zig");
+const local_control = @import("../local_control.zig");
+const store = @import("../../state/store.zig");
 
 pub const LogError = common.LogError;
 
-pub fn followLogs(container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t) LogError!void {
+pub fn followLogs(container_id: []const u8, tail_lines: ?usize, pid: ?posix.pid_t) LogError!void {
     return followLogsWithIo(std.Options.debug_io, container_id, tail_lines, pid);
 }
 
-pub fn followLogsWithIo(io: std.Io, container_id: []const u8, tail_lines: usize, pid: ?posix.pid_t) LogError!void {
+pub fn followLogsWithIo(io: std.Io, container_id: []const u8, tail_lines: ?usize, pid: ?posix.pid_t) LogError!void {
     if (!container.isValidContainerId(container_id)) return LogError.InvalidId;
 
     var path_buf: [paths.max_path]u8 = undefined;
@@ -23,11 +25,7 @@ pub fn followLogsWithIo(io: std.Io, container_id: []const u8, tail_lines: usize,
 
     var file_buffer: [4096]u8 = undefined;
     var file_reader = file.reader(io, &file_buffer);
-    const tail = try prepareFollowStart(io, &file_reader, container_id, tail_lines);
-    defer if (tail) |data| std.heap.page_allocator.free(data);
-    if (tail) |data| {
-        if (data.len > 0) try common.writeToStdoutWithIo(io, data);
-    }
+    try prepareFollowStart(io, file, &file_reader, tail_lines);
 
     var read_buf: [4096]u8 = undefined;
     while (true) {
@@ -41,7 +39,7 @@ pub fn followLogsWithIo(io: std.Io, container_id: []const u8, tail_lines: usize,
             file_reader = file.reader(io, &file_buffer);
             saw_bytes = drainNewBytes(io, &file_reader, &read_buf) or saw_bytes;
         }
-        if (!saw_bytes and !isContainerPidRunning(io, container_id, pid)) break;
+        if (!saw_bytes and !isContainerActive(io, container_id, pid)) break;
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch return LogError.ReadFailed;
     }
 }
@@ -62,17 +60,10 @@ fn openReplacement(io: std.Io, path: []const u8, current: std.Io.File) LogError!
     return replacement;
 }
 
-fn prepareFollowStart(io: std.Io, file_reader: *std.Io.File.Reader, container_id: []const u8, tail_lines: usize) LogError!?[]const u8 {
-    if (tail_lines > 0) {
-        const tail = try storage.readTailWithIo(io, std.heap.page_allocator, container_id, tail_lines);
-        errdefer std.heap.page_allocator.free(tail);
-
-        try seekToEnd(file_reader);
-        return tail;
-    }
-
-    try seekToEnd(file_reader);
-    return null;
+fn prepareFollowStart(io: std.Io, file: std.Io.File, reader: *std.Io.File.Reader, tail_lines: ?usize) LogError!void {
+    const end = file.length(io) catch return LogError.ReadFailed;
+    const start = if (tail_lines) |n| try storage.tailStart(io, file, end, n) else 0;
+    reader.seekTo(start) catch return LogError.ReadFailed;
 }
 
 fn seekToEnd(file_reader: *std.Io.File.Reader) LogError!void {
@@ -95,6 +86,15 @@ fn drainNewBytes(io: std.Io, file_reader: *std.Io.File.Reader, buf: []u8) bool {
     }
     stdout_writer.interface.flush() catch return saw_bytes;
     return saw_bytes;
+}
+
+fn isContainerActive(io: std.Io, container_id: []const u8, initial_pid: ?posix.pid_t) bool {
+    // The desired state remains running between automatic restart attempts.
+    if (local_control.wantsRunning(container_id) catch false) return true;
+    const record = store.load(std.heap.page_allocator, container_id) catch
+        return isContainerPidRunning(io, container_id, initial_pid);
+    defer record.deinit(std.heap.page_allocator);
+    return isContainerPidRunning(io, container_id, record.pid);
 }
 
 fn isContainerPidRunning(io: std.Io, container_id: []const u8, pid: ?posix.pid_t) bool {
@@ -184,4 +184,21 @@ test "log follow detects replacement even when the live file grows past the old 
     var data: [100]u8 = undefined;
     const count = try reader.interface.readSliceShort(&data);
     try std.testing.expect(std.mem.indexOf(u8, data[0..count], "this new record") != null);
+}
+
+test "log follow starts from the same open generation with exact tail semantics" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "follow.log", .{ .read = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, "one\ntwo");
+    var buffer: [128]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    try prepareFollowStart(io, file, &reader, null);
+    try std.testing.expectEqual(@as(u64, 0), reader.logicalPos());
+    try prepareFollowStart(io, file, &reader, 0);
+    try std.testing.expectEqual(@as(u64, 7), reader.logicalPos());
+    try prepareFollowStart(io, file, &reader, 1);
+    try std.testing.expectEqual(@as(u64, 4), reader.logicalPos());
 }

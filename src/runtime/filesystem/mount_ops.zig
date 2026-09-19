@@ -194,6 +194,10 @@ fn ensureDirectory(root_fd: posix.fd_t, path: []const u8) !posix.fd_t {
     return current;
 }
 
+pub fn prepareDirectory(root_fd: posix.fd_t, path: []const u8) !posix.fd_t {
+    return prepareTarget(root_fd, path, true);
+}
+
 fn prepareTarget(root_fd: posix.fd_t, path: []const u8, directory: bool) !posix.fd_t {
     if (!path_support.isPathSafe(path) or std.mem.indexOfScalar(u8, path, 0) != null) return error.UnsafeMountPath;
     if (directory) return ensureDirectory(root_fd, path);

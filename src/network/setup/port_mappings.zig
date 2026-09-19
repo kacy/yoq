@@ -1,23 +1,43 @@
 const std = @import("std");
 const common = @import("common.zig");
 const nat = @import("../nat.zig");
+const ip = @import("../ip.zig");
 const ebpf = @import("ebpf_module.zig").ebpf;
 
 pub const Mapping = struct {
     address: [4]u8,
     address_text: []const u8,
+    bridge_name: []const u8 = @import("../bridge.zig").default_bridge,
+    use_xdp: bool = true,
 
     pub fn addNat(self: Mapping, port: common.PortMap) !void {
-        try nat.addPortMap(port.host_port, self.address_text, port.container_port, port.protocol.toNat());
+        var host_buf: [16]u8 = undefined;
+        const host_ip = if (port.bindIp()) |address| ip.formatIp(address, &host_buf) else null;
+        try nat.addPortMapOnBridge(self.bridge_name, host_ip, port.host_port, self.address_text, port.container_port, port.protocol.toNat());
     }
 
     pub fn addXdp(self: Mapping, port: common.PortMap) void {
+        // Scoped mappings use NAT for the same bind behavior with or without BPF.
+        if (!self.use_xdp or port.bindIp() != null) return;
         if (ebpf.getPortMapper()) |mapper| mapper.addMapping(port.host_port, protocol(port), self.address, port.container_port);
     }
 
+    pub fn removeChecked(self: Mapping, port: common.PortMap) !void {
+        var host_buf: [16]u8 = undefined;
+        const host_ip = if (port.bindIp()) |address| ip.formatIp(address, &host_buf) else null;
+        try nat.removePortMapChecked(host_ip, port.host_port, self.address_text, port.container_port, port.protocol.toNat());
+        if (self.use_xdp and port.bindIp() == null) {
+            if (ebpf.getPortMapper()) |mapper| mapper.removeMapping(port.host_port, protocol(port));
+        }
+    }
+
     pub fn remove(self: Mapping, port: common.PortMap) void {
-        if (ebpf.getPortMapper()) |mapper| mapper.removeMapping(port.host_port, protocol(port));
-        nat.removePortMap(port.host_port, self.address_text, port.container_port, port.protocol.toNat());
+        if (self.use_xdp and port.bindIp() == null) {
+            if (ebpf.getPortMapper()) |mapper| mapper.removeMapping(port.host_port, protocol(port));
+        }
+        var host_buf: [16]u8 = undefined;
+        const host_ip = if (port.bindIp()) |address| ip.formatIp(address, &host_buf) else null;
+        nat.removePortMapAt(host_ip, port.host_port, self.address_text, port.container_port, port.protocol.toNat());
     }
 };
 

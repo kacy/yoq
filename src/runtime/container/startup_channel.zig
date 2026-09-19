@@ -7,7 +7,7 @@ const linux = std.os.linux;
 const log = @import("../../lib/log.zig");
 
 pub const Error = error{ ChannelFailed, StartupAborted };
-pub const Stage = enum(u8) { filesystem_ready = 1, prepared = 2, execute = 3 };
+pub const Stage = enum(u8) { filesystem_ready = 1, prepared = 2, execute = 3, overlay_ready = 4, volumes_ready = 5 };
 pub const NetworkFiles = struct {
     enabled: bool = false,
     address: [4]u8 = .{ 0, 0, 0, 0 },
@@ -86,6 +86,10 @@ pub fn receiveNetwork(fd: posix.fd_t) Error!NetworkFiles {
 test "startup channel enforces stages and preserves generated network data" {
     var channel = try Channel.init();
     defer channel.deinit();
+    try notify(channel.child, .overlay_ready);
+    try expect(channel.parent, .overlay_ready);
+    try notify(channel.parent, .volumes_ready);
+    try expect(channel.child, .volumes_ready);
     try notify(channel.child, .filesystem_ready);
     try expect(channel.parent, .filesystem_ready);
     const files: NetworkFiles = .{ .enabled = true, .address = .{ 10, 42, 0, 7 }, .gateway = .{ 10, 42, 0, 1 } };
@@ -106,4 +110,13 @@ test "startup channel closure and wrong stages never authorize execution" {
     try std.testing.expectError(error.StartupAborted, expect(channel.child, .execute));
     closeOwned(&channel.parent);
     try std.testing.expectError(error.StartupAborted, expect(channel.child, .execute));
+}
+
+test "startup channel cannot skip volume initialization" {
+    var channel = try Channel.init();
+    defer channel.deinit();
+    try notify(channel.parent, .execute);
+    try std.testing.expectError(error.StartupAborted, expect(channel.child, .volumes_ready));
+    closeOwned(&channel.parent);
+    try std.testing.expectError(error.StartupAborted, expect(channel.child, .volumes_ready));
 }

@@ -126,18 +126,20 @@ fn loadInDb(db: *sqlite.Db, alloc: Allocator, id: []const u8) StoreError!Contain
     return rowToRecord(row);
 }
 
-pub fn findByHostname(alloc: Allocator, hostname: []const u8) StoreError!?ContainerRecord {
+pub fn findByHostname(alloc: Allocator, hostname: []const u8) (StoreError || error{AmbiguousName})!?ContainerRecord {
     var lease = try common.leaseDb();
     defer lease.deinit();
 
     return findByHostnameInDb(lease.db, alloc, hostname);
 }
 
-fn findByHostnameInDb(db: *sqlite.Db, alloc: Allocator, hostname: []const u8) StoreError!?ContainerRecord {
+fn findByHostnameInDb(db: *sqlite.Db, alloc: Allocator, hostname: []const u8) (StoreError || error{AmbiguousName})!?ContainerRecord {
+    const matches = db.one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM containers WHERE hostname = ? AND id NOT IN (SELECT container_id FROM local_containers WHERE name IS NOT NULL);", .{}, .{hostname}) catch return StoreError.ReadFailed;
+    if (matches != null and matches.?.count > 1) return error.AmbiguousName;
     const row = (db.oneAlloc(
         ContainerRow,
         alloc,
-        "SELECT " ++ container_columns ++ " FROM containers WHERE hostname = ? ORDER BY created_at DESC LIMIT 1;",
+        "SELECT " ++ container_columns ++ " FROM containers WHERE hostname = ? AND id NOT IN (SELECT container_id FROM local_containers WHERE name IS NOT NULL) LIMIT 1;",
         .{},
         .{hostname},
     ) catch return StoreError.ReadFailed) orelse return null;
@@ -230,14 +232,14 @@ pub fn listAppContainerIds(alloc: Allocator, app_name: []const u8) StoreError!st
     );
 }
 
-pub fn findAppContainer(alloc: Allocator, app_name: []const u8, hostname: []const u8) StoreError!?ContainerRecord {
+pub fn findAppContainer(alloc: Allocator, app_name: []const u8, hostname: []const u8) (StoreError || error{AmbiguousName})!?ContainerRecord {
     var lease = try common.leaseDb();
     defer lease.deinit();
 
     return findAppContainerInDb(lease.db, alloc, app_name, hostname);
 }
 
-fn findAppContainerInDb(db: *sqlite.Db, alloc: Allocator, app_name: []const u8, hostname: []const u8) StoreError!?ContainerRecord {
+fn findAppContainerInDb(db: *sqlite.Db, alloc: Allocator, app_name: []const u8, hostname: []const u8) (StoreError || error{AmbiguousName})!?ContainerRecord {
     const row = (db.oneAlloc(
         ContainerRow,
         alloc,

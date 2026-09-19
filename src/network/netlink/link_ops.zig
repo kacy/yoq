@@ -9,6 +9,12 @@ const socket_ops = @import("socket_ops.zig");
 const MessageBuilder = builder_mod.MessageBuilder;
 
 pub fn getIfIndex(fd: posix.fd_t, name: []const u8) common.NetlinkError!u32 {
+    return getIfIndexChecked(fd, name) catch 0;
+}
+
+/// Only a kernel report of a missing interface returns zero. Transport and
+/// permission errors must not make cleanup forget a live interface.
+pub fn getIfIndexChecked(fd: posix.fd_t, name: []const u8) common.NetlinkError!u32 {
     var buf: [common.buf_size]u8 align(4) = undefined;
     var mb = MessageBuilder.init(&buf);
 
@@ -17,16 +23,24 @@ pub fn getIfIndex(fd: posix.fd_t, name: []const u8) common.NetlinkError!u32 {
     info.family = 0;
     try mb.putAttrStr(hdr, common.IFLA.IFNAME, name);
 
-    socket_ops.sendOnly(fd, mb.message()) catch return 0;
+    try socket_ops.sendOnly(fd, mb.message());
 
     var recv_buf: [common.buf_size]u8 align(4) = undefined;
-    const recv_len = linux_platform.posix.recv(fd, &recv_buf, 0) catch return 0;
-    if (recv_len < @sizeOf(linux.nlmsghdr)) return 0;
+    const recv_len = linux_platform.posix.recv(fd, &recv_buf, 0) catch return error.RecvFailed;
+    if (recv_len < @sizeOf(linux.nlmsghdr)) return error.InvalidResponse;
 
     const resp_hdr: *const linux.nlmsghdr = @ptrCast(@alignCast(&recv_buf));
-    if (resp_hdr.type == .ERROR) return 0;
-    if (resp_hdr.type != .RTM_NEWLINK) return 0;
-    if (recv_len < @sizeOf(linux.nlmsghdr) + @sizeOf(linux.ifinfomsg)) return 0;
+    if (resp_hdr.type == .ERROR) {
+        if (recv_len < @sizeOf(linux.nlmsghdr) + 4) return error.InvalidResponse;
+        const code: *const i32 = @ptrCast(@alignCast(&recv_buf[@sizeOf(linux.nlmsghdr)]));
+        return switch (code.*) {
+            -2, -19 => 0,
+            -1, -13 => error.PermissionDenied,
+            else => error.KernelError,
+        };
+    }
+    if (resp_hdr.type != .RTM_NEWLINK) return error.InvalidResponse;
+    if (recv_len < @sizeOf(linux.nlmsghdr) + @sizeOf(linux.ifinfomsg)) return error.InvalidResponse;
 
     const resp_info: *const linux.ifinfomsg = @ptrCast(@alignCast(&recv_buf[@sizeOf(linux.nlmsghdr)]));
     return @bitCast(resp_info.index);
@@ -106,4 +120,12 @@ test "getMtu returns NotFound for a missing interface" {
     defer linux_platform.posix.close(fd);
 
     try std.testing.expectError(common.NetlinkError.NotFound, getMtu(fd, "definitely-not-a-real-iface"));
+}
+
+test "checked interface lookup distinguishes missing links from bad descriptors" {
+    try std.testing.expectError(error.SendFailed, getIfIndexChecked(-1, "lo"));
+    const fd = try socket_ops.openSocket();
+    defer linux_platform.posix.close(fd);
+    try std.testing.expectEqual(@as(u32, 0), try getIfIndexChecked(fd, "yoq-missing0"));
+    try std.testing.expect(try getIfIndexChecked(fd, "lo") != 0);
 }

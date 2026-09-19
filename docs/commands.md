@@ -7,14 +7,53 @@ local runtime commands require root privileges. keep the same user and home dire
 ## containers
 
 ```text
-yoq run <image|rootfs> [command]     run a container
-yoq ps [--json]                      list containers
-yoq stop <id|name>                   stop a container
-yoq rm <id|name>                     remove a stopped container
-yoq logs <id|name> [--tail N]        show container output
-yoq restart <id|name>                restart a container
-yoq exec <id|name> <cmd> [args...]   run a command in a container
+yoq run [options] <image|rootfs> [command]    create and run a container
+yoq create [options] <image|rootfs> [command] create without starting
+yoq start <id|name>                          start the saved container
+yoq ps [-a] [-q] [--filter key=value] [--json]
+yoq container inspect <id|name>              show effective configuration and state
+yoq rename <id|name> <new-name>               change its lookup name
+yoq stop <id|name>                           stop and suppress automatic restart
+yoq restart <id|name>                        stop, then start the same container
+yoq rm [-v] <id|name>                        remove a stopped container
+yoq wait <id|name>                           wait for a stopped record and print its exit code
+yoq kill [--signal SIGNAL] <id|name>          send a signal
+yoq logs <id|name> [--tail N] [-f]            read or follow logs
+yoq exec [-i] [-t] <id|name> <cmd> [args...]  run with saved process settings
+yoq attach [--no-stdin] <id|name>             attach to the running session
+yoq cp <source> <destination>                one path uses NAME:/path
+yoq diff <id|name>                           list writable-layer changes
+yoq top <id|name> [--json]                    show processes
+yoq stats <id|name> [--json]                  sample resource usage
+yoq pause <id|name>                          freeze processes
+yoq unpause <id|name>                        resume processes
+yoq update [options] <id|name>               update limits or restart policy
+yoq volume <create|ls|inspect|rm>             manage standalone volumes
+yoq network <create|ls|inspect|rm>            manage named local bridges
+yoq container recover                       recover restart policies at host boot
 ```
+
+per-container lifecycle, session, resource, and filesystem commands are also available under `yoq container`, including `container ls` for `ps`. `volume` and `network` remain top-level commands. see [local containers](local-containers.md) for run options, mount defaults, sessions, and upgrade behavior. `ps` shows active containers; add `-a` to include stopped records. image inspection remains `yoq inspect IMAGE`.
+
+run/create options must precede the image. use `-d -it`, not `-dit`, for a detached
+terminal. switches such as `--rm` reject assigned boolean values. CPU affinity,
+`--shm-size`, and `--tmpfs` are described in [temporary mounts](container-temporary-mounts.md).
+`--restart on-failure:N` limits automatic retries; `update --restart` also accepts
+that form. see [resource controls](container-resources.md) for live update options.
+
+```text
+yoq network create [--subnet CIDR] <name>
+yoq network ls [--json]
+yoq network inspect [--json] <name>
+yoq network rm <name>
+yoq volume create [name]
+yoq volume ls
+yoq volume inspect <name>
+yoq volume rm <name>
+```
+
+`container inspect` always emits JSON. volume commands emit text; they do not
+accept `--json`.
 
 ## images
 
@@ -24,6 +63,9 @@ yoq push <source> [target]           push to a registry
 yoq images [--json]                  list local images
 yoq inspect <image>                  show image metadata
 yoq rmi <image>                      remove one local image reference
+yoq tag <source> <target>            add a local image reference
+yoq save [-o PATH] <image>...         save an oci image-layout tar archive
+yoq load [-i PATH]                   load an oci image-layout tar archive
 yoq prune [--json]                   delete unreferenced blobs and layers
 ```
 
@@ -183,7 +225,7 @@ yoq completion <bash|zsh|fish>       output shell completion
 
 notes:
 
-- `--json` is available on `ps`, `images`, `prune`, `version`, `gpu topo`, and `doctor`. `yoq doctor -f manifest.toml --json` groups system and manifest checks separately.
+- local inspection supports `--json` on `ps`, `top`, `stats`, `network ls`, and `network inspect`. image/meta commands also support it on `images`, `prune`, and `version`, as do `gpu topo` and `doctor`. `yoq doctor -f manifest.toml --json` groups system and manifest checks separately.
 - local `yoq up` runs manifest readiness checks before starting services; use `--skip-preflight` only when you need to bypass a known local preflight failure.
 - crons defined in the manifest start automatically with `yoq up`.
 - deployment, metrics, and certificate commands also support `--server host:port`.

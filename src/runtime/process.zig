@@ -117,6 +117,48 @@ pub fn kill(pid: posix.pid_t) ProcessError!void {
     return sendSignal(pid, linux.SIG.KILL);
 }
 
+/// An orphan's new parent may not reap it promptly. Zombies have already
+/// released their descriptors and no longer need a termination signal.
+pub fn hasExited(pid: posix.pid_t) bool {
+    if (pid <= 0) return false;
+    const platform = @import("linux_platform").posix;
+    var path_buffer: [64]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buffer, "/proc/{d}/stat", .{pid}) catch return false;
+    const fd = platform.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch |err| return err == error.FileNotFound;
+    defer platform.close(fd);
+    var buffer: [4096]u8 = undefined;
+    const count = platform.read(fd, &buffer) catch return false;
+    return exitedProcStat(buffer[0..count]);
+}
+
+fn exitedProcStat(stat: []const u8) bool {
+    // The command name can contain spaces and closing parentheses.
+    const end = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return false;
+    var fields = std.mem.tokenizeAny(u8, stat[end + 1 ..], " \t\n");
+    const state = fields.next() orelse return false;
+    return std.mem.eql(u8, state, "Z") or std.mem.eql(u8, state, "X");
+}
+
+test "process exit detection recognizes unreaped children" {
+    const rc = linux.fork();
+    if (linux.errno(rc) != .SUCCESS) return error.ForkFailed;
+    if (rc == 0) linux.exit_group(23);
+    const pid: posix.pid_t = @intCast(rc);
+    defer _ = waitForExit(pid) catch {};
+    for (0..100) |_| {
+        if (hasExited(pid)) return;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
+    }
+    return error.ExitNotObserved;
+}
+
+test "process stat parsing handles names with spaces and parentheses" {
+    try std.testing.expect(exitedProcStat("123 (worker (done)) Z 1 2 3"));
+    try std.testing.expect(exitedProcStat("123 (worker) X 1 2 3"));
+    try std.testing.expect(!exitedProcStat("123 (worker) S 1 2 3"));
+    try std.testing.expect(!exitedProcStat("incomplete"));
+}
+
 /// parse the raw status value from wait4.
 /// follows the waitpid(2) status macros.
 fn parseStatus(status: u32) ExitStatus {

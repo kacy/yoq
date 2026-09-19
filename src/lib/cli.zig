@@ -37,7 +37,7 @@ pub fn write(comptime fmt: []const u8, args: anytype) void {
     defer _ = io.swapCancelProtection(prev);
 
     var buf: [4096]u8 = undefined;
-    var w = std.Io.File.stdout().writer(io, &buf);
+    var w = std.Io.File.stdout().writerStreaming(io, &buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stdout_write_failures += 1;
@@ -56,7 +56,7 @@ pub fn writeErr(comptime fmt: []const u8, args: anytype) void {
     defer _ = io.swapCancelProtection(prev);
 
     var buf: [4096]u8 = undefined;
-    var w = std.Io.File.stderr().writer(io, &buf);
+    var w = std.Io.File.stderr().writerStreaming(io, &buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stderr_write_failures += 1;
@@ -126,19 +126,78 @@ pub fn isValidContainerName(name: []const u8) bool {
     return true;
 }
 
-/// parse a port mapping string "host_port:container_port" into a PortMap
+/// parse [host_ip:][host_port:]container_port[/tcp|udp]. zero or omitted
+/// host ports request an assigned port; container ports must be nonzero.
 pub fn parsePortMap(str: []const u8) ?net_setup.PortMap {
-    // find the colon separator
-    const colon_pos = std.mem.indexOf(u8, str, ":") orelse return null;
-    if (colon_pos == 0 or colon_pos >= str.len - 1) return null;
+    var protocol: net_setup.Protocol = .tcp;
+    const ports = if (std.mem.indexOfScalar(u8, str, '/')) |slash| blk: {
+        const suffix = str[slash + 1 ..];
+        if (std.mem.eql(u8, suffix, "udp")) {
+            protocol = .udp;
+        } else if (!std.mem.eql(u8, suffix, "tcp")) return null;
+        break :blk str[0..slash];
+    } else str;
+    var parts = std.mem.splitScalar(u8, ports, ':');
+    const first = parts.next() orelse return null;
+    const second = parts.next();
+    const third = parts.next();
+    if (parts.next() != null) return null;
+    var host_ip: ?[4]u8 = null;
+    const host_text = if (third != null) blk: {
+        host_ip = ip.parseIp(first) orelse return null;
+        break :blk second.?;
+    } else if (second != null) first else "";
+    const container_text = third orelse second orelse first;
+    const host_port = if (host_text.len == 0) 0 else std.fmt.parseUnsigned(u16, host_text, 10) catch return null;
+    const container_port = std.fmt.parseUnsigned(u16, container_text, 10) catch return null;
+    if (container_port == 0) return null;
+    const mapping: net_setup.PortMap = .{ .host_ip = host_ip, .host_port = host_port, .container_port = container_port, .protocol = protocol };
+    return .{ .host_ip = mapping.bindIp(), .host_port = host_port, .container_port = container_port, .protocol = protocol };
+}
 
-    const host_port = std.fmt.parseInt(u16, str[0..colon_pos], 10) catch return null;
-    const container_port = std.fmt.parseInt(u16, str[colon_pos + 1 ..], 10) catch return null;
+pub const PortMapError = error{ InvalidPortMapping, TooManyPorts, OutOfMemory };
 
-    return .{ .host_port = host_port, .container_port = container_port };
+/// Expand equal-length host and container ranges, bounded by the runtime's
+/// 256 published-port limit. Scalar mappings retain ephemeral-port support.
+pub fn parsePortMaps(alloc: std.mem.Allocator, value: []const u8) PortMapError![]net_setup.PortMap {
+    if (parsePortMap(value)) |mapping| return alloc.dupe(net_setup.PortMap, &.{mapping});
+    var protocol: net_setup.Protocol = .tcp;
+    const ports = if (std.mem.indexOfScalar(u8, value, '/')) |slash| blk: {
+        protocol = std.meta.stringToEnum(net_setup.Protocol, value[slash + 1 ..]) orelse return error.InvalidPortMapping;
+        break :blk value[0..slash];
+    } else value;
+    var fields = std.mem.splitScalar(u8, ports, ':');
+    const first = fields.next() orelse return error.InvalidPortMapping;
+    const second = fields.next() orelse return error.InvalidPortMapping;
+    const third = fields.next();
+    if (fields.next() != null) return error.InvalidPortMapping;
+    const host_ip = if (third != null) ip.parseIp(first) orelse return error.InvalidPortMapping else null;
+    const host_range = try parsePortRange(if (third != null) second else first);
+    const container_range = try parsePortRange(third orelse second);
+    const count = @as(usize, host_range.last) - host_range.first + 1;
+    if (count != @as(usize, container_range.last) - container_range.first + 1) return error.InvalidPortMapping;
+    if (count > 256) return error.TooManyPorts;
+    const mappings = try alloc.alloc(net_setup.PortMap, count);
+    for (mappings, 0..) |*mapping, index| {
+        mapping.* = .{ .host_ip = host_ip, .host_port = host_range.first + @as(u16, @intCast(index)), .container_port = container_range.first + @as(u16, @intCast(index)), .protocol = protocol };
+        mapping.host_ip = mapping.bindIp();
+    }
+    return mappings;
+}
+
+const PortRange = struct { first: u16, last: u16 };
+
+fn parsePortRange(value: []const u8) PortMapError!PortRange {
+    const dash = std.mem.indexOfScalar(u8, value, '-');
+    const first = std.fmt.parseUnsigned(u16, if (dash) |index| value[0..index] else value, 10) catch return error.InvalidPortMapping;
+    const last = if (dash) |index| std.fmt.parseUnsigned(u16, value[index + 1 ..], 10) catch return error.InvalidPortMapping else first;
+    if (first == 0 or last < first) return error.InvalidPortMapping;
+    return .{ .first = first, .last = last };
 }
 
 pub const VolumeMountSpec = struct {
+    kind: enum { bind, volume } = .bind,
+    volume_nocopy: bool = false,
     source: []const u8,
     target: []const u8,
     read_only: bool = true,
@@ -170,7 +229,61 @@ pub fn parseVolumeMount(str: []const u8) ?VolumeMountSpec {
         }
     }
 
-    return .{ .source = source, .target = target, .read_only = read_only };
+    const is_bind = std.mem.startsWith(u8, source, "/") or std.mem.startsWith(u8, source, "./") or std.mem.startsWith(u8, source, "../");
+    return .{ .kind = if (is_bind) .bind else .volume, .source = source, .target = target, .read_only = if (!is_bind and mode == null) false else read_only };
+}
+
+/// structured mounts are writable by default. legacy -v keeps its
+/// read-only default; callers choose the parser from the option spelling.
+pub fn parseStructuredMount(str: []const u8) ?VolumeMountSpec {
+    var source: ?[]const u8 = null;
+    var target: ?[]const u8 = null;
+    var kind: @FieldType(VolumeMountSpec, "kind") = .bind;
+    var volume_nocopy = false;
+    var saw_nocopy = false;
+    var saw_type = false;
+    var saw_mode = false;
+    var read_only = false;
+    var fields = std.mem.splitScalar(u8, str, ',');
+    while (fields.next()) |field| {
+        const eq = std.mem.indexOfScalar(u8, field, '=');
+        const key = if (eq) |i| field[0..i] else field;
+        const value = if (eq) |i| field[i + 1 ..] else "";
+        if (std.mem.eql(u8, key, "type")) {
+            if (saw_type) return null;
+            kind = std.meta.stringToEnum(@FieldType(VolumeMountSpec, "kind"), value) orelse return null;
+            saw_type = true;
+        } else if (std.mem.eql(u8, key, "source") or std.mem.eql(u8, key, "src")) {
+            if (source != null or value.len == 0) return null;
+            source = value;
+        } else if (std.mem.eql(u8, key, "target") or std.mem.eql(u8, key, "dst") or std.mem.eql(u8, key, "destination")) {
+            if (target != null or value.len == 0 or value[0] != '/') return null;
+            target = value;
+        } else if (std.mem.eql(u8, key, "volume-nocopy")) {
+            if (saw_nocopy or eq != null) return null;
+            saw_nocopy = true;
+            volume_nocopy = true;
+        } else if (std.mem.eql(u8, key, "readonly") or std.mem.eql(u8, key, "ro")) {
+            if (saw_mode) return null;
+            saw_mode = true;
+            if (eq == null or std.mem.eql(u8, value, "true")) {
+                read_only = true;
+            } else if (std.mem.eql(u8, value, "false")) {
+                read_only = false;
+            } else return null;
+        } else return null;
+    }
+    if (kind == .bind and (source == null or volume_nocopy)) return null;
+    return .{ .kind = kind, .volume_nocopy = volume_nocopy, .source = source orelse "", .target = target orelse return null, .read_only = read_only };
+}
+
+/// reject non-finite values and quotas that would round down to zero.
+pub fn parseCpuQuota(value: []const u8, period: u64) ?u64 {
+    const cpus = std.fmt.parseFloat(f64, value) catch return null;
+    if (!std.math.isFinite(cpus) or cpus <= 0 or cpus > 1024) return null;
+    const quota = cpus * @as(f64, @floatFromInt(period));
+    if (!std.math.isFinite(quota) or quota < 1 or quota >= @as(f64, @floatFromInt(std.math.maxInt(u64)))) return null;
+    return @intFromFloat(quota);
 }
 
 /// parse human-readable memory sizes like 512k, 256m, or 1g.
@@ -409,7 +522,7 @@ test "parse port map" {
 
 test "parse port map invalid" {
     try std.testing.expect(parsePortMap("invalid") == null);
-    try std.testing.expect(parsePortMap(":80") == null);
+    try std.testing.expectEqual(@as(u16, 0), parsePortMap(":80").?.host_port);
     try std.testing.expect(parsePortMap("8080:") == null);
     try std.testing.expect(parsePortMap("99999:80") == null);
 }
@@ -598,4 +711,116 @@ test "output failure tracking" {
     // We can't easily test actual failures without mocking stdout/stderr
     _ = stdout_write_failures;
     _ = stderr_write_failures;
+}
+
+test "port protocols and invalid ports" {
+    try std.testing.expectEqual(net_setup.Protocol.udp, parsePortMap("5353:53/udp").?.protocol);
+    try std.testing.expectEqual(net_setup.Protocol.tcp, parsePortMap("8080:80/tcp").?.protocol);
+    for ([_][]const u8{ "80:0", "80:80/sctp", "80:80/udp/udp", "999.0.0.1:80:80", "-1:80" }) |value| {
+        try std.testing.expect(parsePortMap(value) == null);
+    }
+}
+
+test "structured mounts have explicit defaults and reject ambiguity" {
+    const writable = parseStructuredMount("type=bind,src=./data,dst=/data").?;
+    try std.testing.expect(!writable.read_only);
+    try std.testing.expect(parseVolumeMount("./data:/data").?.read_only);
+    try std.testing.expect(parseStructuredMount("source=/tmp,target=/data,readonly").?.read_only);
+    try std.testing.expect(!parseStructuredMount("source=/tmp,target=/data,readonly=false").?.read_only);
+    for ([_][]const u8{
+        "type=unsupported,src=data,dst=/data", "src=/tmp,dst=relative",                "src=/tmp,dst=/data,unknown=x",
+        "src=/tmp,source=/var,dst=/data",      "src=/tmp,dst=/data,ro,readonly=false", "src=/tmp,dst=/data,",
+        "src=/tmp",                            "src=/tmp,dst=/data,readonly=",         "type=bind,type=bind,src=/tmp,dst=/data",
+    }) |value| try std.testing.expect(parseStructuredMount(value) == null);
+}
+
+test "cpu quotas reject non-finite and unrepresentable values" {
+    try std.testing.expectEqual(@as(?u64, 50_000), parseCpuQuota("0.5", 100_000));
+    try std.testing.expectEqual(@as(?u64, 1), parseCpuQuota("0.00001", 100_000));
+    for ([_][]const u8{ "nan", "inf", "-inf", "0", "-1", "1025", "0.000001", "1e999" }) |value| {
+        try std.testing.expect(parseCpuQuota(value, 100_000) == null);
+    }
+}
+
+test "structured managed volumes support named and anonymous storage" {
+    const named = parseStructuredMount("type=volume,source=data,target=/data").?;
+    try std.testing.expectEqual(@FieldType(VolumeMountSpec, "kind").volume, named.kind);
+    try std.testing.expect(!named.read_only);
+    const anonymous = parseStructuredMount("type=volume,target=/data,volume-nocopy").?;
+    try std.testing.expectEqualStrings("", anonymous.source);
+    try std.testing.expect(anonymous.volume_nocopy);
+    try std.testing.expect(parseStructuredMount("type=bind,source=/tmp,target=/data,volume-nocopy") == null);
+}
+
+test "published ports accept host addresses and assigned ports" {
+    const bound = parsePortMap("127.0.0.1:8080:80/tcp").?;
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, bound.host_ip.?);
+    try std.testing.expectEqual(@as(u16, 8080), bound.host_port);
+    for ([_][]const u8{ "80", ":80", "0:80", "127.0.0.1::80", "127.0.0.1:0:80/udp" }) |value| {
+        try std.testing.expectEqual(@as(u16, 0), parsePortMap(value).?.host_port);
+    }
+    try std.testing.expect(parsePortMap("0.0.0.0:80:80").?.host_ip == null);
+    for ([_][]const u8{ "[::1]:80:80", "localhost:80:80", "1.2.3.4:80:80:80", "80-90:80", "0" }) |value| {
+        try std.testing.expect(parsePortMap(value) == null);
+    }
+}
+
+test "port ranges preserve addresses protocols and endpoints" {
+    const alloc = std.testing.allocator;
+    const ports = try parsePortMaps(alloc, "127.0.0.1:5300-5302:8000-8002/udp");
+    defer alloc.free(ports);
+    try std.testing.expectEqual(@as(usize, 3), ports.len);
+    try std.testing.expectEqual(@as(u16, 5302), ports[2].host_port);
+    try std.testing.expectEqual(@as(u16, 8002), ports[2].container_port);
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, ports[0].host_ip.?);
+    try std.testing.expectEqual(net_setup.Protocol.udp, ports[0].protocol);
+    const ephemeral = try parsePortMaps(alloc, "127.0.0.1::53/udp");
+    defer alloc.free(ephemeral);
+    try std.testing.expectEqual(@as(u16, 0), ephemeral[0].host_port);
+    const maximum = try parsePortMaps(alloc, "65280-65535:1-256");
+    defer alloc.free(maximum);
+    try std.testing.expectEqual(@as(usize, 256), maximum.len);
+}
+
+test "port ranges reject mismatches descending bounds zero and excessive expansion" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{ "80-82:8000-8001", "82-80:8000-8002", "0-1:80-81", "80-81:0-1", "80-81", "80-81:8000-8001/sctp", "80-81:8000-8001/udp/tcp", "::80-81:8000-8001", "65535-65536:80-81" }) |value| try std.testing.expectError(error.InvalidPortMapping, parsePortMaps(alloc, value));
+    try std.testing.expectError(error.TooManyPorts, parsePortMaps(alloc, "1-257:1-257"));
+}
+
+test "cli redirected output preserves consecutive writes to regular files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const output = try tmp.dir.createFile(io, "stdout", .{});
+    defer output.close(io);
+    const errors = try tmp.dir.createFile(io, "stderr", .{});
+    defer errors.close(io);
+    const linux = std.os.linux;
+    const forked = linux.fork();
+    if (linux.errno(forked) != .SUCCESS) return error.ForkFailed;
+    if (forked == 0) {
+        linux_platform.posix.dup2(output.handle, std.posix.STDOUT_FILENO) catch linux.exit_group(1);
+        linux_platform.posix.dup2(errors.handle, std.posix.STDERR_FILENO) catch linux.exit_group(2);
+        write("first-", .{});
+        write("second", .{});
+        @import("cli_output.zig").write("-third\n", .{});
+        writeErr("first-", .{});
+        writeErr("second", .{});
+        @import("cli_output.zig").writeErr("-third\n", .{});
+        linux.exit_group(0);
+    }
+    var status: u32 = 0;
+    while (true) {
+        const rc = linux.waitpid(@intCast(forked), &status, 0);
+        if (linux.errno(rc) == .INTR) continue;
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+        break;
+    }
+    try std.testing.expectEqual(@as(u32, 0), status);
+    for ([_][]const u8{ "stdout", "stderr" }) |name| {
+        const contents = try tmp.dir.readFileAlloc(io, name, std.testing.allocator, .limited(100));
+        defer std.testing.allocator.free(contents);
+        try std.testing.expectEqualStrings("first-second-third\n", contents);
+    }
 }

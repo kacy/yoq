@@ -138,16 +138,21 @@ fn change(alloc: Allocator, operation: Change, apply: Apply) !void {
     // a periodic refresh still repairs rules removed outside the runtime.
     if (operation == .refresh and sameClaims(previous.items, next.items) and
         last_apply_seconds != 0 and now - last_apply_seconds < 30) return;
-    // a failed database commit or partial table update restores the prior
-    // dataplane. the durable claims remain the source for the next retry.
-    apply(alloc, next.items) catch |err| {
+    // Keep the reservation transaction open while changing the dataplane, so
+    // standalone containers cannot reserve a port between checking and publish.
+    var lease = try common.leaseDb();
+    defer lease.deinit();
+    try lease.db.exec("BEGIN IMMEDIATE;", .{}, .{});
+    errdefer lease.db.exec("ROLLBACK;", .{}, .{}) catch {};
+    for (next.items) |claim| try @import("port_allocator.zig").checkAppPort(lease.db, claim.host_port);
+    var changed_rules = false;
+    errdefer if (changed_rules) {
         apply(alloc, previous.items) catch |restore_err| log.err("published ports: rollback failed: {}", .{restore_err});
-        return err;
     };
-    saveClaims(next.items) catch |err| {
-        apply(alloc, previous.items) catch |restore_err| log.err("published ports: rollback failed: {}", .{restore_err});
-        return err;
-    };
+    changed_rules = true;
+    try apply(alloc, next.items);
+    try saveClaimsInDb(lease.db, next.items);
+    try lease.db.exec("COMMIT;", .{}, .{});
     last_apply_seconds = now;
 }
 
@@ -226,13 +231,18 @@ fn saveClaims(claims: []const Claim) !void {
     defer lease.deinit();
     try lease.db.exec("BEGIN IMMEDIATE;", .{}, .{});
     errdefer lease.db.exec("ROLLBACK;", .{}, .{}) catch {};
-    try lease.db.exec("DELETE FROM published_port_claims;", .{}, .{});
+    try saveClaimsInDb(lease.db, claims);
+    try lease.db.exec("COMMIT;", .{}, .{});
+}
+
+fn saveClaimsInDb(db: *sqlite.Db, claims: []const Claim) !void {
+    for (claims) |claim| try @import("port_allocator.zig").checkAppPort(db, claim.host_port);
+    try db.exec("DELETE FROM published_port_claims;", .{}, .{});
     for (claims) |claim| {
         var address_buf: [16]u8 = undefined;
         const address = ip.formatIp(claim.address, &address_buf);
-        try lease.db.exec("INSERT INTO published_port_claims (app, service, container, host_port, target_port, address, eligible, bootstrap) VALUES (?, ?, ?, ?, ?, ?, ?, ?);", .{}, .{ claim.app, claim.service, claim.container, claim.host_port, claim.target_port, address, @as(i64, @intFromBool(claim.eligible)), @as(i64, @intFromBool(claim.bootstrap)) });
+        try db.exec("INSERT INTO published_port_claims (app, service, container, host_port, target_port, address, eligible, bootstrap) VALUES (?, ?, ?, ?, ?, ?, ?, ?);", .{}, .{ claim.app, claim.service, claim.container, claim.host_port, claim.target_port, address, @as(i64, @intFromBool(claim.eligible)), @as(i64, @intFromBool(claim.bootstrap)) });
     }
-    try lease.db.exec("COMMIT;", .{}, .{});
 }
 
 fn acquireLock() !std.posix.fd_t {

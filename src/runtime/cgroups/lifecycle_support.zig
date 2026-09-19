@@ -66,6 +66,17 @@ pub const Cgroup = struct {
     }
 
     pub fn setLimits(self: *const Cgroup, limits: ResourceLimits) CgroupError!void {
+        if (limits.cpuset_cpus) |requested| {
+            var available_buffer: [512]u8 = undefined;
+            const available_text = self.readFile("cpuset.cpus.effective", &available_buffer) catch blk: {
+                try enableCpusetController(cgroup_root);
+                try enableCpusetController(cgroup_root ++ "/" ++ yoq_prefix);
+                break :blk self.readFile("cpuset.cpus.effective", &available_buffer) catch return error.NotSupported;
+            };
+            const available = common.CpuSet.parse(available_text) catch return error.InvalidLimit;
+            if (!requested.isSubsetOf(&available)) return error.InvalidLimit;
+            self.writeFile("cpuset.cpus", requested.text()) catch return error.WriteFailed;
+        }
         if (limits.cpu_weight) |weight| {
             if (weight < 1 or weight > 10000) {
                 log.err("cgroup: invalid cpu_weight {d} for {s}, must be 1-10000", .{ weight, self.path() });
@@ -286,6 +297,36 @@ pub const Cgroup = struct {
         }
     }
 
+    pub fn setFrozen(self: *const Cgroup, frozen: bool) !void {
+        return @import("admin.zig").setFrozen(self, frozen);
+    }
+
+    pub fn isFrozen(self: *const Cgroup) !bool {
+        return @import("admin.zig").isFrozen(self);
+    }
+
+    pub fn processes(self: *const Cgroup, alloc: std.mem.Allocator) ![]std.posix.pid_t {
+        var path_buffer: [512]u8 = undefined;
+        const filename = try std.fmt.bufPrint(&path_buffer, "{s}/cgroup.procs", .{self.path()});
+        const io = std.Options.debug_io;
+        const file = try std.Io.Dir.cwd().openFile(io, filename, .{});
+        defer file.close(io);
+        // cgroup files report zero size; read their contents as a stream.
+        var buffer: [4096]u8 = undefined;
+        var reader = file.readerStreaming(io, &buffer);
+        const bytes = try reader.interface.allocRemaining(alloc, .limited(1024 * 1024));
+        defer alloc.free(bytes);
+        var pids: std.ArrayList(std.posix.pid_t) = .empty;
+        errdefer pids.deinit(alloc);
+        var lines = std.mem.tokenizeAny(u8, bytes, " \t\r\n");
+        while (lines.next()) |line| {
+            const pid = std.fmt.parseInt(std.posix.pid_t, line, 10) catch return error.ReadFailed;
+            if (pid <= 0) return error.ReadFailed;
+            try pids.append(alloc, pid);
+        }
+        return pids.toOwnedSlice(alloc);
+    }
+
     pub fn path(self: *const Cgroup) []const u8 {
         return self.path_buf[0..self.path_len];
     }
@@ -302,7 +343,7 @@ pub const Cgroup = struct {
         }
     }
 
-    fn writeFile(self: *const Cgroup, filename: []const u8, value: []const u8) !void {
+    pub fn writeFile(self: *const Cgroup, filename: []const u8, value: []const u8) !void {
         var path_buf: [512]u8 = undefined;
         const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ self.path(), filename }) catch return error.WriteFailed;
 
@@ -311,7 +352,7 @@ pub const Cgroup = struct {
         file.writeStreamingAll(std.Options.debug_io, value) catch return error.WriteFailed;
     }
 
-    fn readFile(self: *const Cgroup, filename: []const u8, buf: []u8) ![]const u8 {
+    pub fn readFile(self: *const Cgroup, filename: []const u8, buf: []u8) ![]const u8 {
         var path_buf: [512]u8 = undefined;
         const file_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ self.path(), filename }) catch return error.ReadFailed;
 
@@ -331,6 +372,14 @@ pub const Cgroup = struct {
         return metrics_support.parsePsiFromContent(content) orelse CgroupError.ReadFailed;
     }
 };
+
+fn enableCpusetController(directory: []const u8) CgroupError!void {
+    var path_buffer: [512]u8 = undefined;
+    const filename = std.fmt.bufPrint(&path_buffer, "{s}/cgroup.subtree_control", .{directory}) catch return error.NotSupported;
+    const file = std.Io.Dir.cwd().openFile(std.Options.debug_io, filename, .{ .mode = .write_only }) catch return error.NotSupported;
+    defer file.close(std.Options.debug_io);
+    file.writeStreamingAll(std.Options.debug_io, "+cpuset") catch return error.NotSupported;
+}
 
 fn enableSubtreeControllers(dir_path: []const u8) bool {
     var ctrl_buf: [512]u8 = undefined;
@@ -355,7 +404,7 @@ fn enableSubtreeControllers(dir_path: []const u8) bool {
 }
 
 fn buildDesiredSubtreeControl(available: []const u8, buf: []u8) ?[]const u8 {
-    const wanted = [_][]const u8{ "cpu", "memory", "pids", "io" };
+    const wanted = [_][]const u8{ "cpu", "memory", "pids", "io", "cpuset" };
     var pos: usize = 0;
 
     for (wanted) |name| {
@@ -448,4 +497,40 @@ test "isEmpty returns false for non-whitespace cgroup.procs content" {
         }
         try std.testing.expect(has_non_whitespace);
     }
+}
+
+test "cpuset controller restricts child affinity and rejects unavailable cpus" {
+    if (std.os.linux.geteuid() != 0) return error.SkipZigTest;
+    const linux = std.os.linux;
+    var available_buffer: [512]u8 = undefined;
+    const available = try std.Io.Dir.cwd().readFile(std.testing.io, "/sys/fs/cgroup/cpuset.cpus.effective", &available_buffer);
+    var cpu_numbers = std.mem.tokenizeAny(u8, available, "-,\n");
+    const first = cpu_numbers.next() orelse return error.SkipZigTest;
+    const cpu = try std.fmt.parseUnsigned(usize, first, 10);
+    if (cpu >= @bitSizeOf(linux.cpu_set_t)) return error.SkipZigTest;
+    var id: [12]u8 = undefined;
+    try container.generateId(&id);
+    const group = try Cgroup.create(&id);
+    defer group.destroy() catch {};
+    var limits = ResourceLimits.unlimited;
+    limits.cpuset_cpus = try common.CpuSet.parse(first);
+    try group.setLimits(limits);
+    var actual_buffer: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(first, try group.readFile("cpuset.cpus.effective", &actual_buffer));
+    limits.cpuset_cpus = try common.CpuSet.parse("1048575");
+    try std.testing.expectError(error.InvalidLimit, group.setLimits(limits));
+    try std.testing.expectEqualStrings(first, try group.readFile("cpuset.cpus.effective", &actual_buffer));
+    const child = linux.fork();
+    if (linux.errno(child) != .SUCCESS) return error.ForkFailed;
+    if (child == 0) {
+        group.addProcess(linux.getpid()) catch linux.exit_group(1);
+        var mask: linux.cpu_set_t = std.mem.zeroes(linux.cpu_set_t);
+        if (linux.errno(linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &mask)) != .SUCCESS) linux.exit_group(2);
+        var total: usize = 0;
+        for (mask) |word| total += @popCount(word);
+        if (total != 1 or mask[cpu / @bitSizeOf(usize)] & (@as(usize, 1) << @intCast(cpu % @bitSizeOf(usize))) == 0) linux.exit_group(3);
+        linux.exit_group(0);
+    }
+    const result = try process.waitForExit(@intCast(child));
+    try std.testing.expectEqual(process.ExitStatus{ .exited = 0 }, result.status);
 }
