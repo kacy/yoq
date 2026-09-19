@@ -18,6 +18,7 @@ pub const Output = struct {
 
 test {
     _ = @import("session/process_io.zig");
+    _ = foreground;
     _ = protocol;
     _ = @import("session/server.zig");
     _ = @import("session/client.zig");

@@ -252,4 +252,5 @@ test "exec preserves signal exit status" {
 test {
     _ = process_config;
     _ = session;
+    _ = exec_owner;
 }
