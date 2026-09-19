@@ -155,6 +155,46 @@ pub fn parsePortMap(str: []const u8) ?net_setup.PortMap {
     return .{ .host_ip = mapping.bindIp(), .host_port = host_port, .container_port = container_port, .protocol = protocol };
 }
 
+pub const PortMapError = error{ InvalidPortMapping, TooManyPorts, OutOfMemory };
+
+/// Expand equal-length host and container ranges, bounded by the runtime's
+/// 256 published-port limit. Scalar mappings retain ephemeral-port support.
+pub fn parsePortMaps(alloc: std.mem.Allocator, value: []const u8) PortMapError![]net_setup.PortMap {
+    if (parsePortMap(value)) |mapping| return alloc.dupe(net_setup.PortMap, &.{mapping});
+    var protocol: net_setup.Protocol = .tcp;
+    const ports = if (std.mem.indexOfScalar(u8, value, '/')) |slash| blk: {
+        protocol = std.meta.stringToEnum(net_setup.Protocol, value[slash + 1 ..]) orelse return error.InvalidPortMapping;
+        break :blk value[0..slash];
+    } else value;
+    var fields = std.mem.splitScalar(u8, ports, ':');
+    const first = fields.next() orelse return error.InvalidPortMapping;
+    const second = fields.next() orelse return error.InvalidPortMapping;
+    const third = fields.next();
+    if (fields.next() != null) return error.InvalidPortMapping;
+    const host_ip = if (third != null) ip.parseIp(first) orelse return error.InvalidPortMapping else null;
+    const host_range = try parsePortRange(if (third != null) second else first);
+    const container_range = try parsePortRange(third orelse second);
+    const count = @as(usize, host_range.last) - host_range.first + 1;
+    if (count != @as(usize, container_range.last) - container_range.first + 1) return error.InvalidPortMapping;
+    if (count > 256) return error.TooManyPorts;
+    const mappings = try alloc.alloc(net_setup.PortMap, count);
+    for (mappings, 0..) |*mapping, index| {
+        mapping.* = .{ .host_ip = host_ip, .host_port = host_range.first + @as(u16, @intCast(index)), .container_port = container_range.first + @as(u16, @intCast(index)), .protocol = protocol };
+        mapping.host_ip = mapping.bindIp();
+    }
+    return mappings;
+}
+
+const PortRange = struct { first: u16, last: u16 };
+
+fn parsePortRange(value: []const u8) PortMapError!PortRange {
+    const dash = std.mem.indexOfScalar(u8, value, '-');
+    const first = std.fmt.parseUnsigned(u16, if (dash) |index| value[0..index] else value, 10) catch return error.InvalidPortMapping;
+    const last = if (dash) |index| std.fmt.parseUnsigned(u16, value[index + 1 ..], 10) catch return error.InvalidPortMapping else first;
+    if (first == 0 or last < first) return error.InvalidPortMapping;
+    return .{ .first = first, .last = last };
+}
+
 pub const VolumeMountSpec = struct {
     kind: enum { bind, volume } = .bind,
     volume_nocopy: bool = false,
@@ -723,4 +763,27 @@ test "published ports accept host addresses and assigned ports" {
     for ([_][]const u8{ "[::1]:80:80", "localhost:80:80", "1.2.3.4:80:80:80", "80-90:80", "0" }) |value| {
         try std.testing.expect(parsePortMap(value) == null);
     }
+}
+
+test "port ranges preserve addresses protocols and endpoints" {
+    const alloc = std.testing.allocator;
+    const ports = try parsePortMaps(alloc, "127.0.0.1:5300-5302:8000-8002/udp");
+    defer alloc.free(ports);
+    try std.testing.expectEqual(@as(usize, 3), ports.len);
+    try std.testing.expectEqual(@as(u16, 5302), ports[2].host_port);
+    try std.testing.expectEqual(@as(u16, 8002), ports[2].container_port);
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, ports[0].host_ip.?);
+    try std.testing.expectEqual(net_setup.Protocol.udp, ports[0].protocol);
+    const ephemeral = try parsePortMaps(alloc, "127.0.0.1::53/udp");
+    defer alloc.free(ephemeral);
+    try std.testing.expectEqual(@as(u16, 0), ephemeral[0].host_port);
+    const maximum = try parsePortMaps(alloc, "65280-65535:1-256");
+    defer alloc.free(maximum);
+    try std.testing.expectEqual(@as(usize, 256), maximum.len);
+}
+
+test "port ranges reject mismatches descending bounds zero and excessive expansion" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{ "80-82:8000-8001", "82-80:8000-8002", "0-1:80-81", "80-81:0-1", "80-81", "80-81:8000-8001/sctp", "80-81:8000-8001/udp/tcp", "::80-81:8000-8001", "65535-65536:80-81" }) |value| try std.testing.expectError(error.InvalidPortMapping, parsePortMaps(alloc, value));
+    try std.testing.expectError(error.TooManyPorts, parsePortMaps(alloc, "1-257:1-257"));
 }

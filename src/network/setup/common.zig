@@ -42,6 +42,13 @@ pub const PortMap = struct {
     container_port: u16,
     protocol: Protocol = .tcp,
 
+    pub fn jsonStringify(self: PortMap, writer: anytype) !void {
+        const address = self.bindIp() orelse .{ 0, 0, 0, 0 };
+        var buf: [16]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ address[0], address[1], address[2], address[3] }) catch unreachable;
+        try writer.write(.{ .host_ip = text, .host_port = self.host_port, .container_port = self.container_port, .protocol = self.protocol });
+    }
+
     pub fn bindIp(self: PortMap) ?[4]u8 {
         const address = self.host_ip orelse return null;
         return if (std.mem.eql(u8, &address, &.{ 0, 0, 0, 0 })) null else address;
@@ -71,3 +78,14 @@ pub const NetworkInfo = struct {
 };
 
 pub const wg_interface = "wg-yoq";
+
+test "published port JSON uses readable host addresses" {
+    const alloc = std.testing.allocator;
+    const output = try std.json.Stringify.valueAlloc(alloc, PortMap{ .host_ip = .{ 127, 0, 0, 1 }, .host_port = 5300, .container_port = 53, .protocol = .udp }, .{});
+    defer alloc.free(output);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, output, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("127.0.0.1", parsed.value.object.get("host_ip").?.string);
+    try std.testing.expectEqualStrings("udp", parsed.value.object.get("protocol").?.string);
+    try std.testing.expectEqual(@as(i64, 5300), parsed.value.object.get("host_port").?.integer);
+}
