@@ -17,6 +17,7 @@ comptime {
     _ = @import("network/setup.zig");
     _ = @import("network/port_allocator.zig");
     _ = @import("network/local_networks.zig");
+    _ = @import("runtime/cli/network_command.zig");
     _ = @import("network/policy.zig");
     _ = @import("network/policy_rules.zig");
     _ = @import("network/setup/file_support.zig");

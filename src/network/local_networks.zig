@@ -187,6 +187,26 @@ pub fn attachments(alloc: std.mem.Allocator, name: []const u8) Error![]Attachmen
     return result.toOwnedSlice(alloc) catch return error.OutOfMemory;
 }
 
+pub fn aliases(alloc: std.mem.Allocator, id: []const u8) Error![]const []const u8 {
+    var lease = store.leaseDb() catch return error.DbError;
+    defer lease.deinit();
+    var result: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (result.items) |name| alloc.free(name);
+        result.deinit(alloc);
+    }
+    var stmt = lease.db.prepare("SELECT name FROM local_network_aliases WHERE container_id = ? ORDER BY name;") catch return error.DbError;
+    defer stmt.deinit();
+    var iter = stmt.iterator(struct { name: sqlite.Text }, .{sqlite.Text{ .data = id }}) catch return error.DbError;
+    while (iter.nextAlloc(alloc, .{}) catch return error.DbError) |row| {
+        result.append(alloc, row.name.data) catch {
+            alloc.free(row.name.data);
+            return error.OutOfMemory;
+        };
+    }
+    return result.toOwnedSlice(alloc) catch return error.OutOfMemory;
+}
+
 pub fn requireReference(name: []const u8, id: []const u8) Error!void {
     var lease = store.leaseDb() catch return error.DbError;
     defer lease.deinit();
