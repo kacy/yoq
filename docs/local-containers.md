@@ -68,6 +68,10 @@ run options must precede the image or rootfs argument; arguments after it belong
 
 `-i` keeps stdin available; `-t` allocates a terminal. terminal sessions merge stdout and stderr, handle terminal size changes, and restore the caller's terminal on exit. press ctrl-p, then ctrl-q to detach from an attached terminal without stopping the process. these bytes remain ordinary input in a pipe. `attach --no-stdin` observes output without claiming stdin. one client owns stdin; up to eight clients can observe a session.
 
+when the child stops reading stdin, the input owner can fill its queue. signals
+and detach requests from that client then wait behind its queued input. output
+observers remain responsive; use a separate `kill` or `stop` command if needed.
+
 without `-t`, foreground output preserves raw bytes and separates stderr from stdout. a foreground command returns its attempt's exit status even if the restart policy starts another attempt in the background. terminal detach returns zero. a slow attachment is disconnected instead of blocking the container's log capture; use `logs` for stored output.
 
 `logs NAME --tail 0` prints no history. `logs NAME --tail 20 -f` prints the requested tail, then follows container identity through automatic restarts. log records include stream and timestamp metadata; they are separate from raw attachment output. each log generation is bounded to 50 mib with one rotated file retained. the command reads the current generation, not a concatenation of both files.
@@ -108,12 +112,11 @@ retained for later starts; `update` does not change them. see
 
 `-p 127.0.0.1:8080:80` publishes tcp on a specific ipv4 address. add `/udp` for udp. `-p 80` or `-p 0:80` assigns a host port; read the assignment with `container inspect`. reservations remain stable across stop/start and are released on removal. a running container holds host sockets for its published ports, and startup fails if another process already owns them. `--no-net` disables container networking and cannot be combined with published ports. matching ranges such as `8000-8003:80-83/tcp` expand to individual mappings, with at most 256 mappings per container.
 
-use `network create NAME`, then `run --network NAME`, for a named ipv4 bridge. `--network-alias` adds names visible within that network. stopped containers retain references, so remove them before `network rm`. see [local networks](container-networks.md) for subnet allocation, dns scope, and cleanup.
-
 use `network create NAME` and `run --network NAME` for a named ipv4 bridge.
 `--network-alias` adds names within that network. a container has one attachment,
-chosen at creation; stopped containers keep the network reference. see
-[local networks](container-networks.md) for subnet, DNS, and port-range behavior.
+chosen at creation; stopped containers keep the network reference, so remove
+them before `network rm`. see [local networks](container-networks.md) for subnet,
+dns, and port-range behavior.
 
 standalone supervisors are independent processes; there is no required central daemon. after a host reboot, `yoq container recover` retries `always` containers and `unless-stopped` containers whose saved desired state is running. it does not restart `no` or `on-failure` containers. recovery is a boot action, not a periodic reconciliation command: periodically invoking it would undo a manual stop under `always`.
 
