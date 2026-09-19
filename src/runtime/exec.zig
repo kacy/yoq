@@ -62,7 +62,7 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
     process_config.validate(config.command, config.args, config.env) catch return ExecError.InvalidArguments;
 
     // setns changes mounts, but does not change the calling process root.
-    // Keep the target root open before its /proc path becomes inaccessible.
+    // keep the target root open before its /proc path becomes inaccessible.
     var root_path_buf: [64]u8 = undefined;
     const root_path = std.fmt.bufPrintZ(&root_path_buf, "/proc/{d}/root", .{config.pid}) catch return ExecError.RootOpenFailed;
     const root_fd = linux_platform.posix.open(root_path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0) catch return ExecError.RootOpenFailed;
@@ -87,51 +87,62 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
     var channels = session.ProcessIo.init(config.interactive, config.tty) catch return ExecError.SessionFailed;
     defer channels.deinit();
 
-    // Namespace entry stays in a helper process. The client retains its host
+    // namespace entry stays in a helper process. the client retains its host
     // terminal and namespace context while relaying input and output.
     const cancellation_mask = exec_owner.CancellationMask.block();
     const helper_pid = sysFork() catch |err| {
         cancellation_mask.restore();
         return err;
     };
-    if (helper_pid == 0) {
-        if (config.cgroup_id) |id| {
-            const group = @import("cgroups.zig").Cgroup.open(id) catch linux.exit_group(126);
-            group.addProcess(linux.getpid()) catch linux.exit_group(126);
-        }
-        for (ns_fds) |fd| sysSetns(fd, 0) catch linux.exit_group(126);
-        const parent_handle = exec_owner.parentHandle() catch linux.exit_group(126);
-        const child_pid = sysFork() catch linux.exit_group(126);
-        if (child_pid == 0) {
-            exec_owner.armChild(parent_handle) catch linux.exit_group(126);
-            cancellation_mask.restore();
-            if (!config.tty and linux.errno(linux.setpgid(0, 0)) != .SUCCESS) linux.exit_group(126);
-            for (ns_fds) |fd| linux_platform.posix.close(fd);
-            channels.applyChild() catch linux.exit_group(126);
-            if (linux.errno(linux.fchdir(root_fd)) != .SUCCESS) linux.exit_group(126);
-            if (linux.errno(linux.chroot(".")) != .SUCCESS) linux.exit_group(126);
-            linux_platform.posix.close(root_fd);
-            linux_platform.posix.chdir(config.working_dir) catch linux.exit_group(126);
-            const identity = @import("identity.zig");
-            const account = identity.resolve(config.user) catch linux.exit_group(126);
-            security.apply() catch linux.exit_group(1);
-            identity.apply(account, false) catch linux.exit_group(126);
-            exec_owner.armChild(parent_handle) catch linux.exit_group(126);
-            linux_platform.posix.close(parent_handle);
-            linux.exit_group(process_config.execCommand(config.command, config.args, config.env));
-        }
-        linux_platform.posix.close(parent_handle);
-        channels.deinit();
-        exec_owner.installHelper(child_pid, cancellation_mask);
-        const result = process.waitForExit(child_pid) catch linux.exit_group(126);
-        linux.exit_group(exitCode(result.status));
-    }
+    if (helper_pid == 0) runHelper(config, root_fd, &ns_fds, &channels, cancellation_mask);
     cancellation_mask.restore();
     channels.closeChild();
     return session.foreground.run(&channels, helper_pid) catch {
         exec_owner.abort(helper_pid);
         return ExecError.SessionFailed;
     };
+}
+
+// this process owns namespace entry and waits for the command child. the
+// caller stays in the host namespaces and relays the channels until we exit.
+fn runHelper(
+    config: ExecConfig,
+    root_fd: posix.fd_t,
+    ns_fds: []const posix.fd_t,
+    channels: *session.ProcessIo,
+    cancellation_mask: exec_owner.CancellationMask,
+) noreturn {
+    if (config.cgroup_id) |id| {
+        const group = @import("cgroups.zig").Cgroup.open(id) catch linux.exit_group(126);
+        group.addProcess(linux.getpid()) catch linux.exit_group(126);
+    }
+    for (ns_fds) |fd| sysSetns(fd, 0) catch linux.exit_group(126);
+    const parent_handle = exec_owner.parentHandle() catch linux.exit_group(126);
+    const child_pid = sysFork() catch linux.exit_group(126);
+    if (child_pid == 0) {
+        exec_owner.armChild(parent_handle) catch linux.exit_group(126);
+        cancellation_mask.restore();
+        if (!config.tty and linux.errno(linux.setpgid(0, 0)) != .SUCCESS) linux.exit_group(126);
+        for (ns_fds) |fd| linux_platform.posix.close(fd);
+        channels.applyChild() catch linux.exit_group(126);
+        if (linux.errno(linux.fchdir(root_fd)) != .SUCCESS) linux.exit_group(126);
+        if (linux.errno(linux.chroot(".")) != .SUCCESS) linux.exit_group(126);
+        linux_platform.posix.close(root_fd);
+        linux_platform.posix.chdir(config.working_dir) catch linux.exit_group(126);
+        const identity = @import("identity.zig");
+        const account = identity.resolve(config.user) catch linux.exit_group(126);
+        security.apply() catch linux.exit_group(1);
+        identity.apply(account, false) catch linux.exit_group(126);
+        exec_owner.armChild(parent_handle) catch linux.exit_group(126);
+        linux_platform.posix.close(parent_handle);
+        linux.exit_group(process_config.execCommand(config.command, config.args, config.env));
+    }
+    linux_platform.posix.close(parent_handle);
+    // close the helper's copies so they cannot hold the child's pipes open.
+    channels.deinit();
+    exec_owner.installHelper(child_pid, cancellation_mask);
+    const result = process.waitForExit(child_pid) catch linux.exit_group(126);
+    linux.exit_group(exitCode(result.status));
 }
 
 // -- namespace helpers --
