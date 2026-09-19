@@ -126,7 +126,7 @@ fn jsonNetwork(alloc: std.mem.Allocator, record: networks.Record, details: bool)
     const refs = try networks.attachments(alloc, record.name);
     const containers = try alloc.alloc(JsonContainer, refs.len);
     for (refs, containers) |ref, *value| {
-        value.* = .{ .id = ref.container_id, .name = ref.dns_name, .address = ref.address, .aliases = try networks.aliases(alloc, ref.container_id), .ports = &.{} };
+        value.* = .{ .id = ref.container_id, .name = ref.dns_name, .address = ref.address, .aliases = try networks.listAliases(alloc, ref.container_id), .ports = &.{} };
         const config = @import("../run_state.zig").loadConfig(alloc, ref.container_id) catch |err| switch (err) {
             error.NotFound => continue,
             else => return err,

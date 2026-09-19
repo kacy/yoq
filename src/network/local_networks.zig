@@ -187,7 +187,7 @@ pub fn attachments(alloc: std.mem.Allocator, name: []const u8) Error![]Attachmen
     return result.toOwnedSlice(alloc) catch return error.OutOfMemory;
 }
 
-pub fn aliases(alloc: std.mem.Allocator, id: []const u8) Error![]const []const u8 {
+pub fn listAliases(alloc: std.mem.Allocator, id: []const u8) Error![]const []const u8 {
     var lease = store.leaseDb() catch return error.DbError;
     defer lease.deinit();
     var result: std.ArrayList([]const u8) = .empty;

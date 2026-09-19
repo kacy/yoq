@@ -577,7 +577,7 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
     if (flags.network_name) |name| saved.network_name = try alloc.dupe(u8, name);
     saved.network_aliases = try duplicateStrings(alloc, flags.network_aliases.items);
     if (saved.network_name) |name| {
-        try @import("../../../network/local_networks.zig").reserve(name, id, flags.container_name orelse saved.hostname);
+        try @import("../../../network/local_networks.zig").reserve(name, id, flags.container_name orelse id);
         try @import("../../../network/local_networks.zig").reserveAliases(id, saved.network_aliases);
     }
     saved.auto_remove = flags.auto_remove;
