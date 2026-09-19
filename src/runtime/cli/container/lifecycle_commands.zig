@@ -11,7 +11,7 @@ pub fn stop(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     if (args.next() != null) return error.InvalidArgument;
     const record = try state_support.resolveContainerRef(alloc, ref);
     defer record.deinit(alloc);
-    try lifecycle.stop(record.id, alloc);
+    _ = try @import("../../container_lifecycle.zig").stop(alloc, record.id, .complete);
     cli.write("{s}\n", .{record.id});
 }
 
@@ -22,7 +22,7 @@ pub fn rm(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     if (args.next() != null) return error.InvalidArgument;
     const record = try state_support.resolveContainerRef(alloc, ref);
     defer record.deinit(alloc);
-    lifecycle.removeWithVolumes(record.id, alloc, remove_volumes) catch |err| {
+    @import("../../container_lifecycle.zig").remove(alloc, record.id, remove_volumes) catch |err| {
         if (err == error.ContainerRunning) cli.writeErr("cannot remove running container {s}; stop it first\n", .{ref});
         return err;
     };
@@ -36,4 +36,8 @@ pub fn restart(io: std.Io, args: *std.process.Args.Iterator, alloc: std.mem.Allo
     defer record.deinit(alloc);
     try lifecycle.restart(io, alloc, record.id);
     cli.write("{s}\n", .{record.id});
+}
+
+test {
+    _ = @import("../../container_lifecycle.zig");
 }
