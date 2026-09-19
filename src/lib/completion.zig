@@ -430,7 +430,7 @@ fn generateFish() void {
                     "complete -c yoq -n '__fish_seen_subcommand_from {s}' -l '{s}'\n",
                     .{ meta.name, flag[2..] },
                 );
-            } else if (std.mem.startsWith(u8, flag, "-")) {
+            } else if (flag.len == 2 and flag[0] == '-') {
                 write(
                     "complete -c yoq -n '__fish_seen_subcommand_from {s}' -s '{s}'\n",
                     .{ meta.name, flag[1..] },
@@ -451,7 +451,7 @@ fn generateFish() void {
                         "complete -c yoq -n '__fish_seen_subcommand_from {s}; and __fish_seen_subcommand_from {s}' -l '{s}'\n",
                         .{ meta.name, sub.name, flag[2..] },
                     );
-                } else if (std.mem.startsWith(u8, flag, "-")) {
+                } else if (flag.len == 2 and flag[0] == '-') {
                     write(
                         "complete -c yoq -n '__fish_seen_subcommand_from {s}; and __fish_seen_subcommand_from {s}' -s '{s}'\n",
                         .{ meta.name, sub.name, flag[1..] },
