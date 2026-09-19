@@ -474,6 +474,9 @@ test "local parity manual stop suppresses always restart and automatic removal c
     try automatic.expectExitCode(0);
     try std.testing.expectEqualStrings("removed-output", automatic.stdout);
     try waitRemoved(&fixture.env, "remove-on-exit");
+    try expectCommand(&fixture.env, &.{ "run", "--no-net", "--rm", "-d", "--name", "remove-on-stop", ImageFixture.tag, "sleep", "60" });
+    try expectCommand(&fixture.env, &.{ "stop", "remove-on-stop" });
+    try waitRemoved(&fixture.env, "remove-on-stop");
 }
 
 test "local parity initializes named and anonymous volumes without overwriting retained data" {

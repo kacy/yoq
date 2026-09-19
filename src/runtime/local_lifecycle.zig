@@ -140,11 +140,15 @@ pub fn removeWithVolumes(id: []const u8, alloc: std.mem.Allocator, remove_anonym
 pub fn removeAutomatic(id: []const u8, alloc: std.mem.Allocator, generation: i64) !void {
     const command_lock = try control.lock(id, .command, true);
     defer command_lock.deinit();
-    if ((try control.currentGeneration(id)) != generation) return;
+    const current = (try control.currentGeneration(id)) orelse return;
+    if (current < generation) return;
+    // Explicit stop advances the generation to cancel restarts. It still
+    // permits --rm, but a newer requested run must retain its container.
+    if (current != generation and !try control.finishedGeneration(id, null)) return;
     // The exit packet is sent before the supervisor releases ownership.
     // Holding the command lock prevents a new start while cleanup finishes.
     try waitForOwner(id);
-    if (!try control.finishedGeneration(id, generation)) return;
+    if (!try control.finishedGeneration(id, current)) return;
     try removeLocked(id, alloc, true);
 }
 
