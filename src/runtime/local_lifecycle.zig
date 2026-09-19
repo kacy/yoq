@@ -193,15 +193,16 @@ fn cleanupRuntime(alloc: std.mem.Allocator, record: *const store.ContainerRecord
     } else |err| if (err != error.FileNotFound) return err;
     var db = try store.openDb();
     defer db.deinit();
-    // allocation can commit just before the container record is updated.
-    // retain that ownership across a crash so recovery can finish teardown.
-    const address = if (record.ip_address) |value|
-        ip.parseIp(value) orelse return error.InvalidAddress
-    else
-        ip.lookupChecked(&db, alloc, record.id) catch |err| switch (err) {
-            error.NotFound => return,
-            else => return err,
-        };
+    // an allocation can outlive its container-record update. conversely, a
+    // released address may already belong to another container. only the
+    // allocation table establishes ownership for recovery teardown.
+    const address = ip.lookupChecked(&db, alloc, record.id) catch |err| switch (err) {
+        error.NotFound => {
+            try store.updateNetwork(record.id, null, null);
+            return;
+        },
+        else => return err,
+    };
     const cfg = try run_state.loadConfig(alloc, record.id);
     defer cfg.deinit(alloc);
     const setup = @import("../network/setup.zig");
