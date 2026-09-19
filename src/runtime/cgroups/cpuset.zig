@@ -18,6 +18,10 @@ pub const CpuSet = struct {
         return self.buffer[0..self.len];
     }
 
+    pub fn jsonStringify(self: CpuSet, writer: anytype) !void {
+        try writer.write(self.text());
+    }
+
     pub fn isSubsetOf(self: *const CpuSet, available: *const CpuSet) bool {
         var requested = std.mem.splitScalar(u8, self.text(), ',');
         while (requested.next()) |part| {
@@ -52,6 +56,9 @@ test "cpuset lists validate ranges and reject unavailable cpus" {
     const available = try CpuSet.parse("0-3,8,10-12");
     const allowed = try CpuSet.parse("12,0-2,8,10-11");
     try std.testing.expect(allowed.isSubsetOf(&available));
+    const json = try std.json.Stringify.valueAlloc(std.testing.allocator, available, .{});
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings("\"0-3,8,10-12\"", json);
     const gap = try CpuSet.parse("2-8");
     try std.testing.expect(!gap.isSubsetOf(&available));
     const adjacent = try CpuSet.parse("0-1,2-3");
