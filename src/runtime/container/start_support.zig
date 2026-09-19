@@ -65,12 +65,8 @@ pub fn setupNetwork(config: anytype, pid: posix.pid_t, net_info: *?net_setup.Net
         defer network.deinit(std.heap.page_allocator);
         break :blk network.subnet.gateway;
     } else try gatewayForNode(net_config.node_id);
-    net_info.* = try net_setup.setupContainer(config.id, pid, net_config, db, config.hostname);
-    // Keep ownership even if persistence fails: rollback must remove the veth,
-    // mappings, service registration, and allocated IP.
+    net_info.* = try net_setup.setupContainerTracked(config.id, pid, net_config, db, config.hostname, net_info);
     const info = &net_info.*.?;
-    var ip_buf: [16]u8 = undefined;
-    try store.updateNetwork(config.id, ip.formatIp(info.ip, &ip_buf), info.vethName());
     return .{ .enabled = true, .address = info.ip, .gateway = gateway };
 }
 

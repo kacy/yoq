@@ -27,6 +27,7 @@ pub const removeClusterPeer = cluster_runtime.removeClusterPeer;
 pub const teardownClusterNetworking = cluster_runtime.teardownClusterNetworking;
 
 pub const setupContainer = container_runtime.setupContainer;
+pub const setupContainerTracked = container_runtime.setupContainerTracked;
 pub const teardownContainer = container_runtime.teardownContainer;
 pub const teardownContainerChecked = container_runtime.teardownContainerChecked;
 pub const writeNetworkFiles = file_support.writeNetworkFiles;

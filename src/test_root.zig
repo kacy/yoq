@@ -15,6 +15,7 @@ comptime {
 
     _ = @import("test_socket_bind.zig");
     _ = @import("network/setup.zig");
+    _ = @import("network/setup/container_runtime.zig");
     _ = @import("network/port_allocator.zig");
     _ = @import("network/local_networks.zig");
     _ = @import("runtime/cli/network_command.zig");

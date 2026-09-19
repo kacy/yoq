@@ -24,7 +24,17 @@ pub fn setupContainer(
     db: *sqlite.Db,
     hostname: []const u8,
 ) common.SetupError!common.NetworkInfo {
-    if (config.network_name) |name| return setupNamedContainer(container_id, pid, config, db, name);
+    return setupContainerImpl(container_id, pid, config, db, hostname, null);
+}
+
+/// Publish ownership before per-container kernel changes. The runtime must use
+/// checked teardown on failure and retain this handle until cleanup succeeds.
+pub fn setupContainerTracked(container_id: []const u8, pid: posix.pid_t, config: common.NetworkConfig, db: *sqlite.Db, hostname: []const u8, pending: *?common.NetworkInfo) common.SetupError!common.NetworkInfo {
+    return setupContainerImpl(container_id, pid, config, db, hostname, pending);
+}
+
+fn setupContainerImpl(container_id: []const u8, pid: posix.pid_t, config: common.NetworkConfig, db: *sqlite.Db, hostname: []const u8, pending: ?*?common.NetworkInfo) common.SetupError!common.NetworkInfo {
+    if (config.network_name) |name| return setupNamedContainer(container_id, pid, config, db, name, pending);
     const subnet_config: ?ip.SubnetConfig = if (config.node_id) |nid|
         ip.subnetForNode(nid) catch return common.SetupError.BridgeFailed
     else
@@ -43,19 +53,20 @@ pub fn setupContainer(
         ip.allocateWithSubnet(db, container_id, sc) catch return common.SetupError.IpAllocationFailed
     else
         ip.allocate(db, container_id) catch return common.SetupError.IpAllocationFailed;
-    errdefer ip.release(db, container_id) catch {};
+    errdefer if (pending == null) ip.release(db, container_id) catch {};
 
     var veth_buf: [32]u8 = undefined;
     const host_veth = bridge.vethName(container_id, &veth_buf);
+    if (pending) |owner| try recordOwnership(db, container_id, container_ip, host_veth, owner);
 
     bridge.createVethPairForContainer(host_veth, "eth0", bridge.default_bridge, pid) catch {
         return common.SetupError.VethFailed;
     };
-    errdefer {
+    errdefer if (pending == null) {
         bridge.deleteVeth(host_veth) catch |e| {
             log.warn("setup: failed to clean up veth {s} after error: {}", .{ host_veth, e });
         };
-    }
+    };
 
     if (subnet_config) |sc| {
         bridge.configurableContainer(pid, container_ip, sc.gateway, sc.prefix_len) catch {
@@ -83,11 +94,13 @@ pub fn setupContainer(
     var ip_str_buf: [16]u8 = undefined;
     const ip_str = ip.formatIp(container_ip, &ip_str_buf);
     const mappings: port_mappings.Mapping = .{ .address = container_ip, .address_text = ip_str };
-    port_mappings.install(config.port_maps, mappings) catch |err| {
+    installMappings(config.port_maps, mappings, pending != null) catch |err| {
         log.warn("failed to publish ports for {s}: {}", .{ container_id, err });
         return common.SetupError.NatFailed;
     };
-    errdefer for (config.port_maps) |port| mappings.remove(port);
+    errdefer if (pending == null) {
+        for (config.port_maps) |port| mappings.remove(port);
+    };
 
     const gateway = if (subnet_config) |sc| sc.gateway else bridge.gateway_ip;
     dns.startResolverAt(gateway);
@@ -110,7 +123,7 @@ pub fn setupContainer(
         );
     }
 
-    errdefer if (!config.skip_dns) service_registry_bridge.unregisterContainerService(container_id);
+    errdefer if (pending == null and !config.skip_dns) service_registry_bridge.unregisterContainerService(container_id);
     policy.requireForContainer(hostname, container_ip, std.heap.page_allocator) catch |err| {
         log.err("network policy must be enforced before container startup: {}", .{err});
         return common.SetupError.ConfigFailed;
@@ -147,7 +160,7 @@ pub const writeNetworkFiles = file_support.writeNetworkFiles;
 pub const isValidHostname = file_support.isValidHostname;
 pub const containerSubnetBase = cluster_runtime.containerSubnetBase;
 
-fn setupNamedContainer(container_id: []const u8, pid: posix.pid_t, config: common.NetworkConfig, db: *sqlite.Db, name: []const u8) common.SetupError!common.NetworkInfo {
+fn setupNamedContainer(container_id: []const u8, pid: posix.pid_t, config: common.NetworkConfig, db: *sqlite.Db, name: []const u8, pending: ?*?common.NetworkInfo) common.SetupError!common.NetworkInfo {
     const owned_lock = local_networks.lock(name) catch return error.DbFailed;
     defer owned_lock.deinit();
     const network = local_networks.inspect(std.heap.page_allocator, name) catch return error.DbFailed;
@@ -160,16 +173,19 @@ fn setupNamedContainer(container_id: []const u8, pid: posix.pid_t, config: commo
     bridge.ensureBridgeWithConfig(.{ .name = network.bridge_name, .gateway_ip = subnet.gateway, .prefix_len = subnet.prefix_len }) catch return error.BridgeFailed;
     local_rules.ensure(network.bridge_name, subnet.base) catch return error.NatFailed;
     const address = ip.allocateWithSubnet(db, container_id, subnet) catch return error.IpAllocationFailed;
-    errdefer ip.release(db, container_id) catch {};
+    errdefer if (pending == null) ip.release(db, container_id) catch {};
     var veth_buf: [32]u8 = undefined;
     const host_veth = bridge.vethName(container_id, &veth_buf);
+    if (pending) |owner| try recordOwnership(db, container_id, address, host_veth, owner);
     bridge.createVethPairForContainer(host_veth, "eth0", network.bridge_name, pid) catch return error.VethFailed;
-    errdefer bridge.deleteVeth(host_veth) catch {};
+    errdefer if (pending == null) bridge.deleteVeth(host_veth) catch {};
     bridge.configurableContainer(pid, address, subnet.gateway, subnet.prefix_len) catch return error.ConfigFailed;
     var address_buf: [16]u8 = undefined;
     const mappings: port_mappings.Mapping = .{ .address = address, .address_text = ip.formatIp(address, &address_buf), .bridge_name = network.bridge_name, .use_xdp = false };
-    port_mappings.install(config.port_maps, mappings) catch return error.NatFailed;
-    errdefer for (config.port_maps) |port| mappings.remove(port);
+    installMappings(config.port_maps, mappings, pending != null) catch return error.NatFailed;
+    errdefer if (pending == null) {
+        for (config.port_maps) |port| mappings.remove(port);
+    };
     if (!config.skip_dns) {
         dns.startScopedResolverAt(subnet.gateway, network.bridge_name, name);
         if (!dns.resolverRunningAt(subnet.gateway)) return error.ConfigFailed;
@@ -178,4 +194,52 @@ fn setupNamedContainer(container_id: []const u8, pid: posix.pid_t, config: commo
     var info: common.NetworkInfo = .{ .ip = address, .veth_host = undefined, .veth_host_len = host_veth.len };
     @memcpy(info.veth_host[0..host_veth.len], host_veth);
     return info;
+}
+
+fn recordOwnership(db: *sqlite.Db, id: []const u8, address: [4]u8, veth: []const u8, pending: *?common.NetworkInfo) common.SetupError!void {
+    var info: common.NetworkInfo = .{ .ip = address, .veth_host = undefined, .veth_host_len = veth.len };
+    @memcpy(info.veth_host[0..veth.len], veth);
+    pending.* = info;
+    var address_buf: [16]u8 = undefined;
+    db.exec("UPDATE containers SET ip_address = ?, veth_host = ? WHERE id = ?;", .{}, .{ sqlite.Text{ .data = ip.formatIp(address, &address_buf) }, sqlite.Text{ .data = veth }, sqlite.Text{ .data = id } }) catch return error.DbFailed;
+    const changed = db.one(i64, "SELECT changes();", .{}, .{}) catch return error.DbFailed;
+    if ((changed orelse 0) != 1) return error.DbFailed;
+}
+
+fn installMappings(ports: []const common.PortMap, mappings: port_mappings.Mapping, tracked: bool) !void {
+    if (!tracked) return port_mappings.install(ports, mappings);
+    // The saved owner covers every requested mapping, including the one that
+    // failed midway. Checked teardown can remove each remaining rule on retry.
+    for (ports) |port| {
+        try mappings.addNat(port);
+        mappings.addXdp(port);
+    }
+}
+
+test "tracked network ownership is persisted before resource creation" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try @import("../../state/schema.zig").init(&db);
+    try db.exec("INSERT INTO containers (id, rootfs, command, created_at) VALUES ('owner', '/', 'sh', 1);", .{}, .{});
+    const address = try ip.allocate(&db, "owner");
+    var pending: ?common.NetworkInfo = null;
+    try recordOwnership(&db, "owner", address, "veth-owner", &pending);
+    try std.testing.expectEqual(address, pending.?.ip);
+    const row = (try db.oneAlloc(struct { address: sqlite.Text, veth: sqlite.Text }, std.testing.allocator, "SELECT ip_address, veth_host FROM containers WHERE id = 'owner';", .{}, .{})).?;
+    defer std.testing.allocator.free(row.address.data);
+    defer std.testing.allocator.free(row.veth.data);
+    try std.testing.expectEqualStrings("10.42.0.2", row.address.data);
+    try std.testing.expectEqualStrings("veth-owner", row.veth.data);
+}
+
+test "tracked network ownership survives persistence failure for checked rollback" {
+    var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
+    defer db.deinit();
+    try @import("../../state/schema.zig").init(&db);
+    const address = try ip.allocate(&db, "owner");
+    var pending: ?common.NetworkInfo = null;
+    try std.testing.expectError(error.DbFailed, recordOwnership(&db, "owner", address, "veth-owner", &pending));
+    try std.testing.expectEqual(address, pending.?.ip);
+    try std.testing.expectEqualStrings("veth-owner", pending.?.vethName());
+    try std.testing.expectEqual(address, try ip.lookup(&db, std.testing.allocator, "owner"));
 }
