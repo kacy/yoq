@@ -82,6 +82,28 @@ fn acquireOwner(id: []const u8, generation: i64) !control.Lock {
     return error.StaleGeneration;
 }
 
+const StartupConfig = struct {
+    value: run_state.SavedRunConfig,
+    transition: ?control.Lock,
+    alloc: std.mem.Allocator,
+
+    fn load(alloc: std.mem.Allocator, id: []const u8) !StartupConfig {
+        const transition = try control.lock(id, .transition, true);
+        errdefer transition.deinit();
+        return .{ .value = try run_state.loadConfig(alloc, id), .transition = transition, .alloc = alloc };
+    }
+
+    fn releaseTransition(self: *StartupConfig) void {
+        if (self.transition) |lock| lock.deinit();
+        self.transition = null;
+    }
+
+    fn deinit(self: *StartupConfig) void {
+        self.releaseTransition();
+        self.value.deinit(self.alloc);
+    }
+};
+
 fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, attach: bool, generation: i64) u8 {
     const owner = acquireOwner(id, generation) catch return 255;
     defer owner.deinit();
@@ -112,8 +134,11 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
     }
 
     while (true) {
-        const current_cfg = run_state.loadConfig(std.heap.page_allocator, id) catch return 255;
-        defer current_cfg.deinit(std.heap.page_allocator);
+        // Update and stop use this lock too. Read the effective configuration
+        // after acquiring it and retain the lock through PID publication.
+        var startup_config = StartupConfig.load(std.heap.page_allocator, id) catch return 255;
+        defer startup_config.deinit();
+        const current_cfg = &startup_config.value;
         var ports = @import("../../../network/port_allocator.zig").hold(current_cfg.port_maps) catch |err| {
             store.recordStartupFailure(id) catch {};
             var error_buf: [192]u8 = undefined;
@@ -127,7 +152,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         var monitor: ?*@import("../../local_health.zig").Monitor = null;
         const local_name = control.nameForId(std.heap.page_allocator, id) catch return 255;
         defer if (local_name) |name| std.heap.page_allocator.free(name);
-        var c = containerFromSaved(id, &current_cfg, false, local_name);
+        var c = containerFromSaved(id, current_cfg, false, local_name);
         c.config.session_io = &channels;
         c.config.session_output = .{ .context = &server, .write = session.Server.output };
         server.prepareChild(&channels);
@@ -135,8 +160,6 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
         {
             // stop takes this same lock before changing the requested state.
             // it either cancels this attempt or observes its published pid.
-            const transition = control.lock(id, .transition, true) catch return 255;
-            defer transition.deinit();
             if (!(control.shouldRun(id, generation) catch return 255)) return last_exit;
             store.updateStatus(id, "created", null, null) catch return 255;
             c.start() catch |err| {
@@ -153,7 +176,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
             }
             server.childStarted();
             server.setInput(&channels, c.pid.?);
-            monitor = @import("../../local_health.zig").Monitor.start(id, c.pid.?, generation, &current_cfg) catch |err| {
+            monitor = @import("../../local_health.zig").Monitor.start(id, c.pid.?, generation, current_cfg) catch |err| {
                 c.forceStop() catch {};
                 _ = c.wait() catch 255;
                 store.recordStartupFailure(id) catch {};
@@ -171,6 +194,7 @@ fn superviseGeneration(id: []const u8, cfg: *const run_state.SavedRunConfig, att
                 startup_acknowledged = true;
             }
         }
+        startup_config.releaseTransition();
 
         last_exit = c.wait() catch 255;
         if (monitor) |worker| worker.stop() catch |err| {
@@ -345,4 +369,69 @@ test "standalone DNS uses saved names and IDs independently of the UTS hostname"
         try std.testing.expectEqualStrings(expected, instance.config.network.?.dns_name.?);
         try std.testing.expectEqualStrings("custom-hostname", instance.config.hostname);
     }
+}
+
+test "startup reads resource updates after acquiring the transition lock" {
+    var random: [6]u8 = undefined;
+    @import("linux_platform").randomBytes(&random);
+    const id = std.fmt.bytesToHex(random, .lower);
+    var config: run_state.SavedRunConfig = .{
+        .rootfs = "/fixture",
+        .command = "/bin/sh",
+        .hostname = "update-test",
+        .working_dir = "/",
+        .args = &.{},
+        .env = &.{},
+        .lower_dirs = &.{},
+        .mounts = &.{},
+        .network_enabled = false,
+        .port_maps = &.{},
+        .limits = .{ .memory_max = 64 * 1024 * 1024 },
+        .restart_policy = .no,
+    };
+    try run_state.saveConfig(&id, config);
+    defer run_state.removeConfig(&id);
+    const Loader = struct {
+        id: []const u8,
+        started: std.atomic.Value(bool) = .init(false),
+        finished: std.atomic.Value(bool) = .init(false),
+        memory_max: ?u64 = null,
+        retries: ?u32 = null,
+        failed: bool = false,
+
+        fn run(self: *@This()) void {
+            self.started.store(true, .release);
+            var startup = StartupConfig.load(std.heap.page_allocator, self.id) catch {
+                self.failed = true;
+                self.finished.store(true, .release);
+                return;
+            };
+            defer startup.deinit();
+            self.memory_max = startup.value.limits.memory_max;
+            self.retries = startup.value.restart_max_retries;
+            self.finished.store(true, .release);
+        }
+    };
+    var loader: Loader = .{ .id = &id };
+    var transition: ?control.Lock = try control.lock(&id, .transition, true);
+    var worker: ?std.Thread = null;
+    defer {
+        if (transition) |lock| lock.deinit();
+        if (worker) |thread| thread.join();
+    }
+    worker = try std.Thread.spawn(.{}, Loader.run, .{&loader});
+    while (!loader.started.load(.acquire)) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    try std.Io.sleep(std.testing.io, .fromMilliseconds(25), .awake);
+    try std.testing.expect(!loader.finished.load(.acquire));
+    config.limits.memory_max = 128 * 1024 * 1024;
+    config.restart_policy = .on_failure;
+    config.restart_max_retries = 2;
+    try run_state.saveConfig(&id, config);
+    transition.?.deinit();
+    transition = null;
+    worker.?.join();
+    worker = null;
+    try std.testing.expect(!loader.failed);
+    try std.testing.expectEqual(@as(?u64, 128 * 1024 * 1024), loader.memory_max);
+    try std.testing.expectEqual(@as(?u32, 2), loader.retries);
 }
