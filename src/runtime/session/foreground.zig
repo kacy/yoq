@@ -75,7 +75,7 @@ pub fn run(channels: *process_io.ProcessIo, pid: posix.pid_t) !u8 {
         for (polls[1..3], 0..) |poll, stream| {
             if (poll.fd < 0 or poll.revents == 0) continue;
             const count = platform.read(poll.fd, &buffer) catch |err| switch (err) {
-                error.WouldBlock, error.Interrupted => continue,
+                error.WouldBlock => continue,
                 else => 0, // A closed PTY returns EIO.
             };
             if (count == 0) {
