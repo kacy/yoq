@@ -510,6 +510,7 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
     var created = false;
     errdefer if (!created) @import("../../local_volumes.zig").releaseContainer(id, true) catch {};
     errdefer if (!created) @import("../../../network/port_allocator.zig").release(id) catch {};
+    errdefer if (!created) @import("../../../network/local_networks.zig").release(id) catch {};
     if (img.volumes) |volumes| {
         if (volumes == .object) {
             var it = volumes.object.iterator();
@@ -531,6 +532,10 @@ fn createAndRun(args: *std.process.Args.Iterator, ctx: AppContext, create_only: 
     if (!flags.networking_enabled and saved.port_maps.len > 0) return error.NetworkRequired;
     if (flags.network_name) |name| saved.network_name = try alloc.dupe(u8, name);
     saved.network_aliases = try duplicateStrings(alloc, flags.network_aliases.items);
+    if (saved.network_name) |name| {
+        try @import("../../../network/local_networks.zig").reserve(name, id, flags.container_name orelse saved.hostname);
+        try @import("../../../network/local_networks.zig").reserveAliases(id, saved.network_aliases);
+    }
     saved.auto_remove = flags.auto_remove;
     saved.interactive = flags.interactive;
     saved.tty = flags.tty;

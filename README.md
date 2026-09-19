@@ -74,6 +74,12 @@ press ctrl-c in the first terminal to stop the app. you can also stop it from th
 
 for a larger example with postgres, redis, workers, and health checks, see [examples/web-app](examples/web-app/). the [operator guide](docs/golden-path.md) covers local apps, http routing, and clustered deployment.
 
+### run a standalone container
+
+use `yoq build` and `yoq run` for a single container without a manifest. locally built images can run with `--pull never`; stop/start keeps the same writable layer. `yoq container inspect` shows the effective configuration, and `run -it`, `exec -it`, and `attach` support terminal sessions.
+
+see [local containers](docs/local-containers.md) for build/run, volumes, ports, and cleanup, and the [compatibility table](docs/container-compatibility.md) for the supported scope.
+
 ## what you get
 
 | area | capabilities |
@@ -117,7 +123,7 @@ volumes support local directories, host paths, nfs mounts, and existing parallel
 
 ```text
 yoq run <image> [command]           run a container
-yoq ps                             list containers
+yoq ps [-a]                        list active containers, or all with -a
 yoq logs <id-or-name>               read container output
 yoq up -f manifest.toml             start an app
 yoq apps                           list apps
@@ -137,6 +143,7 @@ see the [installation and recovery guide](docs/install-and-recovery.md) for fres
 
 ## examples and documentation
 
+- [local containers](docs/local-containers.md): standalone build, run, inspect, and cleanup
 - [redis](examples/redis/): a single service with a health check
 - [web app](examples/web-app/): postgres, redis, workers, and health checks
 - [cron jobs](examples/cron/): scheduled work

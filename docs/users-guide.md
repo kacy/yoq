@@ -6,7 +6,7 @@ this is a guide to how yoq works under the hood. it's not a CLI tutorial — it'
 
 ## containers
 
-yoq runs containers directly on Linux kernel primitives. there's no daemon — the `yoq` binary forks the container process itself.
+yoq runs containers directly on linux kernel primitives. each standalone container has one supervisor process, with a durable ownership lock and saved configuration. a central daemon is not required. see [local containers](local-containers.md) for the command-line workflow.
 
 ### namespaces
 
@@ -43,9 +43,11 @@ PSI (pressure stall information) metrics are read from cgroups for resource moni
 
 ### lifecycle
 
-containers follow a simple state machine: create → start → running → stop → removed.
+container identity outlives a process attempt. stop/start preserves its writable layer, configuration, name, and volume references; removal deletes its private storage. command locks serialize mutations, and a saved generation prevents a delayed supervisor from reviving a stopped container. teardown failures remain visible as `cleanup_failed` until cleanup succeeds.
 
-yoq supervises the container process, captures stdout/stderr through pipes for `yoq logs`, and handles restart policies (none, always, on_failure). `yoq exec` runs additional commands inside a running container by entering its namespaces.
+restart policies are `no`, `always`, `on-failure`, and `unless-stopped`. manual stop records the requested state before signaling. an optional boot recovery unit restores eligible standalone containers after reboot. cli and native api stop/remove use the same lifecycle service.
+
+process output feeds raw attachment streams and separate bounded log storage. sessions support pipes, terminals, resize, and detach. exec uses the saved environment, working directory, and user. image health checks report starting, healthy, or unhealthy status independently of restart policy.
 
 ---
 

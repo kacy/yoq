@@ -7,14 +7,33 @@ local runtime commands require root privileges. keep the same user and home dire
 ## containers
 
 ```text
-yoq run <image|rootfs> [command]     run a container
-yoq ps [--json]                      list containers
-yoq stop <id|name>                   stop a container
-yoq rm <id|name>                     remove a stopped container
-yoq logs <id|name> [--tail N]        show container output
-yoq restart <id|name>                restart a container
-yoq exec <id|name> <cmd> [args...]   run a command in a container
+yoq run [options] <image|rootfs> [command]    create and run a container
+yoq create [options] <image|rootfs> [command] create without starting
+yoq start <id|name>                          start the saved container
+yoq ps [-a] [-q] [--filter key=value] [--json]
+yoq container inspect <id|name>              show effective configuration and state
+yoq rename <id|name> <new-name>               change its lookup name
+yoq stop <id|name>                           stop and suppress automatic restart
+yoq restart <id|name>                        stop, then start the same container
+yoq rm [-v] <id|name>                        remove a stopped container
+yoq wait <id|name>                           print the next exit code
+yoq kill [--signal SIGNAL] <id|name>          send a signal
+yoq logs <id|name> [--tail N] [-f]            read or follow logs
+yoq exec [-i] [-t] <id|name> <cmd> [args...]  run with saved process settings
+yoq attach [--no-stdin] <id|name>             attach to the running session
+yoq cp <source> <destination>                one path uses NAME:/path
+yoq diff <id|name>                           list writable-layer changes
+yoq top <id|name> [--json]                    show processes
+yoq stats <id|name> [--json]                  sample resource usage
+yoq pause <id|name>                          freeze processes
+yoq unpause <id|name>                        resume processes
+yoq update [options] <id|name>               update limits or restart policy
+yoq volume <create|ls|inspect|rm>             manage standalone volumes
+yoq network <create|ls|inspect|rm>            manage named local bridges
+yoq container recover                       recover restart policies at host boot
 ```
+
+runtime commands are also available under `yoq container`, including `container ls` for `ps`. see [local containers](local-containers.md) for run options, mount defaults, sessions, and upgrade behavior. `ps` shows active containers; add `-a` to include stopped records. image inspection remains `yoq inspect IMAGE`.
 
 ## images
 
@@ -24,6 +43,9 @@ yoq push <source> [target]           push to a registry
 yoq images [--json]                  list local images
 yoq inspect <image>                  show image metadata
 yoq rmi <image>                      remove one local image reference
+yoq tag <source> <target>            add a local image reference
+yoq save [-o PATH] <image>...         save an oci image-layout tar archive
+yoq load [-i PATH]                   load an oci image-layout tar archive
 yoq prune [--json]                   delete unreferenced blobs and layers
 ```
 

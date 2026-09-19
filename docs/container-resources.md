@@ -1,6 +1,6 @@
 # container resources
 
-These commands inspect and change standalone containers by name or full ID.
+these commands inspect and change standalone containers by name or full ID.
 
 ```sh
 yoq top web
@@ -18,4 +18,4 @@ yoq update web --restart on-failure
 
 `update` accepts `--memory`, `--memory-high`, `--pids`, `--cpu-weight`, `--cpus`, and `--restart`. Omitted settings keep their saved values. Memory, PID, and CPU quota options accept `unlimited`. CPU weight accepts 1 through 10,000. Restart policies are `no`, `always`, `on-failure`, and `unless-stopped`; automatic removal cannot be combined with a restart policy.
 
-Resource changes apply immediately to a running or paused container and are saved for later starts. Updates to a stopped container change its saved configuration. If a controller write or config save fails, the command tries to restore the actual kernel values it read before the update. A `PartialUpdate` error means restoration also failed; inspect `stats --json` before retrying. Restoring a resource limit cannot undo process exits or reclamation caused while the new limit was active.
+resource changes apply immediately to a running or paused container and are saved for later starts. Updates to a stopped container change its saved configuration. If a controller write or config save fails, the command tries to restore the actual kernel values it read before the update. A `PartialUpdate` error means restoration also failed; inspect `stats --json` before retrying. Restoring a resource limit cannot undo process exits or reclamation caused while the new limit was active.

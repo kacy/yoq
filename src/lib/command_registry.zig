@@ -42,6 +42,7 @@ pub const CommandSpec = struct {
 };
 
 pub const command_specs = [_]CommandSpec{
+    .{ .name = "network", .group = .runtime, .usage = "network <create|ls|inspect|rm>", .description = "manage named local bridge networks", .handler = @import("../runtime/cli/network_command.zig").network },
     .{ .name = "__healthcheck", .group = .runtime, .usage = "__healthcheck", .description = "internal healthcheck helper", .handler = @import("../runtime/local_health.zig").helper, .hidden = true },
     .{ .name = "cp", .group = .runtime, .usage = "cp <source> <destination>", .description = "copy files to or from a container", .handler = @import("../runtime/cli/container/filesystem_commands.zig").cp },
     .{ .name = "diff", .group = .runtime, .usage = "diff <id|name>", .description = "list changes in a container writable layer", .handler = @import("../runtime/cli/container/filesystem_commands.zig").diff },
@@ -64,7 +65,7 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "kill", .group = .runtime, .usage = "kill [--signal SIGNAL] <id|name>", .description = "send a signal to a running container", .handler = container_manage.kill },
     .{ .name = "tag", .group = .image, .usage = "tag <source> <target>", .description = "add a local image reference", .handler = image_cmds.tag },
     .{ .name = "run", .group = .runtime, .usage = "run [opts] <image|rootfs> [cmd]", .description = "create and run a container", .handler = container_cmds.run },
-    .{ .name = "ps", .group = .runtime, .usage = "ps", .description = "list containers", .handler = psHandler },
+    .{ .name = "ps", .group = .runtime, .usage = "ps [-a] [-q] [--filter key=value] [--json]", .description = "list active containers, or all with -a", .handler = psHandler },
     .{ .name = "logs", .group = .runtime, .usage = "logs <id|name>", .description = "show container output", .handler = container_cmds.log },
     .{ .name = "stop", .group = .runtime, .usage = "stop <id|name>", .description = "stop a running container", .handler = container_cmds.stop },
     .{ .name = "rm", .group = .runtime, .usage = "rm <id|name>", .description = "remove a stopped container", .handler = container_cmds.rm },
@@ -150,15 +151,38 @@ pub fn printUsage() void {
     write(
         \\
         \\run options:
-        \\  --name <name>             assign a name (used for DNS service discovery)
-        \\  -e, --env KEY=VALUE       set an environment variable
-        \\  -v, --volume src:dst[:ro] bind mount a host path
-        \\  -p host:container         map host port to container port
-        \\  --memory <size>           set memory limit (e.g. 256m)
-        \\  --cpus <n>                set CPU quota in cores
-        \\  -d, --detach              run in the background
-        \\  --restart <policy>        restart policy: no, always, on-failure
-        \\  --no-net                  disable networking
+        \\  --name NAME, --hostname HOST  set lookup name and process hostname
+        \\  --pull missing|always|never   choose local or registry image resolution
+        \\  --entrypoint COMMAND         replace the image entrypoint
+        \\  -w, --workdir PATH           set the process working directory
+        \\  -u, --user USER[:GROUP]      set the process user
+        \\  -e, --env KEY[=VALUE]        override or copy an environment variable
+        \\  --env-file PATH             read literal environment entries
+        \\  -v, --volume SOURCE:TARGET  mount a bind path or named volume
+        \\  --mount type=...,dst=...     configure a bind or volume mount
+        \\  -p, --publish [IP:]HOST:PORT[/tcp|udp]
+        \\                              publish a port (HOST 0 assigns one)
+        \\  --network NAME|default|none  select a local network
+        \\  --network-alias NAME        add a name within a named network
+        \\  --memory SIZE|unlimited      memory limit (default 512 mib)
+        \\  --pids COUNT|unlimited       process limit (default 4096)
+        \\  --cpus COUNT|unlimited       cpu quota in cores
+        \\  --cpu-weight WEIGHT          scheduling weight from 1 to 10000
+        \\  -d, --detach                start in the background
+        \\  -i, --interactive           keep stdin available
+        \\  -t, --tty                   allocate a terminal
+        \\  --rm                       remove after exit, including anonymous volumes
+        \\  --restart POLICY            no, always, on-failure, unless-stopped
+        \\  --stop-signal SIGNAL         override the image stop signal
+        \\  --stop-timeout SECONDS       termination grace period (default 10)
+        \\  --health-cmd COMMAND         override or add a shell healthcheck
+        \\  --health-interval DURATION   interval between checks
+        \\  --health-timeout DURATION    deadline for a check
+        \\  --health-start-period DURATION  initial failure grace period
+        \\  --health-start-interval DURATION  interval during initial grace
+        \\  --health-retries COUNT       failures before unhealthy
+        \\  --no-healthcheck             disable image healthchecks
+        \\  --no-net                    disable networking
         \\
         \\build options:
         \\  -t <tag>                  image tag (e.g. myapp:latest)
@@ -175,7 +199,7 @@ pub fn printUsage() void {
         \\
         \\other options:
         \\  logs --tail N             show last N lines only
-        \\  logs -f, --follow         stream logs until the container exits
+        \\  logs -f, --follow         follow logs through container restarts
         \\
     , .{});
 }

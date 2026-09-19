@@ -17,7 +17,7 @@ const ContainerError = common.ContainerError;
 
 fn containerFromSaved(id: []const u8, cfg: *const run_state.SavedRunConfig, mirror_output: bool) container.Container {
     const net_config: ?net_setup.NetworkConfig = if (cfg.network_enabled)
-        .{ .port_maps = cfg.port_maps }
+        .{ .port_maps = cfg.port_maps, .network_name = cfg.network_name }
     else
         null;
 

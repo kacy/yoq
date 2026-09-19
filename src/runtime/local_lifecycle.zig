@@ -142,6 +142,7 @@ pub fn removeWithVolumes(id: []const u8, alloc: std.mem.Allocator, remove_anonym
     try removeArtifacts(id);
     try @import("local_volumes.zig").releaseContainer(id, remove_anonymous);
     try @import("../network/port_allocator.zig").release(id);
+    try @import("../network/local_networks.zig").release(id);
     try @import("local_health.zig").remove(id);
     try removeSavedConfig(id);
     try control.removeRecord(id);
@@ -183,7 +184,7 @@ fn cleanupRuntime(alloc: std.mem.Allocator, record: *const store.ContainerRecord
         }
         var db = try store.openDb();
         defer db.deinit();
-        try setup.teardownContainerChecked(record.id, &info, .{ .port_maps = cfg.port_maps }, &db);
+        try setup.teardownContainerChecked(record.id, &info, .{ .port_maps = cfg.port_maps, .network_name = cfg.network_name }, &db);
         try store.updateNetwork(record.id, null, null);
     }
 }

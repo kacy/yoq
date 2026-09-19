@@ -33,15 +33,58 @@ const CommandMeta = struct {
 /// flags and subcommands are listed here rather than in each command module
 /// so that completion logic stays in one place and doesn't leak into the
 /// rest of the codebase.
+const run_flags = &.{ "--name", "--hostname", "--pull", "--entrypoint", "--workdir", "-w", "--user", "-u", "--env", "-e", "--env-file", "--volume", "-v", "--mount", "--publish", "-p", "--network", "--network-alias", "--net", "--no-net", "--memory", "--pids", "--cpus", "--cpu-weight", "--detach", "-d", "--interactive", "-i", "--tty", "-t", "-it", "--rm", "--restart", "--stop-signal", "--stop-timeout", "--health-cmd", "--health-interval", "--health-timeout", "--health-start-period", "--health-start-interval", "--health-retries", "--no-healthcheck" };
+const list_flags = &.{ "-a", "--all", "-q", "--quiet", "-f", "--filter", "--json" };
+const update_flags = &.{ "--memory", "--memory-high", "--cpus", "--cpu-weight", "--pids", "--restart" };
+
 const command_meta = [_]CommandMeta{
     // runtime
-    .{ .name = "run", .flags = &.{ "--name", "-p", "--no-net" } },
-    .{ .name = "ps" },
-    .{ .name = "logs", .flags = &.{"--tail"} },
+    .{ .name = "start" },
+    .{ .name = "wait" },
+    .{ .name = "rename" },
+    .{ .name = "cp" },
+    .{ .name = "diff" },
+    .{ .name = "pause" },
+    .{ .name = "unpause" },
+    .{ .name = "kill", .flags = &.{ "--signal", "-s" } },
+    .{ .name = "attach", .flags = &.{"--no-stdin"} },
+    .{ .name = "top", .flags = &.{"--json"} },
+    .{ .name = "stats", .flags = &.{"--json"} },
+    .{ .name = "update", .flags = update_flags },
+    .{ .name = "volume", .subcommands = &.{ .{ .name = "create" }, .{ .name = "ls", .flags = &.{"--json"} }, .{ .name = "inspect" }, .{ .name = "rm" } } },
+    .{ .name = "network", .subcommands = &.{ .{ .name = "create", .flags = &.{"--subnet"} }, .{ .name = "ls", .flags = &.{"--json"} }, .{ .name = "inspect" }, .{ .name = "rm" } } },
+    .{ .name = "container", .subcommands = &.{
+        .{ .name = "run", .flags = run_flags },
+        .{ .name = "create", .flags = run_flags },
+        .{ .name = "ls", .flags = list_flags },
+        .{ .name = "inspect" },
+        .{ .name = "start" },
+        .{ .name = "stop" },
+        .{ .name = "restart" },
+        .{ .name = "rm", .flags = &.{ "-v", "--volumes" } },
+        .{ .name = "rename" },
+        .{ .name = "wait" },
+        .{ .name = "kill", .flags = &.{ "--signal", "-s" } },
+        .{ .name = "exec", .flags = &.{ "-i", "-t", "-it" } },
+        .{ .name = "attach", .flags = &.{"--no-stdin"} },
+        .{ .name = "logs", .flags = &.{ "--tail", "-f", "--follow" } },
+        .{ .name = "cp" },
+        .{ .name = "diff" },
+        .{ .name = "top", .flags = &.{"--json"} },
+        .{ .name = "stats", .flags = &.{"--json"} },
+        .{ .name = "pause" },
+        .{ .name = "unpause" },
+        .{ .name = "update", .flags = update_flags },
+        .{ .name = "recover" },
+    } },
+    .{ .name = "run", .flags = run_flags },
+    .{ .name = "create", .flags = run_flags },
+    .{ .name = "ps", .flags = list_flags },
+    .{ .name = "logs", .flags = &.{ "--tail", "-f", "--follow" } },
     .{ .name = "stop" },
-    .{ .name = "rm" },
+    .{ .name = "rm", .flags = &.{ "-v", "--volumes" } },
     .{ .name = "restart" },
-    .{ .name = "exec" },
+    .{ .name = "exec", .flags = &.{ "-i", "-t", "-it", "--interactive", "--tty" } },
     .{ .name = "status", .flags = &.{ "--app", "--alerts", "--verbose", "-v", "--server" } },
     .{ .name = "apps", .flags = &.{ "--server", "--json", "--status", "--failed", "--in-progress" } },
     .{ .name = "metrics", .flags = &.{ "--server", "--pairs" } },
@@ -50,6 +93,9 @@ const command_meta = [_]CommandMeta{
     } },
 
     // image
+    .{ .name = "tag" },
+    .{ .name = "save", .flags = &.{ "-o", "--output" } },
+    .{ .name = "load", .flags = &.{ "-i", "--input" } },
     .{ .name = "pull" },
     .{ .name = "push" },
     .{ .name = "images" },

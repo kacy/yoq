@@ -14,6 +14,8 @@ before running the manual path, `make test-golden-path` checks the same local as
 
 ## 1. local runtime and manifests
 
+first run the [standalone container walkthrough](local-containers.md#build-and-run-locally) if you are evaluating build/run, persistent writable layers, or interactive sessions. the path below exercises manifest-managed applications.
+
 start with the built-in checks:
 
 ```bash
