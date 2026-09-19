@@ -37,7 +37,7 @@ pub fn write(comptime fmt: []const u8, args: anytype) void {
     defer _ = io.swapCancelProtection(prev);
 
     var buf: [4096]u8 = undefined;
-    var w = std.Io.File.stdout().writer(io, &buf);
+    var w = std.Io.File.stdout().writerStreaming(io, &buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stdout_write_failures += 1;
@@ -56,7 +56,7 @@ pub fn writeErr(comptime fmt: []const u8, args: anytype) void {
     defer _ = io.swapCancelProtection(prev);
 
     var buf: [4096]u8 = undefined;
-    var w = std.Io.File.stderr().writer(io, &buf);
+    var w = std.Io.File.stderr().writerStreaming(io, &buf);
     const out = &w.interface;
     out.print(fmt, args) catch {
         stderr_write_failures += 1;
@@ -786,4 +786,41 @@ test "port ranges reject mismatches descending bounds zero and excessive expansi
     const alloc = std.testing.allocator;
     for ([_][]const u8{ "80-82:8000-8001", "82-80:8000-8002", "0-1:80-81", "80-81:0-1", "80-81", "80-81:8000-8001/sctp", "80-81:8000-8001/udp/tcp", "::80-81:8000-8001", "65535-65536:80-81" }) |value| try std.testing.expectError(error.InvalidPortMapping, parsePortMaps(alloc, value));
     try std.testing.expectError(error.TooManyPorts, parsePortMaps(alloc, "1-257:1-257"));
+}
+
+test "cli redirected output preserves consecutive writes to regular files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const output = try tmp.dir.createFile(io, "stdout", .{});
+    defer output.close(io);
+    const errors = try tmp.dir.createFile(io, "stderr", .{});
+    defer errors.close(io);
+    const linux = std.os.linux;
+    const forked = linux.fork();
+    if (linux.errno(forked) != .SUCCESS) return error.ForkFailed;
+    if (forked == 0) {
+        linux_platform.posix.dup2(output.handle, std.posix.STDOUT_FILENO) catch linux.exit_group(1);
+        linux_platform.posix.dup2(errors.handle, std.posix.STDERR_FILENO) catch linux.exit_group(2);
+        write("first-", .{});
+        write("second", .{});
+        @import("cli_output.zig").write("-third\n", .{});
+        writeErr("first-", .{});
+        writeErr("second", .{});
+        @import("cli_output.zig").writeErr("-third\n", .{});
+        linux.exit_group(0);
+    }
+    var status: u32 = 0;
+    while (true) {
+        const rc = linux.waitpid(@intCast(forked), &status, 0);
+        if (linux.errno(rc) == .INTR) continue;
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+        break;
+    }
+    try std.testing.expectEqual(@as(u32, 0), status);
+    for ([_][]const u8{ "stdout", "stderr" }) |name| {
+        const contents = try tmp.dir.readFileAlloc(io, name, std.testing.allocator, .limited(100));
+        defer std.testing.allocator.free(contents);
+        try std.testing.expectEqualStrings("first-second-third\n", contents);
+    }
 }
