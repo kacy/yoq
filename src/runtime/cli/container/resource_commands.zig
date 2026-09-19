@@ -72,7 +72,7 @@ fn stateName(value: u8) []const u8 {
 fn readProcess(io: std.Io, alloc: std.mem.Allocator, pid: i32) !ProcessRow {
     var path_buffer: [80]u8 = undefined;
     const stat_path = try std.fmt.bufPrint(&path_buffer, "/proc/{d}/stat", .{pid});
-    const stat = try std.Io.Dir.cwd().readFileAlloc(io, stat_path, alloc, .limited(4096));
+    const stat = try readProcFile(io, alloc, stat_path, 4096);
     defer alloc.free(stat);
     const left = std.mem.indexOfScalar(u8, stat, '(') orelse return error.InvalidProcessStat;
     const right = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return error.InvalidProcessStat;
@@ -82,7 +82,7 @@ fn readProcess(io: std.Io, alloc: std.mem.Allocator, pid: i32) !ProcessRow {
     if (process_state.len != 1) return error.InvalidProcessStat;
     const parent = try std.fmt.parseInt(i32, fields.next() orelse return error.InvalidProcessStat, 10);
     const cmd_path = try std.fmt.bufPrint(&path_buffer, "/proc/{d}/cmdline", .{pid});
-    var command = try std.Io.Dir.cwd().readFileAlloc(io, cmd_path, alloc, .limited(1024 * 1024));
+    var command = try readProcFile(io, alloc, cmd_path, 1024 * 1024);
     if (command.len == 0) {
         alloc.free(command);
         command = try alloc.dupe(u8, stat[left + 1 .. right]);
@@ -354,7 +354,7 @@ test "container resource patch rejects invalid values before changing the kernel
     config.auto_remove = true;
     config.restart_policy = .no;
     var fields: [5]admin.Field = undefined;
-    try std.testing.expectError(error.InvalidArgument, (Patch{ .restart = .always }).apply(&config, &fields));
+    try std.testing.expectError(error.InvalidArgument, (Patch{ .restart = .{ .policy = .always } }).apply(&config, &fields));
 }
 
 test "container pause status never restores an exited process" {
@@ -369,4 +369,22 @@ test "container pause status never restores an exited process" {
     defer record.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("stopped", record.status);
     try std.testing.expect(record.pid == null);
+}
+
+// proc files have no useful reported size. streaming also tolerates a process
+// disappearing between reading its stat and command line.
+fn readProcFile(io: std.Io, alloc: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var buffer: [4096]u8 = undefined;
+    var reader = file.readerStreaming(io, &buffer);
+    return reader.interface.allocRemaining(alloc, .limited(limit));
+}
+
+test "container top reads a live process from zero size proc files" {
+    const row = try readProcess(std.testing.io, std.testing.allocator, @intCast(std.os.linux.getpid()));
+    defer std.testing.allocator.free(row.command);
+    try std.testing.expect(row.parent_pid > 0);
+    try std.testing.expect(row.command.len > 0);
+    try std.testing.expect(!std.mem.eql(u8, row.state, "unknown"));
 }

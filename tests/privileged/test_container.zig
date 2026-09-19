@@ -587,7 +587,7 @@ fn activeHealthGroup(id: []const u8) ![]const u8 {
             if (entry.kind != .directory or !std.mem.startsWith(u8, entry.name, prefix)) continue;
             const path = try std.fmt.allocPrint(alloc, "/sys/fs/cgroup/yoq/{s}/cgroup.procs", .{entry.name});
             defer alloc.free(path);
-            const processes = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, alloc, .limited(4096)) catch |err| switch (err) {
+            const processes = readProcessFile(path) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => return err,
             };
@@ -613,13 +613,19 @@ test "local parity health transitions and stop cleans up an active timed check" 
     try started.expectExitCode(0);
     const id = trimOutput(started.stdout);
     try waitHealth(&fixture.env, "health-owner", "healthy", 0);
+    var top = try fixture.env.runYoq(&.{ "top", "health-owner", "--json" });
+    defer top.deinit();
+    try top.expectExitCode(0);
+    const rows = try std.json.parseFromSlice(std.json.Value, alloc, top.stdout, .{});
+    defer rows.deinit();
+    try std.testing.expect(rows.value.array.items.len > 0);
     try expectExecOutput(&fixture.env, "health-owner", ": > /work/timeout", "");
     try waitHealth(&fixture.env, "health-owner", "unhealthy", 124);
     const group = try activeHealthGroup(id);
     defer alloc.free(group);
     const process_file = try std.fmt.allocPrint(alloc, "{s}/cgroup.procs", .{group});
     defer alloc.free(process_file);
-    const processes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, process_file, alloc, .limited(4096));
+    const processes = try readProcessFile(process_file);
     defer alloc.free(processes);
     try expectCommand(&fixture.env, &.{ "stop", "health-owner" });
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, group, .{}));
@@ -642,4 +648,43 @@ test "local parity prune retains a stopped container after its image tag is remo
     try expectCommand(&fixture.env, &.{"prune"});
     try expectCommand(&fixture.env, &.{ "start", "prune-owner" });
     try expectExecOutput(&fixture.env, "prune-owner", "IFS= read -r marker < /work/marker; printf '%s' \"$marker\"", "retained");
+}
+
+test "local parity limits automatic retries and foreground returns the first attempt" {
+    var fixture = try initLifecycleFixture();
+    defer fixture.env.deinit();
+    defer fixture.rootfs.deinit();
+    defer cleanupContainer(&fixture.env, "retry-owner");
+    var started = try fixture.env.runYoq(&.{ "run", "--no-net", "-d", "--restart", "on-failure:2", "--name", "retry-owner", fixture.rootfs.rootfs_path, "/bin/sh", "-c", "exit 7" });
+    defer started.deinit();
+    try started.expectExitCode(0);
+    var completed = false;
+    for (0..160) |_| {
+        var result = try fixture.env.runYoq(&.{ "container", "inspect", "retry-owner" });
+        defer result.deinit();
+        try result.expectExitCode(0);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, result.stdout, .{});
+        defer parsed.deinit();
+        const object = parsed.value.object;
+        if (!object.get("desired_running").?.bool and object.get("restart_count").?.integer == 2) {
+            try std.testing.expectEqual(@as(i64, 7), object.get("state").?.object.get("exit_code").?.integer);
+            completed = true;
+            break;
+        }
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake);
+    }
+    try std.testing.expect(completed);
+    defer cleanupContainer(&fixture.env, "foreground-retry");
+    var attached = try fixture.env.runYoq(&.{ "run", "--no-net", "--restart", "on-failure:2", "--name", "foreground-retry", fixture.rootfs.rootfs_path, "/bin/sh", "-c", "printf first-attempt; exit 9" });
+    defer attached.deinit();
+    try attached.expectExitCode(9);
+    try std.testing.expectEqualStrings("first-attempt", attached.stdout);
+}
+
+fn readProcessFile(path: []const u8) ![]u8 {
+    const file = try std.Io.Dir.cwd().openFile(std.testing.io, path, .{});
+    defer file.close(std.testing.io);
+    var buffer: [4096]u8 = undefined;
+    var reader = file.readerStreaming(std.testing.io, &buffer);
+    return reader.interface.allocRemaining(alloc, .limited(1024 * 1024));
 }

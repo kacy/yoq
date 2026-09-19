@@ -308,7 +308,13 @@ pub const Cgroup = struct {
     pub fn processes(self: *const Cgroup, alloc: std.mem.Allocator) ![]std.posix.pid_t {
         var path_buffer: [512]u8 = undefined;
         const filename = try std.fmt.bufPrint(&path_buffer, "{s}/cgroup.procs", .{self.path()});
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(std.Options.debug_io, filename, alloc, .limited(1024 * 1024));
+        const io = std.Options.debug_io;
+        const file = try std.Io.Dir.cwd().openFile(io, filename, .{});
+        defer file.close(io);
+        // cgroup files report zero size; read their contents as a stream.
+        var buffer: [4096]u8 = undefined;
+        var reader = file.readerStreaming(io, &buffer);
+        const bytes = try reader.interface.allocRemaining(alloc, .limited(1024 * 1024));
         defer alloc.free(bytes);
         var pids: std.ArrayList(std.posix.pid_t) = .empty;
         errdefer pids.deinit(alloc);
