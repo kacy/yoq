@@ -54,7 +54,7 @@ pub fn awaitCheck(runner: anytype, timeout_ns: u64) !Outcome {
     errdefer runner.cleanup() catch {};
     const deadline = runner.now() + @as(i96, timeout_ns);
     while (true) {
-        if (runner.cancelled()) {
+        if (try runner.cancelled()) {
             try runner.cleanup();
             return .cancelled;
         }
@@ -109,8 +109,9 @@ pub fn run(monitor: anytype, timeout_ns: u64) !Outcome {
         cleaned: bool = false,
         group_destroyed: bool = false,
 
-        fn cancelled(self: *@This()) bool {
-            return self.owner.cancelled.load(.acquire) or !self.owner.isCurrent() or self.owner.isPaused();
+        fn cancelled(self: *@This()) !bool {
+            if (self.owner.cancelled.load(.acquire)) return true;
+            return try self.owner.availability() != .ready;
         }
         fn poll(self: *@This()) !?u8 {
             const current = self.helper.id orelse return null;
@@ -165,7 +166,7 @@ test "local health timeout and cancellation clean up every check" {
         fn now(self: *@This()) i96 {
             return self.time;
         }
-        fn cancelled(self: *@This()) bool {
+        fn cancelled(self: *@This()) !bool {
             return self.cancel;
         }
         fn poll(self: *@This()) !?u8 {
@@ -193,11 +194,13 @@ test "local health timeout and cancellation clean up every check" {
 test "local health polling failures clean up and cleanup failures propagate" {
     const Fake = struct {
         fail_poll: bool = false,
+        fail_ownership: bool = false,
         cleanups: usize = 0,
         fn now(_: *@This()) i96 {
             return 0;
         }
-        fn cancelled(_: *@This()) bool {
+        fn cancelled(self: *@This()) !bool {
+            if (self.fail_ownership) return error.OwnershipUnknown;
             return false;
         }
         fn poll(self: *@This()) !?u8 {
@@ -207,11 +210,14 @@ test "local health polling failures clean up and cleanup failures propagate" {
         fn sleep(_: *@This(), _: u64) void {}
         fn cleanup(self: *@This()) !void {
             self.cleanups += 1;
-            if (!self.fail_poll) return error.CleanupFailed;
+            if (!self.fail_poll and !self.fail_ownership) return error.CleanupFailed;
         }
     };
     var runner: Fake = .{ .fail_poll = true };
     try std.testing.expectError(error.PollFailed, awaitCheck(&runner, std.time.ns_per_s));
+    try std.testing.expectEqual(@as(usize, 1), runner.cleanups);
+    runner = .{ .fail_ownership = true };
+    try std.testing.expectError(error.OwnershipUnknown, awaitCheck(&runner, std.time.ns_per_s));
     try std.testing.expectEqual(@as(usize, 1), runner.cleanups);
     runner = .{};
     try std.testing.expectError(error.CleanupFailed, awaitCheck(&runner, std.time.ns_per_s));

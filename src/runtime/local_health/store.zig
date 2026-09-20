@@ -40,6 +40,19 @@ pub fn write(id: []const u8, pid: i32, generation: i64, value: state.State, exit
     );
 }
 
+pub fn markUnavailable(id: []const u8, pid: i32, generation: i64) !void {
+    var lease = try db_store.leaseDb();
+    defer lease.deinit();
+    try ensureTable(lease.db);
+    try lease.db.exec(
+        "UPDATE local_container_health SET status = 'unknown' WHERE container_id = ? AND pid = ? AND generation = ?" ++
+            " AND EXISTS (SELECT 1 FROM containers c JOIN local_containers l ON l.container_id = c.id" ++
+            " WHERE c.id = ? AND c.pid = ? AND l.generation = ? AND l.desired_running = 1);",
+        .{},
+        .{ id, pid, generation, id, pid, generation },
+    );
+}
+
 pub fn read(alloc: std.mem.Allocator, id: []const u8) !?Record {
     var lease = try db_store.leaseDb();
     defer lease.deinit();
@@ -85,4 +98,32 @@ test "local health results cannot overwrite newer generations or attempts" {
     try std.testing.expectEqual(state.Status.starting, record.status);
     try clearCurrent(id, 456, generation);
     try std.testing.expect((try read(std.testing.allocator, id)) == null);
+}
+
+test "monitor failures preserve the last probe and cannot change a newer run" {
+    const containers = @import("../../state/store.zig");
+    const control = @import("../local_control.zig");
+    try containers.initTestDb();
+    defer containers.deinitTestDb();
+    const id = "deadbeef2233";
+    try containers.save(.{ .id = id, .rootfs = "/fixture", .command = "true", .hostname = "health", .status = "running", .pid = 123, .exit_code = null, .created_at = 0 });
+    try control.register(id, null);
+    const generation = try control.request(id, true);
+    try write(id, 123, generation, .{ .started_ns = 0, .status = .healthy, .failures = 1 }, 1);
+    const before = (try read(std.testing.allocator, id)).?;
+    try markUnavailable(id, 123, generation);
+    const unknown = (try read(std.testing.allocator, id)).?;
+    try std.testing.expectEqual(state.Status.unknown, unknown.status);
+    try std.testing.expectEqual(before.failing_streak, unknown.failing_streak);
+    try std.testing.expectEqual(before.last_exit, unknown.last_exit);
+    try std.testing.expectEqual(before.checked_at, unknown.checked_at);
+
+    try write(id, 123, generation, .{ .started_ns = 0, .status = .healthy }, 0);
+    try std.testing.expectEqual(state.Status.healthy, (try read(std.testing.allocator, id)).?.status);
+    const next = try control.request(id, true);
+    try containers.updateStatus(id, "running", 456, null);
+    try write(id, 456, next, .{ .started_ns = 0 }, null);
+    try markUnavailable(id, 123, generation);
+    try markUnavailable(id, 123, next);
+    try std.testing.expectEqual(state.Status.starting, (try read(std.testing.allocator, id)).?.status);
 }
