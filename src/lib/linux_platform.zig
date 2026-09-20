@@ -919,6 +919,7 @@ pub const posix = struct {
     fn usizeResult(rc: usize) !usize {
         return switch (syscallErrno(rc)) {
             .SUCCESS => rc,
+            .INTR => error.Interrupted,
             .AGAIN => error.WouldBlock,
             .CONNRESET => error.ConnectionResetByPeer,
             .TIMEDOUT => error.ConnectionTimedOut,
