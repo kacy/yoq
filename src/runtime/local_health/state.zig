@@ -1,7 +1,8 @@
 const std = @import("std");
 const spec = @import("../../image/spec.zig");
 
-pub const Status = enum { starting, healthy, unhealthy };
+// unknown describes monitor failure; it does not change the application streak.
+pub const Status = enum { starting, healthy, unhealthy, unknown };
 
 pub const Settings = struct {
     interval_ns: u64,

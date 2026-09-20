@@ -392,6 +392,11 @@ test "local parity builds offline and preserves raw streams and process configur
     defer started.deinit();
     try started.expectExitCode(0);
     try expectExecOutput(&fixture.env, "effective-process", "printf '%s|%s|%s' \"$FIXTURE_ENV\" \"$PATH\" \"$PWD\"", "cli-value|/bin|/work");
+    var overridden = try fixture.env.runYoq(&.{ "exec", "--env=FIXTURE_ENV=exec-value", "-e", "ADDED=first", "-e", "ADDED=last", "--workdir=/data", "--user=1000:1000", "effective-process", "sh", "-c", "printf '%s|%s|%s|' \"$FIXTURE_ENV\" \"$ADDED\" \"$PWD\"; while read -r key real effective rest; do if test \"$key\" = Uid:; then printf '%s' \"$effective\"; break; fi; done < /proc/self/status" });
+    defer overridden.deinit();
+    try overridden.expectExitCode(0);
+    try std.testing.expectEqualStrings("exec-value|last|/data|1000", overridden.stdout);
+    try expectExecOutput(&fixture.env, "effective-process", "printf '%s|%s|%s' \"$FIXTURE_ENV\" \"$PATH\" \"$PWD\"", "cli-value|/bin|/work");
     var signaled = try fixture.env.runYoq(&.{ "exec", "effective-process", "sh", "-c", "kill -TERM $$" });
     defer signaled.deinit();
     try signaled.expectExitCode(143);
@@ -561,6 +566,41 @@ test "local parity forwards piped stdin through foreground run exec and attach" 
     try std.testing.expectEqualStrings("<attached-input>", attached.stdout);
 }
 
+test "attached signals reach a child that never reads its full stdin queue" {
+    var fixture = try initLifecycleFixture();
+    defer fixture.env.deinit();
+    defer fixture.rootfs.deinit();
+    const name = "blocked-attach-input";
+    defer cleanupContainer(&fixture.env, name);
+    try expectCommand(&fixture.env, &.{ "run", "--no-net", "-d", "-i", "--name", name, fixture.rootfs.rootfs_path, "/bin/sh", "-c", "trap 'exit 42' TERM; printf 'ready\\n'; while :; do :; done" });
+    const executable = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/yoq", .{fixture.env.cwd});
+    defer alloc.free(executable);
+    // a regular file keeps input available without leaving a blocked writer
+    // behind if the attachment exits before consuming it all.
+    const script =
+        \\import select, signal, subprocess, sys, tempfile, time
+        \\with tempfile.TemporaryFile() as source:
+        \\    source.write(b"x" * (2 * 1024 * 1024))
+        \\    source.seek(0)
+        \\    client = subprocess.Popen([sys.argv[1], "attach", sys.argv[2]], stdin=source, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        \\    try:
+        \\        assert select.select([client.stdout], [], [], 10)[0], "missing readiness output"
+        \\        ready = client.stdout.readline()
+        \\        assert ready == b"ready\n", (ready, client.poll())
+        \\        time.sleep(0.5)
+        \\        client.send_signal(signal.SIGTERM)
+        \\        output, errors = client.communicate(timeout=10)
+        \\        assert client.returncode == 42, (client.returncode, output, errors)
+        \\    finally:
+        \\        if client.poll() is None:
+        \\            client.kill()
+        \\        client.wait()
+    ;
+    var result = try fixture.env.run(&.{ "python3", "-c", script, executable, name });
+    defer result.deinit();
+    try result.expectExitCode(0);
+}
+
 fn waitHealth(env: *helpers.TestEnv, name: []const u8, expected: []const u8, exit_code: u8) !void {
     for (0..100) |_| {
         var result = try env.runYoq(&.{ "container", "inspect", name });
@@ -604,6 +644,47 @@ fn activeHealthGroup(id: []const u8) ![]const u8 {
         try std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
     }
     return error.HealthCheckNotRunning;
+}
+
+test "healthchecks reserve helper slots outside small container pid budgets" {
+    var fixture = try ImageFixture.init();
+    defer fixture.deinit();
+    for ([_][]const u8{ "2", "3" }) |limit| {
+        const name = "health-small-pids";
+        defer cleanupContainer(&fixture.env, name);
+        try expectCommand(&fixture.env, &.{ "run", "--no-net", "-d", "--name", name, "--pids", limit, "--health-cmd", ":", "--health-interval", "100ms", "--health-timeout", "1s", "--health-retries", "1", ImageFixture.tag, "sleep", "60" });
+        try waitHealth(&fixture.env, name, "healthy", 0);
+    }
+}
+
+test "health diagnostics retain bounded output from failed and timed out probes" {
+    var fixture = try ImageFixture.init();
+    defer fixture.deinit();
+    const cases = [_]struct { command: []const u8, code: u8, truncated: bool }{
+        .{ .command = "printf 'probe-out\\377'; printf 'probe-err' >&2; exit 7", .code = 7, .truncated = false },
+        .{ .command = "while :; do printf 'continuous-health-output-0123456789\\n'; done", .code = 124, .truncated = true },
+    };
+    for (cases) |case| {
+        const name = "health-output";
+        defer cleanupContainer(&fixture.env, name);
+        try expectCommand(&fixture.env, &.{ "run", "--no-net", "-d", "--name", name, "--health-cmd", case.command, "--health-interval", "100ms", "--health-timeout", "250ms", "--health-retries", "1", ImageFixture.tag, "sleep", "60" });
+        try waitHealth(&fixture.env, name, "unhealthy", case.code);
+        var inspection = try fixture.env.runYoq(&.{ "container", "inspect", name });
+        defer inspection.deinit();
+        try inspection.expectExitCode(0);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, inspection.stdout, .{});
+        defer parsed.deinit();
+        const health = parsed.value.object.get("health").?.object;
+        const output = health.get("output").?.string;
+        try std.testing.expect(output.len > 0 and output.len <= 4096);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(output));
+        try std.testing.expectEqual(case.truncated, health.get("output_truncated").?.bool);
+        if (!case.truncated) {
+            try helpers.expectContains(output, "probe-out");
+            try helpers.expectContains(output, "probe-err");
+            try helpers.expectContains(output, "\xef\xbf\xbd");
+        }
+    }
 }
 
 test "local parity health transitions and stop cleans up an active timed check" {

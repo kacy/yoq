@@ -17,6 +17,9 @@ pub const Record = health_store.Record;
 pub const cleanupOrphans = check.cleanupOrphans;
 pub const Settings = health_state.Settings;
 
+const Availability = enum { ready, paused, stopped };
+const ownership_retry_ns = std.time.ns_per_s;
+
 pub const Monitor = struct {
     id: []const u8,
     pid: i32,
@@ -28,6 +31,7 @@ pub const Monitor = struct {
     cancelled: std.atomic.Value(bool) = .init(false),
     worker: ?std.Thread = null,
     failed_group: ?check.Group = null,
+    monitor_failed: bool = false,
 
     /// the caller retains cfg until stop returns. stop cancels checks and joins
     /// the worker before releasing the monitor.
@@ -59,8 +63,7 @@ pub const Monitor = struct {
         };
         try health_store.write(id, pid, generation, self.state, null);
         self.worker = std.Thread.spawn(.{}, run, .{self}) catch |err| {
-            self.state.status = .unhealthy;
-            health_store.write(id, pid, generation, self.state, 125) catch {};
+            health_store.markUnavailable(id, pid, generation) catch {};
             return err;
         };
         return self;
@@ -77,57 +80,94 @@ pub const Monitor = struct {
         if (self.failed_group) |group| try group.cleanup();
     }
 
-    pub fn isCurrent(self: *const Monitor) bool {
-        if (!(health_store.current(self.id, self.pid, self.generation) catch false)) return false;
-        process.sendSignal(self.pid, 0) catch return false;
-        const cgroup = cgroups.Cgroup.open(self.id) catch return false;
-        return cgroup.containsProcessChecked(self.pid) catch false;
+    pub fn availability(self: *const Monitor) !Availability {
+        if (!try health_store.current(self.id, self.pid, self.generation)) return .stopped;
+        if (process.hasExited(self.pid)) return .stopped;
+        try process.sendSignal(self.pid, 0);
+        const group = try cgroups.Cgroup.open(self.id);
+        const contains = group.containsProcessChecked(self.pid) catch |err| {
+            // a deleted group confirms teardown; an unreadable group does not.
+            std.Io.Dir.cwd().access(std.Options.debug_io, group.path(), .{}) catch |access_err| switch (access_err) {
+                error.FileNotFound => return .stopped,
+                else => return access_err,
+            };
+            return err;
+        };
+        if (!contains) return .stopped;
+        return if (try group.isFrozen()) .paused else .ready;
     }
 
-    pub fn isPaused(self: *const Monitor) bool {
-        const group = cgroups.Cgroup.open(self.id) catch return false;
-        return group.isFrozen() catch false;
+    fn reportUnavailable(self: *Monitor, err: anyerror) void {
+        if (!self.monitor_failed) log.warn("container {s}: health monitoring unavailable: {}", .{ self.id, err });
+        self.monitor_failed = true;
+        // keep the last completed result and application failure streak. an
+        // ownership or monitor failure is not a failed application probe.
+        health_store.markUnavailable(self.id, self.pid, self.generation) catch {};
     }
 
     fn run(self: *Monitor) void {
-        while (!self.cancelled.load(.acquire) and self.isCurrent()) {
-            if (!self.waitInterval(self.state.interval(self.settings, nowNs()))) return;
-            const group = cgroups.Cgroup.open(self.id) catch return;
-            if (group.isFrozen() catch return) continue;
-            const outcome = check.run(self, self.settings.timeout_ns) catch |err| {
-                log.warn("container {s}: healthcheck failed: {}", .{ self.id, err });
-                self.state.observe(self.settings, nowNs(), false);
-                if (self.failed_group != null) self.state.status = .unhealthy;
-                health_store.write(self.id, self.pid, self.generation, self.state, 125) catch {};
+        while (true) {
+            const interval = if (self.monitor_failed) ownership_retry_ns else self.state.interval(self.settings, nowNs());
+            if (!waitForCheck(self, interval)) return;
+            const result = check.run(self, self.settings.timeout_ns) catch |err| {
+                self.reportUnavailable(err);
+                // retrying a probe could overlap descendants whose cleanup
+                // failed. stop retains the group and retries its teardown.
                 if (self.failed_group != null) return;
                 continue;
             };
-            const code: u8 = switch (outcome) {
-                .cancelled => {
-                    if (self.cancelled.load(.acquire) or !self.isCurrent()) return;
-                    continue;
-                },
+            const code: u8 = switch (result.outcome) {
+                .cancelled => continue,
                 .timed_out => 124,
                 .exited => |code| code,
             };
             self.state.observe(self.settings, nowNs(), code == 0);
-            health_store.write(self.id, self.pid, self.generation, self.state, code) catch |err| {
-                log.warn("container {s}: cannot save health status: {}", .{ self.id, err });
+            health_store.writeResult(self.id, self.pid, self.generation, self.state, code, &result.output) catch |err| {
+                self.reportUnavailable(err);
+                continue;
             };
+            self.monitor_failed = false;
         }
     }
 
-    fn waitInterval(self: *const Monitor, duration: u64) bool {
-        const deadline = @as(i96, nowNs()) + duration;
-        while (@as(i96, nowNs()) < deadline) {
-            if (self.cancelled.load(.acquire) or !self.isCurrent()) return false;
-            const remaining: u64 = @intCast(@max(0, deadline - nowNs()));
+    fn isCancelled(self: *const Monitor) bool {
+        return self.cancelled.load(.acquire);
+    }
+
+    fn now(_: *const Monitor) i96 {
+        return std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
+    }
+
+    fn pause(self: *const Monitor, duration: u64) bool {
+        const deadline = self.now() + duration;
+        while (self.now() < deadline) {
+            if (self.isCancelled()) return false;
+            const remaining: u64 = @intCast(@max(0, deadline - self.now()));
             const step = @min(remaining, 50 * std.time.ns_per_ms);
             if (!runtime_wait.sleep(std.Io.Duration.fromNanoseconds(@intCast(step)), "container healthcheck interval")) return false;
         }
-        return !self.cancelled.load(.acquire) and self.isCurrent();
+        return !self.isCancelled();
     }
 };
+
+// ownership failures delay the next probe instead of ending its monitor.
+// the injected clock keeps cancellation and recovery tests independent of time.
+fn waitForCheck(monitor: anytype, duration: u64) bool {
+    const deadline = monitor.now() + duration;
+    while (!monitor.isCancelled()) {
+        const available = monitor.availability() catch |err| {
+            monitor.reportUnavailable(err);
+            if (!monitor.pause(ownership_retry_ns)) return false;
+            continue;
+        };
+        if (available == .stopped) return false;
+        const remaining = @max(0, deadline - monitor.now());
+        if (available == .ready and remaining == 0) return true;
+        const delay: u64 = if (available == .paused) 50 * std.time.ns_per_ms else @intCast(@min(remaining, 50 * std.time.ns_per_ms));
+        if (!monitor.pause(delay)) return false;
+    }
+    return false;
+}
 
 fn nowNs() i64 {
     return @intCast(std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds());
@@ -169,4 +209,52 @@ test {
     _ = health_state;
     _ = health_store;
     _ = check;
+}
+
+test "health monitoring retries unknown ownership and resumes without spinning" {
+    const Observer = struct {
+        time: i96 = 0,
+        failures_left: usize = 2,
+        reports: usize = 0,
+        sleeps: usize = 0,
+        stop: bool = false,
+        cancel_on_sleep: bool = false,
+        cancelled: bool = false,
+
+        fn now(self: *@This()) i96 {
+            return self.time;
+        }
+        fn isCancelled(self: *@This()) bool {
+            return self.cancelled;
+        }
+        fn availability(self: *@This()) !Availability {
+            if (self.stop) return .stopped;
+            if (self.failures_left > 0) {
+                self.failures_left -= 1;
+                return error.ReadFailed;
+            }
+            return .ready;
+        }
+        fn reportUnavailable(self: *@This(), _: anyerror) void {
+            self.reports += 1;
+        }
+        fn pause(self: *@This(), duration: u64) bool {
+            self.sleeps += 1;
+            self.time += duration;
+            self.cancelled = self.cancel_on_sleep;
+            return !self.cancelled;
+        }
+    };
+    var observer: Observer = .{};
+    try std.testing.expect(waitForCheck(&observer, 0));
+    try std.testing.expectEqual(@as(usize, 2), observer.reports);
+    try std.testing.expectEqual(@as(usize, 2), observer.sleeps);
+    try std.testing.expectEqual(@as(i96, 2 * std.time.ns_per_s), observer.time);
+
+    observer = .{ .cancel_on_sleep = true };
+    try std.testing.expect(!waitForCheck(&observer, 0));
+    try std.testing.expectEqual(@as(usize, 1), observer.reports);
+    observer = .{ .stop = true };
+    try std.testing.expect(!waitForCheck(&observer, 0));
+    try std.testing.expectEqual(@as(usize, 0), observer.sleeps);
 }

@@ -9,7 +9,12 @@ health starts as `starting`. a successful check changes it to `healthy` and rese
 the failure count. three consecutive failures change it to `unhealthy` by default;
 the image's `Retries` setting can change that threshold. failures during
 `StartPeriod` do not count until the first successful check. health status does
-not itself restart a container.
+not itself restart a container. if the supervisor cannot verify ownership or
+manage the probe process, monitoring reports `unknown` and retries after one
+second. this
+preserves the last completed result and application failure count. a completed
+probe restores the reported application health. failed cleanup requires stop
+or recovery before another probe can run.
 
 the default interval and timeout are both 30 seconds. during the initial grace
 period, checks use `StartInterval`, which defaults to 5 seconds. the next interval
@@ -20,14 +25,24 @@ the default. missing values also select defaults.
 checks pause while the container is frozen. freezing a container cancels any
 check already in progress without counting a failure. stop, restart, and timeout
 terminate the helper and its descendants. each check has its own cgroup with the
-container's configured resource limits; those limits bound the check separately
-from the workload. recovery removes abandoned check cgroups before another run.
+container's configured resource limits. a finite pid budget includes two extra
+slots for the check helpers; unlimited remains unlimited. these limits bound
+the check separately from the workload. recovery removes abandoned check
+cgroups before another run.
 
 the saved health record contains the status, failing streak, last exit code, and
-completion timestamp. timeout records exit code 124; a runner failure records
-125. check output is discarded. results are accepted only while the matching
-container PID and run generation are current, so a delayed result cannot replace
-the status of a newer run.
+completion timestamp. timeout records exit code 124. a helper that fails to
+set up the command reports a nonzero exit code with its diagnostic output.
+the latest completed probe also includes `output` and `output_truncated`.
+`output` is null until a result has been captured.
+output combines stdout and stderr, retains at most 4 kib of valid utf-8 text,
+and replaces invalid byte sequences with the replacement character. output
+beyond the limit is drained and discarded, so a noisy check can still time out
+or be cancelled. timeouts retain captured output; pause and stop cancellation
+do not replace the last completed result. starting a new container attempt or
+disabling checks clears the previous output. results are accepted only while
+the matching container pid and run generation are current, so a delayed result
+cannot replace the status of a newer run.
 
 `container inspect NAME` includes the health record. `ps --json` also includes it.
 use `--no-healthcheck` to disable an image check, or `--health-cmd COMMAND` to set

@@ -70,7 +70,7 @@ pub const command_specs = [_]CommandSpec{
     .{ .name = "stop", .group = .runtime, .usage = "stop <id|name>", .description = "stop a running container", .handler = container_cmds.stop },
     .{ .name = "rm", .group = .runtime, .usage = "rm [-v] <id|name>", .description = "remove a stopped container", .handler = container_cmds.rm },
     .{ .name = "restart", .group = .runtime, .usage = "restart <id|name>", .description = "restart a container", .handler = container_cmds.restart },
-    .{ .name = "exec", .group = .runtime, .usage = "exec [-i] [-t] <id|name> <cmd> [args...]", .description = "run a command in a running container", .handler = container_cmds.exec_cmd },
+    .{ .name = "exec", .group = .runtime, .usage = "exec [options] <id|name> <cmd> [args...]", .description = "run a command in a running container", .handler = container_cmds.exec_cmd },
     .{ .name = "status", .group = .runtime, .usage = "status [--app [name]] [--alerts] [--verbose] [--server h:p]", .description = "show service, app, or alert status", .handler = runtime_cmds.status },
     .{ .name = "audit", .group = .runtime, .usage = "audit [--limit N] [--server h:p] [--json]", .description = "show recent audit log entries", .handler = runtime_cmds.audit },
     .{ .name = "apps", .group = .runtime, .usage = "apps [--server h:p] [--json] [--status s|--failed|--in-progress]", .description = "list app release summaries", .handler = runtime_cmds.apps },

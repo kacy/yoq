@@ -1,6 +1,6 @@
 # local containers
 
-this guide describes the current source tree, reviewed 2026-09-19. published 0.2.1 binaries do not include all of these commands. the [compatibility table](container-compatibility.md) records the remaining gaps.
+this guide describes the current source tree, reviewed 2026-09-20. published 0.2.1 binaries do not include all of these commands. the [compatibility table](container-compatibility.md) records the remaining gaps.
 
 standalone containers use `run`, `create`, and `container` commands. manifest services use `up` and `down`, with app releases and dependency ordering. both use the same runtime, but their supervisors own different lifecycles.
 
@@ -55,6 +55,11 @@ cleanup failures leave a `cleanup_failed` record. retry `stop` or `rm` after cor
 ## process settings and sessions
 
 `--entrypoint` replaces the image entrypoint and clears the inherited command. arguments after the image become its command arguments. `--workdir`/`-w` and `--user`/`-u` override image settings. the working directory must already exist inside the container. exec uses the saved environment, working directory, user, and executable search path.
+`exec -e KEY=value -w /path -u USER[:GROUP] NAME COMMAND` overrides those
+settings for that command only. `-e KEY` copies the invoking environment value,
+or removes the saved variable if it is unset on the host. use an absolute
+working directory that already exists. options precede the container name;
+arguments after the command are passed through unchanged.
 
 use `-e KEY=value` to set a value or `-e KEY` to copy it from the invoking environment. an unset host variable removes an inherited image value. `--env-file PATH` accepts literal `KEY=value` lines and bare `KEY` names with the same host-environment behavior as `-e KEY`. blank lines and comments beginning with `#` are ignored. it accepts windows line endings. it does not expand shell expressions or strip quotes. explicit `-e` values take precedence over env-file values, regardless of flag order.
 
@@ -68,9 +73,13 @@ run options must precede the image or rootfs argument; arguments after it belong
 
 `-i` keeps stdin available; `-t` allocates a terminal. terminal sessions merge stdout and stderr, handle terminal size changes, and restore the caller's terminal on exit. press ctrl-p, then ctrl-q to detach from an attached terminal without stopping the process. these bytes remain ordinary input in a pipe. `attach --no-stdin` observes output without claiming stdin. one client owns stdin; up to eight clients can observe a session.
 
-when the child stops reading stdin, the input owner can fill its queue. signals
-and detach requests from that client then wait behind its queued input. output
-observers remain responsive; use a separate `kill` or `stop` command if needed.
+attachments keep reading output and exit status when the child stops reading
+stdin. with a current supervisor, signals and terminal resizing also continue
+while stdin is queued. the client retains at most one unsent input packet;
+keyboard detach cannot skip unread input behind that packet. use `kill` or
+`stop` from another terminal in that case. once detach keys are read, any
+locally unsent input from that read is discarded. older supervisors retain
+their original stdin backpressure behavior until the container restarts.
 
 without `-t`, foreground output preserves raw bytes and separates stderr from stdout. a foreground command returns its attempt's exit status even if the restart policy starts another attempt in the background. terminal detach returns zero. a slow attachment is disconnected instead of blocking the container's log capture; use `logs` for stored output.
 

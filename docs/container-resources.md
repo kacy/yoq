@@ -28,6 +28,11 @@ for its behavior.
 and `--restart`. omitted settings keep their saved values. memory, pid, and cpu
 quota options accept `unlimited`. cpu weight accepts 1 through 10,000.
 
+the pid limit counts every task in the container, including its init process
+and exec helpers. even a single-process workload needs at least two slots for
+init and the command. leave additional room for exec commands and workload
+children. healthcheck helpers use a separate cgroup and reserve their own slots.
+
 restart policies are `no`, `always`, `on-failure`, and `unless-stopped`.
 `on-failure:N` limits automatic retries after the initial attempt; plain
 `on-failure` clears that limit. automatic removal cannot be combined with a

@@ -1,6 +1,6 @@
 # local container compatibility
 
-reviewed 2026-09-19 against the current source tree. this table describes native yoq behavior, not a claim that arbitrary docker clients or workloads are interchangeable. use the installed binary's help when running a published release.
+reviewed 2026-09-20 against the current source tree. this table describes native yoq behavior, not a claim that arbitrary docker clients or workloads are interchangeable. use the installed binary's help when running a published release.
 
 | area | status | behavior and limits |
 | --- | --- | --- |
@@ -10,13 +10,13 @@ reviewed 2026-09-19 against the current source tree. this table describes native
 | identity | implemented | unique standalone names, separate hostname, rename, explicit duplicate legacy-name errors; full ids or names, without short-id lookup |
 | inspection | implemented | container inspect shows saved config/state/health; ps supports all/quiet/json and status/name/id filters |
 | process overrides | implemented | entrypoint, command, env/env-file, workdir, user, hostname, stop signal/timeout |
-| sessions | implemented | stdin pipes, raw stdout/stderr, terminals, resize, detach, attach; eight clients and one stdin owner; owner controls can wait behind queued stdin |
+| sessions | implemented | stdin pipes, raw stdout/stderr, terminals, resize, detach, attach; eight clients and one stdin owner; signals/resize continue with full stdin; keyboard detach can wait behind unread local input |
 | restart | partial | no/always/on-failure[:N]/unless-stopped, bounded backoff, optional boot recovery; host recovery must be invoked after reboot |
 | volumes | implemented | named/anonymous local volumes, image VOLUME initialization, nocopy, reference tracking, explicit anonymous cleanup |
 | bind mounts | partial | structured mounts default writable; legacy colon mounts retain yoq's read-only default |
 | ports | partial | tcp/udp, ipv4 bind address, stable ephemeral host assignments and equal-length ranges; no ipv6 publishing |
 | named networks | partial | one named ipv4 bridge attachment, scoped names/aliases, references across stop/start; no live connect/disconnect or multiple attachments |
-| health | implemented | image and run overrides, grace/retries/timeouts, status reporting, cancellation and orphan cleanup; output discarded; unhealthy does not trigger restart |
+| health | implemented | image and run overrides, grace/retries/timeouts, status reporting, cancellation and orphan cleanup; latest output capped at 4 kib; monitor faults report unknown; unhealthy does not trigger restart |
 | resources | partial | hard/soft memory, pids, cpu quota/weight, creation-time cpu sets, explicit unlimited settings, live limit updates, pause/unpause; stats is a snapshot with cumulative cpu time |
 | temporary mounts | implemented | configurable /dev/shm and typed tmpfs mounts; settings fixed at creation, contents discarded on stop |
 | filesystem tools | partial | cp and diff work on running and stopped image containers; cp excludes archives, ownership/xattrs, device nodes and hardlink topology; mounted volumes are outside diff |
@@ -49,22 +49,15 @@ old duplicate names are not silently assigned to one owner. list records with `p
 
 run/create options precede the image. only `-it` and `-ti` are supported combined
 session flags; use `-d -it` rather than `-dit`. boolean switches reject assigned
-values such as `--rm=false`. exec accepts session flags and uses saved process
-settings; it does not accept per-exec environment, user, or workdir overrides.
+values such as `--rm=false`. exec accepts session flags and environment, user,
+or workdir overrides. omitted settings use the saved process configuration;
+overrides affect only that exec.
 `rm` requires a stopped container and has no force option.
 
 `container inspect` always emits JSON. custom formatting templates are not
 supported. `volume` commands emit text; `network ls` and `network inspect` offer
 `--json`. CPU sets, shared-memory capacity, and tmpfs mounts cannot be changed with
 `update`; recreate the container to change those settings.
-
-## smaller follow-ups
-
-per-exec environment, user, and working-directory overrides would make debugging
-existing containers easier. bounded healthcheck output would explain failed
-checks directly in inspection results. session controls also need a way to
-bypass queued stdin when a child stops reading; the current ordered socket can
-delay the input owner's signals and detach request.
 
 ## separate follow-up designs
 

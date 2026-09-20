@@ -34,6 +34,7 @@ const CommandMeta = struct {
 /// so that completion logic stays in one place and doesn't leak into the
 /// rest of the codebase.
 const run_flags = &.{ "--name", "--hostname", "--pull", "--entrypoint", "--workdir", "-w", "--user", "-u", "--env", "-e", "--env-file", "--volume", "-v", "--mount", "--publish", "-p", "--network", "--network-alias", "--net", "--no-net", "--memory", "--pids", "--cpus", "--cpu-weight", "--cpuset-cpus", "--shm-size", "--tmpfs", "--detach", "-d", "--interactive", "-i", "--tty", "-t", "-it", "-ti", "--rm", "--restart", "--stop-signal", "--stop-timeout", "--health-cmd", "--health-interval", "--health-timeout", "--health-start-period", "--health-start-interval", "--health-retries", "--no-healthcheck" };
+const exec_flags = &.{ "-i", "-t", "-it", "-ti", "--interactive", "--tty", "-e", "--env", "-u", "--user", "-w", "--workdir" };
 const list_flags = &.{ "-a", "--all", "-q", "--quiet", "-f", "--filter", "--json" };
 const update_flags = &.{ "--memory", "--memory-high", "--cpus", "--cpu-weight", "--pids", "--restart" };
 
@@ -65,7 +66,7 @@ const command_meta = [_]CommandMeta{
         .{ .name = "rename" },
         .{ .name = "wait" },
         .{ .name = "kill", .flags = &.{ "--signal", "-s" } },
-        .{ .name = "exec", .flags = &.{ "-i", "-t", "-it", "-ti", "--interactive", "--tty" } },
+        .{ .name = "exec", .flags = exec_flags },
         .{ .name = "attach", .flags = &.{"--no-stdin"} },
         .{ .name = "logs", .flags = &.{ "--tail", "-f", "--follow" } },
         .{ .name = "cp" },
@@ -84,7 +85,7 @@ const command_meta = [_]CommandMeta{
     .{ .name = "stop" },
     .{ .name = "rm", .flags = &.{ "-v", "--volumes" } },
     .{ .name = "restart" },
-    .{ .name = "exec", .flags = &.{ "-i", "-t", "-it", "-ti", "--interactive", "--tty" } },
+    .{ .name = "exec", .flags = exec_flags },
     .{ .name = "status", .flags = &.{ "--app", "--alerts", "--verbose", "-v", "--server" } },
     .{ .name = "apps", .flags = &.{ "--server", "--json", "--status", "--failed", "--in-progress" } },
     .{ .name = "metrics", .flags = &.{ "--server", "--pairs" } },
