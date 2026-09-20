@@ -657,6 +657,36 @@ test "healthchecks reserve helper slots outside small container pid budgets" {
     }
 }
 
+test "health diagnostics retain bounded output from failed and timed out probes" {
+    var fixture = try ImageFixture.init();
+    defer fixture.deinit();
+    const cases = [_]struct { command: []const u8, code: u8, truncated: bool }{
+        .{ .command = "printf 'probe-out\\377'; printf 'probe-err' >&2; exit 7", .code = 7, .truncated = false },
+        .{ .command = "while :; do printf 'continuous-health-output-0123456789\\n'; done", .code = 124, .truncated = true },
+    };
+    for (cases) |case| {
+        const name = "health-output";
+        defer cleanupContainer(&fixture.env, name);
+        try expectCommand(&fixture.env, &.{ "run", "--no-net", "-d", "--name", name, "--health-cmd", case.command, "--health-interval", "100ms", "--health-timeout", "250ms", "--health-retries", "1", ImageFixture.tag, "sleep", "60" });
+        try waitHealth(&fixture.env, name, "unhealthy", case.code);
+        var inspection = try fixture.env.runYoq(&.{ "container", "inspect", name });
+        defer inspection.deinit();
+        try inspection.expectExitCode(0);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, inspection.stdout, .{});
+        defer parsed.deinit();
+        const health = parsed.value.object.get("health").?.object;
+        const output = health.get("output").?.string;
+        try std.testing.expect(output.len > 0 and output.len <= 4096);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(output));
+        try std.testing.expectEqual(case.truncated, health.get("output_truncated").?.bool);
+        if (!case.truncated) {
+            try helpers.expectContains(output, "probe-out");
+            try helpers.expectContains(output, "probe-err");
+            try helpers.expectContains(output, "\xef\xbf\xbd");
+        }
+    }
+}
+
 test "local parity health transitions and stop cleans up an active timed check" {
     var fixture = try ImageFixture.init();
     defer fixture.deinit();

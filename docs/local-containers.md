@@ -1,6 +1,6 @@
 # local containers
 
-this guide describes the current source tree, reviewed 2026-09-19. published 0.2.1 binaries do not include all of these commands. the [compatibility table](container-compatibility.md) records the remaining gaps.
+this guide describes the current source tree, reviewed 2026-09-20. published 0.2.1 binaries do not include all of these commands. the [compatibility table](container-compatibility.md) records the remaining gaps.
 
 standalone containers use `run`, `create`, and `container` commands. manifest services use `up` and `down`, with app releases and dependency ordering. both use the same runtime, but their supervisors own different lifecycles.
 
