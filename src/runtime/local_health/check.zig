@@ -14,8 +14,9 @@ pub const Group = struct {
         try std.Io.Dir.cwd().createDir(std.Options.debug_io, path, .default_dir);
         errdefer std.Io.Dir.cwd().deleteDir(std.Options.debug_io, path) catch {};
         // the check is a sibling so ordinary container teardown does not race
-        // deletion of its cgroup. apply the container's configured bounds here.
-        try group.cgroup.setLimits(limits);
+        // deletion of its cgroup. reserve the helper processes separately from
+        // the command's configured process budget.
+        try group.cgroup.setLimits(checkLimits(limits));
         return group;
     }
 
@@ -23,6 +24,14 @@ pub const Group = struct {
         try self.cgroup.destroy();
     }
 };
+
+fn checkLimits(configured: cgroups.ResourceLimits) cgroups.ResourceLimits {
+    var limits = configured;
+    // __healthcheck relays io while the namespace helper waits for the command.
+    // both live beside the command in this group and each needs one pid slot.
+    if (configured.pids_max) |count| limits.pids_max = count +| 2;
+    return limits;
+}
 
 /// call only with the container owner lock held and no active monitor. recovery
 /// removes groups left by a supervisor that could not run its normal cleanup.
@@ -222,4 +231,13 @@ test "local health polling failures clean up and cleanup failures propagate" {
     runner = .{};
     try std.testing.expectError(error.CleanupFailed, awaitCheck(&runner, std.time.ns_per_s));
     try std.testing.expect(runner.cleanups > 0);
+}
+
+test "healthcheck pid limits reserve helpers without exhausting small command budgets" {
+    try std.testing.expectEqual(@as(?u32, 3), checkLimits(.{ .pids_max = 1 }).pids_max);
+    try std.testing.expectEqual(@as(?u32, 4), checkLimits(.{ .pids_max = 2 }).pids_max);
+    try std.testing.expectEqual(@as(?u32, 4098), checkLimits(.{ .pids_max = 4096 }).pids_max);
+    try std.testing.expectEqual(@as(?u32, std.math.maxInt(u32)), checkLimits(.{ .pids_max = std.math.maxInt(u32) }).pids_max);
+    try std.testing.expect(checkLimits(cgroups.ResourceLimits.unlimited).pids_max == null);
+    try std.testing.expectEqual(@as(?u64, 16 * 1024 * 1024), checkLimits(.{ .pids_max = 1, .memory_max = 16 * 1024 * 1024 }).memory_max);
 }
