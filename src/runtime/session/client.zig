@@ -121,8 +121,11 @@ fn runOutcome(fd: posix.fd_t) !Outcome {
                 const result = detach.consume(input[0..count], &outgoing.bytes);
                 outgoing.len = result.count;
                 if (result.detached) {
-                    // detach discards locally unsent input. closing the socket
-                    // also releases ownership if its send buffer is full.
+                    // preserve the prefix when it can be sent immediately.
+                    // detach discards any remaining local bytes rather than
+                    // waiting for credit or room in the socket send buffer.
+                    outgoing.flush(fd) catch {};
+                    // closing the socket also releases ownership if full.
                     protocol.send(fd, .detach, "", true) catch {};
                     return .detached;
                 }
@@ -264,7 +267,10 @@ test "session client restores terminal on remote exit and detach" {
         const raw = try posix.tcgetattr(io.input);
         try std.testing.expect(!raw.lflag.ICANON and !raw.lflag.ECHO);
         if (detach) {
-            try foreground.writeAll(io.input, "\x10\x11");
+            try foreground.writeAll(io.input, "x\x10\x11");
+            try protocol.receive(sockets[0], &packet, false);
+            try std.testing.expectEqual(protocol.Kind.stdin, try packet.kind());
+            try std.testing.expectEqualStrings("x", packet.payload());
             try protocol.receive(sockets[0], &packet, false);
             try std.testing.expectEqual(protocol.Kind.detach, try packet.kind());
         } else try protocol.send(sockets[0], .exit, &.{23}, false);
