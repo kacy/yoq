@@ -1,4 +1,28 @@
 const std = @import("std");
+const cli = @import("../../../lib/cli.zig");
+
+// explicit values are copied; bare names use the host value or request an unset.
+pub fn append(alloc: std.mem.Allocator, env: *std.ArrayList([]const u8), value: []const u8) error{ InvalidArgument, OutOfMemory }!void {
+    const eq = std.mem.indexOfScalar(u8, value, '=');
+    const name = if (eq) |i| value[0..i] else value;
+    if (name.len == 0 or std.mem.indexOfAny(u8, name, " \t\r\n") != null or std.mem.indexOfScalar(u8, value, 0) != null) {
+        cli.writeErr("invalid environment variable name\n", .{});
+        return error.InvalidArgument;
+    }
+    const owned = if (eq != null)
+        try alloc.dupe(u8, value)
+    else blk: {
+        const key = try alloc.dupeZ(u8, name);
+        defer alloc.free(key);
+        if (std.c.getenv(key)) |host_value| {
+            break :blk try std.fmt.allocPrint(alloc, "{s}={s}", .{ name, std.mem.span(host_value) });
+        }
+        // keep an unset name so it also removes an inherited value.
+        break :blk try alloc.dupe(u8, name);
+    };
+    errdefer alloc.free(owned);
+    try env.append(alloc, owned);
+}
 
 /// merge inherited values and overrides in order. the last value for each name
 /// wins; a bare name removes that variable. the result owns all its strings.

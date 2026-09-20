@@ -37,34 +37,12 @@ fn optionValue(args: anytype, option: []const u8, inline_value: ?[]const u8) Con
     };
 }
 
-fn appendEnv(alloc: std.mem.Allocator, env: *std.ArrayList([]const u8), value: []const u8) ContainerError!void {
-    const eq = std.mem.indexOfScalar(u8, value, '=');
-    const name = if (eq) |i| value[0..i] else value;
-    if (name.len == 0 or std.mem.indexOfAny(u8, name, " \t\r\n") != null or std.mem.indexOfScalar(u8, value, 0) != null) {
-        writeErr("invalid environment variable name\n", .{});
-        return ContainerError.InvalidArgument;
-    }
-    const owned = if (eq != null)
-        alloc.dupe(u8, value) catch return ContainerError.OutOfMemory
-    else blk: {
-        const key = alloc.dupeZ(u8, name) catch return ContainerError.OutOfMemory;
-        defer alloc.free(key);
-        if (std.c.getenv(key)) |host_value| {
-            break :blk std.fmt.allocPrint(alloc, "{s}={s}", .{ name, std.mem.span(host_value) }) catch return ContainerError.OutOfMemory;
-        }
-        // keep an unset name so it also removes a value inherited from the image.
-        break :blk alloc.dupe(u8, name) catch return ContainerError.OutOfMemory;
-    };
-    errdefer alloc.free(owned);
-    env.append(alloc, owned) catch return ContainerError.OutOfMemory;
-}
-
 fn appendEnvFile(alloc: std.mem.Allocator, env: *std.ArrayList([]const u8), contents: []const u8) ContainerError!void {
     var lines = std.mem.splitScalar(u8, contents, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trimStart(u8, std.mem.trimEnd(u8, raw, "\r"), " \t");
         if (line.len == 0 or line[0] == '#') continue;
-        try appendEnv(alloc, env, line);
+        try environment.append(alloc, env, line);
     }
 }
 
@@ -167,7 +145,7 @@ fn parseRunFlags(args: anytype, alloc: std.mem.Allocator, io: std.Io) ContainerE
             if (flags.port_maps.items.len + mappings.len > 256) return ContainerError.InvalidArgument;
             flags.port_maps.appendSlice(alloc, mappings) catch return ContainerError.OutOfMemory;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--env")) {
-            try appendEnv(alloc, &flags.env, try optionValue(args, arg, inline_value));
+            try environment.append(alloc, &flags.env, try optionValue(args, arg, inline_value));
         } else if (std.mem.eql(u8, arg, "--env-file")) {
             const path = try optionValue(args, arg, inline_value);
             const contents = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(1024 * 1024)) catch |err| {
@@ -845,7 +823,7 @@ test "environment passthrough copies the current host value" {
         for (env.items) |entry| alloc.free(entry);
         env.deinit(alloc);
     }
-    try appendEnv(alloc, &env, "PATH");
+    try environment.append(alloc, &env, "PATH");
     try std.testing.expect(std.mem.startsWith(u8, env.items[0], "PATH="));
     try std.testing.expectEqualStrings(std.mem.span(value), env.items[0][5..]);
 }
