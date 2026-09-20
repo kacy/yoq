@@ -60,22 +60,21 @@ pub const Outcome = union(enum) { exited: u8, timed_out, cancelled };
 /// the injected runner owns the helper and all check descendants. every return
 /// path calls cleanup before returning the result to the monitor.
 pub fn awaitCheck(runner: anytype, timeout_ns: u64) !Outcome {
-    errdefer runner.cleanup() catch {};
+    const outcome = pollCheck(runner, timeout_ns) catch |err| {
+        try runner.cleanup();
+        return err;
+    };
+    try runner.cleanup();
+    return outcome;
+}
+
+fn pollCheck(runner: anytype, timeout_ns: u64) !Outcome {
     const deadline = runner.now() + @as(i96, timeout_ns);
     while (true) {
-        if (try runner.cancelled()) {
-            try runner.cleanup();
-            return .cancelled;
-        }
-        if (try runner.poll()) |code| {
-            try runner.cleanup();
-            return .{ .exited = code };
-        }
+        if (try runner.cancelled()) return .cancelled;
+        if (try runner.poll()) |code| return .{ .exited = code };
         const remaining = @max(0, deadline - runner.now());
-        if (remaining == 0) {
-            try runner.cleanup();
-            return .timed_out;
-        }
+        if (remaining == 0) return .timed_out;
         const delay: u64 = @intCast(@min(remaining, 50 * std.time.ns_per_ms));
         runner.sleep(delay);
     }
@@ -115,8 +114,6 @@ pub fn run(monitor: anytype, timeout_ns: u64) !Outcome {
         owner: @TypeOf(monitor),
         helper: *std.process.Child,
         group: *Group,
-        cleaned: bool = false,
-        group_destroyed: bool = false,
 
         fn cancelled(self: *@This()) !bool {
             if (self.owner.cancelled.load(.acquire)) return true;
@@ -144,33 +141,31 @@ pub fn run(monitor: anytype, timeout_ns: u64) !Outcome {
             _ = runtime_wait.sleep(std.Io.Duration.fromNanoseconds(@intCast(delay)), "container healthcheck wait");
         }
         fn cleanup(self: *@This()) !void {
-            if (self.cleaned) return;
             if (self.helper.id) |current| process.kill(current) catch {};
             // cgroup.kill also reaches children that change session or detach.
-            if (!self.group_destroyed) {
-                try self.group.cleanup();
-                self.group_destroyed = true;
-            }
+            // retain a failed group for stop/recovery instead of repeating its
+            // full destruction deadline while unwinding this check.
+            self.group.cleanup() catch |err| {
+                self.owner.failed_group = self.group.*;
+                return err;
+            };
             if (self.helper.id) |current| {
                 _ = try process.waitForExit(current);
                 self.helper.id = null;
             }
-            self.cleaned = true;
         }
     };
     var runner: Runner = .{ .owner = monitor, .helper = &child, .group = &group };
-    defer group_owned = !runner.group_destroyed;
-    const outcome = try awaitCheck(&runner, timeout_ns);
-    group_owned = !runner.group_destroyed;
-    return outcome;
+    // awaitCheck now owns the single cleanup attempt, including error returns.
+    group_owned = false;
+    return awaitCheck(&runner, timeout_ns);
 }
 
 test "local health timeout and cancellation clean up every check" {
     const Fake = struct {
         remaining: usize = 3,
         cancel: bool = false,
-        cleaned: bool = false,
-        group_destroyed: bool = false,
+        cleanups: usize = 0,
         time: i96 = 0,
         fn now(self: *@This()) i96 {
             return self.time;
@@ -186,18 +181,18 @@ test "local health timeout and cancellation clean up every check" {
             self.time += delay;
         }
         fn cleanup(self: *@This()) !void {
-            self.cleaned = true;
+            self.cleanups += 1;
         }
     };
     var runner: Fake = .{};
     try std.testing.expectEqual(Outcome.timed_out, try awaitCheck(&runner, std.time.ns_per_ms));
-    try std.testing.expect(runner.cleaned);
+    try std.testing.expectEqual(@as(usize, 1), runner.cleanups);
     runner = .{ .cancel = true };
     try std.testing.expectEqual(Outcome.cancelled, try awaitCheck(&runner, std.time.ns_per_s));
-    try std.testing.expect(runner.cleaned);
+    try std.testing.expectEqual(@as(usize, 1), runner.cleanups);
     runner = .{ .remaining = 0 };
     try std.testing.expectEqual(Outcome{ .exited = 0 }, try awaitCheck(&runner, std.time.ns_per_s));
-    try std.testing.expect(runner.cleaned);
+    try std.testing.expectEqual(@as(usize, 1), runner.cleanups);
 }
 
 test "local health polling failures clean up and cleanup failures propagate" {
@@ -230,7 +225,7 @@ test "local health polling failures clean up and cleanup failures propagate" {
     try std.testing.expectEqual(@as(usize, 1), runner.cleanups);
     runner = .{};
     try std.testing.expectError(error.CleanupFailed, awaitCheck(&runner, std.time.ns_per_s));
-    try std.testing.expect(runner.cleanups > 0);
+    try std.testing.expectEqual(@as(usize, 1), runner.cleanups);
 }
 
 test "healthcheck pid limits reserve helpers without exhausting small command budgets" {
