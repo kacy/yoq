@@ -19,7 +19,7 @@ yoq rm [-v] <id|name>                        remove a stopped container
 yoq wait <id|name>                           wait for a stopped record and print its exit code
 yoq kill [--signal SIGNAL] <id|name>          send a signal
 yoq logs <id|name> [--tail N] [-f]            read or follow logs
-yoq exec [-i] [-t] <id|name> <cmd> [args...]  run with saved process settings
+yoq exec [options] <id|name> <cmd> [args...]  run with optional process overrides
 yoq attach [--no-stdin] <id|name>             attach to the running session
 yoq cp <source> <destination>                one path uses NAME:/path
 yoq diff <id|name>                           list writable-layer changes
@@ -40,6 +40,11 @@ terminal. switches such as `--rm` reject assigned boolean values. CPU affinity,
 `--shm-size`, and `--tmpfs` are described in [temporary mounts](container-temporary-mounts.md).
 `--restart on-failure:N` limits automatic retries; `update --restart` also accepts
 that form. see [resource controls](container-resources.md) for live update options.
+
+exec accepts `-i`, `-t`, `-e`/`--env`, `-u`/`--user`, and `-w`/`--workdir`.
+process overrides apply only to that invocation; omitted settings use the saved
+container configuration. options precede the container name. value options
+also accept `--option=value`.
 
 ```text
 yoq network create [--subnet CIDR] <name>
