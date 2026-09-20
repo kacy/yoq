@@ -10,6 +10,7 @@ const net_setup = @import("../../../network/setup.zig");
 const oci = @import("../../../image/oci.zig");
 const image_cmds = @import("../../../image/commands.zig");
 const common = @import("common.zig");
+const environment = @import("environment.zig");
 const state_support = @import("state_support.zig");
 const supervisor_runtime = @import("supervisor_runtime.zig");
 
@@ -299,34 +300,6 @@ fn freeOwnedMounts(alloc: std.mem.Allocator, mounts: []const container.BindMount
     alloc.free(mounts);
 }
 
-fn mergeEnv(alloc: std.mem.Allocator, base_env: []const []const u8, override_env: []const []const u8) ContainerError![][]const u8 {
-    var merged: std.ArrayList([]const u8) = .empty;
-    defer merged.deinit(alloc);
-
-    for (base_env) |value| {
-        merged.append(alloc, value) catch return ContainerError.OutOfMemory;
-    }
-
-    for (override_env) |value| {
-        const eq = std.mem.indexOfScalar(u8, value, '=');
-        const key = if (eq) |i| value[0..i] else value;
-        var replaced = false;
-        for (merged.items, 0..) |*existing, i| {
-            const existing_eq = std.mem.indexOfScalar(u8, existing.*, '=') orelse continue;
-            if (std.mem.eql(u8, existing.*[0..existing_eq], key)) {
-                if (eq != null) existing.* = value else _ = merged.orderedRemove(i);
-                replaced = true;
-                break;
-            }
-        }
-        if (!replaced and eq != null) {
-            merged.append(alloc, value) catch return ContainerError.OutOfMemory;
-        }
-    }
-
-    return dupStringList(alloc, merged.items);
-}
-
 fn buildMounts(alloc: std.mem.Allocator, volume_specs: []const cli.VolumeMountSpec, id: ?[]const u8) ContainerError![]container.BindMount {
     if (volume_specs.len == 0) {
         return alloc.alloc(container.BindMount, 0) catch return ContainerError.OutOfMemory;
@@ -424,7 +397,7 @@ fn buildSavedRunConfig(
     const image_reference = if (img.manifest_digest.len > 0) try alloc.dupe(u8, img.manifest_digest) else null;
     errdefer if (image_reference) |value| alloc.free(value);
 
-    const merged_env = mergeEnv(alloc, img.image_env, flags.env.items) catch |e| return e;
+    const merged_env = environment.merge(alloc, img.image_env, flags.env.items) catch |e| return e;
     errdefer freeOwnedStringList(alloc, merged_env);
 
     const rootfs = alloc.dupe(u8, img.rootfs) catch return ContainerError.OutOfMemory;
@@ -804,12 +777,12 @@ test "env files preserve literal values and later overrides remove unset names" 
         env.deinit(alloc);
     }
     try appendEnvFile(alloc, &env, "# comment\r\n\n A=one\r\nB=literal # value\nA=two\n");
-    const merged = try mergeEnv(alloc, &.{ "A=image", "C=keep" }, env.items);
+    const merged = try environment.merge(alloc, &.{ "A=image", "C=keep" }, env.items);
     defer freeOwnedStringList(alloc, merged);
     try std.testing.expectEqualStrings("A=two", merged[0]);
     try std.testing.expectEqualStrings("C=keep", merged[1]);
     try std.testing.expectEqualStrings("B=literal # value", merged[2]);
-    const removed = try mergeEnv(alloc, merged, &.{ "A", "B=cli" });
+    const removed = try environment.merge(alloc, merged, &.{ "A", "B=cli" });
     defer freeOwnedStringList(alloc, removed);
     try std.testing.expectEqual(@as(usize, 2), removed.len);
     try std.testing.expectEqualStrings("C=keep", removed[0]);
@@ -826,7 +799,7 @@ test "run environment file values precede explicit environment options" {
     var args: TestArgs = .{ .values = &.{ "-e", "VALUE=cli", "--env-file", path, "image" } };
     var flags = try parseRunFlags(&args, alloc, std.testing.io);
     defer flags.deinit(alloc);
-    const env = try mergeEnv(alloc, &.{"VALUE=image"}, flags.env.items);
+    const env = try environment.merge(alloc, &.{"VALUE=image"}, flags.env.items);
     defer freeOwnedStringList(alloc, env);
     try std.testing.expectEqualStrings("VALUE=cli", env[0]);
     try std.testing.expectEqualStrings("SECOND=two", env[1]);
