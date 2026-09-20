@@ -109,14 +109,14 @@ pub const Monitor = struct {
         while (true) {
             const interval = if (self.monitor_failed) ownership_retry_ns else self.state.interval(self.settings, nowNs());
             if (!waitForCheck(self, interval)) return;
-            const outcome = check.run(self, self.settings.timeout_ns) catch |err| {
+            const result = check.run(self, self.settings.timeout_ns) catch |err| {
                 self.reportUnavailable(err);
                 // retrying a probe could overlap descendants whose cleanup
                 // failed. stop retains the group and retries its teardown.
                 if (self.failed_group != null) return;
                 continue;
             };
-            const code: u8 = switch (outcome) {
+            const code: u8 = switch (result.outcome) {
                 .cancelled => continue,
                 .timed_out => 124,
                 .exited => |code| code,

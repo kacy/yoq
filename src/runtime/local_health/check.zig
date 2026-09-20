@@ -1,7 +1,7 @@
 const std = @import("std");
 const cgroups = @import("../cgroups.zig");
 const process = @import("../process.zig");
-const runtime_wait = @import("../../lib/runtime_wait.zig");
+const output = @import("output.zig");
 
 pub const Group = struct {
     cgroup: cgroups.Cgroup,
@@ -56,6 +56,7 @@ pub fn cleanupOrphans(id: []const u8) !void {
 }
 
 pub const Outcome = union(enum) { exited: u8, timed_out, cancelled };
+pub const Result = struct { outcome: Outcome, output: output.Output };
 
 /// the injected runner owns the helper and all check descendants. every return
 /// path calls cleanup before returning the result to the monitor.
@@ -80,7 +81,7 @@ fn pollCheck(runner: anytype, timeout_ns: u64) !Outcome {
     }
 }
 
-pub fn run(monitor: anytype, timeout_ns: u64) !Outcome {
+pub fn run(monitor: anytype, timeout_ns: u64) !Result {
     var helper_io = @import("../helper_io.zig").init();
     defer helper_io.deinit();
     const io = helper_io.io();
@@ -100,10 +101,12 @@ pub fn run(monitor: anytype, timeout_ns: u64) !Outcome {
     var child = try std.process.spawn(io, .{
         .argv = &.{ exe_buffer[0..exe_len], "__healthcheck", monitor.id, pid, generation },
         .stdin = .pipe,
-        .stdout = .ignore,
-        .stderr = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
     });
     defer child.kill(io);
+    var capture = try output.Capture.take(&child);
+    defer capture.deinit();
     const helper_pid = child.id.?;
     try group.cgroup.addProcess(helper_pid);
     // no check process can fork before its helper has joined the owned group.
@@ -114,12 +117,14 @@ pub fn run(monitor: anytype, timeout_ns: u64) !Outcome {
         owner: @TypeOf(monitor),
         helper: *std.process.Child,
         group: *Group,
+        capture: *output.Capture,
 
         fn cancelled(self: *@This()) !bool {
             if (self.owner.cancelled.load(.acquire)) return true;
             return try self.owner.availability() != .ready;
         }
         fn poll(self: *@This()) !?u8 {
+            try self.capture.drain();
             const current = self.helper.id orelse return null;
             const result = try process.wait(current, true);
             return switch (result.status) {
@@ -137,8 +142,8 @@ pub fn run(monitor: anytype, timeout_ns: u64) !Outcome {
         fn now(_: *@This()) i96 {
             return std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
         }
-        fn sleep(_: *@This(), delay: u64) void {
-            _ = runtime_wait.sleep(std.Io.Duration.fromNanoseconds(@intCast(delay)), "container healthcheck wait");
+        fn sleep(self: *@This(), delay: u64) void {
+            self.capture.wait(delay);
         }
         fn cleanup(self: *@This()) !void {
             if (self.helper.id) |current| process.kill(current) catch {};
@@ -155,10 +160,11 @@ pub fn run(monitor: anytype, timeout_ns: u64) !Outcome {
             }
         }
     };
-    var runner: Runner = .{ .owner = monitor, .helper = &child, .group = &group };
+    var runner: Runner = .{ .owner = monitor, .helper = &child, .group = &group, .capture = &capture };
     // awaitCheck now owns the single cleanup attempt, including error returns.
     group_owned = false;
-    return awaitCheck(&runner, timeout_ns);
+    const outcome = try awaitCheck(&runner, timeout_ns);
+    return .{ .outcome = outcome, .output = try capture.finish() };
 }
 
 test "local health timeout and cancellation clean up every check" {
@@ -235,4 +241,8 @@ test "healthcheck pid limits reserve helpers without exhausting small command bu
     try std.testing.expectEqual(@as(?u32, std.math.maxInt(u32)), checkLimits(.{ .pids_max = std.math.maxInt(u32) }).pids_max);
     try std.testing.expect(checkLimits(cgroups.ResourceLimits.unlimited).pids_max == null);
     try std.testing.expectEqual(@as(?u64, 16 * 1024 * 1024), checkLimits(.{ .pids_max = 1, .memory_max = 16 * 1024 * 1024 }).memory_max);
+}
+
+test {
+    _ = output;
 }
