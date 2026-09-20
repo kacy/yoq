@@ -179,9 +179,13 @@ pub fn helper(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const pid = try std.fmt.parseInt(i32, args.next() orelse return error.InvalidArgument, 10);
     const generation = try std.fmt.parseInt(i64, args.next() orelse return error.InvalidArgument, 10);
     if (args.next() != null or pid <= 0) return error.InvalidArgument;
+    // keep the gate read on this thread. a pooled stdin read leaves worker
+    // tasks in the check's cgroup and consumes the command's pid allowance.
+    var helper_io = @import("helper_io.zig").init();
+    defer helper_io.deinit();
     var gate: [1]u8 = undefined;
     var stdin_buffer: [16]u8 = undefined;
-    var stdin = std.Io.File.stdin().readerStreaming(ctx.io, &stdin_buffer);
+    var stdin = std.Io.File.stdin().readerStreaming(helper_io.io(), &stdin_buffer);
     try stdin.interface.readSliceAll(&gate);
     if (gate[0] != '1' or !try health_store.current(id, pid, generation)) return error.CheckCancelled;
     const group = try cgroups.Cgroup.open(id);
