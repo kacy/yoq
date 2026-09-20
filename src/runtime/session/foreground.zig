@@ -67,7 +67,7 @@ pub fn run(channels: *process_io.ProcessIo, pid: posix.pid_t) !u8 {
         for (polls[1..3], 0..) |poll, stream| {
             if (poll.fd < 0 or poll.revents == 0) continue;
             const count = platform.read(poll.fd, &buffer) catch |err| switch (err) {
-                error.WouldBlock => continue,
+                error.WouldBlock, error.Interrupted => continue,
                 else => 0, // a closed pty returns EIO.
             };
             if (count == 0) {
@@ -119,7 +119,10 @@ const PendingInput = struct {
     }
 
     fn readStdin(self: *PendingInput, tty: bool) !void {
-        const count = try platform.read(posix.STDIN_FILENO, self.bytes[self.len..][0..protocol.max_payload]);
+        const count = platform.read(posix.STDIN_FILENO, self.bytes[self.len..][0..protocol.max_payload]) catch |err| {
+            if (err == error.Interrupted or err == error.WouldBlock) return;
+            return err;
+        };
         self.len += count;
         if (count != 0) return;
 
