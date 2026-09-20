@@ -123,10 +123,7 @@ pub fn exec_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !voi
         exec_args.append(alloc, arg) catch return ContainerError.OutOfMemory;
     }
 
-    const saved = run_state.loadConfig(alloc, record.id) catch |err| blk: {
-        // app and assignment owners do not write standalone run configuration.
-        // preserve their existing exec defaults when no saved settings exist.
-        if (err == error.NotFound) break :blk null;
+    const saved = loadExecConfig(alloc, &record) catch |err| {
         writeErr("failed to load process configuration for {s}: {}\n", .{ id, err });
         return ContainerError.StoreError;
     };
@@ -148,6 +145,16 @@ pub fn exec_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !voi
     };
 
     std.process.exit(exit_code);
+}
+
+fn loadExecConfig(alloc: std.mem.Allocator, record: *const store.ContainerRecord) !?run_state.SavedRunConfig {
+    return run_state.loadConfig(alloc, record.id) catch |err| {
+        if (err != error.NotFound) return err;
+        // managed and legacy owners may have no saved settings. a known
+        // standalone container must retain its configured user and environment.
+        if (try @import("../../container_lifecycle.zig").isStandalone(alloc, record)) return err;
+        return null;
+    };
 }
 
 pub fn log(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
@@ -205,4 +212,31 @@ pub fn attach_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !v
         return ContainerError.ProcessNotFound;
     };
     std.process.exit(code);
+}
+
+test "exec rejects missing standalone settings and preserves managed defaults" {
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    const alloc = std.testing.allocator;
+    const control = @import("../../local_control.zig");
+    var id: [12]u8 = undefined;
+    try @import("../../container.zig").generateId(&id);
+    var record: store.ContainerRecord = .{
+        .id = &id,
+        .rootfs = "/fixture",
+        .command = "serve",
+        .hostname = "web",
+        .status = "running",
+        .pid = 42,
+        .exit_code = null,
+        .created_at = 0,
+    };
+
+    try std.testing.expect((try loadExecConfig(alloc, &record)) == null);
+    try control.register(&id, null);
+    try std.testing.expectError(error.NotFound, loadExecConfig(alloc, &record));
+
+    // an app owner remains authoritative over older standalone registration.
+    record.app_name = "managed-app";
+    try std.testing.expect((try loadExecConfig(alloc, &record)) == null);
 }

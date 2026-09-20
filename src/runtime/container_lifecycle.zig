@@ -15,7 +15,7 @@ const supervisor = @import("cli/container/supervisor_runtime.zig");
 pub const StopWait = enum { brief, complete };
 pub const StopResult = enum { stopped, stopping };
 
-fn isStandalone(alloc: std.mem.Allocator, record: *const store.ContainerRecord) !bool {
+pub fn isStandalone(alloc: std.mem.Allocator, record: *const store.ContainerRecord) !bool {
     if (record.app_name != null) return false;
     if (try control.currentGeneration(record.id) != null) return true;
     const config = run_state.loadConfig(alloc, record.id) catch |err| switch (err) {
