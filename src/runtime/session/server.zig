@@ -18,7 +18,12 @@ pub fn address(id: []const u8, path_buf: *[paths.max_path]u8) !struct { addr: po
     return .{ .addr = addr, .len = @intCast(@offsetOf(posix.sockaddr.un, "path") + path.len + 1), .path = path };
 }
 
-const Client = struct { fd: posix.fd_t = -1, ready: bool = false };
+const Client = struct {
+    fd: posix.fd_t = -1,
+    ready: bool = false,
+    input_flow: bool = false,
+    input_credit: usize = 0,
+};
 const max_clients = 8;
 const history_count = 16;
 
@@ -37,7 +42,7 @@ pub const Server = struct {
     pid: ?posix.pid_t = null,
     forking: bool = false,
     terminal_size: terminal.Size = .{},
-    input_buffer: [64 * 1024]u8 = undefined,
+    input_buffer: [protocol.input_capacity]u8 = undefined,
     input_len: usize = 0,
     eof_pending: bool = false,
     history: [history_count]protocol.Packet = undefined,
@@ -159,6 +164,8 @@ pub const Server = struct {
         if (self.input_client == client.fd) self.input_client = null;
         channels.close(&client.fd);
         client.ready = false;
+        client.input_flow = false;
+        client.input_credit = 0;
     }
 
     fn hello(self: *Server, client: *Client, data: []const u8) !void {
@@ -169,7 +176,8 @@ pub const Server = struct {
             return error.InputBusy;
         }
         if (owns_input) self.input_client = client.fd;
-        try protocol.send(client.fd, .ready, &.{ @intFromBool(self.tty), @intFromBool(owns_input) }, true);
+        const input_flags: u8 = if (owns_input) protocol.ready_input | protocol.ready_flow else 0;
+        try protocol.send(client.fd, .ready, &.{ @intFromBool(self.tty), input_flags }, true);
         const oldest = (self.history_next + history_count - self.history_len) % history_count;
         for (0..self.history_len) |i| {
             const entry = &self.history[(oldest + i) % history_count];
@@ -195,6 +203,11 @@ pub const Server = struct {
         if (!client.ready) return error.InvalidPacket;
         switch (kind) {
             .detach => self.disconnect(client),
+            .input_flow => {
+                if (data.len != 0 or self.input_client != client.fd or client.input_flow) return error.InvalidPacket;
+                client.input_flow = true;
+                self.grantInput(client);
+            },
             .signal => {
                 if (data.len != 1 or data[0] == 0 or data[0] > 64) return error.InvalidPacket;
                 if (self.pid) |pid| try process.sendSignal(pid, data[0]);
@@ -203,6 +216,10 @@ pub const Server = struct {
                 if (self.input_client != client.fd or self.eof_pending) return error.InputNotOwned;
                 if (self.pid != null and self.input_fd < 0) return error.InputClosed;
                 if (data.len > self.input_buffer.len - self.input_len) return error.InputOverflow;
+                if (client.input_flow) {
+                    if (data.len > client.input_credit) return error.InputOverflow;
+                    client.input_credit -= data.len;
+                }
                 @memcpy(self.input_buffer[self.input_len..][0..data.len], data);
                 self.input_len += data.len;
             },
@@ -219,6 +236,23 @@ pub const Server = struct {
             },
             else => return error.InvalidPacket,
         }
+    }
+
+    fn grantInput(self: *Server, client: *Client) void {
+        if (!client.input_flow or self.input_client != client.fd or self.eof_pending) return;
+        if (self.pid != null and self.input_fd < 0) return;
+        // retained input from an earlier owner and credits already sent both
+        // reserve space. a reconnect must not grant the same space twice.
+        const available = self.input_buffer.len - self.input_len;
+        const credit = available - client.input_credit;
+        if (credit == 0) return;
+        var bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &bytes, @intCast(credit), .little);
+        protocol.send(client.fd, .input_credit, &bytes, true) catch |err| {
+            if (err != error.WouldBlock and err != error.Interrupted) self.disconnect(client);
+            return;
+        };
+        client.input_credit += credit;
     }
 
     fn flushInput(self: *Server) void {
@@ -248,6 +282,15 @@ pub const Server = struct {
         };
     }
 
+    fn canReceive(self: *Server, client: Client, input_full: bool) bool {
+        if (!input_full or self.input_client != client.fd or client.input_flow) return true;
+        // a replacement owner may negotiate while retained stdin fills the
+        // queue. peek without consuming a legacy stdin packet we cannot fit.
+        var kind: [1]u8 = undefined;
+        const count = platform.recv(client.fd, &kind, posix.MSG.PEEK | posix.MSG.DONTWAIT) catch return false;
+        return count == 0 or kind[0] != @intFromEnum(protocol.Kind.stdin);
+    }
+
     fn run(self: *Server) void {
         var blocked = posix.sigemptyset();
         posix.sigaddset(&blocked, .PIPE);
@@ -256,15 +299,17 @@ pub const Server = struct {
             var polls: [max_clients + 1]linux.pollfd = undefined;
             self.mutex.lockUncancelable(std.Options.debug_io);
             polls[0] = .{ .fd = self.listener, .events = linux.POLL.IN, .revents = 0 };
-            // only the stdin owner can add to the queue. observers must still
-            // be able to attach, send signals, and detach while it is full.
+            self.flushInput();
+            for (&self.clients) |*client| if (client.ready) self.grantInput(client);
+            // negotiated owners cannot exceed their credit, so their control
+            // packets remain readable even when the input queue is full.
+            // older clients still need socket backpressure.
             const input_full = self.input_len > self.input_buffer.len - protocol.max_payload;
             for (self.clients, 1..) |client, i| polls[i] = .{
-                .fd = if (input_full and self.input_client == client.fd) -1 else client.fd,
+                .fd = if (self.canReceive(client, input_full)) client.fd else -1,
                 .events = linux.POLL.IN,
                 .revents = 0,
             };
-            self.flushInput();
             self.mutex.unlock(std.Options.debug_io);
             _ = linux.poll(&polls, polls.len, 20);
             self.mutex.lockUncancelable(std.Options.debug_io);
@@ -283,7 +328,7 @@ pub const Server = struct {
             for (&self.clients, 1..) |*client, i| {
                 if (client.fd >= 0 and polls[i].fd == client.fd and polls[i].revents != 0)
                     self.receive(client) catch |err| {
-                        if (err != error.WouldBlock) self.disconnect(client);
+                        if (err != error.WouldBlock and err != error.Interrupted) self.disconnect(client);
                     };
             }
         }
@@ -312,7 +357,7 @@ test "session server replays raw output and grants stdin to one client" {
     var packet: protocol.Packet = .{};
     try protocol.receive(client, &packet, false);
     try std.testing.expectEqual(protocol.Kind.ready, try packet.kind());
-    try std.testing.expectEqualSlices(u8, &.{ 0, 1 }, packet.payload());
+    try std.testing.expectEqualSlices(u8, &.{ 0, protocol.ready_input | protocol.ready_flow }, packet.payload());
     try protocol.receive(client, &packet, false);
     try std.testing.expectEqualStrings("early prompt> ", packet.payload());
 
@@ -432,4 +477,61 @@ test "session discards pending stdin when the child closes its input" {
     try std.testing.expectError(error.InputClosed, server.receive(&client));
     try std.testing.expectEqual(@as(usize, 0), server.input_len);
     try std.testing.expect(!server.eof_pending);
+}
+
+test "session credits reserve retained input and bound a replacement owner" {
+    var server = try Server.init("fe4567890123", true, false);
+    defer server.deinit();
+    var sockets: [2]posix.fd_t = undefined;
+    if (linux.socketpair(posix.AF.UNIX, posix.SOCK.SEQPACKET | posix.SOCK.CLOEXEC, 0, &sockets) != 0) return error.SocketFailed;
+    defer platform.close(sockets[1]);
+    var client: Client = .{ .fd = sockets[0] };
+    defer channels.close(&client.fd);
+    // an earlier attachment left input queued before disconnecting.
+    @memset(&server.input_buffer, 'a');
+    server.input_len = server.input_buffer.len - 3;
+    try server.hello(&client, &.{1});
+    var packet: protocol.Packet = .{};
+    try protocol.receive(sockets[1], &packet, false);
+    try std.testing.expectEqualSlices(u8, &.{ 0, protocol.ready_input | protocol.ready_flow }, packet.payload());
+    // legacy clients receive no new packet types unless they opt in.
+    try std.testing.expectError(error.WouldBlock, protocol.receive(sockets[1], &packet, true));
+    try protocol.send(sockets[1], .input_flow, "", false);
+    try server.receive(&client);
+    try protocol.receive(sockets[1], &packet, false);
+    try std.testing.expectEqual(protocol.Kind.input_credit, try packet.kind());
+    try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, packet.payload()[0..4], .little));
+    server.grantInput(&client);
+    try std.testing.expectError(error.WouldBlock, protocol.receive(sockets[1], &packet, true));
+    try protocol.send(sockets[1], .stdin, "abc", false);
+    try server.receive(&client);
+    try std.testing.expectEqual(server.input_buffer.len, server.input_len);
+    try std.testing.expectEqual(@as(usize, 0), client.input_credit);
+    try protocol.send(sockets[1], .stdin, "x", false);
+    try std.testing.expectError(error.InputOverflow, server.receive(&client));
+    try std.testing.expectEqual(server.input_buffer.len, server.input_len);
+}
+
+test "session flow owner resizes and detaches with no stdin credit" {
+    var server = try Server.init("fe5678901234", true, true);
+    defer server.deinit();
+    // no child input fd: all granted bytes remain queued in the server.
+    server.input_len = server.input_buffer.len;
+    @memset(&server.input_buffer, 'i');
+    try server.start();
+    const owner = try testConnect("fe5678901234");
+    defer platform.close(owner);
+    try protocol.send(owner, .hello, &.{1}, false);
+    var packet: protocol.Packet = .{};
+    try protocol.receive(owner, &packet, false);
+    try protocol.send(owner, .input_flow, "", false);
+    const size: terminal.Size = .{ .rows = 41, .columns = 99 };
+    try protocol.send(owner, .resize, std.mem.asBytes(&size), false);
+    try protocol.send(owner, .detach, "", false);
+    try std.testing.expectError(error.Disconnected, protocol.receive(owner, &packet, false));
+    server.mutex.lockUncancelable(std.Options.debug_io);
+    defer server.mutex.unlock(std.Options.debug_io);
+    try std.testing.expectEqualDeep(size, server.terminal_size);
+    try std.testing.expect(server.input_client == null);
+    try std.testing.expectEqual(server.input_buffer.len, server.input_len);
 }

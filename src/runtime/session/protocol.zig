@@ -3,7 +3,13 @@ const posix = std.posix;
 const platform = @import("linux_platform").posix;
 
 pub const max_payload = 4096;
-pub const Kind = enum(u8) { hello = 1, ready, stdin, stdout, stderr, resize, signal, eof, exit, failure, detach };
+pub const input_capacity = 64 * 1024;
+pub const ready_input: u8 = 1;
+pub const ready_flow: u8 = 2;
+
+// ready_flow is advertised only to the stdin owner. older clients treat that
+// byte as a boolean; credits start only after an explicit input_flow reply.
+pub const Kind = enum(u8) { hello = 1, ready, stdin, stdout, stderr, resize, signal, eof, exit, failure, detach, input_flow, input_credit };
 pub const Packet = struct {
     bytes: [max_payload + 1]u8 = undefined,
     len: usize = 0,
@@ -22,12 +28,22 @@ pub fn send(fd: posix.fd_t, kind: Kind, data: []const u8, nonblocking: bool) !vo
     var buffer: [max_payload + 1]u8 = undefined;
     buffer[0] = @intFromEnum(kind);
     @memcpy(buffer[1..][0..data.len], data);
-    const count = try platform.send(fd, buffer[0 .. data.len + 1], posix.MSG.NOSIGNAL | @as(u32, if (nonblocking) posix.MSG.DONTWAIT else 0));
+    const count = while (true) {
+        break platform.send(fd, buffer[0 .. data.len + 1], posix.MSG.NOSIGNAL | @as(u32, if (nonblocking) posix.MSG.DONTWAIT else 0)) catch |err| {
+            if (err == error.Interrupted) continue;
+            return err;
+        };
+    };
     if (count != data.len + 1) return error.Disconnected;
 }
 
 pub fn receive(fd: posix.fd_t, packet: *Packet, nonblocking: bool) !void {
-    const count = try platform.recv(fd, &packet.bytes, posix.MSG.TRUNC | @as(u32, if (nonblocking) posix.MSG.DONTWAIT else 0));
+    const count = while (true) {
+        break platform.recv(fd, &packet.bytes, posix.MSG.TRUNC | @as(u32, if (nonblocking) posix.MSG.DONTWAIT else 0)) catch |err| {
+            if (err == error.Interrupted) continue;
+            return err;
+        };
+    };
     if (count == 0) return error.Disconnected;
     if (count > packet.bytes.len) return error.InvalidPacket;
     packet.len = count;
