@@ -68,10 +68,12 @@ pub fn inspect(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     defer if (cfg) |value| value.deinit(ctx.alloc);
     const name = try control.nameForId(ctx.alloc, record.id);
     defer if (name) |value| ctx.alloc.free(value);
+    const health = try @import("../../local_health.zig").read(ctx.alloc, record.id);
+    defer if (health) |value| value.deinit(ctx.alloc);
     const output = try std.json.Stringify.valueAlloc(ctx.alloc, .{
         .name = name orelse record.hostname,
         .state = record,
-        .health = try @import("../../local_health.zig").read(ctx.alloc, record.id),
+        .health = health,
         .desired_running = try control.wantsRunning(record.id),
         .restart_count = try control.restartCount(record.id),
         .config = cfg,

@@ -122,7 +122,7 @@ pub const Monitor = struct {
                 .exited => |code| code,
             };
             self.state.observe(self.settings, nowNs(), code == 0);
-            health_store.write(self.id, self.pid, self.generation, self.state, code) catch |err| {
+            health_store.writeResult(self.id, self.pid, self.generation, self.state, code, &result.output) catch |err| {
                 self.reportUnavailable(err);
                 continue;
             };

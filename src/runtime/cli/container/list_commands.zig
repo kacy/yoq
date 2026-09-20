@@ -78,6 +78,8 @@ pub fn ps(args: *std.process.Args.Iterator, ctx: AppContext) !void {
                 else => return err,
             };
             defer if (cfg) |value| value.deinit(ctx.alloc);
+            const health = try @import("../../local_health.zig").read(ctx.alloc, record.id);
+            defer if (health) |value| value.deinit(ctx.alloc);
             const value = try std.json.Stringify.valueAlloc(ctx.alloc, .{
                 .id = id,
                 .name = name,
@@ -89,7 +91,7 @@ pub fn ps(args: *std.process.Args.Iterator, ctx: AppContext) !void {
                 .exit_code = record.exit_code,
                 .created_at = record.created_at,
                 .restart_count = try control.restartCount(id),
-                .health = try @import("../../local_health.zig").read(ctx.alloc, record.id),
+                .health = health,
                 .ports = if (cfg) |value| value.port_maps else &.{},
                 .mounts = if (cfg) |value| value.mounts else &.{},
                 .image = if (cfg) |value| value.image_reference else null,
