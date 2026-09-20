@@ -561,6 +561,41 @@ test "local parity forwards piped stdin through foreground run exec and attach" 
     try std.testing.expectEqualStrings("<attached-input>", attached.stdout);
 }
 
+test "attached signals reach a child that never reads its full stdin queue" {
+    var fixture = try initLifecycleFixture();
+    defer fixture.env.deinit();
+    defer fixture.rootfs.deinit();
+    const name = "blocked-attach-input";
+    defer cleanupContainer(&fixture.env, name);
+    try expectCommand(&fixture.env, &.{ "run", "--no-net", "-d", "-i", "--name", name, fixture.rootfs.rootfs_path, "/bin/sh", "-c", "trap 'exit 42' TERM; printf 'ready\\n'; while :; do :; done" });
+    const executable = try std.fmt.allocPrint(alloc, "{s}/zig-out/bin/yoq", .{fixture.env.cwd});
+    defer alloc.free(executable);
+    // a regular file keeps input available without leaving a blocked writer
+    // behind if the attachment exits before consuming it all.
+    const script =
+        \\import select, signal, subprocess, sys, tempfile, time
+        \\with tempfile.TemporaryFile() as source:
+        \\    source.write(b"x" * (2 * 1024 * 1024))
+        \\    source.seek(0)
+        \\    client = subprocess.Popen([sys.argv[1], "attach", sys.argv[2]], stdin=source, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        \\    try:
+        \\        assert select.select([client.stdout], [], [], 10)[0], "missing readiness output"
+        \\        ready = client.stdout.readline()
+        \\        assert ready == b"ready\n", (ready, client.poll())
+        \\        time.sleep(0.5)
+        \\        client.send_signal(signal.SIGTERM)
+        \\        output, errors = client.communicate(timeout=10)
+        \\        assert client.returncode == 42, (client.returncode, output, errors)
+        \\    finally:
+        \\        if client.poll() is None:
+        \\            client.kill()
+        \\        client.wait()
+    ;
+    var result = try fixture.env.run(&.{ "python3", "-c", script, executable, name });
+    defer result.deinit();
+    try result.expectExitCode(0);
+}
+
 fn waitHealth(env: *helpers.TestEnv, name: []const u8, expected: []const u8, exit_code: u8) !void {
     for (0..100) |_| {
         var result = try env.runYoq(&.{ "container", "inspect", name });
