@@ -64,12 +64,17 @@ fn writeRecord(id: []const u8, pid: i32, generation: i64, value: state.State, ex
     // generation from appearing between the state update and its diagnostics.
     if (lease.db.rowsAffected() != 0) {
         if (output) |result| {
-            try lease.db.exec(
+            var statement = try lease.db.prepareDynamic(
                 "INSERT INTO local_container_health_output (container_id, generation, pid, output, truncated) VALUES (?, ?, ?, ?, ?)" ++
                     " ON CONFLICT(container_id) DO UPDATE SET generation=excluded.generation, pid=excluded.pid, output=excluded.output, truncated=excluded.truncated;",
-                .{},
-                .{ id, generation, pid, result.text(), @intFromBool(result.truncated) },
             );
+            defer statement.deinit();
+            statement.exec(.{}, .{ id, generation, pid, result.text(), @intFromBool(result.truncated) }) catch |err| {
+                // finalize otherwise reports the same step error a second time.
+                // retain the write error so the result transaction rolls back.
+                _ = sqlite.c.sqlite3_reset(statement.stmt);
+                return err;
+            };
         } else {
             try lease.db.exec("DELETE FROM local_container_health_output WHERE container_id = ?;", .{}, .{id});
         }
