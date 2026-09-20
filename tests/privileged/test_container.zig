@@ -641,6 +641,17 @@ fn activeHealthGroup(id: []const u8) ![]const u8 {
     return error.HealthCheckNotRunning;
 }
 
+test "healthchecks reserve helper slots outside small container pid budgets" {
+    var fixture = try ImageFixture.init();
+    defer fixture.deinit();
+    for ([_][]const u8{ "1", "2" }) |limit| {
+        const name = "health-small-pids";
+        defer cleanupContainer(&fixture.env, name);
+        try expectCommand(&fixture.env, &.{ "run", "--no-net", "-d", "--name", name, "--pids", limit, "--health-cmd", ":", "--health-interval", "100ms", "--health-timeout", "1s", "--health-retries", "1", ImageFixture.tag, "sleep", "60" });
+        try waitHealth(&fixture.env, name, "healthy", 0);
+    }
+}
+
 test "local parity health transitions and stop cleans up an active timed check" {
     var fixture = try ImageFixture.init();
     defer fixture.deinit();
