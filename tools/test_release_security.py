@@ -107,6 +107,15 @@ class ReleaseSecurityTests(unittest.TestCase):
         # The bookkeeper range would match if other products were not skipped.
         self.assertEqual(sqlite_findings('3.53.4', [advisory]), [])
 
+        # AFFECTED_FIELD carries the advisory's own range, copied from CVE-2025-29088.
+        affected_field = self.sqlite_advisory('CVE-2025-29088', [
+            {'strategy': 'StandardRange', 'source': 'AFFECTED_FIELD',
+             'range': [{'introduced': '3.49.0'}, {'fixed': '3.49.1'}]},
+            {'source': 'REFERENCES_COMMIT', 'range': [{'fixed': '56d2fd008b108109f489339f5fd55212bb50afd4'}]},
+        ])
+        self.assertEqual(sqlite_findings('3.49.0', [affected_field]), [affected_field])
+        self.assertEqual(sqlite_findings('3.53.4', [affected_field]), [])
+
         commit_only = self.sqlite_advisory('CVE-2026-50812', [
             {'source': 'REFERENCES_COMMIT', 'range': [{'fixed': 'b869ed6b067d623cb1383549f2a18aa35508385d'}]},
         ])
