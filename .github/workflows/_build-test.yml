@@ -85,7 +85,7 @@ jobs:
 
       - name: upload failure log
         if: steps.run-command.outcome == 'failure' && inputs.failure-artifact-name != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.failure-artifact-name }}
           path: ${{ runner.temp }}/build-test.log
@@ -93,7 +93,7 @@ jobs:
 
       - name: upload success artifact
         if: steps.run-command.outcome == 'success' && inputs.upload-path != '' && inputs.upload-artifact-name != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.upload-artifact-name }}
           path: ${{ inputs.upload-path }}
