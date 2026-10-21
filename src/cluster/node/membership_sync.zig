@@ -17,16 +17,23 @@ fn proposeUnderLock(self: anytype, sql: []const u8) !void {
     _ = try self.proposeLocked(sql);
 }
 
-pub fn checkAgentHealth(self: anytype, agents: []const agent_registry.AgentRecord) void {
-    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+/// Seconds without a heartbeat before an agent counts as lost. The timeout
+/// grows with the gossip cluster size, the same way gossip probing slows down.
+/// The caller holds the node lock.
+fn heartbeatTimeoutLocked(self: anytype) i64 {
     const base_timeout: i64 = 30;
-    self.mu.lockUncancelable(std.Options.debug_io);
     const multiplier: i64 = if (self.gossip) |g| blk: {
         const member_count = g.members.count() + 1;
         break :blk @min(@as(i64, gossip_mod.Gossip.ceilLog2(member_count)), gossip_mod.Gossip.max_interval_multiplier);
     } else 1;
+    return base_timeout * multiplier;
+}
+
+pub fn checkAgentHealth(self: anytype, agents: []const agent_registry.AgentRecord) void {
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+    self.mu.lockUncancelable(std.Options.debug_io);
+    const timeout = heartbeatTimeoutLocked(self);
     self.mu.unlock(std.Options.debug_io);
-    const timeout: i64 = base_timeout * multiplier;
 
     for (agents) |agent| {
         if (!std.mem.eql(u8, agent.status, "active") and !agent_drain.isDraining(agent.status)) continue;
@@ -201,22 +208,29 @@ pub fn processGossipActions(self: anytype, actions: []gossip_mod.Action) void {
     }
 }
 
+/// A gossip dead verdict only says this node cannot reach the member. A new
+/// leader may not be trusted by agents yet, so its probes fail even though
+/// the agents are healthy. The heartbeat record decides: the agent is marked
+/// offline only when its heartbeat is stale too. Wireguard peers are left for
+/// cleanupDeadAgents, which removes them after the agent has been offline
+/// for an hour.
 pub fn handleGossipMemberDead(self: anytype, member_id: u64) void {
     const agent_id = agent_registry.findAgentIdByNodeId(self.alloc, &self.state_machine.db, member_id) orelse return;
     defer self.alloc.free(agent_id);
+
+    const agent = (agent_registry.getAgent(self.alloc, &self.state_machine.db, agent_id) catch return) orelse return;
+    defer agent.deinit(self.alloc);
+
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+    if (now - agent.last_heartbeat <= heartbeatTimeoutLocked(self)) {
+        logger.info("gossip: member {} unreachable, but agent {s} heartbeat is fresh; keeping it active", .{ member_id, agent_id });
+        return;
+    }
 
     logger.info("gossip: member {} dead, marking agent {s} offline", .{ member_id, agent_id });
 
     markOfflineAndOrphanLocked(self, agent_id);
     service_reconciler.noteNodeLost(@intCast(member_id));
-
-    if (member_id >= 1 and member_id <= 65534) {
-        var wg_buf: [256]u8 = undefined;
-        const wg_sql = agent_registry.removeWireguardPeerSql(&wg_buf, @intCast(member_id)) catch return;
-        _ = self.proposeLocked(wg_sql) catch |e| {
-            logger.warn("gossip: failed to remove wireguard peer for dead member {}: {}", .{ member_id, e });
-        };
-    }
 }
 
 pub fn handleGossipMemberAlive(self: anytype, member_id: u64) void {
