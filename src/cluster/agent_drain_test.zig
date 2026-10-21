@@ -240,3 +240,35 @@ test "cluster reliability: ordinary worker loss atomically releases assignments 
     defer alloc.free(row.agent_id.data);
     try std.testing.expectEqualStrings("", row.agent_id.data);
 }
+
+test "cluster reliability: gossip dead verdict needs a stale heartbeat and keeps wireguard peers" {
+    var node = try seed(false);
+    defer node.deinit();
+    node.fixPointers();
+    const session = try mutation.Session.begin(&node);
+    const now = std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
+    const fresh = try sql.render(alloc, "UPDATE agents SET status = 'active', last_heartbeat = ? WHERE id = 'source';", .{now});
+    defer alloc.free(fresh);
+    try session.commit(fresh);
+    try session.commit("INSERT INTO wireguard_peers (node_id, agent_id, public_key, endpoint, overlay_ip, container_subnet) VALUES (4, 'source', 'key', '127.0.0.1:51820', '10.40.0.4', '10.42.4.0/24');");
+
+    const membership = @import("node/membership_sync.zig");
+    const actions = @import("node/action_loop.zig");
+
+    // a new leader that agents do not trust yet sees them as dead, but the
+    // agent is still heartbeating, so nothing changes.
+    membership.handleGossipMemberDead(&node, 4);
+    actions.processActions(&node);
+    try expectStatus(&node, "agents", "source", "active");
+    try expectStatus(&node, "assignments", "original", "running");
+
+    // once the heartbeat is stale as well, the agent goes offline, but its
+    // wireguard peer stays until cleanupDeadAgents removes it.
+    try session.commit("UPDATE agents SET last_heartbeat = 0 WHERE id = 'source';");
+    membership.handleGossipMemberDead(&node, 4);
+    actions.processActions(&node);
+    try expectStatus(&node, "agents", "source", "offline");
+    try expectStatus(&node, "assignments", "original", "pending");
+    const peers = (try node.stateMachineDb().one(struct { count: i64 }, "SELECT COUNT(*) AS count FROM wireguard_peers WHERE node_id = 4;", .{}, .{})).?;
+    try std.testing.expectEqual(@as(i64, 1), peers.count);
+}
