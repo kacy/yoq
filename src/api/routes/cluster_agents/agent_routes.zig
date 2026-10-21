@@ -710,6 +710,43 @@ test "registration bootstrap filters worker peers and excludes the assigned iden
     }
 }
 
+test "registration lists the other voters as gossip seeds" {
+    const alloc = std.testing.allocator;
+    var node = try Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 9700,
+        .gossip_port = 19877,
+        .peers = &.{
+            .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
+            .{ .id = 3, .addr = .{ 10, 0, 0, 3 }, .port = 9710 },
+        },
+        .shared_key = [_]u8{7} ** 32,
+        .data_dir = "/unused",
+    });
+    defer node.deinit();
+    node.fixPointers();
+    node.mu.lockUncancelable(std.Options.debug_io);
+    defer node.mu.unlock(std.Options.debug_io);
+
+    var json = std.Io.Writer.Allocating.init(alloc);
+    defer json.deinit();
+    try writeRegistrationJson(alloc, &json.writer, &node, .{
+        .id = "worker",
+        .credential = retry_test_key,
+        .registration_key_accepted = true,
+        .node_id = 4,
+        .overlay_ip = "10.42.0.4",
+        .role = "agent",
+    });
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json.written(), .{});
+    defer parsed.deinit();
+    // the answering voter stays in gossip_server; the others use raft port + 100.
+    const voters = parsed.value.object.get("gossip_voters").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), voters.len);
+    try std.testing.expectEqualStrings("2@10.0.0.2:9800", voters[0].string);
+    try std.testing.expectEqualStrings("3@10.0.0.3:9810", voters[1].string);
+}
+
 test "registration bootstrap preserves responses without peer data" {
     const alloc = std.testing.allocator;
     var node = try Node.initForTests(alloc, .{ .id = 1, .port = 0, .gossip_port = 19877, .peers = &.{}, .data_dir = "/unused" });

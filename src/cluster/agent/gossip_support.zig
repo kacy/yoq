@@ -233,6 +233,47 @@ test "gossip bootstrap pins first worker to server identity and actual port" {
     try std.testing.expect(!gossip_sender_validation.isTrustedSender(&gossip, packet));
 }
 
+test "agents trust every voter's gossip, not only the registering leader" {
+    const alloc = std.testing.allocator;
+    var agent = struct {
+        alloc: std.mem.Allocator,
+        server_addr: [4]u8 = .{ 10, 0, 0, 1 },
+        node_id: ?u16 = 4,
+        gossip_seeds: ?[][]const u8 = null,
+    }{ .alloc = alloc };
+    defer if (agent.gossip_seeds) |seeds| {
+        for (seeds) |seed| alloc.free(seed);
+        alloc.free(seeds);
+    };
+    // voter 1 answered the registration, so its pinned entry wins over the
+    // voter list. the agent's own id is skipped in every list.
+    parseGossipSeeds(&agent,
+        \\{"gossip_server":{"id":1,"port":9800},
+        \\ "gossip_voters":["1@10.0.0.99:9800","2@10.0.0.2:9800","3@10.0.0.3:9810"],
+        \\ "gossip_seeds":["4@10.0.0.4","5@10.0.0.5"]}
+    );
+    const seeds = agent.gossip_seeds.?;
+    try std.testing.expectEqual(@as(usize, 4), seeds.len);
+    try std.testing.expectEqualStrings("1@10.0.0.1:9800", seeds[0]);
+    try std.testing.expectEqualStrings("2@10.0.0.2:9800", seeds[1]);
+    try std.testing.expectEqualStrings("3@10.0.0.3:9810", seeds[2]);
+    try std.testing.expectEqualStrings("5@10.0.0.5", seeds[3]);
+
+    // after a leader change, voter 3's probes come from a known member.
+    var gossip = gossip_mod.Gossip.init(alloc, 4, .{ .ip = .{ 10, 0, 0, 4 }, .port = default_gossip_port }, .{});
+    defer gossip.deinit();
+    for (seeds) |seed| {
+        const peer = parseSeedAddr(seed).?;
+        try gossip.addMember(peer.id, .{ .ip = peer.ip, .port = peer.port });
+    }
+    const packet = transport_mod.GossipReceiveResult{
+        .sender_id = 3,
+        .from_addr = @import("linux_platform").net.Address.initIp4(.{ 10, 0, 0, 3 }, 9810),
+        .payload = "ping",
+    };
+    try std.testing.expect(gossip_sender_validation.isTrustedSender(&gossip, packet));
+}
+
 test "gossip bootstrap retains legacy ports and rejects invalid endpoints" {
     try std.testing.expectEqual(@as(u16, 9800), parseSeedAddr("3@10.0.0.3").?.port);
     for ([_][]const u8{ "0@10.0.0.1", "1@10.0.0.1:0", "1@10.0.0.1:65536", "1@10.0.0.1:no" }) |seed|
