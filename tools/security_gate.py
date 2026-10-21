@@ -85,6 +85,32 @@ def interval_contains(version, events):
     return affected or (introduced is not None and introduced <= version)
 
 
+def sqlite_version_intervals(extracted_events):
+    """Return the lists of SQLite version events in an OSV range.
+
+    OSV publishes two shapes. Older records list bare events, such as
+    {'introduced': '0'}. Newer records group events by origin, such as
+    {'source': 'CPE_RANGE', 'cpe': ..., 'range': [...]}. Only CPE entries
+    for sqlite:sqlite carry SQLite version numbers. Commit references and
+    CPEs for other products are skipped.
+    """
+    if all(isinstance(event, dict) and 'range' not in event for event in extracted_events):
+        return [extracted_events]
+    intervals = []
+    for entry in extracted_events:
+        if not isinstance(entry, dict) or 'range' not in entry:
+            raise ValueError('invalid SQLite version event')
+        source = entry.get('source')
+        if source == 'REFERENCES_COMMIT':
+            continue
+        if source not in ('CPE_RANGE', 'CPE_STRING'):
+            raise ValueError(f'unrecognized SQLite event source: {source}')
+        # cpe:2.3:a:<vendor>:<product>:...
+        if entry.get('cpe', '').split(':')[3:5] == ['sqlite', 'sqlite']:
+            intervals.append(entry['range'])
+    return intervals
+
+
 def sqlite_findings(version, advisories, not_affected=None):
     if not advisories:
         raise ValueError('SQLite repository advisory inventory is empty; mapping requires review')
@@ -103,11 +129,14 @@ def sqlite_findings(version, advisories, not_affected=None):
             continue
         affected = False
         for interval in ranges:
-            source = interval.get('database_specific', {})
-            if not source.get('extracted_events'):
+            events = interval.get('database_specific', {}).get('extracted_events')
+            versions = sqlite_version_intervals(events) if isinstance(events, list) and events else []
+            # Commit-only records have no version numbers to compare.
+            if not versions:
                 unclassified.append(advisory['id'])
                 continue
-            affected |= interval_contains(current, source['extracted_events'])
+            for version_events in versions:
+                affected |= interval_contains(current, version_events)
         if affected:
             findings.append(advisory)
     if unclassified:

@@ -93,6 +93,33 @@ class ReleaseSecurityTests(unittest.TestCase):
             with self.subTest(events=events), self.assertRaises(ValueError):
                 sqlite_findings('3.53.4', [self.sqlite_advisory('unmapped', events)])
 
+    def test_sqlite_grouped_events_use_only_sqlite_cpe_ranges(self):
+        # OSV's newer shape, copied from CVE-2019-19924 and CVE-2026-50812.
+        sqlite_cpe = 'cpe:2.3:a:sqlite:sqlite:3.30.1:*:*:*:*:*:*:*'
+        advisory = self.sqlite_advisory('CVE-2019-19924', [
+            {'source': 'CPE_STRING', 'cpe': 'cpe:2.3:a:apache:bookkeeper:4.12.1:*:*:*:*:*:*:*',
+             'range': [{'introduced': '0'}, {'last_affected': '4.12.1'}]},
+            {'source': 'CPE_STRING', 'cpe': sqlite_cpe,
+             'range': [{'introduced': '3.30.1'}, {'last_affected': '3.30.1'}]},
+            {'source': 'REFERENCES_COMMIT', 'range': [{'fixed': '8654186b0236d556aa85528c2573ee0b6ab71be3'}]},
+        ])
+        self.assertEqual(sqlite_findings('3.30.1', [advisory]), [advisory])
+        # The bookkeeper range would match if other products were not skipped.
+        self.assertEqual(sqlite_findings('3.53.4', [advisory]), [])
+
+        commit_only = self.sqlite_advisory('CVE-2026-50812', [
+            {'source': 'REFERENCES_COMMIT', 'range': [{'fixed': 'b869ed6b067d623cb1383549f2a18aa35508385d'}]},
+        ])
+        unknown_source = self.sqlite_advisory('unknown-source', [
+            {'source': 'SOMETHING_NEW', 'cpe': sqlite_cpe, 'range': [{'introduced': '0'}]},
+        ])
+        mixed_shapes = self.sqlite_advisory('mixed-shapes', [
+            {'introduced': '0'}, {'source': 'CPE_RANGE', 'cpe': sqlite_cpe, 'range': [{'fixed': '3.50.2'}]},
+        ])
+        for record in [commit_only, unknown_source, mixed_shapes]:
+            with self.subTest(record=record['id']), self.assertRaises(ValueError):
+                sqlite_findings('3.53.4', [record])
+
     def test_sqlite_source_review_is_bound_to_version_and_build_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
