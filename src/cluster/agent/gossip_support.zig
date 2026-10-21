@@ -13,6 +13,7 @@ pub fn parseGossipSeeds(self: anytype, body: []const u8) void {
     const Registration = struct {
         gossip_server: ?struct { id: u64, port: u16 } = null,
         gossip_seeds: []const []const u8 = &.{},
+        gossip_voters: []const []const u8 = &.{},
     };
     const parsed = std.json.parseFromSlice(Registration, self.alloc, body, .{ .ignore_unknown_fields = true }) catch return;
     defer parsed.deinit();
@@ -28,17 +29,21 @@ pub fn parseGossipSeeds(self: anytype, body: []const u8) void {
             };
         }
     }
-    for (parsed.value.gossip_seeds) |seed| {
-        const peer = parseSeedAddr(seed) orelse continue;
-        if (peer.id == (self.node_id orelse 0)) continue;
-        if (server) |pinned| {
-            if (peer.id == pinned.id) continue;
+    // the other voters come first: any of them can become leader, and the
+    // agent must trust its probes. worker seeds follow.
+    for ([_][]const []const u8{ parsed.value.gossip_voters, parsed.value.gossip_seeds }) |list| {
+        for (list) |seed| {
+            const peer = parseSeedAddr(seed) orelse continue;
+            if (peer.id == (self.node_id orelse 0)) continue;
+            if (server) |pinned| {
+                if (peer.id == pinned.id) continue;
+            }
+            const duped = self.alloc.dupe(u8, seed) catch break;
+            seeds.append(self.alloc, duped) catch {
+                self.alloc.free(duped);
+                break;
+            };
         }
-        const duped = self.alloc.dupe(u8, seed) catch break;
-        seeds.append(self.alloc, duped) catch {
-            self.alloc.free(duped);
-            break;
-        };
     }
 
     if (seeds.items.len > 0) {
