@@ -212,13 +212,15 @@ fn writeRegistrationJson(alloc: std.mem.Allocator, writer: *std.Io.Writer, node:
     // do not know. list the other voters so a new leader's probes are trusted.
     // peers use the default gossip port, raft port + 100, because a custom
     // gossip port is only known to the voter that set it.
-    try writer.writeAll(",\"gossip_voters\":[");
-    for (node.config.peers, 0..) |peer, i| {
-        if (i > 0) try writer.writeByte(',');
-        const ip = peer.addr;
-        try writer.print("\"{d}@{d}.{d}.{d}.{d}:{d}\"", .{ peer.id, ip[0], ip[1], ip[2], ip[3], peer.port +| 100 });
+    if (node.config.peers.len > 0) {
+        try writer.writeAll(",\"gossip_voters\":[");
+        for (node.config.peers, 0..) |peer, i| {
+            if (i > 0) try writer.writeByte(',');
+            const ip = peer.addr;
+            try writer.print("\"{d}@{d}.{d}.{d}.{d}:{d}\"", .{ peer.id, ip[0], ip[1], ip[2], ip[3], peer.port +| 100 });
+        }
+        try writer.writeByte(']');
     }
-    try writer.writeByte(']');
 
     blk: {
         const db = node.stateMachineDb();
