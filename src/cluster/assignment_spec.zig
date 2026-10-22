@@ -135,6 +135,7 @@ fn validate(execution: Execution) !void {
     if (execution.volumes.len > 128 or execution.ports.len > 128 or execution.gpu_count > 8) return error.InvalidRequest;
     for (execution.volumes) |mount| {
         if (mount.source.len == 0 or std.mem.indexOfScalar(u8, mount.source, 0) != null or mount.target.len == 0 or mount.target[0] != '/' or std.mem.indexOfScalar(u8, mount.target, 0) != null) return error.InvalidRequest;
+        if (mount.kind == .bind and !std.fs.path.isAbsolute(mount.source)) return error.InvalidRequest;
     }
     for (execution.ports) |port| if (port.host_port == 0 or port.container_port == 0) return error.InvalidRequest;
     // checked again here so stored and replicated assignments fail closed too
@@ -286,6 +287,26 @@ test "agents refuse stored assignments with a traversing volume name" {
     try std.testing.expectError(error.InvalidRequest, decode(alloc,
         \\{"version":1,"argv":["sh"],"volume_definitions":[{"name":"../../root","driver":{"local":{}}}]}
     ));
+}
+
+test "assignments need absolute bind sources" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{ "./data", "../data", "data" }) |source| {
+        const json = try std.fmt.allocPrint(alloc,
+            \\{{"version":1,"argv":["sh"],"volumes":[{{"source":"{s}","target":"/data","kind":"bind"}}]}}
+        , .{source});
+        defer alloc.free(json);
+        try std.testing.expectError(error.InvalidRequest, decode(alloc, json));
+    }
+
+    var absolute = try decode(alloc,
+        \\{"version":1,"argv":["sh"],"volumes":[{"source":"/srv/data","target":"/data","kind":"bind"}]}
+    );
+    absolute.deinit();
+    var named = try decode(alloc,
+        \\{"version":1,"argv":["sh"],"volumes":[{"source":"data","target":"/data","kind":"named"}],"volume_definitions":[{"name":"data","driver":{"local":{}}}]}
+    );
+    named.deinit();
 }
 
 test "training execution retains named mounts gpu settings and published ports" {
