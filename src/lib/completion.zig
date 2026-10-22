@@ -131,7 +131,7 @@ const command_meta = [_]CommandMeta{
     // cluster
     .{ .name = "serve", .flags = &.{ "--port", "--log-format", "--http-proxy-bind", "--http-proxy-port" } },
     .{ .name = "init-server", .flags = &.{ "--id", "--port", "--api-port", "--peers", "--token", "--log-format", "--http-proxy-bind", "--http-proxy-port" } },
-    .{ .name = "join", .flags = &.{ "--token", "--port" } },
+    .{ .name = "join", .flags = &.{ "--token", "--port", "--agent-port", "--role", "--region", "--host-path-root" } },
     .{ .name = "cluster", .subcommands = &.{
         .{ .name = "status" },
     } },

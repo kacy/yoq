@@ -1381,3 +1381,39 @@ test "placement numbers reject invalid heartbeat then accept valid resource snap
     defer support.freeResponse(alloc, response);
     try std.testing.expectEqual(http.StatusCode.ok, response.status);
 }
+
+test "apply with host paths needs cluster:admin, not just apps:write" {
+    const alloc = std.testing.allocator;
+    const auth = @import("../../auth.zig");
+    defer auth.resetGrantedScopes();
+    const bodies = [_][]const u8{
+        \\{"app_name":"demo-app","services":[{"name":"web","image":"alpine","volumes":[{"source":"/srv/data","target":"/data","kind":"bind"}]}]}
+        ,
+        \\{"app_name":"demo-app","volume_definitions":[{"name":"logs","driver":{"host":{"path":"/var/log"}}}],"services":[{"name":"web","image":"alpine","volumes":[{"source":"logs","target":"/logs","kind":"named"}]}]}
+        ,
+        \\{"app_name":"demo-app","volume_definitions":[{"name":"scratch","driver":{"parallel":{"mount_path":"/mnt/lustre"}}}],"services":[{"name":"web","image":"alpine"}]}
+        ,
+    };
+
+    var harness = try RouteFlowHarness.init(alloc);
+    defer harness.deinit();
+    for (bodies) |body| {
+        auth.setGrantedScopes("apps:write");
+        const refused = harness.appApply(body);
+        defer freeResponse(alloc, refused);
+        try std.testing.expectEqual(http.StatusCode.forbidden, refused.status);
+
+        auth.setGrantedScopes("apps:write,cluster:admin");
+        const allowed = harness.appApply(body);
+        defer freeResponse(alloc, allowed);
+        try std.testing.expect(allowed.status != .forbidden);
+    }
+
+    // ordinary named volumes stay an apps:write operation
+    auth.setGrantedScopes("apps:write");
+    const named = harness.appApply(
+        \\{"app_name":"demo-app","volume_definitions":[{"name":"data","driver":{"local":{}}}],"services":[{"name":"web","image":"alpine","volumes":[{"source":"data","target":"/data","kind":"named"}]}]}
+    );
+    defer freeResponse(alloc, named);
+    try std.testing.expect(named.status != .forbidden);
+}

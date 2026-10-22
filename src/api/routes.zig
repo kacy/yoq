@@ -24,6 +24,7 @@ pub const Response = common.Response;
 
 pub fn dispatch(request: http.Request, alloc: std.mem.Allocator) Response {
     defer audit.resetActor();
+    defer auth.resetGrantedScopes();
     if (authorizeRequest(request, alloc)) |denied| return denied;
 
     if (request.method == .GET) {
@@ -64,6 +65,7 @@ pub fn authorizeRequest(request: http.Request, alloc: std.mem.Allocator) ?Respon
         if (!(@import("../cluster/agent_credentials.zig").authenticates(node.stateMachineDb(), bearer, if (agent_id.len == 0) null else agent_id) catch false))
             return common.unauthorized();
         audit.setActorName("agent");
+        auth.setGrantedScopes("");
         return null;
     }
     const has_any_auth = api_token != null or join_token != null;
@@ -77,6 +79,7 @@ pub fn authorizeRequest(request: http.Request, alloc: std.mem.Allocator) ?Respon
             const has_join_auth = if (join_token) |jt| common.hasValidBearerToken(&request, jt) else false;
             if (!has_join_auth) return common.unauthorized();
             audit.setActorName("join-token");
+            auth.setGrantedScopes("");
         } else {
             // operator routes: a legacy admin token or a named, scoped token.
             auth_result = auth.authorize(alloc, &request, api_token);
@@ -85,9 +88,11 @@ pub fn authorizeRequest(request: http.Request, alloc: std.mem.Allocator) ?Respon
                 if (!auth_result.allows(scope)) return common.forbidden();
             }
             audit.setActorName(auth_result.actor_name);
+            auth.setGrantedScopes(auth_result.scopes);
         }
     } else {
         audit.setActor(.unauthenticated);
+        auth.setGrantedScopes(if (has_any_auth) "" else null);
     }
 
     return null;

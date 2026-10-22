@@ -188,6 +188,7 @@ fn readRequestFrom(alloc: std.mem.Allocator, header_reader: anytype, body_reader
     // Check exactly the same authentication and scopes as dispatch, before any
     // body allocation. Dispatch checks again in case a token was revoked during upload.
     defer audit.resetActor();
+    defer @import("../auth.zig").resetGrantedScopes();
     if (routes.authorizeRequest(head, alloc)) |denied| {
         return if (denied.status == .forbidden) error.Forbidden else error.Unauthorized;
     }

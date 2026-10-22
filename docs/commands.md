@@ -171,7 +171,7 @@ yoq init-server [--id N] [--port P]  start a cluster server node
     [--http-proxy-bind ADDR]
     [--http-proxy-port PORT]
 yoq join <host> --token <token> [--port PORT]
-                                     join as an agent node
+    [--host-path-root DIR]...        join as an agent node
 yoq cluster status                   show cluster health
 yoq cluster backup <bundle> --set <id> --join-token-file <file>
     [--data-dir <root>]              capture one stopped voter

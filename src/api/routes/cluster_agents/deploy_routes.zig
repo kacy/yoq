@@ -228,6 +228,11 @@ fn handleApply(
         apply_request.ParseError.InvalidRolloutConfig => common.badRequest("invalid rollout config"),
     };
     defer parsed.deinit(alloc);
+    // apps:write deploys workloads; reaching into the host filesystem is an
+    // operator decision
+    if (parsed.uses_host_paths and !@import("../../auth.zig").grantedAllows("cluster:admin")) {
+        return .{ .status = .forbidden, .body = "{\"error\":\"bind mounts and host or parallel volumes require cluster:admin\"}", .allocated = false };
+    }
 
     const session = mutation_session.Session.begin(node) catch return common.notLeader(alloc, node);
     session.synchronize() catch |err| return mutationFailure(alloc, node, err);
