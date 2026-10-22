@@ -539,6 +539,25 @@ test "assignNodeId skips agents without node_id" {
     try std.testing.expectEqual(@as(u8, 1), nid);
 }
 
+test "findAgentIdByNodeId returns null for ids that do not fit the column" {
+    var db = sqlite.Db.init(.{
+        .mode = .Memory,
+        .open_flags = .{ .write = true },
+    }) catch return;
+    defer db.deinit();
+
+    db.exec(test_support.agents_schema, .{}, .{}) catch return;
+    db.exec("INSERT INTO agents (id, address, node_id, last_heartbeat, registered_at) VALUES ('a1', '10.0.0.1:7701', 1, 1000, 1000);", .{}, .{}) catch return;
+
+    const alloc = std.testing.allocator;
+    const found = findAgentIdByNodeId(alloc, &db, 1) orelse return error.TestUnexpectedResult;
+    defer alloc.free(found);
+    try std.testing.expectEqualStrings("a1", found);
+
+    try std.testing.expect(findAgentIdByNodeId(alloc, &db, @as(u64, std.math.maxInt(i64)) + 1) == null);
+    try std.testing.expect(findAgentIdByNodeId(alloc, &db, std.math.maxInt(u64)) == null);
+}
+
 test "getGossipSeeds respects requested count" {
     var db = sqlite.Db.init(.{
         .mode = .Memory,
