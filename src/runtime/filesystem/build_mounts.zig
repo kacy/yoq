@@ -9,6 +9,8 @@ pub fn mountAt(root: []const u8) !void {
     const root_fd = try platform.posix.open(root, .{ .PATH = true, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0);
     defer platform.posix.close(root_fd);
     try mountFilesystem(root_fd, "proc", "proc", linux.MS.NOSUID | linux.MS.NODEV | linux.MS.NOEXEC, null);
+    var proc_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try @import("proc_mask.zig").harden(std.fmt.bufPrint(&proc_buf, "{s}/proc", .{root}) catch return error.PathTooLong);
     try mountFilesystem(root_fd, "dev", "tmpfs", linux.MS.NOSUID | linux.MS.STRICTATIME, "mode=755,size=65536k");
     // Builds retain the launcher's network namespace. Its sysfs cannot be
     // freshly mounted with capabilities belonging only to our user namespace.
