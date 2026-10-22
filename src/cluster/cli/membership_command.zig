@@ -24,6 +24,8 @@ pub fn join(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     var agent_api_port: u16 = 7701;
     var role: cluster_config.NodeRole = .both;
     var region: ?[]const u8 = null;
+    var host_path_roots: std.ArrayList([]const u8) = .empty;
+    defer host_path_roots.deinit(alloc);
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--token")) {
@@ -63,6 +65,16 @@ pub fn join(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
                 writeErr("--region requires a region name\n", .{});
                 return MembershipError.InvalidArgument;
             };
+        } else if (std.mem.eql(u8, arg, "--host-path-root")) {
+            const root = args.next() orelse {
+                writeErr("--host-path-root requires a directory\n", .{});
+                return MembershipError.InvalidArgument;
+            };
+            if (!std.fs.path.isAbsolute(root)) {
+                writeErr("--host-path-root must be an absolute path: {s}\n", .{root});
+                return MembershipError.InvalidArgument;
+            }
+            try host_path_roots.append(alloc, root);
         } else {
             server_host = arg;
         }
@@ -91,6 +103,7 @@ pub fn join(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !void {
     agent.agent_api_port = agent_api_port;
     agent.role = role;
     agent.region = region;
+    agent.host_path_roots = host_path_roots.items;
 
     orchestrator.installSignalHandlers();
     @import("../agent/enrollment_retry.zig").run(&agent, &orchestrator.shutdown_requested, .{}) catch |err| {

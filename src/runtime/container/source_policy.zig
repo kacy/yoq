@@ -9,6 +9,22 @@ pub fn isAllowed(source: []const u8) bool {
     return allowedAt(source, canonical[0..len]);
 }
 
+/// whether a cluster agent may mount the host path `source`. agents refuse
+/// every host path unless the operator listed a root it may come from with
+/// `yoq join --host-path-root`. both sides are resolved first, so a symlink
+/// cannot lead out of an allowed root. a path that does not exist yet is
+/// refused, since nothing can be said about where it will point.
+pub fn underHostRoot(source: []const u8, roots: []const []const u8) bool {
+    var source_buf: [paths.max_path]u8 = undefined;
+    const resolved = source_buf[0 .. std.Io.Dir.cwd().realPathFile(std.Options.debug_io, source, &source_buf) catch return false];
+    for (roots) |root| {
+        var root_buf: [paths.max_path]u8 = undefined;
+        const resolved_root = root_buf[0 .. std.Io.Dir.cwd().realPathFile(std.Options.debug_io, root, &root_buf) catch continue];
+        if (within(resolved, resolved_root)) return true;
+    }
+    return false;
+}
+
 fn within(path: []const u8, root: []const u8) bool {
     return std.mem.eql(u8, path, root) or (std.mem.startsWith(u8, path, root) and
         (std.mem.eql(u8, root, "/") or (path.len > root.len and path[root.len] == '/')));
@@ -58,4 +74,26 @@ test "bind source policy protects relocated state and root-owned named volumes" 
     try std.testing.expect(allowedAt("/srv/yoq/volumes/app/data", "/srv/yoq"));
     try std.testing.expect(allowedAt("/root/.local/share/yoq/volumes/app/data", "/root/.local/share/yoq"));
     try std.testing.expect(!allowedAt("/root/.local/share/yoq/volumes/app/data", "/home/alice/.local/share/yoq"));
+}
+
+test "agents mount host paths only below an allowed root" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.Options.debug_io, "allowed/data");
+    try tmp.dir.createDirPath(std.Options.debug_io, "other");
+    try tmp.dir.symLink(std.Options.debug_io, "../other", "allowed/escape", .{});
+    var buf: [paths.max_path]u8 = undefined;
+    const base = buf[0..try tmp.dir.realPath(std.Options.debug_io, &buf)];
+    var a: [paths.max_path]u8 = undefined;
+    var b: [paths.max_path]u8 = undefined;
+    const allowed = try std.fmt.bufPrint(&a, "{s}/allowed", .{base});
+
+    try std.testing.expect(underHostRoot(try std.fmt.bufPrint(&b, "{s}/allowed/data", .{base}), &.{allowed}));
+    try std.testing.expect(underHostRoot(allowed, &.{allowed}));
+    // nothing is allowed without a configured root
+    try std.testing.expect(!underHostRoot(try std.fmt.bufPrint(&b, "{s}/allowed/data", .{base}), &.{}));
+    try std.testing.expect(!underHostRoot(try std.fmt.bufPrint(&b, "{s}/other", .{base}), &.{allowed}));
+    // a link inside the root that points out of it
+    try std.testing.expect(!underHostRoot(try std.fmt.bufPrint(&b, "{s}/allowed/escape", .{base}), &.{allowed}));
+    try std.testing.expect(!underHostRoot(try std.fmt.bufPrint(&b, "{s}/allowed/missing", .{base}), &.{allowed}));
 }

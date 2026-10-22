@@ -99,6 +99,9 @@ pub const Agent = struct {
     // role separation fields — set by the join command before registration
     role: cluster_config.NodeRole = .both,
     region: ?[]const u8 = null,
+    /// host directories that assignments may bind-mount or use as host and
+    /// parallel volumes, from `--host-path-root`. empty refuses them all.
+    host_path_roots: []const []const u8 = &.{},
 
     /// gossip seed addresses returned by the server during registration.
     /// format: "node_id@address" — used to bootstrap gossip membership.

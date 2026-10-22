@@ -408,6 +408,11 @@ fn runAssignment(
         reportStatus(self, assignment_id, meta.generation, "failed", "gpu_environment_failed");
         return;
     };
+    if (!hostPathsAllowed(execution.value.volumes, execution.value.volume_definitions, self.host_path_roots)) {
+        setContainerState(self, assignment_id, .failed);
+        reportStatus(self, assignment_id, meta.generation, "failed", "host_path_not_allowed");
+        return;
+    }
     var mounts_arena = std.heap.ArenaAllocator.init(self.alloc);
     defer mounts_arena.deinit();
     const mount_runtime = @import("../../manifest/orchestrator/service_runtime.zig");
@@ -970,6 +975,28 @@ fn cleanup(container_id: []const u8) void {
     logs.deleteLogFile(container_id);
     container.cleanupContainerDirs(container_id);
     store.remove(container_id) catch {};
+}
+
+/// every host path an assignment reaches, through a bind mount or a host or
+/// parallel volume it mounts, must sit below one of the agent's allowed
+/// roots. checked before any volume is created or mounted.
+fn hostPathsAllowed(mounts: []const manifest_spec.VolumeMount, definitions: []const manifest_spec.Volume, roots: []const []const u8) bool {
+    const source_policy = @import("../../runtime/container/source_policy.zig");
+    for (mounts) |mount| {
+        const host_path = switch (mount.kind) {
+            .bind => mount.source,
+            .named => for (definitions) |definition| {
+                if (!std.mem.eql(u8, definition.name, mount.source)) continue;
+                break switch (definition.driver) {
+                    .host => |host| host.path,
+                    .parallel => |parallel| parallel.mount_path,
+                    .local, .nfs => null,
+                };
+            } else null,
+        } orelse continue;
+        if (!source_policy.underHostRoot(host_path, roots)) return false;
+    }
+    return true;
 }
 
 test "assignment startup releases owned inputs when worker admission fails" {
