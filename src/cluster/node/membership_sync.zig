@@ -215,6 +215,7 @@ pub fn processGossipActions(self: anytype, actions: []gossip_mod.Action) void {
 /// cleanupDeadAgents, which removes them after the agent has been offline
 /// for an hour.
 pub fn handleGossipMemberDead(self: anytype, member_id: u64) void {
+    const node_id = std.math.cast(i64, member_id) orelse return;
     const agent_id = agent_registry.findAgentIdByNodeId(self.alloc, &self.state_machine.db, member_id) orelse return;
     defer self.alloc.free(agent_id);
 
@@ -230,10 +231,11 @@ pub fn handleGossipMemberDead(self: anytype, member_id: u64) void {
     logger.info("gossip: member {} dead, marking agent {s} offline", .{ member_id, agent_id });
 
     markOfflineAndOrphanLocked(self, agent_id);
-    service_reconciler.noteNodeLost(@intCast(member_id));
+    service_reconciler.noteNodeLost(node_id);
 }
 
 pub fn handleGossipMemberAlive(self: anytype, member_id: u64) void {
+    const node_id = std.math.cast(i64, member_id) orelse return;
     const agent_id = agent_registry.findAgentIdByNodeId(self.alloc, &self.state_machine.db, member_id) orelse return;
     defer self.alloc.free(agent_id);
 
@@ -243,7 +245,7 @@ pub fn handleGossipMemberAlive(self: anytype, member_id: u64) void {
         logger.warn("gossip: failed to propose active for agent {s}: {}", .{ agent_id, e });
         return;
     };
-    service_reconciler.noteNodeRecovered(@intCast(member_id));
+    service_reconciler.noteNodeRecovered(node_id);
 }
 
 pub fn syncGossipMembership(self: anytype) void {

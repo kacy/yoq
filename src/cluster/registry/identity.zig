@@ -12,10 +12,14 @@ pub const NodeIdError = error{
 pub fn findAgentIdByNodeId(alloc: Allocator, db: *sqlite.Db, node_id: u64) ?[]const u8 {
     const Row = struct { id: sqlite.Text };
 
+    // gossip ids come off the wire. an id that does not fit the column
+    // cannot belong to an agent.
+    const db_node_id = std.math.cast(i64, node_id) orelse return null;
+
     var stmt = db.prepare("SELECT id FROM agents WHERE node_id = ? LIMIT 1;") catch return null;
     defer stmt.deinit();
 
-    var iter = stmt.iterator(Row, .{@as(i64, @intCast(node_id))}) catch return null;
+    var iter = stmt.iterator(Row, .{db_node_id}) catch return null;
     if (iter.nextAlloc(alloc, .{}) catch null) |row| return row.id.data;
     return null;
 }

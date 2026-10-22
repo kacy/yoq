@@ -145,6 +145,10 @@ const indirect_probe_count = 3;
 pub const GossipConfig = struct {
     fanout: ?u32 = null,
     suspicion_multiplier: ?u32 = null,
+    /// add members first heard about in piggybacked updates. servers turn
+    /// this off: their membership comes from the agents table, and any
+    /// trusted member could otherwise make them track arbitrary ids.
+    learn_unknown_members: bool = true,
 };
 
 pub const Gossip = struct {
@@ -177,6 +181,7 @@ pub const Gossip = struct {
     // user-configured overrides (null = use automatic values)
     configured_fanout: ?u32,
     configured_suspicion_multiplier: ?u32,
+    learn_unknown_members: bool,
 
     // base intervals — scaled by ceil(log2(N)) for adaptive timing
     const base_probe_interval: u32 = 5;
@@ -207,6 +212,7 @@ pub const Gossip = struct {
             .dead_timeout = base_dead_timeout * susp_mult,
             .configured_fanout = config.fanout,
             .configured_suspicion_multiplier = config.suspicion_multiplier,
+            .learn_unknown_members = config.learn_unknown_members,
         };
     }
 
@@ -326,10 +332,6 @@ pub const Gossip = struct {
 
     fn encodeUpdates(buf: []u8, start: usize, updates: []const StateUpdate) usize {
         return codec_support.encodeUpdates(buf, start, updates);
-    }
-
-    fn decodeUpdates(data: []const u8, count: u8) BoundedUpdates {
-        return codec_support.decodeUpdates(data, count, BoundedUpdates, MemberState);
     }
 
     fn writeU64(buf: []u8, val: u64) void {
@@ -1514,6 +1516,36 @@ test "applyStateUpdate unknown member dead is ignored" {
     g.freeActions(drain);
 }
 
+test "a server ignores updates about members it does not know" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{ .learn_unknown_members = false });
+    defer g.deinit();
+
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+
+    // a trusted member piggybacks claims about strangers and one real change
+    try g.handlePing(.{
+        .from = 2,
+        .sequence = 1,
+        .updates = BoundedUpdates.fromSlice(&.{
+            .{ .id = 99, .addr = .{ .ip = .{ 10, 0, 0, 99 }, .port = 7000 }, .state = .alive, .incarnation = 1 },
+            .{ .id = 100, .addr = .{ .ip = .{ 10, 0, 0, 100 }, .port = 7000 }, .state = .suspect, .incarnation = 1 },
+            .{ .id = 2, .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 }, .state = .suspect, .incarnation = 5 },
+        }),
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), g.members.count());
+    try std.testing.expectEqual(MemberState.suspect, g.members.get(2).?.state);
+
+    const actions = try g.drainActions();
+    defer g.freeActions(actions);
+    for (actions) |action| switch (action) {
+        .member_alive, .member_dead => return error.TestUnexpectedResult,
+        .member_suspect => |event| try std.testing.expectEqual(@as(u64, 2), event.id),
+        .send_message => {},
+    };
+}
+
 test "handlePing from unknown sender still processes updates" {
     const alloc = std.testing.allocator;
     var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{});
@@ -1625,23 +1657,47 @@ test "null config matches default behavior" {
     try std.testing.expectEqual(@as(u32, 100), g.dead_timeout);
 }
 
-test "decodeUpdates rejects invalid MemberState byte" {
-    // build a ping message with 1 update that has an invalid state byte (0xFF)
-    var buf: [512]u8 = undefined;
+/// A ping from member 99 carrying one update about `id` in `state`.
+fn buildPingWithUpdate(buf: *[41]u8, from: u64, id: u64, state: u8) []const u8 {
     buf[0] = 0x10; // ping
-    @memset(buf[1..9], 0); // from = 0
-    @memset(buf[9..17], 0); // sequence = 0
-    buf[17] = 1; // count = 1
-    @memset(buf[18..32], 0); // id + addr fields
-    buf[32] = 0xFF; // invalid state byte (valid: 0, 1, 2)
-    @memset(buf[33..41], 0); // incarnation
+    Gossip.writeU64(buf[1..], from);
+    Gossip.writeU64(buf[9..], 1); // sequence
+    buf[17] = 1; // count
+    Gossip.writeU64(buf[18..], id);
+    @memcpy(buf[26..30], &[_]u8{ 10, 0, 0, 50 });
+    buf[30] = 0;
+    buf[31] = 0x1B;
+    buf[32] = state;
+    Gossip.writeU64(buf[33..], 1); // incarnation
+    return buf;
+}
 
-    const msg = Gossip.decode(std.testing.allocator, buf[0..41]) catch return;
-    // if decode succeeds, the update should have been rejected (empty updates)
-    switch (msg) {
-        .ping => |p| try std.testing.expectEqual(@as(u8, 0), p.updates.len),
-        else => unreachable,
+test "decode rejects a message with an invalid MemberState byte" {
+    var buf: [41]u8 = undefined;
+    const data = buildPingWithUpdate(&buf, 99, 50, 0xFF);
+    try std.testing.expectError(error.InvalidMessage, Gossip.decode(std.testing.allocator, data));
+}
+
+test "decode rejects member ids of zero or beyond the i64 range" {
+    const alloc = std.testing.allocator;
+    const bad_ids = [_]u64{ 0, @as(u64, std.math.maxInt(i64)) + 1, std.math.maxInt(u64) };
+
+    var buf: [41]u8 = undefined;
+    for (bad_ids) |bad| {
+        // as the sender
+        try std.testing.expectError(error.InvalidMessage, Gossip.decode(alloc, buildPingWithUpdate(&buf, bad, 50, 0)));
+        // as the subject of a piggybacked update
+        try std.testing.expectError(error.InvalidMessage, Gossip.decode(alloc, buildPingWithUpdate(&buf, 99, bad, 0)));
+        // as the target of a ping_req
+        var req_buf: [512]u8 = undefined;
+        const len = try Gossip.encode(&req_buf, .{ .ping_req = .{ .from = 99, .target = bad, .sequence = 1, .updates = .{} } });
+        try std.testing.expectError(error.InvalidMessage, Gossip.decode(alloc, req_buf[0..len]));
     }
+
+    // the largest voter id is still accepted
+    const max_id: u64 = std.math.maxInt(i64);
+    const msg = try Gossip.decode(alloc, buildPingWithUpdate(&buf, max_id, max_id, 0));
+    try std.testing.expectEqual(max_id, msg.ping.updates.buf[0].id);
 }
 
 test "suspect timeout skipped when tick_count wraps below state_changed_at" {
