@@ -118,10 +118,17 @@ pub const BuildStage = struct {
     instructions: []const dockerfile.Instruction,
 };
 
+pub const max_copy_sources = 64;
+
 pub const CopyArgs = struct {
-    src: []const u8,
+    sources_buf: [max_copy_sources][]const u8 = undefined,
+    source_count: usize = 0,
     dest: []const u8,
-    from_stage: ?[]const u8,
+    from_stage: ?[]const u8 = null,
+
+    pub fn sources(self: *const CopyArgs) []const []const u8 {
+        return self.sources_buf[0..self.source_count];
+    }
 };
 
 pub const TriggerInstruction = struct {

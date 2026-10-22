@@ -19,11 +19,17 @@ pub fn processAdd(
     args: []const u8,
     context_dir: []const u8,
 ) types.BuildError!void {
-    const split = copy_args.parseCopyArgs(args);
-    const format = copy_args.archiveFormat(split.src) orelse
-        return copy.processCopy(alloc, state, args, context_dir);
-
-    return processArchiveAdd(alloc, state, args, split.src, split.dest, context_dir, format);
+    const split = try copy.parseArgs(args);
+    const sources = split.sources();
+    for (sources) |src| {
+        const format = copy_args.archiveFormat(src) orelse continue;
+        if (sources.len > 1) {
+            @import("../../../lib/log.zig").err("build: ADD extracts one archive per step; split '{s}' into separate steps", .{args});
+            return types.BuildError.CopyStepFailed;
+        }
+        return processArchiveAdd(alloc, state, args, src, split.dest, context_dir, format);
+    }
+    return copy.processCopy(alloc, state, args, context_dir);
 }
 
 pub fn processAddMultiStage(
@@ -34,9 +40,9 @@ pub fn processAddMultiStage(
     stages: []const types.BuildStage,
     completed_states: []const types.BuildState,
 ) types.BuildError!void {
-    const split = copy_args.parseCopyArgs(args);
+    const split = try copy.parseArgs(args);
     if (split.from_stage) |stage_ref| {
-        return copy.processCopyFromStage(alloc, state, split.src, split.dest, stage_ref, stages, completed_states);
+        return copy.processCopyFromStage(alloc, state, split.sources(), split.dest, stage_ref, stages, completed_states);
     }
     return processAdd(alloc, state, args, context_dir);
 }
