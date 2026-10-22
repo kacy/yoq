@@ -876,6 +876,22 @@ pub const posix = struct {
         try connectResult(std.os.linux.connect(fd, addr, len));
     }
 
+    /// Close every descriptor above stderr except `keep`. A child cloned from
+    /// a daemon starts with a copy of the daemon's whole fd table, and
+    /// close-on-exec does not help a child that never execs, such as a
+    /// container's init.
+    pub fn closeInheritedFds(keep: ?std.posix.fd_t) void {
+        const first: std.posix.fd_t = 3;
+        const last: std.posix.fd_t = std.math.maxInt(std.posix.fd_t);
+        const flags: std.os.linux.CLOSE_RANGE = .{ .UNSHARE = false, .CLOEXEC = false };
+        if (keep) |fd| if (fd >= first) {
+            if (fd > first) _ = std.os.linux.close_range(first, fd - 1, flags);
+            if (fd < last) _ = std.os.linux.close_range(fd + 1, last, flags);
+            return;
+        };
+        _ = std.os.linux.close_range(first, last, flags);
+    }
+
     pub fn pipe() ![2]std.posix.fd_t {
         var fds: [2]std.posix.fd_t = undefined;
         try voidResult(std.os.linux.pipe2(&fds, .{ .CLOEXEC = true }));
