@@ -29,6 +29,11 @@ fn decodeKey(encoded: []const u8) ?[32]u8 {
     return parse_support.decodeKey(encoded);
 }
 
+/// True when `encoded` is a base64 wireguard key that decodes to 32 bytes.
+pub fn isValidPublicKey(encoded: []const u8) bool {
+    return decodeKey(encoded) != null;
+}
+
 fn parseEndpoint(endpoint: []const u8) ?[16]u8 {
     return parse_support.parseEndpoint(endpoint);
 }
@@ -127,6 +132,18 @@ test "decodeKey valid base64" {
 
 test "decodeKey invalid length" {
     try std.testing.expect(decodeKey("too_short") == null);
+}
+
+test "decodeKey rejects keys that do not decode to exactly 32 bytes" {
+    try std.testing.expect(decodeKey("A" ** 43 ++ "=") != null);
+
+    // 44 alphabet characters with no padding would decode to 33 bytes
+    try std.testing.expect(decodeKey("A" ** 44) == null);
+    // "==" padding would decode to 31 bytes
+    try std.testing.expect(decodeKey("A" ** 42 ++ "==") == null);
+    try std.testing.expect(decodeKey("A" ** 42 ++ "=") == null);
+    try std.testing.expect(decodeKey("A" ** 44 ++ "=") == null);
+    try std.testing.expect(decodeKey("A" ** 42 ++ "!=") == null);
 }
 
 test "parseEndpoint valid" {
