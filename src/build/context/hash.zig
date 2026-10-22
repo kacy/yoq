@@ -9,8 +9,12 @@ const Hasher = @import("../hash_encoding.zig").Hasher;
 pub fn hashFiles(
     alloc: std.mem.Allocator,
     context_dir: []const u8,
-    src_path: []const u8,
+    requested_path: []const u8,
 ) types.ContextError!blob_store.Digest {
+    const src_path = path_policy.rootRelative(requested_path) catch {
+        log.err("build: path traversal attempt in hashFiles: {s}", .{requested_path});
+        return types.ContextError.PathTraversal;
+    };
     path_policy.validateContextSourcePath(alloc, context_dir, src_path) catch |err| {
         return switch (err) {
             error.NotFound => types.ContextError.NotFound,

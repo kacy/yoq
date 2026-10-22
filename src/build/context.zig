@@ -5,6 +5,7 @@ const path_policy = @import("context/path_policy.zig");
 const types = @import("context/types.zig");
 
 pub const ContextError = types.ContextError;
+pub const rootRelative = path_policy.rootRelative;
 
 pub fn hashFiles(
     alloc: std.mem.Allocator,
