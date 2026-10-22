@@ -309,6 +309,79 @@ test "gzip tar extraction uses the same confinement for archive-created symlinks
     try expectContents(tmp.dir, "outside/marker", "outside remains intact");
 }
 
+fn gzipBytes(bytes: []const u8) ![]u8 {
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    defer output.deinit();
+    try output.ensureUnusedCapacity(64);
+    const compressor = try alloc.create(std.compress.flate.Compress);
+    defer alloc.destroy(compressor);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    compressor.* = try .init(&output.writer, &window, .gzip, .default);
+    try compressor.writer.writeAll(bytes);
+    try compressor.finish();
+    return output.toOwnedSlice();
+}
+
+/// A tar stream that starts with a PAX header of `size` bytes, none of them
+/// a space, so the record length never ends.
+fn undelimitedPaxArchive(size: usize) ![]u8 {
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    defer output.deinit();
+    try writeRawHeader(&output.writer, "pax", 'x', size);
+    try output.writer.splatByteAll('9', size);
+    try output.writer.splatByteAll(0, (512 - size % 512) % 512 + 1024);
+    return output.toOwnedSlice();
+}
+
+fn extractGzipBytes(tmp: std.testing.TmpDir, bytes: []const u8) !void {
+    const compressed = try gzipBytes(bytes);
+    defer alloc.free(compressed);
+    try tmp.dir.writeFile(io, .{ .sub_path = "input.tar.gz", .data = compressed });
+    var archive_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const archive_len = try tmp.dir.realPathFile(io, "input.tar.gz", &archive_buf);
+    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dest_len = try tmp.dir.realPathFile(io, "dest", &dest_buf);
+    try extract.extractTarGzFile(archive_buf[0..archive_len], dest_buf[0..dest_len], "pax limit test");
+}
+
+test "gzip tar extraction fails cleanly on an undelimited PAX header" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try prepareDest(tmp);
+
+    // within the cap: the record never ends inside the block
+    const bounded = try undelimitedPaxArchive(60 * 1024);
+    defer alloc.free(bounded);
+    try expectFailure(extractGzipBytes(tmp, bounded));
+
+    // above the cap: rejected before any of it is read
+    const oversized = try undelimitedPaxArchive(128 * 1024);
+    defer alloc.free(oversized);
+    try std.testing.expectError(error.TarHeader, extractGzipBytes(tmp, oversized));
+}
+
+test "gzip tar extraction accepts a long PAX path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try prepareDest(tmp);
+
+    const name = "d" ** 200;
+    const record = "210 path=" ++ name ++ "\n";
+    try std.testing.expectEqual(@as(usize, 210), record.len);
+
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    defer output.deinit();
+    try writeRawHeader(&output.writer, "pax", 'x', record.len);
+    try output.writer.writeAll(record);
+    try output.writer.splatByteAll(0, 512 - record.len);
+    var tar: std.tar.Writer = .{ .underlying_writer = &output.writer };
+    try tar.writeFileBytes("short", "long path contents", .{});
+    try tar.finishPedantically();
+
+    try extractGzipBytes(tmp, output.written());
+    try expectContents(tmp.dir, "dest/" ++ name, "long path contents");
+}
+
 fn updateChecksum(header: []u8) !void {
     @memset(header[148..156], ' ');
     var checksum: u32 = 0;
