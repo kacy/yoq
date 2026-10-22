@@ -89,7 +89,7 @@ fn copyEntry(io: std.Io, source: std.Io.Dir, source_name: []const u8, destinatio
             try copyContents(io, from, to, depth);
             if (linux.errno(linux.fchmod(to.handle, (stat.permissions.toMode() & 0o7777))) != .SUCCESS) return error.ChmodFailed;
         },
-        .file => try source.copyFile(source_name, destination, destination_name, io, .{}),
+        .file => try copyRegularFile(io, source, source_name, destination, destination_name),
         .sym_link => {
             var target: [std.fs.max_path_bytes]u8 = undefined;
             const len = try source.readLink(io, source_name, &target);
@@ -101,6 +101,44 @@ fn copyEntry(io: std.Io, source: std.Io.Dir, source_name: []const u8, destinatio
         },
         else => return error.UnsupportedFileType,
     }
+}
+
+/// copy one regular file without following a symlink at `name`.
+///
+/// a running container can swap the entry for an absolute symlink between the
+/// stat above and the open. /proc/<pid>/root is not a chroot, so following it
+/// would read a host file. open the entry once without following links, then
+/// copy from that descriptor only. O_NONBLOCK keeps a swapped-in fifo from
+/// blocking the copy.
+fn copyRegularFile(io: std.Io, source: std.Io.Dir, name: []const u8, destination: std.Io.Dir, destination_name: []const u8) !void {
+    const name_z = try std.posix.toPosixPath(name);
+    const rc = linux.openat(source.handle, &name_z, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true }, 0);
+    switch (linux.errno(rc)) {
+        .SUCCESS => {},
+        .LOOP => return error.EntryChanged,
+        .NOENT => return error.FileNotFound,
+        else => return error.OpenFailed,
+    }
+    const file: std.Io.File = .{ .handle = @intCast(rc), .flags = .{ .nonblocking = false } };
+    var reader: std.Io.File.Reader = .init(file, io, &.{});
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    if (stat.kind != .file) return error.EntryChanged;
+    reader.size = stat.size;
+
+    // the atomic file is renamed into place, so a symlink planted at the
+    // destination name is replaced rather than followed
+    var atomic_file = try destination.createFileAtomic(io, destination_name, .{ .permissions = stat.permissions, .replace = true });
+    defer atomic_file.deinit(io);
+    var buffer: [1024]u8 = undefined;
+    var writer = atomic_file.file.writer(io, &buffer);
+    _ = writer.interface.sendFileAll(&reader, .unlimited) catch |err| switch (err) {
+        error.ReadFailed => return reader.err.?,
+        error.WriteFailed => return writer.err.?,
+    };
+    try writer.flush();
+    try atomic_file.replace(io);
 }
 
 fn sameDirectory(a: std.Io.Dir, b: std.Io.Dir) !bool {
@@ -155,4 +193,51 @@ test "container paths resolve absolute directory symlinks within its root" {
     const content = try directory.readFileAlloc(io, "file", std.testing.allocator, .limited(100));
     defer std.testing.allocator.free(content);
     try std.testing.expectEqualStrings("inside", content);
+}
+
+test "copying a regular file never follows a symlink swapped in at its name" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "container");
+    try tmp.dir.createDirPath(io, "out");
+    try tmp.dir.writeFile(io, .{ .sub_path = "host-secret", .data = "do not copy" });
+    var path_buf: [4096]u8 = undefined;
+    const len = try tmp.dir.realPathFile(io, "host-secret", &path_buf);
+    // the entry was a file when classified; it is an absolute link by the open
+    try tmp.dir.symLink(io, path_buf[0..len], "container/data", .{});
+
+    var container = try tmp.dir.openDir(io, "container", .{});
+    defer container.close(io);
+    var out = try tmp.dir.openDir(io, "out", .{});
+    defer out.close(io);
+    try std.testing.expectError(error.EntryChanged, copyRegularFile(io, container, "data", out, "data"));
+    try std.testing.expectError(error.FileNotFound, out.access(io, "data", .{}));
+}
+
+test "copying from a fifo does not block" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "out");
+    if (linux.errno(linux.mknodat(tmp.dir.handle, "pipe", linux.S.IFIFO | 0o600, 0)) != .SUCCESS) return error.SkipZigTest;
+    var out = try tmp.dir.openDir(io, "out", .{});
+    defer out.close(io);
+    try std.testing.expectError(error.EntryChanged, copyRegularFile(io, tmp.dir, "pipe", out, "pipe"));
+}
+
+test "copying onto a planted destination symlink replaces the link" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "out");
+    try tmp.dir.writeFile(io, .{ .sub_path = "source", .data = "new bytes" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "victim", .data = "untouched" });
+    try tmp.dir.symLink(io, "../victim", "out/target", .{});
+    var out = try tmp.dir.openDir(io, "out", .{});
+    defer out.close(io);
+    try copyRegularFile(io, tmp.dir, "source", out, "target");
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("untouched", try tmp.dir.readFile(io, "victim", &buf));
+    try std.testing.expectEqualStrings("new bytes", try out.readFile(io, "target", &buf));
 }
