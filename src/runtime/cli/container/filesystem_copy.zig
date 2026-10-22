@@ -194,3 +194,50 @@ test "container paths resolve absolute directory symlinks within its root" {
     defer std.testing.allocator.free(content);
     try std.testing.expectEqualStrings("inside", content);
 }
+
+test "copying a regular file never follows a symlink swapped in at its name" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "container");
+    try tmp.dir.createDirPath(io, "out");
+    try tmp.dir.writeFile(io, .{ .sub_path = "host-secret", .data = "do not copy" });
+    var path_buf: [4096]u8 = undefined;
+    const len = try tmp.dir.realPathFile(io, "host-secret", &path_buf);
+    // the entry was a file when classified; it is an absolute link by the open
+    try tmp.dir.symLink(io, path_buf[0..len], "container/data", .{});
+
+    var container = try tmp.dir.openDir(io, "container", .{});
+    defer container.close(io);
+    var out = try tmp.dir.openDir(io, "out", .{});
+    defer out.close(io);
+    try std.testing.expectError(error.EntryChanged, copyRegularFile(io, container, "data", out, "data"));
+    try std.testing.expectError(error.FileNotFound, out.access(io, "data", .{}));
+}
+
+test "copying from a fifo does not block" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "out");
+    if (linux.errno(linux.mknodat(tmp.dir.handle, "pipe", linux.S.IFIFO | 0o600, 0)) != .SUCCESS) return error.SkipZigTest;
+    var out = try tmp.dir.openDir(io, "out", .{});
+    defer out.close(io);
+    try std.testing.expectError(error.EntryChanged, copyRegularFile(io, tmp.dir, "pipe", out, "pipe"));
+}
+
+test "copying onto a planted destination symlink replaces the link" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "out");
+    try tmp.dir.writeFile(io, .{ .sub_path = "source", .data = "new bytes" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "victim", .data = "untouched" });
+    try tmp.dir.symLink(io, "../victim", "out/target", .{});
+    var out = try tmp.dir.openDir(io, "out", .{});
+    defer out.close(io);
+    try copyRegularFile(io, tmp.dir, "source", out, "target");
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("untouched", try tmp.dir.readFile(io, "victim", &buf));
+    try std.testing.expectEqualStrings("new bytes", try out.readFile(io, "target", &buf));
+}
