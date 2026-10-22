@@ -205,3 +205,10 @@ test "resolveVolumePath — parallel driver" {
     const path = try resolveVolumePath(&buf, "myapp", "scratch", .{ .parallel = .{ .mount_path = "/mnt/lustre/data" } });
     try std.testing.expectEqualStrings("/mnt/lustre/data", path);
 }
+
+test "managed volume paths refuse traversing names" {
+    var buf: [paths.max_path]u8 = undefined;
+    try std.testing.expectError(common.VolumeError.InvalidName, common.resolveVolumePath(&buf, "demo", "../../etc", .{ .local = .{} }));
+    try std.testing.expectError(common.VolumeError.InvalidName, common.resolveVolumePath(&buf, "../x", "data", .{ .local = .{} }));
+    try std.testing.expectError(common.VolumeError.InvalidName, common.resolveVolumePath(&buf, "demo", "a/b", .{ .nfs = .{ .server = "s", .path = "/e", .options = null } }));
+}

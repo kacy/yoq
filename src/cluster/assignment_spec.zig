@@ -137,6 +137,8 @@ fn validate(execution: Execution) !void {
         if (mount.source.len == 0 or std.mem.indexOfScalar(u8, mount.source, 0) != null or mount.target.len == 0 or mount.target[0] != '/' or std.mem.indexOfScalar(u8, mount.target, 0) != null) return error.InvalidRequest;
     }
     for (execution.ports) |port| if (port.host_port == 0 or port.container_port == 0) return error.InvalidRequest;
+    // checked again here so stored and replicated assignments fail closed too
+    for (execution.volume_definitions) |volume| if (!@import("../manifest/names.zig").isValid(volume.name)) return error.InvalidRequest;
     if (execution.working_dir) |dir| {
         if (dir.len == 0 or dir[0] != '/' or std.mem.indexOfScalar(u8, dir, 0) != null) return error.InvalidRequest;
     }
@@ -277,6 +279,13 @@ test "assignment resource limits reach actual kernel cgroup controls" {
         try std.testing.expectEqual(limits.cpu_max_period, actual.cpu_max_period.?);
         try std.testing.expectEqual(limits.memory_max, actual.memory_limit);
     }
+}
+
+test "agents refuse stored assignments with a traversing volume name" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.InvalidRequest, decode(alloc,
+        \\{"version":1,"argv":["sh"],"volume_definitions":[{"name":"../../root","driver":{"local":{}}}]}
+    ));
 }
 
 test "training execution retains named mounts gpu settings and published ports" {
