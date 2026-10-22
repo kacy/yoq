@@ -163,3 +163,35 @@ pub fn processCopyMultiStage(
     }
     return processCopy(alloc, state, args, context_dir);
 }
+
+test "several COPY sources land in one destination directory" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "layer", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "build.zig", .data = "one" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = "two" });
+    var root_buf: [paths.max_path]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    var layer_buf: [paths.max_path]u8 = undefined;
+    const layer_dir = try std.fmt.bufPrint(&layer_buf, "{s}/layer", .{root});
+
+    // the first lines of this repo's own Dockerfile
+    const split = try parseArgs("build.zig build.zig.zon ./");
+    var dest_buf: [paths.max_path]u8 = undefined;
+    const dest = try common.Destination.resolve("/src", split.dest, &dest_buf);
+    try dest.ensureParents(layer_dir);
+    try copySources(alloc, root, split.sources(), layer_dir, dest.path);
+
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("one", try tmp.dir.readFile(io, "layer/src/build.zig", &buf));
+    try std.testing.expectEqualStrings("two", try tmp.dir.readFile(io, "layer/src/build.zig.zon", &buf));
+
+    // the cache key changes when any source changes
+    var first_buf: [71]u8 = undefined;
+    const first = try hashSources(alloc, root, split.sources(), &first_buf);
+    try tmp.dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = "changed" });
+    var second_buf: [71]u8 = undefined;
+    try std.testing.expect(!std.mem.eql(u8, first, try hashSources(alloc, root, split.sources(), &second_buf)));
+}
