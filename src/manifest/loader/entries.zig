@@ -15,6 +15,12 @@ pub fn parseCommonFields(
         log.err("manifest: {s} '{s}' is missing required field 'image'", .{ kind, name });
         return common.LoadError.MissingImage;
     };
+    // an unset ${VAR} expands to nothing, which would otherwise reach the
+    // server as "image":"" and be refused there with a vaguer error
+    if (image_raw.len == 0) {
+        log.err("manifest: {s} '{s}' has an empty 'image' (is a variable unset?)", .{ kind, name });
+        return common.LoadError.MissingImage;
+    }
 
     const command = try fields.parseStringArray(alloc, table.getArray("command"));
     errdefer {
