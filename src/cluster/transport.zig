@@ -209,6 +209,38 @@ test "tcp transport receives an authenticated message through its listener" {
     try std.testing.expect((try transport.receive(alloc)) == null);
 }
 
+test "the gossip socket cannot be shared with another local socket" {
+    const alloc = std.testing.allocator;
+    var transport = try Transport.init(alloc, 0);
+    defer transport.deinit();
+    try transport.initUdp(0);
+
+    var address: posix.sockaddr.in = undefined;
+    var address_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
+    try linux_platform.posix.getsockname(transport.udp_fd.?, @ptrCast(&address), &address_len);
+    const port = std.mem.bigToNative(u16, address.port);
+
+    // a squatter that asks for address reuse still cannot bind the port
+    for ([_][4]u8{ .{ 127, 0, 0, 1 }, .{ 0, 0, 0, 0 } }) |ip| {
+        const squatter = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0);
+        defer linux_platform.posix.close(squatter);
+        const one: i32 = 1;
+        try posix.setsockopt(squatter, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one));
+        const target = linux_platform.net.Address.initIp4(ip, port);
+        try std.testing.expectError(error.AddressInUse, linux_platform.posix.bind(squatter, &target.any, target.getOsSockLen()));
+    }
+
+    // a second transport on the same host, such as an agent next to a
+    // server, is refused instead of silently splitting the traffic
+    var other = try Transport.init(alloc, 0);
+    defer other.deinit();
+    try std.testing.expectError(error.AddressInUse, other.initUdp(port));
+
+    // restarting on the same port works straight away
+    transport.deinitUdp();
+    try transport.initUdp(port);
+}
+
 test "encode/decode round-trip: request vote" {
     const alloc = std.testing.allocator;
     const args = RequestVoteArgs{

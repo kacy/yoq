@@ -15,9 +15,9 @@ pub fn initUdp(self: anytype, port: u16) !void {
     const fd = try linux_platform.posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
     errdefer linux_platform.posix.close(fd);
 
-    const one: i32 = 1;
-    try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one));
-
+    // no SO_REUSEADDR: with it, any local process that also sets it could
+    // bind the same port and silently take our gossip. udp has no
+    // TIME_WAIT, so restarts do not need it either.
     const addr = linux_platform.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
     try linux_platform.posix.bind(fd, &addr.any, addr.getOsSockLen());
     self.udp_fd = fd;
