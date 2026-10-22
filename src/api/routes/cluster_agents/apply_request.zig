@@ -46,6 +46,7 @@ pub const ParseError = error{
     OutOfMemory,
     InvalidRequest,
     InvalidImage,
+    RelativeBindSource,
     InvalidRolloutConfig,
 };
 
@@ -226,6 +227,10 @@ fn validateNamedVolumes(root: std.json.Value) ParseError!bool {
                 const mount_kind = mount.object.get("kind") orelse return error.InvalidRequest;
                 if (mount_kind != .string) return error.InvalidRequest;
                 if (std.mem.eql(u8, mount_kind.string, "bind")) {
+                    // an agent would resolve a relative source against its
+                    // own working directory, which is never what was meant
+                    const source = mount.object.get("source") orelse return error.InvalidRequest;
+                    if (source != .string or !std.fs.path.isAbsolute(source.string)) return error.RelativeBindSource;
                     uses_host_paths = true;
                     continue;
                 }
