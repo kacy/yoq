@@ -45,6 +45,37 @@ pub fn requiredScope(method: http.Method, path: []const u8) ?[]const u8 {
     return "*"; // unknown route: require admin
 }
 
+// scopes granted to the request this thread is serving. each route needs one
+// scope, checked before dispatch. a handler that needs a second one, such as
+// cluster apply with host paths, asks grantedAllows. it fails closed: nothing
+// is granted until authorizeRequest records the request's scopes.
+threadlocal var granted_buf: [1024]u8 = undefined;
+threadlocal var granted_len: usize = 0;
+threadlocal var granted_all: bool = false;
+
+/// record the request's scopes. null means the server runs without api auth,
+/// so every scope is granted.
+pub fn setGrantedScopes(csv: ?[]const u8) void {
+    const value = csv orelse {
+        granted_all = true;
+        granted_len = 0;
+        return;
+    };
+    granted_all = false;
+    // a list too long to copy grants nothing extra rather than a truncation
+    granted_len = if (value.len <= granted_buf.len) value.len else 0;
+    @memcpy(granted_buf[0..granted_len], value[0..granted_len]);
+}
+
+pub fn resetGrantedScopes() void {
+    granted_all = false;
+    granted_len = 0;
+}
+
+pub fn grantedAllows(scope: []const u8) bool {
+    return granted_all or scopes.allows(granted_buf[0..granted_len], scope);
+}
+
 /// the outcome of authorizing a request.
 pub const AuthResult = struct {
     ok: bool = false,
@@ -134,4 +165,20 @@ test "authorize rejects a missing or wrong token" {
     const result = authorize(std.testing.allocator, &req, "adminsecret");
     defer result.deinit(std.testing.allocator);
     try std.testing.expect(!result.ok);
+}
+
+test "granted scopes fail closed and honor the request's token" {
+    defer resetGrantedScopes();
+    resetGrantedScopes();
+    try std.testing.expect(!grantedAllows("apps:read"));
+    setGrantedScopes("apps:write,cluster:*");
+    try std.testing.expect(grantedAllows("apps:read"));
+    try std.testing.expect(grantedAllows("cluster:admin"));
+    try std.testing.expect(!grantedAllows("secrets:read"));
+    // a server without api auth grants everything
+    setGrantedScopes(null);
+    try std.testing.expect(grantedAllows("cluster:admin"));
+    // a scope list too long to keep grants nothing
+    setGrantedScopes("apps:write," ** 100);
+    try std.testing.expect(!grantedAllows("apps:write"));
 }
