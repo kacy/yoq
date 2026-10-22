@@ -22,14 +22,12 @@ pub fn processCopy(
     args: []const u8,
     context_dir: []const u8,
 ) types.BuildError!void {
-    const split = copy_args.parseCopyArgs(args);
+    const split = try parseArgs(args);
     var actual_dest_buf: [paths.max_path]u8 = undefined;
     const actual_dest = try common.Destination.resolve(state.workdir, split.dest, &actual_dest_buf);
 
-    const file_hash = context.hashFiles(alloc, context_dir, split.src) catch
-        return types.BuildError.CopyStepFailed;
     var file_hash_buf: [71]u8 = undefined;
-    const file_hash_str = file_hash.string(&file_hash_buf);
+    const file_hash_str = try hashSources(alloc, context_dir, split.sources(), &file_hash_buf);
 
     const cache_key = (try common.withCache(alloc, state, "COPY", args, file_hash_str, actual_dest.path)) orelse return;
     defer alloc.free(cache_key);
@@ -39,17 +37,47 @@ pub fn processCopy(
     defer cwd().deleteTree(std.Options.debug_io, layer_dir) catch {};
 
     try actual_dest.ensureParents(layer_dir);
-    context.copyFiles(alloc, context_dir, split.src, layer_dir, actual_dest.path) catch
-        return types.BuildError.CopyStepFailed;
+    try copySources(alloc, context_dir, split.sources(), layer_dir, actual_dest.path);
 
     const layer_result = layer.createLayerFromDir(alloc, layer_dir) catch return types.BuildError.LayerFailed;
     if (layer_result) |lr| try common.commitLayerResult(state, lr, cache_key);
 }
 
+/// parse COPY or ADD arguments, logging why a step is refused.
+pub fn parseArgs(args: []const u8) types.BuildError!types.CopyArgs {
+    return copy_args.parseCopyArgs(args) catch |err| {
+        log.err("build: cannot use COPY/ADD arguments '{s}': {s}", .{ args, @errorName(err) });
+        return types.BuildError.CopyStepFailed;
+    };
+}
+
+/// one digest for the cache key. a single source keeps its own digest, so
+/// cache entries from before multi-source support stay valid.
+fn hashSources(alloc: std.mem.Allocator, root: []const u8, sources: []const []const u8, out: *[71]u8) types.BuildError![]const u8 {
+    if (sources.len == 1) {
+        const digest = context.hashFiles(alloc, root, sources[0]) catch return types.BuildError.CopyStepFailed;
+        return digest.string(out);
+    }
+    var combined = std.crypto.hash.sha2.Sha256.init(.{});
+    for (sources) |src| {
+        const digest = context.hashFiles(alloc, root, src) catch return types.BuildError.CopyStepFailed;
+        var buf: [71]u8 = undefined;
+        combined.update(digest.string(&buf));
+    }
+    const hex = std.fmt.bytesToHex(combined.finalResult(), .lower);
+    return std.fmt.bufPrint(out, "sha256:{s}", .{&hex}) catch types.BuildError.CopyStepFailed;
+}
+
+fn copySources(alloc: std.mem.Allocator, root: []const u8, sources: []const []const u8, layer_dir: []const u8, dest: []const u8) types.BuildError!void {
+    for (sources) |src| {
+        context.copyFiles(alloc, root, src, layer_dir, dest) catch return types.BuildError.CopyStepFailed;
+    }
+}
+
 pub fn processCopyFromStage(
     alloc: std.mem.Allocator,
     state: *types.BuildState,
-    src: []const u8,
+    sources: []const []const u8,
     dest: []const u8,
     stage_ref: []const u8,
     stages: []const types.BuildStage,
@@ -115,8 +143,7 @@ pub fn processCopyFromStage(
     defer cwd().deleteTree(std.Options.debug_io, layer_dir) catch {};
 
     try actual_dest.ensureParents(layer_dir);
-    context.copyFiles(alloc, merged_dir, src, layer_dir, actual_dest.path) catch
-        return types.BuildError.CopyStepFailed;
+    try copySources(alloc, merged_dir, sources, layer_dir, actual_dest.path);
 
     const layer_result = layer.createLayerFromDir(alloc, layer_dir) catch return types.BuildError.LayerFailed;
     if (layer_result) |lr| try common.commitLayerResult(state, lr, null);
@@ -130,9 +157,41 @@ pub fn processCopyMultiStage(
     stages: []const types.BuildStage,
     completed_states: []const types.BuildState,
 ) types.BuildError!void {
-    const split = copy_args.parseCopyArgs(args);
+    const split = try parseArgs(args);
     if (split.from_stage) |stage_ref| {
-        return processCopyFromStage(alloc, state, split.src, split.dest, stage_ref, stages, completed_states);
+        return processCopyFromStage(alloc, state, split.sources(), split.dest, stage_ref, stages, completed_states);
     }
     return processCopy(alloc, state, args, context_dir);
+}
+
+test "several COPY sources land in one destination directory" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "layer", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "build.zig", .data = "one" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = "two" });
+    var root_buf: [paths.max_path]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    var layer_buf: [paths.max_path]u8 = undefined;
+    const layer_dir = try std.fmt.bufPrint(&layer_buf, "{s}/layer", .{root});
+
+    // the first lines of this repo's own Dockerfile
+    const split = try parseArgs("build.zig build.zig.zon ./");
+    var dest_buf: [paths.max_path]u8 = undefined;
+    const dest = try common.Destination.resolve("/src", split.dest, &dest_buf);
+    try dest.ensureParents(layer_dir);
+    try copySources(alloc, root, split.sources(), layer_dir, dest.path);
+
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("one", try tmp.dir.readFile(io, "layer/src/build.zig", &buf));
+    try std.testing.expectEqualStrings("two", try tmp.dir.readFile(io, "layer/src/build.zig.zon", &buf));
+
+    // the cache key changes when any source changes
+    var first_buf: [71]u8 = undefined;
+    const first = try hashSources(alloc, root, split.sources(), &first_buf);
+    try tmp.dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = "changed" });
+    var second_buf: [71]u8 = undefined;
+    try std.testing.expect(!std.mem.eql(u8, first, try hashSources(alloc, root, split.sources(), &second_buf)));
 }

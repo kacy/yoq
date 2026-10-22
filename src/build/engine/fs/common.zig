@@ -199,5 +199,5 @@ test "build destination is rejected before hashing cache lookup or stage extract
     try std.testing.expectError(error.CopyStepFailed, @import("copy.zig").processCopy(failing.allocator(), &state, "input.tar relative/", root));
     try std.testing.expect(!failing.has_induced_failure);
     const completed = [_]types.BuildState{types.BuildState.init(std.testing.allocator)};
-    try std.testing.expectError(error.CopyStepFailed, @import("copy.zig").processCopyFromStage(std.testing.allocator, &state, "/source", "../../outside", "0", &.{}, &completed));
+    try std.testing.expectError(error.CopyStepFailed, @import("copy.zig").processCopyFromStage(std.testing.allocator, &state, &.{"/source"}, "../../outside", "0", &.{}, &completed));
 }
