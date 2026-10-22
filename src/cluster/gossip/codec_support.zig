@@ -61,10 +61,11 @@ pub fn decode(data: []const u8, GossipMessage: type, BoundedUpdates: type, Membe
             const from = readU64(data[1..]);
             const sequence = readU64(data[9..]);
             const count = data[17];
+            if (!isValidMemberId(from)) return error.InvalidMessage;
             if (count > max_piggyback_updates) return error.InvalidMessage;
             if (data.len < 18 + @as(usize, count) * 23) return error.InvalidMessage;
 
-            const updates = decodeUpdates(data[18..], count, BoundedUpdates, MemberState);
+            const updates = decodeUpdates(data[18..], count, BoundedUpdates, MemberState) orelse return error.InvalidMessage;
             if (msg_type == 0x10) {
                 return .{ .ping = .{ .from = from, .sequence = sequence, .updates = updates } };
             }
@@ -76,10 +77,11 @@ pub fn decode(data: []const u8, GossipMessage: type, BoundedUpdates: type, Membe
             const target = readU64(data[9..]);
             const sequence = readU64(data[17..]);
             const count = data[25];
+            if (!isValidMemberId(from) or !isValidMemberId(target)) return error.InvalidMessage;
             if (count > max_piggyback_updates) return error.InvalidMessage;
             if (data.len < 26 + @as(usize, count) * 23) return error.InvalidMessage;
 
-            const updates = decodeUpdates(data[26..], count, BoundedUpdates, MemberState);
+            const updates = decodeUpdates(data[26..], count, BoundedUpdates, MemberState) orelse return error.InvalidMessage;
             return .{ .ping_req = .{ .from = from, .target = target, .sequence = sequence, .updates = updates } };
         },
         else => return error.InvalidMessage,
@@ -104,19 +106,29 @@ pub fn encodeUpdates(buf: []u8, start: usize, updates: anytype) usize {
     return pos;
 }
 
-pub fn decodeUpdates(data: []const u8, count: u8, BoundedUpdates: type, MemberState: type) BoundedUpdates {
+/// Member ids are stored as sqlite integers (agents) or bounded to i64 by
+/// the static voter config, and 0 is never issued. Anything else on the
+/// wire is forged or corrupt.
+pub fn isValidMemberId(id: u64) bool {
+    return id != 0 and id <= std.math.maxInt(i64);
+}
+
+/// Returns null when any update has an invalid id or state byte.
+pub fn decodeUpdates(data: []const u8, count: u8, BoundedUpdates: type, MemberState: type) ?BoundedUpdates {
     var result: BoundedUpdates = .{};
     result.len = count;
 
     var pos: usize = 0;
     for (0..count) |i| {
+        const id = readU64(data[pos..]);
+        if (!isValidMemberId(id)) return null;
         result.buf[i] = .{
-            .id = readU64(data[pos..]),
+            .id = id,
             .addr = .{
                 .ip = data[pos + 8 ..][0..4].*,
                 .port = @as(u16, data[pos + 12]) | (@as(u16, data[pos + 13]) << 8),
             },
-            .state = std.enums.fromInt(MemberState, data[pos + 14]) orelse return .{},
+            .state = std.enums.fromInt(MemberState, data[pos + 14]) orelse return null,
             .incarnation = readU64(data[pos + 15 ..]),
         };
         pos += 23;
