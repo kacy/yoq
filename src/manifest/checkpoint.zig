@@ -31,9 +31,15 @@ pub fn freeEntries(alloc: std.mem.Allocator, entries: []CheckpointEntry) void {
     alloc.free(entries);
 }
 
+/// file the training code writes into a step directory once the checkpoint
+/// is fully on disk. without it a crash mid-write would leave a partial
+/// directory that outranks the last good one.
+pub const complete_marker = ".yoq-complete";
+
 /// list the step directories directly inside `dir`, sorted by step
-/// ascending. symlinked entries are skipped. free with freeEntries.
-pub fn scanCheckpointDir(alloc: std.mem.Allocator, dir: std.Io.Dir) ![]CheckpointEntry {
+/// ascending. symlinked entries are skipped, and so are directories without
+/// the completion marker when `require_marker` is set. free with freeEntries.
+pub fn scanCheckpointDir(alloc: std.mem.Allocator, dir: std.Io.Dir, require_marker: bool) ![]CheckpointEntry {
     var entries: std.ArrayList(CheckpointEntry) = .empty;
     errdefer {
         for (entries.items) |entry| alloc.free(entry.name);
@@ -44,6 +50,7 @@ pub fn scanCheckpointDir(alloc: std.mem.Allocator, dir: std.Io.Dir) ![]Checkpoin
     while (try iter.next(std.Options.debug_io)) |entry| {
         if (entry.kind != .directory) continue;
         const step = parseStepFromName(entry.name) orelse continue;
+        if (require_marker and !hasCompleteMarker(dir, entry.name)) continue;
         const name = try alloc.dupe(u8, entry.name);
         errdefer alloc.free(name);
         try entries.append(alloc, .{ .step = step, .name = name });
@@ -52,6 +59,13 @@ pub fn scanCheckpointDir(alloc: std.mem.Allocator, dir: std.Io.Dir) ![]Checkpoin
     const sorted = try entries.toOwnedSlice(alloc);
     std.mem.sort(CheckpointEntry, sorted, {}, stepLessThan);
     return sorted;
+}
+
+fn hasCompleteMarker(dir: std.Io.Dir, name: []const u8) bool {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ name, complete_marker }) catch return false;
+    const stat = dir.statFile(std.Options.debug_io, path, .{ .follow_symlinks = false }) catch return false;
+    return stat.kind == .file;
 }
 
 fn stepLessThan(_: void, a: CheckpointEntry, b: CheckpointEntry) bool {
@@ -73,15 +87,19 @@ fn parseStepFromName(name: []const u8) ?i64 {
 }
 
 /// record newly discovered checkpoints in the database and enforce
-/// keep-N retention. `dir` is the opened checkpoint directory and
-/// `checkpoint_path` is its path inside the container, which is what gets
-/// recorded. returns the number of new checkpoints recorded.
-pub fn syncCheckpoints(alloc: std.mem.Allocator, job_id: []const u8, checkpoint_path: []const u8, dir: std.Io.Dir, keep: u32) !u32 {
-    return syncCheckpointsWithDelete(alloc, job_id, checkpoint_path, dir, keep, deleteCheckpointDirectory);
+/// keep-N retention. `dir` is the opened checkpoint directory; the recorded
+/// paths are the container paths below `ckpt.path`. only complete
+/// checkpoints are counted, so a partial directory is never kept in place of
+/// a good one and never deleted while it might still be written.
+/// returns the number of new checkpoints recorded.
+pub fn syncCheckpoints(alloc: std.mem.Allocator, job_id: []const u8, ckpt: spec.CheckpointSpec, dir: std.Io.Dir) !u32 {
+    return syncCheckpointsWithDelete(alloc, job_id, ckpt, dir, deleteCheckpointDirectory);
 }
 
-fn syncCheckpointsWithDelete(alloc: std.mem.Allocator, job_id: []const u8, checkpoint_path: []const u8, dir: std.Io.Dir, keep: u32, comptime delete_directory: anytype) !u32 {
-    const entries = scanCheckpointDir(alloc, dir) catch return error.ScanFailed;
+fn syncCheckpointsWithDelete(alloc: std.mem.Allocator, job_id: []const u8, ckpt: spec.CheckpointSpec, dir: std.Io.Dir, comptime delete_directory: anytype) !u32 {
+    const checkpoint_path = ckpt.path;
+    const keep = ckpt.keep;
+    const entries = scanCheckpointDir(alloc, dir, ckpt.require_complete_marker) catch return error.ScanFailed;
     defer freeEntries(alloc, entries);
     if (entries.len == 0) return 0;
 
@@ -164,15 +182,17 @@ pub fn buildCheckpointEnv(
     try appendEnv(alloc, env, "YOQ_CHECKPOINT_DIR={s}", .{ckpt.path});
     try appendEnv(alloc, env, "YOQ_CHECKPOINT_INTERVAL={d}", .{ckpt.interval_secs});
     try appendEnv(alloc, env, "YOQ_CHECKPOINT_KEEP={d}", .{ckpt.keep});
+    if (ckpt.require_complete_marker) try appendEnv(alloc, env, "YOQ_CHECKPOINT_MARKER={s}", .{complete_marker});
     if (resume_path) |path| try appendEnv(alloc, env, "YOQ_RESUME_FROM={s}", .{path});
 }
 
 // checkpoint paths belong to the container. open the directory behind the
 // longest matching bind mount and return a path the resumed process can open.
-pub fn latestMountedCheckpoint(alloc: std.mem.Allocator, checkpoint_path: []const u8, mounts: []const @import("../runtime/container.zig").BindMount) !?[]const u8 {
+pub fn latestMountedCheckpoint(alloc: std.mem.Allocator, ckpt: spec.CheckpointSpec, mounts: []const @import("../runtime/container.zig").BindMount) !?[]const u8 {
+    const checkpoint_path = ckpt.path;
     var dir = try openMountedDirectory(checkpoint_path, mounts) orelse return null;
     defer dir.close(std.Options.debug_io);
-    const entries = try scanCheckpointDir(alloc, dir);
+    const entries = try scanCheckpointDir(alloc, dir, ckpt.require_complete_marker);
     defer freeEntries(alloc, entries);
     if (entries.len == 0) return null;
     return try std.fs.path.join(alloc, &.{ checkpoint_path, entries[entries.len - 1].name });
@@ -278,10 +298,11 @@ test "buildCheckpointEnv adds env vars" {
 
     try buildCheckpointEnv(alloc, &env, ckpt, null);
 
-    try std.testing.expectEqual(@as(usize, 3), env.items.len);
+    try std.testing.expectEqual(@as(usize, 4), env.items.len);
     try std.testing.expectEqualStrings("YOQ_CHECKPOINT_DIR=/mnt/checkpoints", env.items[0]);
     try std.testing.expectEqualStrings("YOQ_CHECKPOINT_INTERVAL=900", env.items[1]);
     try std.testing.expectEqualStrings("YOQ_CHECKPOINT_KEEP=3", env.items[2]);
+    try std.testing.expectEqualStrings("YOQ_CHECKPOINT_MARKER=.yoq-complete", env.items[3]);
 }
 
 test "buildCheckpointEnv adds resume path" {
@@ -301,8 +322,8 @@ test "buildCheckpointEnv adds resume path" {
 
     try buildCheckpointEnv(alloc, &env, ckpt, "/mnt/ckpt/step_500");
 
-    try std.testing.expectEqual(@as(usize, 4), env.items.len);
-    try std.testing.expectEqualStrings("YOQ_RESUME_FROM=/mnt/ckpt/step_500", env.items[3]);
+    try std.testing.expectEqual(@as(usize, 5), env.items.len);
+    try std.testing.expectEqualStrings("YOQ_RESUME_FROM=/mnt/ckpt/step_500", env.items[4]);
 }
 
 test "checkpoint store round-trip" {
@@ -416,11 +437,16 @@ test "training checkpoint resume maps the most specific mount into container pat
         .{ .source = "/missing", .target = "/data" },
         .{ .source = host, .target = "/data/checkpoints" },
     };
-    const latest = (try latestMountedCheckpoint(alloc, "/data/checkpoints", &mounts)).?;
+    const latest = (try latestMountedCheckpoint(alloc, .{ .path = "/data/checkpoints", .require_complete_marker = false }, &mounts)).?;
     defer alloc.free(latest);
     try std.testing.expectEqualStrings("/data/checkpoints/step_20", latest);
     try std.testing.expect((try mountedLocation("/database", &mounts)) == null);
     try std.testing.expectError(error.InvalidCheckpointPath, mountedLocation("/data/../etc", &mounts));
+}
+
+/// retention tests that predate completion markers
+fn unmarked(keep: u32) spec.CheckpointSpec {
+    return .{ .path = "/ckpt", .keep = keep, .require_complete_marker = false };
 }
 
 fn seedRetentionJob() !void {
@@ -462,13 +488,13 @@ test "training checkpoint retention prunes the first discovered batch" {
     defer alloc.free(path);
     for ([_][]const u8{ "step_100", "step_200", "step_300", "step_400" }) |name|
         try tmp.dir.createDir(std.Options.debug_io, name, .default_dir);
-    try std.testing.expectEqual(@as(u32, 4), try syncCheckpoints(alloc, "retention-job", "/ckpt", tmp.dir, 2));
+    try std.testing.expectEqual(@as(u32, 4), try syncCheckpoints(alloc, "retention-job", unmarked(2), tmp.dir));
     try expectRetainedSteps(&.{ 400, 300 });
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_100", .{}));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_200", .{}));
     try tmp.dir.access(std.Options.debug_io, "step_300", .{});
     try tmp.dir.access(std.Options.debug_io, "step_400", .{});
-    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "retention-job", "/ckpt", tmp.dir, 2));
+    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "retention-job", unmarked(2), tmp.dir));
 }
 
 test "training checkpoint retention keeps newer steps when older directories arrive late" {
@@ -488,11 +514,11 @@ test "training checkpoint retention keeps newer steps when older directories arr
     }
     try tmp.dir.createDir(std.Options.debug_io, "step_100", .default_dir);
     try tmp.dir.createDir(std.Options.debug_io, "step_200", .default_dir);
-    try std.testing.expectEqual(@as(u32, 2), try syncCheckpoints(alloc, "retention-job", "/ckpt", tmp.dir, 0));
+    try std.testing.expectEqual(@as(u32, 2), try syncCheckpoints(alloc, "retention-job", unmarked(0), tmp.dir));
     const latest = (try store.getLatestCheckpoint(alloc, "retention-job")).?;
     defer latest.deinit(alloc);
     try std.testing.expectEqual(@as(i64, 400), latest.step);
-    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "retention-job", "/ckpt", tmp.dir, 2));
+    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "retention-job", unmarked(2), tmp.dir));
     try expectRetainedSteps(&.{ 400, 300 });
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_100", .{}));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_200", .{}));
@@ -516,11 +542,11 @@ test "training checkpoint retention preserves failed deletions and retries them"
             return error.AccessDenied;
         }
     };
-    try std.testing.expectError(error.AccessDenied, syncCheckpointsWithDelete(alloc, "retention-job", "/ckpt", tmp.dir, 1, Failure.delete));
+    try std.testing.expectError(error.AccessDenied, syncCheckpointsWithDelete(alloc, "retention-job", unmarked(1), tmp.dir, Failure.delete));
     try expectRetainedSteps(&.{ 30, 20, 10 });
     try tmp.dir.access(std.Options.debug_io, "step_20", .{});
     try tmp.dir.access(std.Options.debug_io, "step_10", .{});
-    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "retention-job", "/ckpt", tmp.dir, 1));
+    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "retention-job", unmarked(1), tmp.dir));
     try expectRetainedSteps(&.{30});
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_20", .{}));
     try tmp.dir.access(std.Options.debug_io, "step_30", .{});
@@ -532,10 +558,10 @@ test "training checkpoint retention accepts an empty checkpoint directory" {
     defer tmp.cleanup();
     const path = try tmp.dir.realPathFileAlloc(std.Options.debug_io, ".", alloc);
     defer alloc.free(path);
-    const entries = try scanCheckpointDir(alloc, tmp.dir);
+    const entries = try scanCheckpointDir(alloc, tmp.dir, false);
     defer freeEntries(alloc, entries);
     try std.testing.expectEqual(@as(usize, 0), entries.len);
-    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "not-yet-recorded", "/ckpt", tmp.dir, 2));
+    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "not-yet-recorded", unmarked(2), tmp.dir));
 }
 
 test "scanCheckpointDir finds step directories in step order" {
@@ -546,7 +572,7 @@ test "scanCheckpointDir finds step directories in step order" {
         try tmp.dir.createDir(std.Options.debug_io, name, .default_dir);
     try tmp.dir.symLink(std.Options.debug_io, "step_100", "step_999", .{});
 
-    const entries = try scanCheckpointDir(alloc, tmp.dir);
+    const entries = try scanCheckpointDir(alloc, tmp.dir, false);
     defer freeEntries(alloc, entries);
     // the symlinked step_999 is not a checkpoint
     try std.testing.expectEqual(@as(usize, 3), entries.len);
@@ -572,11 +598,11 @@ test "checkpoint scans see every directory, not the first 64" {
     defer alloc.free(host);
     const mounts = [_]@import("../runtime/container.zig").BindMount{.{ .source = host, .target = "/ckpt" }};
 
-    const latest = (try latestMountedCheckpoint(alloc, "/ckpt", &mounts)).?;
+    const latest = (try latestMountedCheckpoint(alloc, unmarked(5), &mounts)).?;
     defer alloc.free(latest);
     try std.testing.expectEqualStrings("/ckpt/step_100", latest);
 
-    try std.testing.expectEqual(@as(u32, 100), try syncCheckpoints(alloc, "retention-job", "/ckpt", tmp.dir, 5));
+    try std.testing.expectEqual(@as(u32, 100), try syncCheckpoints(alloc, "retention-job", unmarked(5), tmp.dir));
     try expectRetainedSteps(&.{ 100, 99, 98, 97, 96 });
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_95", .{}));
 }
@@ -600,7 +626,7 @@ test "checkpoint paths that cross a symlink below the mount are refused" {
     // the link is the checkpoint directory itself, or a component above it
     for ([_][]const u8{ "/mnt/checkpoints/model", "/mnt/checkpoints/a/model" }) |path| {
         try std.testing.expectError(error.CheckpointPathRejected, openMountedDirectory(path, &mounts));
-        try std.testing.expectError(error.CheckpointPathRejected, latestMountedCheckpoint(alloc, path, &mounts));
+        try std.testing.expectError(error.CheckpointPathRejected, latestMountedCheckpoint(alloc, .{ .path = path }, &mounts));
     }
     for (1..8) |step| try tmp.dir.access(std.Options.debug_io, try std.fmt.bufPrint(&name_buf, "outside/checkpoint-{d}", .{step}), .{});
 
@@ -610,4 +636,62 @@ test "checkpoint paths that cross a symlink below the mount are refused" {
     var real = (try openMountedDirectory("/mnt/checkpoints/real", &mounts)).?;
     real.close(std.Options.debug_io);
     try std.testing.expect((try openMountedDirectory("/mnt/checkpoints/missing", &mounts)) == null);
+}
+
+fn markComplete(dir: std.Io.Dir, name: []const u8) !void {
+    var buf: [64]u8 = undefined;
+    try dir.writeFile(std.Options.debug_io, .{ .sub_path = try std.fmt.bufPrint(&buf, "{s}/" ++ complete_marker, .{name}), .data = "" });
+}
+
+test "a partial newer checkpoint never replaces the last complete one" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try seedRetentionJob();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.Options.debug_io, "step_100", .default_dir);
+    try markComplete(tmp.dir, "step_100");
+    // step_200 is still being written: no marker yet
+    try tmp.dir.createDir(std.Options.debug_io, "step_200", .default_dir);
+    const host = try tmp.dir.realPathFileAlloc(std.Options.debug_io, ".", alloc);
+    defer alloc.free(host);
+    const mounts = [_]@import("../runtime/container.zig").BindMount{.{ .source = host, .target = "/ckpt" }};
+    const ckpt: spec.CheckpointSpec = .{ .path = "/ckpt", .keep = 1 };
+
+    try std.testing.expectEqual(@as(u32, 1), try syncCheckpoints(alloc, "retention-job", ckpt, tmp.dir));
+    try expectRetainedSteps(&.{100});
+    try tmp.dir.access(std.Options.debug_io, "step_100", .{});
+    try tmp.dir.access(std.Options.debug_io, "step_200", .{});
+    const resumed = (try latestMountedCheckpoint(alloc, ckpt, &mounts)).?;
+    defer alloc.free(resumed);
+    try std.testing.expectEqualStrings("/ckpt/step_100", resumed);
+
+    // once step_200 is marked it counts, and step_100 falls out of keep = 1
+    try markComplete(tmp.dir, "step_200");
+    try std.testing.expectEqual(@as(u32, 1), try syncCheckpoints(alloc, "retention-job", ckpt, tmp.dir));
+    try expectRetainedSteps(&.{200});
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.Options.debug_io, "step_100", .{}));
+}
+
+test "without a complete checkpoint nothing is resumed or deleted" {
+    const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
+    try seedRetentionJob();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    for ([_][]const u8{ "step_1", "step_2", "step_3" }) |name|
+        try tmp.dir.createDir(std.Options.debug_io, name, .default_dir);
+    // a marker that is a directory or a symlink does not count
+    try tmp.dir.createDirPath(std.Options.debug_io, "step_2/" ++ complete_marker);
+    try tmp.dir.symLink(std.Options.debug_io, "../step_2/" ++ complete_marker, "step_3/" ++ complete_marker, .{});
+    const host = try tmp.dir.realPathFileAlloc(std.Options.debug_io, ".", alloc);
+    defer alloc.free(host);
+    const mounts = [_]@import("../runtime/container.zig").BindMount{.{ .source = host, .target = "/ckpt" }};
+    const ckpt: spec.CheckpointSpec = .{ .path = "/ckpt", .keep = 1 };
+
+    try std.testing.expect((try latestMountedCheckpoint(alloc, ckpt, &mounts)) == null);
+    try std.testing.expectEqual(@as(u32, 0), try syncCheckpoints(alloc, "retention-job", ckpt, tmp.dir));
+    for ([_][]const u8{ "step_1", "step_2", "step_3" }) |name| try tmp.dir.access(std.Options.debug_io, name, .{});
 }

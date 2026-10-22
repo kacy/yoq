@@ -185,6 +185,7 @@ fn fieldRule(kind: Kind, key: []const u8) ?Rule {
         .checkpoint => {
             if (oneOf(key, &.{ "path", "interval" })) return .{ .value_type = .string };
             if (oneOf(key, &.{ "interval_secs", "keep" })) return .{ .value_type = .integer };
+            if (std.mem.eql(u8, key, "require_complete_marker")) return .{ .value_type = .boolean };
         },
         .resources => {
             if (oneOf(key, &.{ "cpu", "memory_mb" })) return .{ .value_type = .integer };

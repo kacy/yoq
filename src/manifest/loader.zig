@@ -2169,6 +2169,24 @@ test "training job — checkpoint interval default" {
 
     try std.testing.expectEqual(@as(u64, 1800), manifest.training_jobs[0].checkpoint.?.interval_secs);
     try std.testing.expectEqual(@as(u32, 5), manifest.training_jobs[0].checkpoint.?.keep);
+    try std.testing.expect(manifest.training_jobs[0].checkpoint.?.require_complete_marker);
+}
+
+test "training job — checkpoint completion marker can be turned off" {
+    const alloc = std.testing.allocator;
+
+    var manifest = try loadFromString(alloc,
+        \\[training.test]
+        \\image = "scratch"
+        \\gpus = 1
+        \\
+        \\[training.test.checkpoint]
+        \\path = "/mnt/ckpt"
+        \\require_complete_marker = false
+    );
+    defer manifest.deinit();
+
+    try std.testing.expect(!manifest.training_jobs[0].checkpoint.?.require_complete_marker);
 }
 
 test "training rejects unsupported dataset preparation and spare ranks" {

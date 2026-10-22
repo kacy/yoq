@@ -39,6 +39,9 @@ pub const CheckpointSpec = struct {
     path: []const u8,
     interval_secs: u64 = 1800,
     keep: u32 = 5,
+    /// count a step directory only once the training code has written the
+    /// completion marker into it. see checkpoint.complete_marker.
+    require_complete_marker: bool = true,
 
     pub fn deinit(self: CheckpointSpec, alloc: std.mem.Allocator) void {
         alloc.free(self.path);
