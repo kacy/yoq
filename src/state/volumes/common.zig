@@ -54,7 +54,10 @@ pub fn resolveVolumePath(
     // managed volumes live under the data root; a traversing name would put
     // them, and later their deleteTree, anywhere on the host
     switch (driver) {
-        .local, .nfs => if (!names.isValid(app_name) or !names.isValid(vol_name)) return VolumeError.InvalidName,
+        .local, .nfs => {
+            const app_ok = names.isValid(app_name) or std.mem.eql(u8, app_name, names.standalone_app);
+            if (!app_ok or !names.isValid(vol_name)) return VolumeError.InvalidName;
+        },
         .host, .parallel => {},
     }
     return switch (driver) {

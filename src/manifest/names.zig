@@ -5,6 +5,10 @@ const std = @import("std");
 
 pub const max_len = 128;
 
+/// app namespace for volumes made by plain `yoq run`. it starts with a dot,
+/// so no user-supplied name can collide with it.
+pub const standalone_app = ".containers";
+
 /// An ascii letter or digit, then letters, digits, ".", "_" or "-", up to
 /// max_len bytes. "." and ".." never pass because the first byte must be
 /// alphanumeric.

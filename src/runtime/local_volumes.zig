@@ -9,7 +9,7 @@ const paths = @import("../lib/paths.zig");
 const container = @import("container.zig");
 
 // standalone volumes use a separate namespace from manifest-managed apps.
-const app_name = ".containers";
+const app_name = @import("../manifest/names.zig").standalone_app;
 pub const VolumeError = error{ InvalidName, InvalidMount, NotFound, InUse, DbError, CopyFailed, OutOfMemory } || volumes.VolumeError;
 
 pub const Record = struct {

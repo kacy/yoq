@@ -210,5 +210,7 @@ test "managed volume paths refuse traversing names" {
     var buf: [paths.max_path]u8 = undefined;
     try std.testing.expectError(common.VolumeError.InvalidName, common.resolveVolumePath(&buf, "demo", "../../etc", .{ .local = .{} }));
     try std.testing.expectError(common.VolumeError.InvalidName, common.resolveVolumePath(&buf, "../x", "data", .{ .local = .{} }));
+    // the reserved namespace for standalone containers still resolves
+    _ = try common.resolveVolumePath(&buf, ".containers", "data", .{ .local = .{} });
     try std.testing.expectError(common.VolumeError.InvalidName, common.resolveVolumePath(&buf, "demo", "a/b", .{ .nfs = .{ .server = "s", .path = "/e", .options = null } }));
 }
