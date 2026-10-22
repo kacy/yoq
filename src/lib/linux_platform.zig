@@ -902,6 +902,40 @@ pub const posix = struct {
         }
     }
 
+    /// How openat2 resolves a path. See openat2(2).
+    pub const Resolve = packed struct(u64) {
+        no_xdev: bool = false,
+        no_magiclinks: bool = false,
+        no_symlinks: bool = false,
+        beneath: bool = false,
+        in_root: bool = false,
+        cached: bool = false,
+        _: u58 = 0,
+    };
+
+    pub const OpenBeneathError = error{ FileNotFound, NotDir, PathEscapes, Unexpected };
+
+    /// openat2 relative to `dir_fd`. A path that would leave the directory or
+    /// cross a link the resolve flags refuse fails with PathEscapes.
+    pub fn openat2(dir_fd: std.posix.fd_t, path: []const u8, flags: std.os.linux.O, resolve: Resolve) OpenBeneathError!std.posix.fd_t {
+        const how = extern struct { flags: u64, mode: u64 = 0, resolve: u64 }{
+            .flags = @as(u32, @bitCast(flags)),
+            .resolve = @bitCast(resolve),
+        };
+        const path_z = std.posix.toPosixPath(path) catch return error.FileNotFound;
+        while (true) {
+            const rc = std.os.linux.syscall4(.openat2, @bitCast(@as(isize, dir_fd)), @intFromPtr(&path_z), @intFromPtr(&how), @sizeOf(@TypeOf(how)));
+            return switch (syscallErrno(rc)) {
+                .SUCCESS => @intCast(rc),
+                .INTR, .AGAIN => continue,
+                .NOENT => error.FileNotFound,
+                .NOTDIR => error.NotDir,
+                .LOOP, .XDEV => error.PathEscapes,
+                else => error.Unexpected,
+            };
+        }
+    }
+
     pub fn pipe() ![2]std.posix.fd_t {
         var fds: [2]std.posix.fd_t = undefined;
         try voidResult(std.os.linux.pipe2(&fds, .{ .CLOEXEC = true }));

@@ -120,8 +120,12 @@ pub fn syncCheckpoints(self: anytype) void {
     var arena = std.heap.ArenaAllocator.init(self.alloc);
     defer arena.deinit();
     const mounts = @import("../orchestrator/service_runtime.zig").resolveServiceVolumes(arena.allocator(), self.job.volumes, self.manifest_volumes, self.app_name) catch return;
-    const host_path = (checkpoint_mgr.mountedDirectory(arena.allocator(), ckpt.path, mounts.bind_mounts.items) catch return) orelse return;
-    const new_ckpts = checkpoint_mgr.syncCheckpoints(self.alloc, jid, host_path, ckpt.keep) catch |err| {
+    var dir = (checkpoint_mgr.openMountedDirectory(ckpt.path, mounts.bind_mounts.items) catch |err| {
+        @import("../../lib/log.zig").warn("checkpoint sync skipped for {s}: {}", .{ jid, err });
+        return;
+    }) orelse return;
+    defer dir.close(std.Options.debug_io);
+    const new_ckpts = checkpoint_mgr.syncCheckpoints(self.alloc, jid, ckpt.path, dir, ckpt.keep) catch |err| {
         @import("../../lib/log.zig").warn("checkpoint sync failed for {s}: {}", .{ jid, err });
         return;
     };
