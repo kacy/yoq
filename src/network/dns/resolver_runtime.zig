@@ -425,3 +425,35 @@ fn forwardQuery(
         log.warn("dns: failed to relay upstream response: {}", .{e});
     };
 }
+
+test "rate limit survives time running backwards" {
+    var entry: RateLimitEntry = .{ .ip = 7, .tokens = 0, .last_refill = 1_000 };
+    for ([_]i64{ 1_000, 991, 990, 0, std.math.minInt(i32) }) |now_ms| {
+        try std.testing.expect(!takeToken(&entry, 7, now_ms));
+        try std.testing.expectEqual(@as(u32, 0), entry.tokens);
+    }
+}
+
+test "rate limit refill is capped at a full bucket" {
+    var entry: RateLimitEntry = .{ .ip = 7, .tokens = 3, .last_refill = 0 };
+    try std.testing.expect(takeToken(&entry, 7, std.math.maxInt(i32)));
+    try std.testing.expectEqual(rate_limit_max_tokens - 1, entry.tokens);
+}
+
+test "rate limit refills a client that queries faster than the refill interval" {
+    var entry: RateLimitEntry = .{ .ip = 7, .tokens = 0, .last_refill = 0 };
+    var granted: usize = 0;
+    var now_ms: i64 = 5;
+    // one query every 5 ms for a second, at a refill rate of 100 per second
+    while (now_ms <= 1_000) : (now_ms += 5) {
+        if (takeToken(&entry, 7, now_ms)) granted += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 100), granted);
+}
+
+test "a new client takes over a slot with a fresh bucket" {
+    var entry: RateLimitEntry = .{ .ip = 7, .tokens = 0, .last_refill = 500 };
+    try std.testing.expect(takeToken(&entry, 263, 0));
+    try std.testing.expectEqual(@as(u32, 263), entry.ip);
+    try std.testing.expectEqual(rate_limit_max_tokens - 1, entry.tokens);
+}
