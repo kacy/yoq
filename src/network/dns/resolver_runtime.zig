@@ -247,28 +247,35 @@ fn checkRateLimit(client_ip: u32) bool {
     rate_limit_mutex.lockUncancelable(std.Options.debug_io);
     defer rate_limit_mutex.unlock(std.Options.debug_io);
 
-    const now = std.Io.Clock.real.now(std.Options.debug_io).toMilliseconds();
-    const idx = @as(usize, @intCast(client_ip % 256));
-    var entry = &rate_limits[idx];
+    // the monotonic clock: a wall-clock step must not stall or crash the bucket
+    const now_ms = std.Io.Clock.awake.now(std.Options.debug_io).toMilliseconds();
+    return takeToken(&rate_limits[client_ip % 256], client_ip, now_ms);
+}
 
-    if (entry.ip == client_ip) {
-        const elapsed = now - entry.last_refill;
-        const refill_amount = @divTrunc(elapsed, rate_limit_refill_ms);
-        const max_new = rate_limit_max_tokens - entry.tokens;
-        const new_tokens = @as(u32, @intCast(@min(refill_amount, max_new)));
-        entry.tokens += new_tokens;
-        entry.last_refill = now;
-
-        if (entry.tokens > 0) {
-            entry.tokens -= 1;
-            return true;
-        }
-        return false;
+/// Token bucket for one slot: up to rate_limit_max_tokens queries, refilled
+/// at one token per rate_limit_refill_ms. A new client takes over the slot
+/// with a full bucket.
+fn takeToken(entry: *RateLimitEntry, client_ip: u32, now_ms: i64) bool {
+    if (entry.ip != client_ip) {
+        entry.* = .{ .ip = client_ip, .tokens = rate_limit_max_tokens - 1, .last_refill = now_ms };
+        return true;
     }
 
-    entry.ip = client_ip;
-    entry.tokens = rate_limit_max_tokens - 1;
-    entry.last_refill = now;
+    // time that runs backwards earns nothing
+    const periods = @divTrunc(@max(now_ms - entry.last_refill, 0), rate_limit_refill_ms);
+    const missing = rate_limit_max_tokens - entry.tokens;
+    if (periods >= missing) {
+        entry.tokens = rate_limit_max_tokens;
+        entry.last_refill = now_ms;
+    } else {
+        // keep the partial period, so clients that query more often than
+        // the refill interval still earn tokens back
+        entry.tokens += @intCast(periods);
+        entry.last_refill += periods * rate_limit_refill_ms;
+    }
+
+    if (entry.tokens == 0) return false;
+    entry.tokens -= 1;
     return true;
 }
 
@@ -417,4 +424,36 @@ fn forwardQuery(
     _ = linux_platform.posix.sendto(sock, response_buf[0..resp_n], 0, @ptrCast(client_addr), addr_len) catch |e| {
         log.warn("dns: failed to relay upstream response: {}", .{e});
     };
+}
+
+test "rate limit survives time running backwards" {
+    var entry: RateLimitEntry = .{ .ip = 7, .tokens = 0, .last_refill = 1_000 };
+    for ([_]i64{ 1_000, 991, 990, 0, std.math.minInt(i32) }) |now_ms| {
+        try std.testing.expect(!takeToken(&entry, 7, now_ms));
+        try std.testing.expectEqual(@as(u32, 0), entry.tokens);
+    }
+}
+
+test "rate limit refill is capped at a full bucket" {
+    var entry: RateLimitEntry = .{ .ip = 7, .tokens = 3, .last_refill = 0 };
+    try std.testing.expect(takeToken(&entry, 7, std.math.maxInt(i32)));
+    try std.testing.expectEqual(rate_limit_max_tokens - 1, entry.tokens);
+}
+
+test "rate limit refills a client that queries faster than the refill interval" {
+    var entry: RateLimitEntry = .{ .ip = 7, .tokens = 0, .last_refill = 0 };
+    var granted: usize = 0;
+    var now_ms: i64 = 5;
+    // one query every 5 ms for a second, at a refill rate of 100 per second
+    while (now_ms <= 1_000) : (now_ms += 5) {
+        if (takeToken(&entry, 7, now_ms)) granted += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 100), granted);
+}
+
+test "a new client takes over a slot with a fresh bucket" {
+    var entry: RateLimitEntry = .{ .ip = 7, .tokens = 0, .last_refill = 500 };
+    try std.testing.expect(takeToken(&entry, 263, 0));
+    try std.testing.expectEqual(@as(u32, 263), entry.ip);
+    try std.testing.expectEqual(rate_limit_max_tokens - 1, entry.tokens);
 }
