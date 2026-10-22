@@ -242,7 +242,11 @@ test "copy to nested destination creates parents" {
     try std.testing.expectEqualStrings("[server]\nport = 8080", content);
 }
 
-test "copy directory skips symlinks" {
+fn readLinkTarget(dir: std.Io.Dir, path: []const u8, buf: []u8) ![]const u8 {
+    return buf[0..try dir.readLink(std.testing.io, path, buf)];
+}
+
+test "copy directory keeps symlinks as links" {
     var src = std.testing.tmpDir(.{});
     defer src.cleanup();
     try tmpWriteFile(src.dir, "real.txt", "real content");
@@ -264,10 +268,48 @@ test "copy directory skips symlinks" {
     defer std.testing.allocator.free(content);
     try std.testing.expectEqualStrings("real content", content);
 
-    const link_result = dst.dir.access(std.testing.io, "out/link.txt", .{});
-    if (link_result) |_| {
-        try std.testing.expect(false);
-    } else |_| {}
+    var link_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("real.txt", try readLinkTarget(dst.dir, "out/link.txt", &link_buf));
+}
+
+test "copy directory keeps dangling, absolute and directory links without following them" {
+    var src = std.testing.tmpDir(.{});
+    defer src.cleanup();
+    try src.dir.createDirPath(std.testing.io, "lib/real");
+    try tmpWriteFile(src.dir, "lib/real/libfoo.so.1", "elf");
+    try src.dir.symLink(std.testing.io, "real", "lib/dir-link", .{});
+    try src.dir.symLink(std.testing.io, "missing", "lib/dangling", .{});
+    try src.dir.symLink(std.testing.io, "/usr/lib/libc.so", "lib/absolute", .{});
+
+    var dst = std.testing.tmpDir(.{});
+    defer dst.cleanup();
+    var src_buf: [4096]u8 = undefined;
+    var dst_buf: [4096]u8 = undefined;
+    const src_path = try tmpRealPath(src.dir, &src_buf);
+    const dst_path = try tmpRealPath(dst.dir, &dst_buf);
+    try copyFiles(std.testing.allocator, src_path, "lib", dst_path, "out");
+
+    var link_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("real", try readLinkTarget(dst.dir, "out/dir-link", &link_buf));
+    try std.testing.expectEqualStrings("missing", try readLinkTarget(dst.dir, "out/dangling", &link_buf));
+    try std.testing.expectEqualStrings("/usr/lib/libc.so", try readLinkTarget(dst.dir, "out/absolute", &link_buf));
+    // the directory link was not traversed, so its contents exist only once
+    try dst.dir.access(std.testing.io, "out/real/libfoo.so.1", .{});
+}
+
+test "copy directory refuses a fifo instead of skipping it" {
+    var src = std.testing.tmpDir(.{});
+    defer src.cleanup();
+    try tmpWriteFile(src.dir, "ok.txt", "ok");
+    if (std.os.linux.errno(std.os.linux.mknodat(src.dir.handle, "pipe", std.os.linux.S.IFIFO | 0o600, 0)) != .SUCCESS) return error.SkipZigTest;
+
+    var dst = std.testing.tmpDir(.{});
+    defer dst.cleanup();
+    var src_buf: [4096]u8 = undefined;
+    var dst_buf: [4096]u8 = undefined;
+    const src_path = try tmpRealPath(src.dir, &src_buf);
+    const dst_path = try tmpRealPath(dst.dir, &dst_buf);
+    try std.testing.expectError(error.CopyFailed, copyFiles(std.testing.allocator, src_path, ".", dst_path, "out"));
 }
 
 test "hash rejects symlink escape from context" {
