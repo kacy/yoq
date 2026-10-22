@@ -46,3 +46,7 @@ pub fn runWorker(args: *std.process.Args.Iterator, ctx: AppContext) !void {
 pub fn train(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     return train_cmd.train(args, ctx.io, ctx.alloc);
 }
+
+test {
+    _ = deploy;
+}

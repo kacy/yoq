@@ -46,6 +46,7 @@ pub const ParseError = error{
     OutOfMemory,
     InvalidRequest,
     InvalidImage,
+    RelativeBindSource,
     InvalidRolloutConfig,
 };
 
@@ -226,6 +227,10 @@ fn validateNamedVolumes(root: std.json.Value) ParseError!bool {
                 const mount_kind = mount.object.get("kind") orelse return error.InvalidRequest;
                 if (mount_kind != .string) return error.InvalidRequest;
                 if (std.mem.eql(u8, mount_kind.string, "bind")) {
+                    // an agent would resolve a relative source against its
+                    // own working directory, which is never what was meant
+                    const source = mount.object.get("source") orelse return error.InvalidRequest;
+                    if (source != .string or !std.fs.path.isAbsolute(source.string)) return error.RelativeBindSource;
                     uses_host_paths = true;
                     continue;
                 }
@@ -426,6 +431,16 @@ test "parse refuses a workload with a missing or unusable image instead of skipp
     , true));
     try std.testing.expectError(ParseError.InvalidImage, parse(alloc,
         \\{"app_name":"demo","services":[],"workers":[{"name":"migrate","command":[]}]}
+    , true));
+}
+
+test "parse refuses relative bind sources" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(ParseError.RelativeBindSource, parse(alloc,
+        \\{"app_name":"demo","services":[{"name":"web","image":"nginx","command":[],"volumes":[{"source":"./data","target":"/data","kind":"bind"}]}]}
+    , true));
+    try std.testing.expectError(ParseError.RelativeBindSource, parse(alloc,
+        \\{"app_name":"demo","services":[],"crons":[{"name":"tick","image":"alpine","every":60,"volumes":[{"source":"../data","target":"/data","kind":"bind"}]}]}
     , true));
 }
 

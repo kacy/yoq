@@ -138,6 +138,7 @@ fn runUpOptions(io: std.Io, alloc: std.mem.Allocator, options: *const UpOptions,
     if (options.server_addr == null and !options.skip_preflight) {
         try runLocalPreflight(deps, alloc, &manifest);
     }
+    if (options.server_addr != null) try checkClusterBindSources(&manifest);
 
     var release = release_plan.ReleasePlan.fromAppSpec(alloc, &app, options.service_names.items) catch return DeployError.OutOfMemory;
     defer release.deinit();
@@ -170,6 +171,21 @@ fn runUpOptions(io: std.Io, alloc: std.mem.Allocator, options: *const UpOptions,
     }
 
     try deps.local_start_fn(deps.ctx, io, alloc, &manifest, &release, options.dev_mode);
+}
+
+/// agents resolve a relative bind source against their own working
+/// directory, not this one, so refuse it before anything is posted.
+fn checkClusterBindSources(manifest: *const manifest_spec.Manifest) DeployError!void {
+    inline for (.{ "services", "workers", "crons", "training_jobs" }) |kind| {
+        for (@field(manifest, kind)) |workload| {
+            for (workload.volumes) |mount| {
+                if (mount.kind == .bind and !std.fs.path.isAbsolute(mount.source)) {
+                    writeErr("{s}: bind mount '{s}' needs an absolute host path when deploying to a cluster\n", .{ workload.name, mount.source });
+                    return DeployError.InvalidArgument;
+                }
+            }
+        }
+    }
 }
 
 fn runHostPreflight(
@@ -551,6 +567,37 @@ test "up remote dry run skips cluster apply" {
     try std.testing.expectEqual(@as(u32, 0), harness.cluster_calls);
     try std.testing.expectEqual(@as(u32, 1), harness.cluster_dry_run_calls);
     try std.testing.expectEqualStrings("127.0.0.1:7700", harness.cluster_addr.?);
+}
+
+test "up to a cluster refuses relative bind sources before posting" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "manifest.toml",
+        .data =
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\volumes = ["./data:/data"]
+        \\
+        ,
+    });
+    var dir_buf: [4096]u8 = undefined;
+    const dir_len = try tmp.dir.realPathFile(std.testing.io, ".", &dir_buf);
+    const manifest_path = try std.fs.path.join(alloc, &.{ dir_buf[0..dir_len], "manifest.toml" });
+    defer alloc.free(manifest_path);
+
+    for ([_][]const []const u8{
+        &.{ "-f", manifest_path, "--server", "127.0.0.1:7700" },
+        &.{ "-f", manifest_path, "--dry-run", "--server", "127.0.0.1:7700" },
+    }) |tokens| {
+        var options = try parseUpTokens(alloc, tokens);
+        defer options.deinit(alloc);
+        var harness = UpHarness{};
+        try std.testing.expectError(DeployError.InvalidArgument, runUpOptions(std.testing.io, alloc, &options, harness.deps()));
+        try std.testing.expectEqual(@as(u32, 0), harness.cluster_calls);
+        try std.testing.expectEqual(@as(u32, 0), harness.cluster_dry_run_calls);
+    }
 }
 
 const UpHarness = struct {

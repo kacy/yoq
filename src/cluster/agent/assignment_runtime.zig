@@ -994,6 +994,9 @@ fn hostPathsAllowed(mounts: []const manifest_spec.VolumeMount, definitions: []co
                 };
             } else null,
         } orelse continue;
+        // underHostRoot would resolve a relative path against this
+        // process's working directory
+        if (!std.fs.path.isAbsolute(host_path)) return false;
         if (!source_policy.underHostRoot(host_path, roots)) return false;
     }
     return true;
