@@ -43,3 +43,39 @@ test "bind preserves unix socket path errors" {
     const length: posix.socklen_t = @intCast(@offsetOf(posix.sockaddr.un, "path") + path.len + 1);
     try std.testing.expectError(error.FileNotFound, platform.posix.bind(socket, @ptrCast(&address), length));
 }
+
+fn expectCloseOnExec(fd: posix.fd_t) !void {
+    const flags = try platform.posix.fcntl(fd, posix.F.GETFD, 0);
+    try std.testing.expect(flags & posix.FD_CLOEXEC != 0);
+}
+
+test "pipe socket and accept descriptors are close-on-exec by default" {
+    const pipe = try platform.posix.pipe();
+    defer for (pipe) |fd| platform.posix.close(fd);
+    for (pipe) |fd| try expectCloseOnExec(fd);
+
+    // no CLOEXEC flag passed: the wrapper adds it
+    const listener = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+    defer platform.posix.close(listener);
+    try expectCloseOnExec(listener);
+    var address = platform.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    try platform.posix.bind(listener, &address.any, address.getOsSockLen());
+    try platform.posix.listen(listener, 1);
+    var length = address.getOsSockLen();
+    try platform.posix.getsockname(listener, &address.any, &length);
+
+    const client = try platform.posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+    defer platform.posix.close(client);
+    try platform.posix.connect(client, &address.any, length);
+    const accepted = try platform.posix.accept(listener, null, null, 0);
+    defer platform.posix.close(accepted);
+    try expectCloseOnExec(accepted);
+}
+
+test "dup2 onto the same descriptor clears close-on-exec" {
+    const pipe = try platform.posix.pipe();
+    defer for (pipe) |fd| platform.posix.close(fd);
+    try platform.posix.dup2(pipe[0], pipe[0]);
+    const flags = try platform.posix.fcntl(pipe[0], posix.F.GETFD, 0);
+    try std.testing.expectEqual(@as(usize, 0), flags & posix.FD_CLOEXEC);
+}

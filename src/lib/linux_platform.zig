@@ -722,8 +722,13 @@ pub const posix = struct {
         return std.os.linux.getuid();
     }
 
+    /// Descriptors from socket, accept and pipe are always close-on-exec.
+    /// Containers are cloned from long-lived daemons, so anything left
+    /// inheritable leaks host sockets and other containers' pipes into
+    /// workloads. Hand a descriptor to a child with dup2, which clears it.
     pub fn socket(domain: anytype, socket_type: anytype, protocol: anytype) !std.posix.fd_t {
-        const rc = std.os.linux.socket(int(u32, domain), int(u32, socket_type), int(u32, protocol));
+        const flags = int(u32, socket_type) | std.os.linux.SOCK.CLOEXEC;
+        const rc = std.os.linux.socket(int(u32, domain), flags, int(u32, protocol));
         return fdResult(rc);
     }
 
@@ -738,7 +743,7 @@ pub const posix = struct {
     }
 
     pub fn accept(fd: std.posix.fd_t, addr: ?*std.posix.sockaddr, len: ?*std.posix.socklen_t, flags: anytype) !std.posix.fd_t {
-        const rc = std.os.linux.accept4(fd, addr, len, int(u32, flags));
+        const rc = std.os.linux.accept4(fd, addr, len, int(u32, flags) | std.os.linux.SOCK.CLOEXEC);
         return fdResult(rc);
     }
 
@@ -853,6 +858,12 @@ pub const posix = struct {
     }
 
     pub fn dup2(old_fd: std.posix.fd_t, new_fd: std.posix.fd_t) !void {
+        // dup2 onto itself is a no-op that keeps close-on-exec set, so clear
+        // it here: callers use dup2 to hand the descriptor to a child.
+        if (old_fd == new_fd) {
+            _ = try fcntl(old_fd, std.os.linux.F.SETFD, 0);
+            return;
+        }
         try voidResult(std.os.linux.dup2(old_fd, new_fd));
     }
 
@@ -867,7 +878,7 @@ pub const posix = struct {
 
     pub fn pipe() ![2]std.posix.fd_t {
         var fds: [2]std.posix.fd_t = undefined;
-        try voidResult(std.os.linux.pipe(&fds));
+        try voidResult(std.os.linux.pipe2(&fds, .{ .CLOEXEC = true }));
         return fds;
     }
 
