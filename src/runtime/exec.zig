@@ -112,6 +112,10 @@ fn runHelper(
     channels: *session.ProcessIo,
     cancellation_mask: exec_owner.CancellationMask,
 ) noreturn {
+    // the command child joins the container's pid namespace, so container
+    // root can see it before execve. a non-dumpable process keeps it out of
+    // /proc/<pid>/fd and /proc/<pid>/mem. execve resets this for the command.
+    if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_DUMPABLE), 0, 0, 0, 0)) != .SUCCESS) linux.exit_group(126);
     if (config.cgroup_id) |id| {
         const group = @import("cgroups.zig").Cgroup.open(id) catch linux.exit_group(126);
         group.addProcess(linux.getpid()) catch linux.exit_group(126);
@@ -123,8 +127,10 @@ fn runHelper(
         exec_owner.armChild(parent_handle) catch linux.exit_group(126);
         cancellation_mask.restore();
         if (!config.tty and linux.errno(linux.setpgid(0, 0)) != .SUCCESS) linux.exit_group(126);
-        for (ns_fds) |fd| linux_platform.posix.close(fd);
         channels.applyChild() catch linux.exit_group(126);
+        // drop everything inherited from the caller, including the namespace
+        // handles. only stdio, the root and the parent watch remain.
+        linux_platform.posix.closeInheritedFds(&.{ root_fd, parent_handle });
         if (linux.errno(linux.fchdir(root_fd)) != .SUCCESS) linux.exit_group(126);
         if (linux.errno(linux.chroot(".")) != .SUCCESS) linux.exit_group(126);
         linux_platform.posix.close(root_fd);
