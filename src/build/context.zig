@@ -5,6 +5,7 @@ const path_policy = @import("context/path_policy.zig");
 const types = @import("context/types.zig");
 
 pub const ContextError = types.ContextError;
+pub const rootRelative = path_policy.rootRelative;
 
 pub fn hashFiles(
     alloc: std.mem.Allocator,
@@ -333,4 +334,40 @@ test "copy rejects destination traversal" {
 
     const result = copyFiles(std.testing.allocator, src_path, "hello.txt", dst_path, "../escape.txt");
     try std.testing.expectError(ContextError.PathTraversal, result);
+}
+
+test "absolute COPY sources resolve inside the build root, not on the host" {
+    const alloc = std.testing.allocator;
+    var root = std.testing.tmpDir(.{});
+    defer root.cleanup();
+    var layer = std.testing.tmpDir(.{});
+    defer layer.cleanup();
+    try root.dir.createDirPath(std.Options.debug_io, "etc/conf.d");
+    try root.dir.writeFile(std.Options.debug_io, .{ .sub_path = "etc/hostname", .data = "from-stage" });
+    try root.dir.writeFile(std.Options.debug_io, .{ .sub_path = "etc/conf.d/app", .data = "nested" });
+    const root_path = try root.dir.realPathFileAlloc(std.Options.debug_io, ".", alloc);
+    defer alloc.free(root_path);
+    const layer_path = try layer.dir.realPathFileAlloc(std.Options.debug_io, ".", alloc);
+    defer alloc.free(layer_path);
+
+    // a file and a directory named by absolute paths come from the root
+    try copyFiles(alloc, root_path, "/etc/hostname", layer_path, "out/hostname");
+    try copyFiles(alloc, root_path, "/etc/conf.d", layer_path, "conf");
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("from-stage", try layer.dir.readFile(std.Options.debug_io, "out/hostname", &buf));
+    try std.testing.expectEqualStrings("nested", try layer.dir.readFile(std.Options.debug_io, "conf/app", &buf));
+
+    // hashing an absolute path hashes the root's copy
+    try std.testing.expectEqual(try hashFiles(alloc, root_path, "etc/hostname"), try hashFiles(alloc, root_path, "/etc/hostname"));
+
+    // "/" is the whole root
+    try copyFiles(alloc, root_path, "/", layer_path, "all");
+    try std.testing.expectEqualStrings("from-stage", try layer.dir.readFile(std.Options.debug_io, "all/etc/hostname", &buf));
+
+    // a host path that is not under the root is not found, never read
+    try std.testing.expectError(error.NotFound, copyFiles(alloc, root_path, "/etc/passwd", layer_path, "leak"));
+    try std.testing.expectError(error.NotFound, hashFiles(alloc, root_path, "/etc/passwd"));
+
+    try std.testing.expectError(error.PathTraversal, copyFiles(alloc, root_path, "/etc/../../x", layer_path, "x"));
+    try std.testing.expectError(error.PathTraversal, copyFiles(alloc, root_path, "/etc/host\x00name", layer_path, "x"));
 }

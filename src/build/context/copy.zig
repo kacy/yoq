@@ -7,10 +7,14 @@ const path_policy = @import("path_policy.zig");
 pub fn copyFiles(
     alloc: std.mem.Allocator,
     context_dir: []const u8,
-    src: []const u8,
+    requested_src: []const u8,
     layer_dir: []const u8,
     dest: []const u8,
 ) types.ContextError!void {
+    const src = path_policy.rootRelative(requested_src) catch {
+        log.err("build: path traversal attempt in copyFiles source: {s}", .{requested_src});
+        return types.ContextError.PathTraversal;
+    };
     path_policy.validateContextSourcePath(alloc, context_dir, src) catch |err| {
         return switch (err) {
             error.NotFound => types.ContextError.NotFound,

@@ -14,6 +14,19 @@ pub fn containsPathTraversal(path: []const u8) bool {
     return false;
 }
 
+/// Turn a COPY or ADD source into a path relative to the build root.
+///
+/// sources are opened on the root's directory handle, and the kernel ignores
+/// that handle for absolute paths. `COPY --from=stage /etc/shadow` must read
+/// the stage's /etc/shadow, not the host's, so a leading slash means the
+/// root here. "/" and "" both mean the root itself.
+pub fn rootRelative(src: []const u8) SourcePathError![]const u8 {
+    if (std.mem.indexOfScalar(u8, src, 0) != null) return error.PathTraversal;
+    if (containsPathTraversal(src)) return error.PathTraversal;
+    const relative = std.mem.trimStart(u8, src, "/");
+    return if (relative.len == 0) "." else relative;
+}
+
 pub fn validateContextSourcePath(
     alloc: std.mem.Allocator,
     context_dir: []const u8,

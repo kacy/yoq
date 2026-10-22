@@ -84,5 +84,5 @@ fn buildArchivePath(
     context_dir: []const u8,
     src: []const u8,
 ) ![]u8 {
-    return std.fs.path.join(alloc, &.{ context_dir, src });
+    return std.fs.path.join(alloc, &.{ context_dir, try context.rootRelative(src) });
 }
