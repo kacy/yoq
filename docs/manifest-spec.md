@@ -115,6 +115,8 @@ volumes = [
 ]
 ```
 
+relative bind sources only work with a local `yoq up`. for `yoq up --server`, use an absolute host path.
+
 ### restart policy
 
 | value | behavior |

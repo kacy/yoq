@@ -193,6 +193,8 @@ clustered service applies are rollout-aware:
 
 bind mounts, `host` volumes and `parallel` volumes give a workload access to the agent's own filesystem. an apply that uses any of them needs a token with `cluster:admin`. an `apps:write` token gets a 403 response.
 
+bind sources must be absolute paths in a cluster. a relative source like `./data` would be resolved on each agent against whatever directory that agent was started from, so `yoq up --server` refuses it before sending anything, and the server answers 400.
+
 agents refuse these mounts by default. pass `--host-path-root` once for each directory that assignments may use. each bind source and each host or parallel path must exist, and its resolved path, with symlinks followed, must be inside one of those directories. otherwise the assignment fails with `host_path_not_allowed` before yoq creates or mounts any volume. named `local` and `nfs` volumes are managed by yoq and are not affected.
 
 ```sh
