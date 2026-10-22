@@ -1154,6 +1154,50 @@ test "rollback state restores prior assignments after cutover" {
     try std.testing.expectEqualStrings("pending", assignments[0].status);
 }
 
+test "rollback removes only the placed assignments of a legacy deploy target" {
+    const alloc = std.testing.allocator;
+    var harness = try RolloutNodeHarness.init(alloc);
+    defer harness.deinit();
+
+    const db = harness.node.stateMachineDb();
+    try db.exec("INSERT INTO agents (id, address, status, cpu_cores, memory_mb, last_heartbeat, registered_at) VALUES ('agent1', '127.0.0.1', 'active', 2, 1024, 0, 0);", .{}, .{});
+
+    // legacy POST /deploy requests carry no app or workload identity
+    const request: scheduler.PlacementRequest = .{
+        .image = "alpine",
+        .command = "echo web",
+        .cpu_limit = 1000,
+        .memory_limit_mb = 256,
+    };
+
+    var rollback_state = try RollbackState.capture(alloc, try mutation_session.Session.begin(harness.node), &.{.{ .request = request, .rollout = .{} }});
+    defer rollback_state.deinit();
+
+    for ([_][]const u8{ "unrelated", "placed" }) |id| {
+        db.exec(
+            "INSERT INTO assignments (id, agent_id, image, command, status, cpu_limit, memory_limit_mb, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+            .{},
+            .{ id, "agent1", "alpine", "echo web", "running", @as(i64, 1000), @as(i64, 256), @as(i64, 1) },
+        ) catch return error.SkipZigTest;
+    }
+
+    try rollback_state.recordActivatedTarget(.{
+        .request = request,
+        .assignment_ids = &.{"placed"},
+        .placement_count = 1,
+    });
+    try rollback_state.rollbackActivatedTargets(try mutation_session.Session.begin(harness.node));
+    harness.applyCommitted();
+
+    const remaining = try agent_registry.getAssignments(alloc, db, "agent1");
+    defer {
+        for (remaining) |assignment| assignment.deinit(alloc);
+        alloc.free(remaining);
+    }
+    try std.testing.expectEqual(@as(usize, 1), remaining.len);
+    try std.testing.expectEqualStrings("unrelated", remaining[0].id);
+}
+
 test "resumed replica rollout keeps physical placement and logical target counts" {
     const requests = [_]apply_request.ServiceRequest{.{
         .replicas = 3,

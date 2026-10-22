@@ -18,6 +18,23 @@ fn nowRealSeconds() i64 {
     return std.Io.Clock.real.now(std.Options.debug_io).toSeconds();
 }
 
+/// The app-scoped identity of a placement request. Legacy `POST /deploy`
+/// requests have none, so rollback cannot look their assignments up by
+/// workload and works from the ids it recorded instead.
+const Workload = struct {
+    app_name: []const u8,
+    kind: []const u8,
+    name: []const u8,
+};
+
+fn workloadOf(request: scheduler.PlacementRequest) ?Workload {
+    return .{
+        .app_name = request.app_name orelse return null,
+        .kind = request.workload_kind orelse return null,
+        .name = request.workload_name orelse return null,
+    };
+}
+
 const PriorAssignmentSnapshot = struct {
     request: scheduler.PlacementRequest,
     assignments: []agent_registry.Assignment,
@@ -54,15 +71,13 @@ pub const RollbackState = struct {
         }
 
         for (requests) |req| {
-            const app_name = req.request.app_name orelse continue;
-            const workload_kind = req.request.workload_kind orelse continue;
-            const workload_name = req.request.workload_name orelse continue;
+            const workload = workloadOf(req.request) orelse continue;
             const assignments = agent_registry.listAssignmentsForWorkload(
                 alloc,
                 db,
-                app_name,
-                workload_kind,
-                workload_name,
+                workload.app_name,
+                workload.kind,
+                workload.name,
             ) catch return ApplyError.InternalError;
             errdefer {
                 for (assignments) |assignment| assignment.deinit(alloc);
@@ -122,18 +137,16 @@ pub const RollbackState = struct {
             defer session.node.mu.unlock(std.Options.debug_io);
             try session.checkLocked();
             for (self.activated_targets.items) |target| {
-                const current = agent_registry.listAssignmentsForWorkload(self.alloc, session.node.stateMachineDb(), target.request.app_name.?, target.request.workload_kind.?, target.request.workload_name.?) catch return error.InternalError;
+                const workload = workloadOf(target.request) orelse {
+                    for (target.assignment_ids) |id| try appendOwnedId(self.alloc, &removed_ids, id);
+                    continue;
+                };
+                const current = agent_registry.listAssignmentsForWorkload(self.alloc, session.node.stateMachineDb(), workload.app_name, workload.kind, workload.name) catch return error.InternalError;
                 defer {
                     for (current) |assignment| assignment.deinit(self.alloc);
                     self.alloc.free(current);
                 }
-                for (current) |assignment| {
-                    const id = self.alloc.dupe(u8, assignment.id) catch return error.InternalError;
-                    removed_ids.append(self.alloc, id) catch {
-                        self.alloc.free(id);
-                        return error.InternalError;
-                    };
-                }
+                for (current) |assignment| try appendOwnedId(self.alloc, &removed_ids, assignment.id);
             }
         }
         const agents = lease.agents(self.alloc, removed_ids.items) catch return error.InternalError;
@@ -141,8 +154,14 @@ pub const RollbackState = struct {
         var batch = std.Io.Writer.Allocating.init(self.alloc);
         defer batch.deinit();
         for (self.activated_targets.items) |target| {
+            const workload = workloadOf(target.request) orelse {
+                // capture() kept no snapshot for a legacy target, so undo it
+                // by removing only the assignments this rollout placed.
+                appendDeleteByIds(&batch.writer, target.assignment_ids) catch return error.InternalError;
+                continue;
+            };
             var delete_buffer: [2048]u8 = undefined;
-            const deletion = agent_registry.deleteAssignmentsForWorkloadSql(&delete_buffer, target.request.app_name.?, target.request.workload_kind.?, target.request.workload_name.?) catch return error.InternalError;
+            const deletion = agent_registry.deleteAssignmentsForWorkloadSql(&delete_buffer, workload.app_name, workload.kind, workload.name) catch return error.InternalError;
             batch.writer.writeAll(deletion) catch return error.InternalError;
             if (self.findSnapshot(target.request)) |snapshot| {
                 for (snapshot.assignments, snapshot.claims) |assignment, claim| {
@@ -168,13 +187,12 @@ pub const RollbackState = struct {
     }
 
     fn findSnapshot(self: *const RollbackState, request: scheduler.PlacementRequest) ?*const PriorAssignmentSnapshot {
-        const app_name = request.app_name orelse return null;
-        const workload_kind = request.workload_kind orelse return null;
-        const workload_name = request.workload_name orelse return null;
+        const workload = workloadOf(request) orelse return null;
         for (self.snapshots) |*snapshot| {
-            if (std.mem.eql(u8, snapshot.request.app_name orelse return null, app_name) and
-                std.mem.eql(u8, snapshot.request.workload_kind orelse return null, workload_kind) and
-                std.mem.eql(u8, snapshot.request.workload_name orelse return null, workload_name))
+            const captured = workloadOf(snapshot.request) orelse continue;
+            if (std.mem.eql(u8, captured.app_name, workload.app_name) and
+                std.mem.eql(u8, captured.kind, workload.kind) and
+                std.mem.eql(u8, captured.name, workload.name))
             {
                 return snapshot;
             }
@@ -192,15 +210,13 @@ fn reconcilePriorAssignments(
     request: scheduler.PlacementRequest,
     keep_ids: []const []const u8,
 ) ApplyError!void {
-    const app_name = request.app_name orelse return;
-    const workload_kind = request.workload_kind orelse return;
-    const workload_name = request.workload_name orelse return;
+    const workload = workloadOf(request) orelse return;
 
     const lease = try placement.Lease.begin(session);
     defer lease.deinit();
     var batch = std.Io.Writer.Allocating.init(session.node.alloc);
     defer batch.deinit();
-    sql_command.write(&batch.writer, "DELETE FROM assignments WHERE app_name = ? AND workload_kind = ? AND workload_name = ?", .{ app_name, workload_kind, workload_name }) catch return error.InternalError;
+    sql_command.write(&batch.writer, "DELETE FROM assignments WHERE app_name = ? AND workload_kind = ? AND workload_name = ?", .{ workload.app_name, workload.kind, workload.name }) catch return error.InternalError;
     if (keep_ids.len > 0) {
         batch.writer.writeAll(" AND id NOT IN (") catch return error.InternalError;
         for (keep_ids, 0..) |id, index| {
@@ -219,9 +235,21 @@ pub fn discardTarget(session: mutation_session.Session, target: ScheduledTarget)
     defer lease.deinit();
     var batch = std.Io.Writer.Allocating.init(session.node.alloc);
     defer batch.deinit();
-    for (target.assignment_ids) |id| sql_command.write(&batch.writer, "DELETE FROM assignments WHERE id = ?;", .{id}) catch return error.InternalError;
+    appendDeleteByIds(&batch.writer, target.assignment_ids) catch return error.InternalError;
     batch.writer.writeAll(placement.cleanup_sql) catch return error.InternalError;
     try lease.commit(batch.written());
+}
+
+fn appendDeleteByIds(writer: *std.Io.Writer, ids: []const []const u8) !void {
+    for (ids) |id| try sql_command.write(writer, "DELETE FROM assignments WHERE id = ?;", .{id});
+}
+
+fn appendOwnedId(alloc: std.mem.Allocator, ids: *std.ArrayList([]const u8), id: []const u8) ApplyError!void {
+    const owned = alloc.dupe(u8, id) catch return error.InternalError;
+    ids.append(alloc, owned) catch {
+        alloc.free(owned);
+        return error.InternalError;
+    };
 }
 
 fn appendRestoredAssignment(writer: *std.Io.Writer, assignment: agent_registry.Assignment, index: u64) !void {
