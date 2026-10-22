@@ -44,17 +44,17 @@ pub fn copyFiles(
         return copyDirectory(ctx_dir, src, dst_dir, dest_clean);
     }
 
-    if (std.fs.path.dirname(dest_clean)) |parent| {
+    var buf: [1024]u8 = undefined;
+    const target_path = if (dest.len > 0 and dest[dest.len - 1] == '/')
+        std.fmt.bufPrint(&buf, "{s}{s}", .{ dest_clean, std.fs.path.basename(src) }) catch
+            return types.ContextError.CopyFailed
+    else
+        dest_clean;
+
+    // the parent of the final file, so "/app/" creates /app as well
+    if (std.fs.path.dirname(target_path)) |parent| {
         dst_dir.createDirPath(std.Options.debug_io, parent) catch return types.ContextError.CopyFailed;
     }
-
-    const target_path = if (dest.len > 0 and dest[dest.len - 1] == '/') blk: {
-        const basename = std.fs.path.basename(src);
-        var buf: [1024]u8 = undefined;
-        const combined = std.fmt.bufPrint(&buf, "{s}{s}", .{ dest_clean, basename }) catch
-            return types.ContextError.CopyFailed;
-        break :blk combined;
-    } else dest_clean;
 
     ctx_dir.copyFile(src, dst_dir, target_path, std.Options.debug_io, .{}) catch return types.ContextError.CopyFailed;
 }
