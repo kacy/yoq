@@ -43,7 +43,7 @@ pub fn spawn(child_fn: *const fn (?*anyopaque) callconv(.c) u8, arg: ?*anyopaque
 pub fn buildChildMain(arg: ?*anyopaque) callconv(.c) u8 {
     const ctx: *const BuildChildContext = @ptrCast(@alignCast(arg));
     // build steps run image commands; they get stdio and nothing else
-    linux_platform.posix.closeInheritedFds(null);
+    linux_platform.posix.closeInheritedFds(&.{});
 
     const root = mountRoot(ctx) catch return 1;
     return executeInRoot(ctx, root);

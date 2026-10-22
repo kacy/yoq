@@ -58,7 +58,7 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
 
     // keep only stdio and the startup channel. everything else is the
     // daemon's: host-namespace sockets and other containers' pipes.
-    linux_platform.posix.closeInheritedFds(if (ctx.startup_fd >= 0) ctx.startup_fd else null);
+    linux_platform.posix.closeInheritedFds(&.{ctx.startup_fd});
     defer if (ctx.startup_fd >= 0) linux_platform.posix.close(ctx.startup_fd);
     const host_mode = ctx.host_mode;
 

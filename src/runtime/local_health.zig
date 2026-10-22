@@ -194,6 +194,9 @@ pub fn helper(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     _ = (try health_state.Settings.fromImage(parsed.value)) orelse return error.CheckCancelled;
     const command = parsed.value.Test.?;
     const shell = std.mem.eql(u8, command[0], "CMD-SHELL");
+    // no handle to the host state database may exist when we fork into the
+    // container's namespaces
+    @import("../state/store.zig").closeDb();
     const code = try exec_runtime.execInContainer(.{
         .pid = pid,
         .command = if (shell) "/bin/sh" else command[1],

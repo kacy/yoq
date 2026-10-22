@@ -80,7 +80,7 @@ test "dup2 onto the same descriptor clears close-on-exec" {
     try std.testing.expectEqual(@as(usize, 0), flags & posix.FD_CLOEXEC);
 }
 
-test "closeInheritedFds keeps stdio and the requested descriptor only" {
+test "closeInheritedFds keeps stdio and the requested descriptors only" {
     const drop = try platform.posix.pipe();
     defer for (drop) |fd| platform.posix.close(fd);
     const keep = try platform.posix.pipe();
@@ -89,7 +89,8 @@ test "closeInheritedFds keeps stdio and the requested descriptor only" {
     const rc = std.os.linux.fork();
     if (std.os.linux.errno(rc) != .SUCCESS) return error.ForkFailed;
     if (rc == 0) {
-        platform.posix.closeInheritedFds(keep[1]);
+        // keep two descriptors with a closed one between them
+        platform.posix.closeInheritedFds(&.{ keep[1], drop[0] });
         const open = struct {
             fn check(fd: posix.fd_t) bool {
                 return std.os.linux.errno(std.os.linux.fcntl(fd, posix.F.GETFD, 0)) == .SUCCESS;
@@ -97,10 +98,10 @@ test "closeInheritedFds keeps stdio and the requested descriptor only" {
         }.check;
         // report through the exit status: 0 means only stdio and keep[1] survived
         var status: u8 = 0;
-        for ([_]posix.fd_t{ 0, 1, 2, keep[1] }) |fd| if (!open(fd)) {
+        for ([_]posix.fd_t{ 0, 1, 2, keep[1], drop[0] }) |fd| if (!open(fd)) {
             status |= 1;
         };
-        for ([_]posix.fd_t{ drop[0], drop[1], keep[0] }) |fd| if (open(fd)) {
+        for ([_]posix.fd_t{ drop[1], keep[0] }) |fd| if (open(fd)) {
             status |= 2;
         };
         std.os.linux.exit_group(status);

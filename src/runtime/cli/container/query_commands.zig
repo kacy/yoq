@@ -199,6 +199,9 @@ pub fn exec_cmd(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !voi
 
     const exec_config = try buildExecConfig(alloc, &flags, pid, record.id, saved);
     defer environment.free(alloc, exec_config.env);
+    // no handle to the host state database may exist when we fork into the
+    // container's namespaces
+    store.closeDb();
     const exit_code = exec.execInContainer(exec_config) catch |err| {
         writeErr("failed to exec in container {s}: {}\n", .{ id, err });
         return ContainerError.ProcessNotFound;
