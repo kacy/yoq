@@ -834,7 +834,7 @@ test "app rollback restores worker and training workload snapshot" {
         \\{"app_name":"demo-app","services":[],"workers":[{"name":"migrate","image":"alpine","command":["/bin/sh","-c","echo first"]}],"crons":[],"training_jobs":[{"name":"finetune","image":"trainer:v1","command":["python","train.py"],"gpus":1}]}
     ;
     const second_apply_body =
-        \\{"app_name":"demo-app","services":[],"workers":[{"name":"compact","image":"alpine","command":["/bin/sh","-c","echo second"]}],"crons":[{"name":"nightly","schedule":"0 2 * * *","command":["/bin/sh","-c","echo cron"]}],"training_jobs":[]}
+        \\{"app_name":"demo-app","services":[],"workers":[{"name":"compact","image":"alpine","command":["/bin/sh","-c","echo second"]}],"crons":[{"name":"nightly","image":"alpine","schedule":"0 2 * * *","command":["/bin/sh","-c","echo cron"]}],"training_jobs":[]}
     ;
 
     var harness = try RouteFlowHarness.init(alloc);

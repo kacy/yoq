@@ -401,6 +401,34 @@ test "parse keeps replica instances under one logical service request" {
     try std.testing.expectEqualStrings("zone=east", parsed.requests.items[0].request.required_labels);
 }
 
+test "parse refuses a workload with a missing or unusable image instead of skipping it" {
+    const alloc = std.testing.allocator;
+    const long_image = "r/" ++ "a" ** 300;
+    const bad_services = [_][]const u8{
+        "{\"name\":\"api\",\"command\":[]}",
+        "{\"name\":\"api\",\"image\":\"\",\"command\":[]}",
+        "{\"name\":\"api\",\"image\":\"" ++ long_image ++ "\",\"command\":[]}",
+        "{\"name\":\"api\",\"image\":\"bad\\\\image\",\"command\":[]}",
+        "{\"name\":\"api\",\"image\":7,\"command\":[]}",
+    };
+    for (bad_services) |bad| {
+        const body = try std.fmt.allocPrint(alloc,
+            \\{{"app_name":"demo","services":[{{"name":"web","image":"nginx","command":[]}},{s}]}}
+        , .{bad});
+        defer alloc.free(body);
+        try std.testing.expectError(ParseError.InvalidImage, parse(alloc, body, true));
+    }
+
+    // dropping the only service used to leave the cron behind and report
+    // the apply as completed with nothing placed
+    try std.testing.expectError(ParseError.InvalidImage, parse(alloc,
+        \\{"app_name":"demo","services":[{"name":"web","image":"","command":[]}],"crons":[{"name":"tick","image":"alpine","every":60}]}
+    , true));
+    try std.testing.expectError(ParseError.InvalidImage, parse(alloc,
+        \\{"app_name":"demo","services":[],"workers":[{"name":"migrate","command":[]}]}
+    , true));
+}
+
 test "manifest apply rejects undeclared named volumes in every workload collection" {
     const alloc = std.testing.allocator;
     for ([_][]const u8{ "services", "workers", "crons", "training_jobs" }) |kind| {
