@@ -45,6 +45,7 @@ pub const ParseError = error{
     NoServices,
     OutOfMemory,
     InvalidRequest,
+    InvalidImage,
     InvalidRolloutConfig,
 };
 
@@ -53,6 +54,7 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
     defer document.deinit();
     placement_numbers.validateWorkloads(document.value) catch return ParseError.InvalidRequest;
     const uses_host_paths = try validateNamedVolumes(document.value);
+    try validateImages(document.value);
 
     var parsed: ApplyRequest = .{
         .app_name = extractJsonString(body, "app_name") orelse extractJsonString(body, "volume_app"),
@@ -70,15 +72,14 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
     if (extractJsonArray(body, "services")) |services_json| {
         var iter = json_helpers.extractJsonObjects(services_json);
         while (iter.next()) |block| {
-            const image = extractJsonString(block, "image") orelse continue;
+            // validateImages already checked the parsed document. a raw lookup
+            // that still misses means the body was formatted in a way this
+            // scanner cannot read, so refuse it rather than drop the service.
+            const image = extractJsonString(block, "image") orelse return ParseError.InvalidImage;
+            if (!common.validateClusterInput(image)) return ParseError.InvalidImage;
             const encoded = extractCommandString(alloc, block) catch |err| return if (err == error.OutOfMemory) ParseError.OutOfMemory else ParseError.InvalidRequest;
             defer alloc.free(encoded);
             const command = @import("../../../cluster/assignment_spec.zig").withVolumeDefinitions(alloc, encoded, body) catch |err| return if (err == error.OutOfMemory) ParseError.OutOfMemory else ParseError.InvalidRequest;
-
-            if (!common.validateClusterInput(image)) {
-                alloc.free(command);
-                continue;
-            }
 
             const numeric = numbers.parse(alloc, block) catch {
                 alloc.free(command);
@@ -177,6 +178,20 @@ fn parseRolloutPolicy(object: std.json.Value, block: []const u8) error{InvalidRo
         .failure_action = failure_action,
         .health_check_timeout = health_check_timeout,
     };
+}
+
+/// every workload must name an image the agents can pull. an apply that
+/// skipped a bad one would report success while the service never runs.
+fn validateImages(root: std.json.Value) ParseError!void {
+    for ([_][]const u8{ "services", "workers", "crons", "training_jobs" }) |kind| {
+        const workloads = root.object.get(kind) orelse continue;
+        if (workloads != .array) return error.InvalidRequest;
+        for (workloads.array.items) |workload| {
+            if (workload != .object) return error.InvalidRequest;
+            const image = workload.object.get("image") orelse return error.InvalidImage;
+            if (image != .string or !common.validateClusterInput(image.string)) return error.InvalidImage;
+        }
+    }
 }
 
 /// checks named volume references and reports whether any mount reaches a
