@@ -20,6 +20,7 @@ comptime {
     _ = @import("network/local_networks.zig");
     _ = @import("network/dns/resolver_runtime.zig");
     _ = @import("runtime/filesystem/proc_mask.zig");
+    _ = @import("manifest/names.zig");
     _ = @import("network/local_network_rules.zig");
     _ = @import("runtime/cli/network_command.zig");
     _ = @import("network/policy.zig");

@@ -4,6 +4,7 @@ const volumes_mod = @import("../../../state/volumes.zig");
 const json_helpers = @import("../../../lib/json_helpers.zig");
 const app_snapshot = @import("../../../manifest/app_snapshot.zig");
 const spec = @import("../../../manifest/spec.zig");
+const names = @import("../../../manifest/names.zig");
 const common = @import("../common.zig");
 
 const extractJsonString = json_helpers.extractJsonString;
@@ -59,6 +60,8 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
     if (require_app_name and parsed.app_name == null) {
         return ParseError.MissingAppName;
     }
+    // agents build host paths from the app name
+    if (parsed.app_name) |name| if (!names.isValid(name)) return ParseError.InvalidRequest;
 
     if (extractJsonArray(body, "services")) |services_json| {
         var iter = json_helpers.extractJsonObjects(services_json);
@@ -179,7 +182,7 @@ fn validateNamedVolumes(root: std.json.Value) ParseError!void {
         for (volumes.array.items) |volume| {
             if (volume != .object) return error.InvalidRequest;
             const name = volume.object.get("name") orelse return error.InvalidRequest;
-            if (name != .string or name.string.len == 0) return error.InvalidRequest;
+            if (name != .string or !names.isValid(name.string)) return error.InvalidRequest;
         }
     }
     for ([_][]const u8{ "services", "workers", "crons", "training_jobs" }) |kind| {
@@ -187,6 +190,9 @@ fn validateNamedVolumes(root: std.json.Value) ParseError!void {
         if (workloads != .array) return error.InvalidRequest;
         for (workloads.array.items) |workload| {
             if (workload != .object) return error.InvalidRequest;
+            if (workload.object.get("name")) |name| {
+                if (name != .string or !names.isValid(name.string)) return error.InvalidRequest;
+            }
             const mounts = workload.object.get("volumes") orelse continue;
             if (mounts != .array) return error.InvalidRequest;
             for (mounts.array.items) |mount| {
@@ -208,6 +214,29 @@ fn validateNamedVolumes(root: std.json.Value) ParseError!void {
 
 fn extractCommandString(alloc: std.mem.Allocator, block: []const u8) ![]const u8 {
     return @import("../../../cluster/assignment_spec.zig").fromWorkload(alloc, block);
+}
+
+test "parse refuses app, workload and volume names that could become host paths" {
+    const alloc = std.testing.allocator;
+    const refused = [_][]const u8{
+        \\{"app_name":"../../etc","services":[{"name":"web","image":"alpine"}]}
+        ,
+        \\{"app_name":"demo","services":[{"name":"a/b","image":"alpine"}]}
+        ,
+        \\{"app_name":"demo","volume_definitions":[{"name":"../../../../usr/lib","driver":{"local":{}}}],"services":[{"name":"web","image":"alpine"}]}
+        ,
+        \\{"app_name":"demo","volume_definitions":[{"name":"..","driver":{"local":{}}}],"services":[{"name":"web","image":"alpine"}]}
+        ,
+        \\{"app_name":"","services":[{"name":"web","image":"alpine"}]}
+        ,
+    };
+    for (refused) |json| try std.testing.expectError(ParseError.InvalidRequest, parse(alloc, json, false));
+
+    var accepted = try parse(alloc,
+        \\{"app_name":"demo-app","volume_definitions":[{"name":"pg.v2","driver":{"local":{}}}],"services":[{"name":"data-1","image":"alpine"}]}
+    , true);
+    defer accepted.deinit(alloc);
+    try std.testing.expectEqualStrings("demo-app", accepted.app_name.?);
 }
 
 test "parse finds services array regardless of field order" {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const paths = @import("../../lib/paths.zig");
 const spec = @import("../../manifest/spec.zig");
+const names = @import("../../manifest/names.zig");
 
 pub const VolumeError = error{
     DbError,
@@ -10,6 +11,7 @@ pub const VolumeError = error{
     IoError,
     MountFailed,
     UnmountFailed,
+    InvalidName,
 };
 
 pub const VolumeRecord = struct {
@@ -49,6 +51,15 @@ pub fn resolveVolumePath(
     vol_name: []const u8,
     driver: spec.VolumeDriver,
 ) VolumeError![]const u8 {
+    // managed volumes live under the data root; a traversing name would put
+    // them, and later their deleteTree, anywhere on the host
+    switch (driver) {
+        .local, .nfs => {
+            const app_ok = names.isValid(app_name) or std.mem.eql(u8, app_name, names.standalone_app);
+            if (!app_ok or !names.isValid(vol_name)) return VolumeError.InvalidName;
+        },
+        .host, .parallel => {},
+    }
     return switch (driver) {
         .local => paths.dataPathFmt(buf, "volumes/{s}/{s}", .{ app_name, vol_name }) catch |err| switch (err) {
             error.HomeDirNotFound => VolumeError.HomeDirNotFound,

@@ -149,7 +149,9 @@ fn mountNfs(
         @intFromPtr(source_z.ptr),
         @intFromPtr(mp_z.ptr),
         @intFromPtr(fstype.ptr),
-        0,
+        // the export is caller supplied, so its setuid files and device
+        // nodes must not count on this host
+        linux.MS.NOSUID | linux.MS.NODEV,
         @intFromPtr(opts_z.ptr),
     );
 

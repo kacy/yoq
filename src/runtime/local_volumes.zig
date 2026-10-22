@@ -9,7 +9,7 @@ const paths = @import("../lib/paths.zig");
 const container = @import("container.zig");
 
 // standalone volumes use a separate namespace from manifest-managed apps.
-const app_name = ".containers";
+const app_name = @import("../manifest/names.zig").standalone_app;
 pub const VolumeError = error{ InvalidName, InvalidMount, NotFound, InUse, DbError, CopyFailed, OutOfMemory } || volumes.VolumeError;
 
 pub const Record = struct {
@@ -37,11 +37,7 @@ fn rollback(db: *sqlite.Db) void {
     db.exec("ROLLBACK;", .{}, .{}) catch {};
 }
 
-pub fn validName(name: []const u8) bool {
-    if (name.len == 0 or name.len > 128 or !std.ascii.isAlphanumeric(name[0])) return false;
-    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-' and c != '.') return false;
-    return true;
-}
+pub const validName = @import("../manifest/names.zig").isValid;
 
 const Creation = struct {
     path_buf: [paths.max_path]u8 = undefined,
