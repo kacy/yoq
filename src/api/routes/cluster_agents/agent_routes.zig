@@ -13,6 +13,7 @@ const mutation = @import("../../../cluster/mutation_session.zig");
 const deploy_routes = @import("deploy_routes.zig");
 const credentials = @import("../../../cluster/agent_credentials.zig");
 const Node = @import("../../../cluster/node.zig").Node;
+const wireguard = @import("../../../network/wireguard.zig");
 
 const Response = common.Response;
 const RouteContext = common.RouteContext;
@@ -70,7 +71,9 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
     const labels_str = json_helpers.extractJsonString(request.body, "labels");
 
     if (wg_public_key) |pub_key| {
-        if (!common.validateClusterInput(pub_key)) return common.badRequest("invalid wg_public_key");
+        // every agent decodes this key from replicated state, so a bad one
+        // must never get that far
+        if (!wireguard.isValidPublicKey(pub_key)) return common.badRequest("invalid wg_public_key");
 
         const port = wg_listen_port orelse 51820;
         const endpoint_host = if (request_support.parseHostPort(address)) |hp|
@@ -518,7 +521,7 @@ test "registration returns credentials only after their row is applied" {
     defer node.deinit();
     node.fixPointers();
     for (0..61) |_| node.raft.tick();
-    const body = "{\"token\":\"join-secret\",\"address\":\"10.0.0.2\",\"cpu_cores\":2,\"memory_mb\":512,\"wg_public_key\":\"test-key\"}";
+    const body = "{\"token\":\"join-secret\",\"address\":\"10.0.0.2\",\"cpu_cores\":2,\"memory_mb\":512,\"wg_public_key\":\"" ++ test_wg_key ++ "\"}";
     const response = handleAgentRegisterImpl(alloc, .{
         .method = .POST,
         .path = "/agents/register",
@@ -540,7 +543,41 @@ test "registration returns credentials only after their row is applied" {
     try std.testing.expectEqual(node.raft.commit_index, node.state_machine.last_applied);
 }
 
+test "registration rejects a wireguard key that does not decode to 32 bytes" {
+    const node_mod = @import("../../../cluster/node.zig");
+    const alloc = std.testing.allocator;
+    var node = try node_mod.Node.initForTests(alloc, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/unused" });
+    defer node.deinit();
+    node.fixPointers();
+    for (0..61) |_| node.raft.tick();
+
+    // 44 alphabet characters without padding: every agent's decoder used to
+    // panic on this once it reached the wireguard_peers table
+    const body = "{\"token\":\"join-secret\",\"address\":\"10.0.0.2\",\"cpu_cores\":2,\"memory_mb\":512,\"wg_public_key\":\"" ++ "A" ** 44 ++ "\"}";
+    const response = handleAgentRegisterImpl(alloc, .{
+        .method = .POST,
+        .path = "/agents/register",
+        .path_only = "/agents/register",
+        .query = "",
+        .content_length = body.len,
+        .body = body,
+        .headers_raw = "",
+    }, .{ .cluster = &node, .join_token = "join-secret" });
+    defer if (response.allocated) alloc.free(response.body);
+    try std.testing.expectEqual(http.StatusCode.bad_request, response.status);
+
+    const agents = try agent_registry.listAgents(alloc, &node.state_machine.db);
+    defer {
+        for (agents) |agent| agent.deinit(alloc);
+        alloc.free(agents);
+    }
+    try std.testing.expectEqual(@as(usize, 0), agents.len);
+}
+
 const retry_test_key = "0123456789abcdef" ** 4;
+const test_wg_key = "test" ++ "A" ** 39 ++ "=";
+const original_wg_key = "orig" ++ "A" ** 39 ++ "=";
+const different_wg_key = "diff" ++ "A" ** 39 ++ "=";
 
 fn registerRetryForTest(node: *@import("../../../cluster/node.zig").Node, key: []const u8, public_key: []const u8, address: []const u8) !Response {
     const alloc = std.testing.allocator;
@@ -564,7 +601,7 @@ test "enrollment retry after lost response and replica promotion keeps one ident
     defer leader.deinit();
     leader.fixPointers();
     leader.raft.role = .leader;
-    const first = try registerRetryForTest(&leader, retry_test_key, "test-key", "10.0.0.2");
+    const first = try registerRetryForTest(&leader, retry_test_key, test_wg_key, "10.0.0.2");
     defer if (first.allocated) alloc.free(first.body);
     try std.testing.expectEqual(http.StatusCode.ok, first.status);
     const first_id = extractJsonString(first.body, "id").?;
@@ -586,7 +623,7 @@ test "enrollment retry after lost response and replica promotion keeps one ident
     replica.raft.persistent_state.current_term = 1;
     try std.testing.expect(replica.log.setCurrentTerm(1));
     leader.raft.role = .follower;
-    const retried = try registerRetryForTest(&replica, retry_test_key, "test-key", "10.0.0.3");
+    const retried = try registerRetryForTest(&replica, retry_test_key, test_wg_key, "10.0.0.3");
     defer if (retried.allocated) alloc.free(retried.body);
     try std.testing.expectEqual(http.StatusCode.ok, retried.status);
     try std.testing.expectEqualStrings(first_id, extractJsonString(retried.body, "id").?);
@@ -605,23 +642,23 @@ test "enrollment retries cannot replace wireguard identity or revive revoked cre
     defer node.deinit();
     node.fixPointers();
     node.raft.role = .leader;
-    const first = try registerRetryForTest(&node, retry_test_key, "original-key", "10.0.0.2");
+    const first = try registerRetryForTest(&node, retry_test_key, original_wg_key, "10.0.0.2");
     defer if (first.allocated) alloc.free(first.body);
     try std.testing.expectEqual(http.StatusCode.ok, first.status);
     const id = extractJsonString(first.body, "id").?;
-    const replacement = try registerRetryForTest(&node, retry_test_key, "different-key", "10.0.0.9");
+    const replacement = try registerRetryForTest(&node, retry_test_key, different_wg_key, "10.0.0.9");
     defer if (replacement.allocated) alloc.free(replacement.body);
     try std.testing.expectEqual(http.StatusCode.conflict, replacement.status);
     const session = try mutation.Session.begin(&node);
     try session.commit("UPDATE agents SET credential_hash = NULL;");
-    const revoked = try registerRetryForTest(&node, retry_test_key, "original-key", "10.0.0.9");
+    const revoked = try registerRetryForTest(&node, retry_test_key, original_wg_key, "10.0.0.9");
     defer if (revoked.allocated) alloc.free(revoked.body);
     try std.testing.expectEqual(http.StatusCode.conflict, revoked.status);
     try std.testing.expect(!(try credentials.authenticates(node.stateMachineDb(), retry_test_key, id)));
     const unchanged = (try agent_registry.getAgent(alloc, node.stateMachineDb(), id)).?;
     defer unchanged.deinit(alloc);
     try std.testing.expectEqualStrings("10.0.0.2", unchanged.address);
-    try std.testing.expectEqualStrings("original-key", unchanged.wg_public_key.?);
+    try std.testing.expectEqualStrings(original_wg_key, unchanged.wg_public_key.?);
 }
 
 test "simultaneous enrollment retries converge on the same applied identity" {
@@ -634,7 +671,7 @@ test "simultaneous enrollment retries converge on the same applied identity" {
         node: *@import("../../../cluster/node.zig").Node,
         response: ?Response = null,
         fn run(self: *@This()) void {
-            self.response = registerRetryForTest(self.node, retry_test_key, "test-key", "10.0.0.2") catch null;
+            self.response = registerRetryForTest(self.node, retry_test_key, test_wg_key, "10.0.0.2") catch null;
         }
     };
     var workers = [_]Worker{ .{ .node = &node }, .{ .node = &node } };
