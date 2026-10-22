@@ -6,8 +6,14 @@ const types = @import("types.zig");
 
 pub fn decodeKey(encoded: []const u8) ?[32]u8 {
     if (encoded.len != types.encoded_key_len) return null;
+    // the decoder requires the destination to match the decoded size. 44
+    // characters without padding decode to 33 bytes and with "==" to 31,
+    // so check the size before decoding into the fixed buffer.
+    const decoder = std.base64.standard.Decoder;
+    const size = decoder.calcSizeForSlice(encoded) catch return null;
+    if (size != 32) return null;
     var raw: [32]u8 = undefined;
-    std.base64.standard.Decoder.decode(&raw, encoded[0..types.encoded_key_len]) catch return null;
+    decoder.decode(&raw, encoded) catch return null;
     return raw;
 }
 
