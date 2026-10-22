@@ -110,7 +110,8 @@ pub fn withAlertGeneration(alloc: std.mem.Allocator, encoded: []const u8, genera
 pub fn decode(alloc: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(Execution) {
     if (encoded.len > max_encoded_bytes) return error.InvalidRequest;
     if (std.mem.startsWith(u8, encoded, "{")) {
-        var parsed = try std.json.parseFromSlice(Execution, alloc, encoded, .{});
+        // tolerate fields added by newer servers
+        var parsed = try std.json.parseFromSlice(Execution, alloc, encoded, .{ .ignore_unknown_fields = true });
         errdefer parsed.deinit();
         try validate(parsed.value);
         return parsed;

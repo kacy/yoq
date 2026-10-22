@@ -377,6 +377,7 @@ fn parseCheckpointSpec(alloc: std.mem.Allocator, name: []const u8, table: ?*cons
         .path = alloc.dupe(u8, path_raw) catch return common.LoadError.OutOfMemory,
         .interval_secs = interval_secs,
         .keep = keep,
+        .require_complete_marker = ckpt_table.getBool("require_complete_marker") orelse true,
     };
 }
 

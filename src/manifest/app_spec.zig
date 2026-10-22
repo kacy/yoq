@@ -809,10 +809,13 @@ fn writeJsonTrainingData(writer: anytype, data: spec.DataSpec) !void {
 fn writeJsonCheckpoint(writer: anytype, checkpoint: spec.CheckpointSpec) !void {
     try writer.writeAll("{\"path\":\"");
     try json_helpers.writeJsonEscaped(writer, checkpoint.path);
-    try writer.print("\",\"interval_secs\":{d},\"keep\":{d}}}", .{
+    try writer.print("\",\"interval_secs\":{d},\"keep\":{d}", .{
         checkpoint.interval_secs,
         checkpoint.keep,
     });
+    // written only when off, so the default stays out of stored specs
+    if (!checkpoint.require_complete_marker) try writer.writeAll(",\"require_complete_marker\":false");
+    try writer.writeByte('}');
 }
 
 fn restartPolicyString(restart: spec.RestartPolicy) []const u8 {

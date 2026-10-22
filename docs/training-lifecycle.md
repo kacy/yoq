@@ -18,6 +18,8 @@ cluster rank zero receives an owned rendezvous port. different gangs reserve dif
 
 checkpoint paths are container paths. mount a writable volume at that path so checkpoints survive replacement. on resume, each agent scans the corresponding host mount and passes the newest step directory as `YOQ_RESUME_FROM`, expressed inside the container. cross-agent recovery requires storage visible to every eligible agent, such as a shared filesystem. the training process writes checkpoints; yoq does not create framework snapshots.
 
+yoq counts a step directory as a checkpoint only after it contains a completion marker. write the checkpoint files first, then create an empty `.yoq-complete` file in the step directory. yoq passes this name to the job as `YOQ_CHECKPOINT_MARKER`. resume skips directories without the marker, and retention never deletes them, so a rank that crashes during a write cannot replace or remove the last complete checkpoint. if a job cannot write the marker, set `require_complete_marker = false` to treat every step directory as complete.
+
 `training.<name>.data` is rejected because automatic dataset preparation and sharding are not implemented. prepare data in the job command and mount it as a volume. nonzero `training.<name>.fault_tolerance.spare_ranks` is also rejected. the default of zero remains supported; failures restart the whole group within the configured retry limit.
 
 upgrade agents before submitting assignments that use these execution fields. older agents do not understand the expanded assignment specification.

@@ -616,6 +616,7 @@ defined under `[training.<name>.checkpoint]`. the path is inside each container 
 | `path` | string | yes | — | checkpoint storage path |
 | `interval_secs` | integer | no | `1800` | requested interval passed as `YOQ_CHECKPOINT_INTERVAL`; the application controls writes |
 | `keep` | integer | no | `5` | checkpoints retained during local synchronization; cluster storage needs its own retention policy |
+| `require_complete_marker` | boolean | no | `true` | count a step directory only after it contains a `.yoq-complete` file; see [training lifecycle](training-lifecycle.md) |
 
 ```toml
 [training.llm-finetune.checkpoint]

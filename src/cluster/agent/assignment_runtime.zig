@@ -429,7 +429,7 @@ fn runAssignment(
     if (execution.value.checkpoint) |ckpt| {
         const checkpoints = @import("../../manifest/checkpoint.zig");
         const resume_path = if (execution.value.resume_checkpoint)
-            checkpoints.latestMountedCheckpoint(mounts_arena.allocator(), ckpt.path, mounts.bind_mounts.items) catch {
+            checkpoints.latestMountedCheckpoint(mounts_arena.allocator(), ckpt, mounts.bind_mounts.items) catch {
                 setContainerState(self, assignment_id, .failed);
                 reportStatus(self, assignment_id, meta.generation, "failed", "checkpoint_path_invalid");
                 return;
