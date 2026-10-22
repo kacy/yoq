@@ -16,6 +16,9 @@ pub const ApplyRequest = struct {
     app_name: ?[]const u8,
     summary: app_snapshot.Summary,
     requests: std.ArrayListUnmanaged(ServiceRequest) = .empty,
+    /// the request mounts host paths: a bind mount, or a host or parallel
+    /// volume driver. those need more than apps:write.
+    uses_host_paths: bool = false,
 
     pub fn deinit(self: *ApplyRequest, alloc: std.mem.Allocator) void {
         for (self.requests.items) |req| alloc.free(req.request.command);
@@ -49,11 +52,12 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
     const document = numbers.parse(alloc, body) catch return ParseError.InvalidRequest;
     defer document.deinit();
     placement_numbers.validateWorkloads(document.value) catch return ParseError.InvalidRequest;
-    try validateNamedVolumes(document.value);
+    const uses_host_paths = try validateNamedVolumes(document.value);
 
     var parsed: ApplyRequest = .{
         .app_name = extractJsonString(body, "app_name") orelse extractJsonString(body, "volume_app"),
         .summary = app_snapshot.summarize(body),
+        .uses_host_paths = uses_host_paths,
     };
     errdefer parsed.deinit(alloc);
 
@@ -175,7 +179,10 @@ fn parseRolloutPolicy(object: std.json.Value, block: []const u8) error{InvalidRo
     };
 }
 
-fn validateNamedVolumes(root: std.json.Value) ParseError!void {
+/// checks named volume references and reports whether any mount reaches a
+/// host path chosen by the caller.
+fn validateNamedVolumes(root: std.json.Value) ParseError!bool {
+    var uses_host_paths = false;
     const definitions = root.object.get("volume_definitions");
     if (definitions) |volumes| {
         if (volumes != .array) return error.InvalidRequest;
@@ -183,6 +190,10 @@ fn validateNamedVolumes(root: std.json.Value) ParseError!void {
             if (volume != .object) return error.InvalidRequest;
             const name = volume.object.get("name") orelse return error.InvalidRequest;
             if (name != .string or !names.isValid(name.string)) return error.InvalidRequest;
+            if (volume.object.get("driver")) |driver| {
+                if (driver == .object and (driver.object.get("host") != null or driver.object.get("parallel") != null))
+                    uses_host_paths = true;
+            }
         }
     }
     for ([_][]const u8{ "services", "workers", "crons", "training_jobs" }) |kind| {
@@ -199,7 +210,10 @@ fn validateNamedVolumes(root: std.json.Value) ParseError!void {
                 if (mount != .object) return error.InvalidRequest;
                 const mount_kind = mount.object.get("kind") orelse return error.InvalidRequest;
                 if (mount_kind != .string) return error.InvalidRequest;
-                if (std.mem.eql(u8, mount_kind.string, "bind")) continue;
+                if (std.mem.eql(u8, mount_kind.string, "bind")) {
+                    uses_host_paths = true;
+                    continue;
+                }
                 if (!std.mem.eql(u8, mount_kind.string, "named")) return error.InvalidRequest;
                 const source = mount.object.get("source") orelse return error.InvalidRequest;
                 if (source != .string) return error.InvalidRequest;
@@ -210,6 +224,7 @@ fn validateNamedVolumes(root: std.json.Value) ParseError!void {
             }
         }
     }
+    return uses_host_paths;
 }
 
 fn extractCommandString(alloc: std.mem.Allocator, block: []const u8) ![]const u8 {
