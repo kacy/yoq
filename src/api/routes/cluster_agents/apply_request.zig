@@ -45,6 +45,7 @@ pub const ParseError = error{
     NoServices,
     OutOfMemory,
     InvalidRequest,
+    InvalidImage,
     InvalidRolloutConfig,
 };
 
@@ -53,6 +54,7 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
     defer document.deinit();
     placement_numbers.validateWorkloads(document.value) catch return ParseError.InvalidRequest;
     const uses_host_paths = try validateNamedVolumes(document.value);
+    try validateImages(document.value);
 
     var parsed: ApplyRequest = .{
         .app_name = extractJsonString(body, "app_name") orelse extractJsonString(body, "volume_app"),
@@ -70,15 +72,14 @@ pub fn parse(alloc: std.mem.Allocator, body: []const u8, require_app_name: bool)
     if (extractJsonArray(body, "services")) |services_json| {
         var iter = json_helpers.extractJsonObjects(services_json);
         while (iter.next()) |block| {
-            const image = extractJsonString(block, "image") orelse continue;
+            // validateImages already checked the parsed document. a raw lookup
+            // that still misses means the body was formatted in a way this
+            // scanner cannot read, so refuse it rather than drop the service.
+            const image = extractJsonString(block, "image") orelse return ParseError.InvalidImage;
+            if (!common.validateClusterInput(image)) return ParseError.InvalidImage;
             const encoded = extractCommandString(alloc, block) catch |err| return if (err == error.OutOfMemory) ParseError.OutOfMemory else ParseError.InvalidRequest;
             defer alloc.free(encoded);
             const command = @import("../../../cluster/assignment_spec.zig").withVolumeDefinitions(alloc, encoded, body) catch |err| return if (err == error.OutOfMemory) ParseError.OutOfMemory else ParseError.InvalidRequest;
-
-            if (!common.validateClusterInput(image)) {
-                alloc.free(command);
-                continue;
-            }
 
             const numeric = numbers.parse(alloc, block) catch {
                 alloc.free(command);
@@ -177,6 +178,20 @@ fn parseRolloutPolicy(object: std.json.Value, block: []const u8) error{InvalidRo
         .failure_action = failure_action,
         .health_check_timeout = health_check_timeout,
     };
+}
+
+/// every workload must name an image the agents can pull. an apply that
+/// skipped a bad one would report success while the service never runs.
+fn validateImages(root: std.json.Value) ParseError!void {
+    for ([_][]const u8{ "services", "workers", "crons", "training_jobs" }) |kind| {
+        const workloads = root.object.get(kind) orelse continue;
+        if (workloads != .array) return error.InvalidRequest;
+        for (workloads.array.items) |workload| {
+            if (workload != .object) return error.InvalidRequest;
+            const image = workload.object.get("image") orelse return error.InvalidImage;
+            if (image != .string or !common.validateClusterInput(image.string)) return error.InvalidImage;
+        }
+    }
 }
 
 /// checks named volume references and reports whether any mount reaches a
@@ -384,6 +399,34 @@ test "parse keeps replica instances under one logical service request" {
     try std.testing.expectEqual(@as(u32, 3), parsed.requests.items[0].replicas);
     try std.testing.expectEqualStrings("web", parsed.requests.items[0].request.workload_name.?);
     try std.testing.expectEqualStrings("zone=east", parsed.requests.items[0].request.required_labels);
+}
+
+test "parse refuses a workload with a missing or unusable image instead of skipping it" {
+    const alloc = std.testing.allocator;
+    const long_image = "r/" ++ "a" ** 300;
+    const bad_services = [_][]const u8{
+        "{\"name\":\"api\",\"command\":[]}",
+        "{\"name\":\"api\",\"image\":\"\",\"command\":[]}",
+        "{\"name\":\"api\",\"image\":\"" ++ long_image ++ "\",\"command\":[]}",
+        "{\"name\":\"api\",\"image\":\"bad\\\\image\",\"command\":[]}",
+        "{\"name\":\"api\",\"image\":7,\"command\":[]}",
+    };
+    for (bad_services) |bad| {
+        const body = try std.fmt.allocPrint(alloc,
+            \\{{"app_name":"demo","services":[{{"name":"web","image":"nginx","command":[]}},{s}]}}
+        , .{bad});
+        defer alloc.free(body);
+        try std.testing.expectError(ParseError.InvalidImage, parse(alloc, body, true));
+    }
+
+    // dropping the only service used to leave the cron behind and report
+    // the apply as completed with nothing placed
+    try std.testing.expectError(ParseError.InvalidImage, parse(alloc,
+        \\{"app_name":"demo","services":[{"name":"web","image":"","command":[]}],"crons":[{"name":"tick","image":"alpine","every":60}]}
+    , true));
+    try std.testing.expectError(ParseError.InvalidImage, parse(alloc,
+        \\{"app_name":"demo","services":[],"workers":[{"name":"migrate","command":[]}]}
+    , true));
 }
 
 test "manifest apply rejects undeclared named volumes in every workload collection" {

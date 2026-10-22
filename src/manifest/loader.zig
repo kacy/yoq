@@ -573,6 +573,15 @@ test "missing image returns error" {
     try std.testing.expectError(LoadError.MissingImage, result);
 }
 
+test "an image that expands to nothing returns error" {
+    const alloc = std.testing.allocator;
+    const result = loadFromString(alloc,
+        \\[service.web]
+        \\image = "${YOQ_TEST_SURELY_UNSET_IMAGE}"
+    );
+    try std.testing.expectError(LoadError.MissingImage, result);
+}
+
 test "no services returns error" {
     const alloc = std.testing.allocator;
     const result = loadFromString(alloc, "# empty manifest\n");

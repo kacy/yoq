@@ -225,6 +225,7 @@ fn handleApply(
         apply_request.ParseError.NoServices => common.badRequest("no services to deploy"),
         apply_request.ParseError.OutOfMemory => common.internalError(),
         apply_request.ParseError.InvalidRequest => common.badRequest("invalid request body"),
+        apply_request.ParseError.InvalidImage => common.badRequest("every workload needs a valid image"),
         apply_request.ParseError.InvalidRolloutConfig => common.badRequest("invalid rollout config"),
     };
     defer parsed.deinit(alloc);
@@ -310,6 +311,7 @@ pub fn handleAppDryRun(alloc: std.mem.Allocator, request: @import("../../http.zi
         apply_request.ParseError.NoServices => common.badRequest("no services to deploy"),
         apply_request.ParseError.OutOfMemory => common.internalError(),
         apply_request.ParseError.InvalidRequest => common.badRequest("invalid request body"),
+        apply_request.ParseError.InvalidImage => common.badRequest("every workload needs a valid image"),
         apply_request.ParseError.InvalidRolloutConfig => common.badRequest("invalid rollout config"),
     };
     defer parsed.deinit(alloc);
