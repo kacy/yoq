@@ -26,6 +26,7 @@ pub fn mountEssentialWithShm(target_root: []const u8, shm_size: u64) FilesystemE
         if (errno == 1 or errno == 13) return FilesystemError.MountPermissionDenied;
         return FilesystemError.MountFailed;
     }
+    try @import("proc_mask.zig").harden(proc_path);
 
     var dev_path_buf: [4096]u8 = undefined;
     const dev_path = joinTargetPath(target_root, "/dev", &dev_path_buf) catch return FilesystemError.PathTooLong;
