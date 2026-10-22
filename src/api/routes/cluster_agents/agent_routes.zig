@@ -26,7 +26,10 @@ fn nowRealSeconds() i64 {
 pub fn handleAgentRegister(alloc: std.mem.Allocator, request: http.Request, ctx: RouteContext) Response {
     const resp = @import("api_discovery.zig").attach(alloc, ctx, handleAgentRegisterImpl(alloc, request, ctx));
     if (!resp.status.isError()) {
-        const address = extractJsonString(request.body, "address") orelse "";
+        // registration already accepted this body, so it parses
+        const parsed = common.parseBody(alloc, request.body) catch null;
+        defer if (parsed) |p| p.deinit();
+        const address = if (parsed) |p| (common.optionalText(p.value, "address") catch null) orelse "" else "";
         audit.record(.agent_register, address, .ok);
     }
     return resp;
@@ -37,14 +40,14 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
     const expected_token = ctx.join_token orelse return common.badRequest("no join token configured");
     if (request.body.len == 0) return common.badRequest("missing request body");
 
-    const token = extractJsonString(request.body, "token") orelse return common.badRequest("missing token field");
-    const address = extractJsonString(request.body, "address") orelse return common.badRequest("missing address field");
-    const parsed = numbers.parse(alloc, request.body) catch return common.badRequest("invalid resource snapshot");
+    const parsed = common.parseBody(alloc, request.body) catch return common.badRequest("invalid resource snapshot");
     defer parsed.deinit();
+    const token = (common.optionalText(parsed.value, "token") catch return common.badRequest("invalid token field")) orelse return common.badRequest("missing token field");
+    const address = (common.optionalText(parsed.value, "address") catch return common.badRequest("invalid address field")) orelse return common.badRequest("missing address field");
     const agent_api_port = numbers.optional(u16, parsed.value, "agent_api_port", 1, 65535) catch return common.badRequest("invalid agent_api_port");
     const cpu_cores = (numbers.optional(u32, parsed.value, "cpu_cores", 1, 10000) catch return common.badRequest("invalid cpu_cores")) orelse return common.badRequest("missing cpu_cores field");
     const memory_mb = (numbers.optional(u64, parsed.value, "memory_mb", 1, 10_000_000) catch return common.badRequest("invalid memory_mb")) orelse return common.badRequest("missing memory_mb field");
-    const wg_public_key = extractJsonString(request.body, "wg_public_key");
+    const wg_public_key = common.optionalText(parsed.value, "wg_public_key") catch return common.badRequest("invalid wg_public_key");
     const wg_listen_port = numbers.optional(u16, parsed.value, "wg_listen_port", 1, 65535) catch return common.badRequest("invalid wg_listen_port");
 
     if (!common.validateClusterInput(address)) return common.badRequest("invalid address");
@@ -66,9 +69,9 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
     var peer_sql: ?[]const u8 = null;
     var peer_sql_buf: [6144]u8 = undefined;
 
-    const role_str = json_helpers.extractJsonString(request.body, "role");
-    const region_str = json_helpers.extractJsonString(request.body, "region");
-    const labels_str = json_helpers.extractJsonString(request.body, "labels");
+    const role_str = common.optionalText(parsed.value, "role") catch return common.badRequest("invalid role");
+    const region_str = common.optionalText(parsed.value, "region") catch return common.badRequest("invalid region");
+    const labels_str = common.optionalText(parsed.value, "labels") catch return common.badRequest("invalid labels");
 
     if (wg_public_key) |pub_key| {
         // every agent decodes this key from replicated state, so a bad one
@@ -97,7 +100,7 @@ fn handleAgentRegisterImpl(alloc: std.mem.Allocator, request: http.Request, ctx:
 
     var sql_buf: [2048]u8 = undefined;
     const gpu_count_val = numbers.optional(u32, parsed.value, "gpu_count", 0, std.math.maxInt(u32)) catch return common.badRequest("invalid gpu_count");
-    const gpu_model_str = json_helpers.extractJsonString(request.body, "gpu_model");
+    const gpu_model_str = common.optionalText(parsed.value, "gpu_model") catch return common.badRequest("invalid gpu_model");
     const gpu_vram_val = numbers.optional(u64, parsed.value, "gpu_vram_mb", 0, std.math.maxInt(i64)) catch return common.badRequest("invalid gpu_vram_mb");
 
     const resources: agent_registry.AgentResources = .{
@@ -486,7 +489,9 @@ pub fn handleUpdateLabels(alloc: std.mem.Allocator, request: http.Request, id: [
     const node = ctx.cluster orelse return common.badRequest("not running in cluster mode");
     if (request.body.len == 0) return common.badRequest("missing request body");
 
-    const labels = extractJsonString(request.body, "labels") orelse return common.badRequest("missing labels field");
+    const parsed = common.parseBody(alloc, request.body) catch return common.badRequest("invalid json body");
+    defer parsed.deinit();
+    const labels = (common.optionalText(parsed.value, "labels") catch return common.badRequest("invalid labels field")) orelse return common.badRequest("missing labels field");
 
     var sql_buf: [1024]u8 = undefined;
     const sql = agent_registry.updateLabelsSql(&sql_buf, id, labels) catch return common.internalError();
@@ -541,6 +546,47 @@ test "registration returns credentials only after their row is applied" {
     try std.testing.expectEqual(@as(?i64, 1), json_helpers.extractJsonInt(gossip, "id"));
     try std.testing.expectEqual(@as(?i64, 19877), json_helpers.extractJsonInt(gossip, "port"));
     try std.testing.expectEqual(node.raft.commit_index, node.state_machine.last_applied);
+}
+
+test "registration and label updates decode formatted json" {
+    const node_mod = @import("../../../cluster/node.zig");
+    const alloc = std.testing.allocator;
+    var node = try node_mod.Node.initForTests(alloc, .{
+        .id = 1,
+        .port = 0,
+        .gossip_port = 19878,
+        .peers = &.{},
+        .data_dir = "/unused-in-memory-registration",
+    });
+    defer node.deinit();
+    node.fixPointers();
+    for (0..61) |_| node.raft.tick();
+    const ctx: RouteContext = .{ .cluster = &node, .join_token = "join-secret" };
+
+    // spaces after the colons and escaped strings, as a standard encoder writes them
+    const body = "{ \"token\": \"join-secret\", \"address\": \"10.0.0.2\", \"cpu_cores\": 2, \"memory_mb\": 512, " ++
+        "\"region\": \"us\\u002deast\", \"labels\": \"zone=a\", \"wg_public_key\": \"" ++ test_wg_key ++ "\" }";
+    const response = handleAgentRegisterImpl(alloc, statusTestRequest(body), ctx);
+    defer if (response.allocated) alloc.free(response.body);
+    try std.testing.expectEqual(http.StatusCode.ok, response.status);
+    const id = extractJsonString(response.body, "id") orelse return error.MissingIdentity;
+
+    const labels = handleUpdateLabels(alloc, statusTestRequest(
+        \\{ "labels": "zone=b,disk=\u0073sd" }
+    ), id, ctx);
+    defer if (labels.allocated) alloc.free(labels.body);
+    try std.testing.expectEqual(http.StatusCode.ok, labels.status);
+
+    const agent = (try agent_registry.getAgent(alloc, node.stateMachineDb(), id)) orelse return error.MissingAgent;
+    defer agent.deinit(alloc);
+    try std.testing.expectEqualStrings("us-east", agent.region.?);
+    try std.testing.expectEqualStrings("zone=b,disk=ssd", agent.labels.?);
+
+    for ([_][]const u8{ "{\"labels\":", "{\"labels\":7}", "{\"labels\":\"zone=a\\u0000\"}" }) |bad| {
+        const refused = handleUpdateLabels(alloc, statusTestRequest(bad), id, ctx);
+        defer if (refused.allocated) alloc.free(refused.body);
+        try std.testing.expectEqual(http.StatusCode.bad_request, refused.status);
+    }
 }
 
 test "registration rejects a wireguard key that does not decode to 32 bytes" {

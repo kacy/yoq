@@ -7,7 +7,6 @@ const common = @import("../common.zig");
 const store_support = @import("store_support.zig");
 
 const Response = common.Response;
-const extractJsonString = json_helpers.extractJsonString;
 const SecretListContext = struct {
     names: []const []const u8,
 };
@@ -31,8 +30,17 @@ pub fn handleListSecrets(alloc: std.mem.Allocator) Response {
 pub fn handleSetSecret(alloc: std.mem.Allocator, request: http.Request) Response {
     if (request.body.len == 0) return common.badRequest("missing request body");
 
-    const name = extractJsonString(request.body, "name") orelse return common.badRequest("missing name field");
-    const value = extractJsonString(request.body, "value") orelse return common.badRequest("missing value field");
+    const parsed = common.parseBody(alloc, request.body) catch return common.badRequest("invalid json body");
+    // the decoded value is plaintext, so don't leave it in freed memory
+    defer {
+        if (parsed.value.object.get("value")) |value| if (value == .string) std.crypto.secureZero(u8, @constCast(value.string));
+        parsed.deinit();
+    }
+    const name = (common.optionalText(parsed.value, "name") catch return common.badRequest("invalid name field")) orelse return common.badRequest("missing name field");
+    const value_field = parsed.value.object.get("value") orelse return common.badRequest("missing value field");
+    // secret values may hold any text, including newlines in a pem key
+    if (value_field != .string) return common.badRequest("invalid value field");
+    const value = value_field.string;
 
     if (name.len == 0) return common.badRequest("name cannot be empty");
 

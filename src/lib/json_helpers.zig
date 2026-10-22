@@ -65,6 +65,10 @@ pub fn writeNullableJsonRawField(writer: anytype, key: []const u8, value: ?[]con
 // avoids pulling in a full parser for simple key-value lookups.
 
 /// extract a string value from a JSON object: {"key":"value"}
+///
+/// the result is the raw bytes between the quotes, with escapes left in
+/// place, and the key must be followed directly by `:"`. use it only for
+/// json yoq wrote itself. request bodies go through `common.parseBody`.
 pub fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
     var search_buf: [128]u8 = undefined;
     const needle = std.fmt.bufPrint(&search_buf, "\"{s}\":\"", .{key}) catch return null;

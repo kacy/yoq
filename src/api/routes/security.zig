@@ -521,3 +521,45 @@ test "policy action is case sensitive" {
     const resp = route(req, testing.allocator).?;
     try testing.expectEqual(Status.bad_request, resp.status);
 }
+
+fn postRequest(path: []const u8, body: []const u8) http.Request {
+    return .{ .method = .POST, .path = path, .path_only = path, .query = "", .headers_raw = "", .content_length = body.len, .body = body };
+}
+
+test "secret bodies are parsed as json before anything is stored" {
+    const bad_bodies = [_][]const u8{
+        "{\"name\":\"db\",\"value\":",
+        "{\"name\":\"db\",\"value\":7}",
+        "{\"name\":\"db\\nother\",\"value\":\"x\"}",
+        "{ \"value\": \"x\" }",
+    };
+    for (bad_bodies) |body| {
+        const resp = route(postRequest("/v1/secrets", body), testing.allocator).?;
+        defer resp.deinit(testing.allocator);
+        try testing.expectEqual(Status.bad_request, resp.status);
+    }
+}
+
+test "policies store decoded values from formatted json" {
+    const store = @import("../../state/store.zig");
+    try store.initTestDb();
+    defer store.deinitTestDb();
+
+    const resp = route(postRequest("/v1/policies",
+        \\{ "source": "web", "target": "db", "action": "deny" }
+    ), testing.allocator).?;
+    defer resp.deinit(testing.allocator);
+    try testing.expectEqual(Status.ok, resp.status);
+
+    var policies = try store.listNetworkPolicies(testing.allocator);
+    defer {
+        for (policies.items) |policy| policy.deinit(testing.allocator);
+        policies.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 1), policies.items.len);
+    try testing.expectEqualStrings("web", policies.items[0].source_service);
+
+    const control = route(postRequest("/v1/policies", "{\"source\":\"web\\u0000\",\"target\":\"db\",\"action\":\"deny\"}"), testing.allocator).?;
+    defer control.deinit(testing.allocator);
+    try testing.expectEqual(Status.bad_request, control.status);
+}

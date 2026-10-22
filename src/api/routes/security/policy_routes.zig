@@ -7,7 +7,6 @@ const audit = @import("../../../state/audit.zig");
 const common = @import("../common.zig");
 
 const Response = common.Response;
-const extractJsonString = json_helpers.extractJsonString;
 const PolicyListContext = struct {
     policies: []const store.NetworkPolicyRecord,
 };
@@ -27,9 +26,11 @@ pub fn handleListPolicies(alloc: std.mem.Allocator) Response {
 pub fn handleAddPolicy(alloc: std.mem.Allocator, request: http.Request) Response {
     if (request.body.len == 0) return common.badRequest("missing request body");
 
-    const source = extractJsonString(request.body, "source") orelse return common.badRequest("missing source field");
-    const target = extractJsonString(request.body, "target") orelse return common.badRequest("missing target field");
-    const action = extractJsonString(request.body, "action") orelse return common.badRequest("missing action field");
+    const parsed = common.parseBody(alloc, request.body) catch return common.badRequest("invalid json body");
+    defer parsed.deinit();
+    const source = (common.optionalText(parsed.value, "source") catch return common.badRequest("invalid source field")) orelse return common.badRequest("missing source field");
+    const target = (common.optionalText(parsed.value, "target") catch return common.badRequest("invalid target field")) orelse return common.badRequest("missing target field");
+    const action = (common.optionalText(parsed.value, "action") catch return common.badRequest("invalid action field")) orelse return common.badRequest("missing action field");
 
     if (source.len == 0) return common.badRequest("source cannot be empty");
     if (target.len == 0) return common.badRequest("target cannot be empty");

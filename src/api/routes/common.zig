@@ -137,6 +137,26 @@ pub fn validateClusterInput(value: []const u8) bool {
     return true;
 }
 
+/// parses a request body as a JSON object. strings come back decoded and
+/// copied into the result's arena, so a caller holding a secret can zero
+/// it before `deinit`.
+pub fn parseBody(alloc: std.mem.Allocator, body: []const u8) !std.json.Parsed(std.json.Value) {
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{ .allocate = .alloc_always, .parse_numbers = false });
+    errdefer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidRequest;
+    return parsed;
+}
+
+/// reads an optional string field from a body parsed with `parseBody`.
+/// a field that is present but not a string is an error. so is one with
+/// control characters, since these values end up in sql text and logs.
+pub fn optionalText(object: std.json.Value, key: []const u8) error{InvalidRequest}!?[]const u8 {
+    const value = object.object.get(key) orelse return null;
+    if (value != .string) return error.InvalidRequest;
+    for (value.string) |c| if (c < 0x20 or c == 0x7f) return error.InvalidRequest;
+    return value.string;
+}
+
 pub fn validateContainerId(id: []const u8) bool {
     if (id.len == 0 or id.len > 64) return false;
     for (id) |c| {
@@ -204,6 +224,23 @@ pub fn extractQueryValue(query: []const u8, param: []const u8) ?[]const u8 {
 // ============================================================================
 // Tests
 // ============================================================================
+
+test "parseBody decodes escapes and accepts spaced json" {
+    const parsed = try parseBody(testing.allocator,
+        \\{ "name": "a\"b", "value": "line1\nline2\u00e9", "n": 1 }
+    );
+    defer parsed.deinit();
+    try testing.expectEqualStrings("a\"b", (try optionalText(parsed.value, "name")).?);
+    try testing.expectEqual(@as(?[]const u8, null), try optionalText(parsed.value, "missing"));
+    // control characters are refused for plain text fields
+    try testing.expectError(error.InvalidRequest, optionalText(parsed.value, "value"));
+    try testing.expectError(error.InvalidRequest, optionalText(parsed.value, "n"));
+    try testing.expectError(error.InvalidRequest, parseBody(testing.allocator, "[1]"));
+    if (parseBody(testing.allocator, "{\"name\":")) |unexpected| {
+        unexpected.deinit();
+        return error.TestUnexpectedResult;
+    } else |_| {}
+}
 
 test "notFound returns correct response" {
     const resp = notFound();
