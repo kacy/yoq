@@ -79,3 +79,35 @@ test "dup2 onto the same descriptor clears close-on-exec" {
     const flags = try platform.posix.fcntl(pipe[0], posix.F.GETFD, 0);
     try std.testing.expectEqual(@as(usize, 0), flags & posix.FD_CLOEXEC);
 }
+
+test "closeInheritedFds keeps stdio and the requested descriptor only" {
+    const drop = try platform.posix.pipe();
+    defer for (drop) |fd| platform.posix.close(fd);
+    const keep = try platform.posix.pipe();
+    defer for (keep) |fd| platform.posix.close(fd);
+
+    const rc = std.os.linux.fork();
+    if (std.os.linux.errno(rc) != .SUCCESS) return error.ForkFailed;
+    if (rc == 0) {
+        platform.posix.closeInheritedFds(keep[1]);
+        const open = struct {
+            fn check(fd: posix.fd_t) bool {
+                return std.os.linux.errno(std.os.linux.fcntl(fd, posix.F.GETFD, 0)) == .SUCCESS;
+            }
+        }.check;
+        // report through the exit status: 0 means only stdio and keep[1] survived
+        var status: u8 = 0;
+        for ([_]posix.fd_t{ 0, 1, 2, keep[1] }) |fd| if (!open(fd)) {
+            status |= 1;
+        };
+        for ([_]posix.fd_t{ drop[0], drop[1], keep[0] }) |fd| if (open(fd)) {
+            status |= 2;
+        };
+        std.os.linux.exit_group(status);
+    }
+
+    var status: u32 = 0;
+    _ = std.os.linux.waitpid(@intCast(rc), &status, 0);
+    try std.testing.expect(std.os.linux.W.IFEXITED(status));
+    try std.testing.expectEqual(@as(u32, 0), std.os.linux.W.EXITSTATUS(status));
+}

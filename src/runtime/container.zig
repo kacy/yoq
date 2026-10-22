@@ -223,7 +223,6 @@ pub const Container = struct {
         var channel = startup.Channel.init() catch return ContainerError.StartFailed;
         defer channel.deinit();
         child_ctx.startup_fd = channel.child;
-        child_ctx.parent_startup_fd = channel.parent;
 
         // Retain the database used for network setup through rollback: cleanup
         // must not depend on successfully reopening it after a later failure.

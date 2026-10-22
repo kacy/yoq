@@ -38,7 +38,6 @@ pub const ChildExecContext = struct {
     user: ?[]const u8 = null,
     rootless: bool = false,
     startup_fd: posix.fd_t = -1,
-    parent_startup_fd: posix.fd_t = -1,
     gpu_indices: []const u32 = &.{},
     has_overlay: bool,
     host_mode: bool,
@@ -57,7 +56,9 @@ pub const ChildExecContext = struct {
 pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
     const ctx: *const ChildExecContext = @ptrCast(@alignCast(arg));
 
-    if (ctx.parent_startup_fd >= 0) linux_platform.posix.close(ctx.parent_startup_fd);
+    // keep only stdio and the startup channel. everything else is the
+    // daemon's: host-namespace sockets and other containers' pipes.
+    linux_platform.posix.closeInheritedFds(if (ctx.startup_fd >= 0) ctx.startup_fd else null);
     defer if (ctx.startup_fd >= 0) linux_platform.posix.close(ctx.startup_fd);
     const host_mode = ctx.host_mode;
 
