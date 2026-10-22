@@ -89,7 +89,7 @@ fn copyEntry(io: std.Io, source: std.Io.Dir, source_name: []const u8, destinatio
             try copyContents(io, from, to, depth);
             if (linux.errno(linux.fchmod(to.handle, (stat.permissions.toMode() & 0o7777))) != .SUCCESS) return error.ChmodFailed;
         },
-        .file => try source.copyFile(source_name, destination, destination_name, io, .{}),
+        .file => try copyRegularFile(io, source, source_name, destination, destination_name),
         .sym_link => {
             var target: [std.fs.max_path_bytes]u8 = undefined;
             const len = try source.readLink(io, source_name, &target);
@@ -101,6 +101,44 @@ fn copyEntry(io: std.Io, source: std.Io.Dir, source_name: []const u8, destinatio
         },
         else => return error.UnsupportedFileType,
     }
+}
+
+/// copy one regular file without following a symlink at `name`.
+///
+/// a running container can swap the entry for an absolute symlink between the
+/// stat above and the open. /proc/<pid>/root is not a chroot, so following it
+/// would read a host file. open the entry once without following links, then
+/// copy from that descriptor only. O_NONBLOCK keeps a swapped-in fifo from
+/// blocking the copy.
+fn copyRegularFile(io: std.Io, source: std.Io.Dir, name: []const u8, destination: std.Io.Dir, destination_name: []const u8) !void {
+    const name_z = try std.posix.toPosixPath(name);
+    const rc = linux.openat(source.handle, &name_z, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true }, 0);
+    switch (linux.errno(rc)) {
+        .SUCCESS => {},
+        .LOOP => return error.EntryChanged,
+        .NOENT => return error.FileNotFound,
+        else => return error.OpenFailed,
+    }
+    const file: std.Io.File = .{ .handle = @intCast(rc), .flags = .{ .nonblocking = false } };
+    var reader: std.Io.File.Reader = .init(file, io, &.{});
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    if (stat.kind != .file) return error.EntryChanged;
+    reader.size = stat.size;
+
+    // the atomic file is renamed into place, so a symlink planted at the
+    // destination name is replaced rather than followed
+    var atomic_file = try destination.createFileAtomic(io, destination_name, .{ .permissions = stat.permissions, .replace = true });
+    defer atomic_file.deinit(io);
+    var buffer: [1024]u8 = undefined;
+    var writer = atomic_file.file.writer(io, &buffer);
+    _ = writer.interface.sendFileAll(&reader, .unlimited) catch |err| switch (err) {
+        error.ReadFailed => return reader.err.?,
+        error.WriteFailed => return writer.err.?,
+    };
+    try writer.flush();
+    try atomic_file.replace(io);
 }
 
 fn sameDirectory(a: std.Io.Dir, b: std.Io.Dir) !bool {
