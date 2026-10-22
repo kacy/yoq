@@ -65,7 +65,7 @@ fn hashSources(alloc: std.mem.Allocator, root: []const u8, sources: []const []co
         combined.update(digest.string(&buf));
     }
     const hex = std.fmt.bytesToHex(combined.finalResult(), .lower);
-    return std.fmt.bufPrint(out, "sha256:{s}", .{&hex}) catch unreachable;
+    return std.fmt.bufPrint(out, "sha256:{s}", .{&hex}) catch types.BuildError.CopyStepFailed;
 }
 
 fn copySources(alloc: std.mem.Allocator, root: []const u8, sources: []const []const u8, layer_dir: []const u8, dest: []const u8) types.BuildError!void {
