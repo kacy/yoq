@@ -79,8 +79,8 @@ fn hashDirectory(
         switch (stat.kind) {
             .file => try hashOpenFile(sub_dir, path, hasher),
             .directory => header(hasher, 2, path, stat.permissions.toMode(), 0),
-            // Directory COPY currently skips links. Including their literal
-            // targets is conservative and never reads outside the context.
+            // directory COPY keeps links as links, so hash the literal
+            // target. this never reads outside the context.
             .sym_link => try hashLink(sub_dir, path, hasher),
             else => return types.ContextError.HashFailed,
         }

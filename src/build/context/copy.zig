@@ -94,7 +94,20 @@ fn copyDirectory(
                 source.copyFile(entry.path, target, entry.path, std.Options.debug_io, .{}) catch
                     return types.ContextError.CopyFailed;
             },
-            else => continue,
+            .sym_link => {
+                // keep links as links. the walker never descends through
+                // them, and layer extraction validates their targets.
+                if (std.fs.path.dirname(entry.path)) |parent| {
+                    target.createDirPath(std.Options.debug_io, parent) catch return types.ContextError.CopyFailed;
+                }
+                var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const len = source.readLink(std.Options.debug_io, entry.path, &link_buf) catch return types.ContextError.CopyFailed;
+                target.symLink(std.Options.debug_io, link_buf[0..len], entry.path, .{}) catch return types.ContextError.CopyFailed;
+            },
+            else => {
+                log.err("build: cannot copy {s}: devices, fifos and sockets are not supported", .{entry.path});
+                return types.ContextError.CopyFailed;
+            },
         }
     }
 }
