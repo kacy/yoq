@@ -26,6 +26,7 @@ pub fn initGossip(alloc: std.mem.Allocator, config: anytype, transport: anytype)
     gossip_state.* = gossip_mod.Gossip.init(alloc, config.id, .{ .ip = .{ 0, 0, 0, 0 }, .port = gossip_port }, .{
         .fanout = config.gossip_fanout,
         .suspicion_multiplier = config.gossip_suspicion_multiplier,
+        .learn_unknown_members = false,
     });
 
     transport.initUdp(gossip_port) catch {

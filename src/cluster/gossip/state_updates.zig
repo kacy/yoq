@@ -12,7 +12,7 @@ pub fn applyStateUpdate(self: anytype, update: anytype) !void {
     }
 
     const member = self.members.getPtr(update.id) orelse {
-        if (update.state == .dead) return;
+        if (update.state == .dead or !self.learn_unknown_members) return;
         try self.members.put(update.id, .{
             .id = update.id,
             .addr = update.addr,

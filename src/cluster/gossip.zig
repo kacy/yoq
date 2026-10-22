@@ -145,6 +145,10 @@ const indirect_probe_count = 3;
 pub const GossipConfig = struct {
     fanout: ?u32 = null,
     suspicion_multiplier: ?u32 = null,
+    /// add members first heard about in piggybacked updates. servers turn
+    /// this off: their membership comes from the agents table, and any
+    /// trusted member could otherwise make them track arbitrary ids.
+    learn_unknown_members: bool = true,
 };
 
 pub const Gossip = struct {
@@ -177,6 +181,7 @@ pub const Gossip = struct {
     // user-configured overrides (null = use automatic values)
     configured_fanout: ?u32,
     configured_suspicion_multiplier: ?u32,
+    learn_unknown_members: bool,
 
     // base intervals — scaled by ceil(log2(N)) for adaptive timing
     const base_probe_interval: u32 = 5;
@@ -207,6 +212,7 @@ pub const Gossip = struct {
             .dead_timeout = base_dead_timeout * susp_mult,
             .configured_fanout = config.fanout,
             .configured_suspicion_multiplier = config.suspicion_multiplier,
+            .learn_unknown_members = config.learn_unknown_members,
         };
     }
 
@@ -1508,6 +1514,36 @@ test "applyStateUpdate unknown member dead is ignored" {
 
     const drain = try g.drainActions();
     g.freeActions(drain);
+}
+
+test "a server ignores updates about members it does not know" {
+    const alloc = std.testing.allocator;
+    var g = Gossip.init(alloc, 1, .{ .ip = .{ 10, 0, 0, 1 }, .port = 7000 }, .{ .learn_unknown_members = false });
+    defer g.deinit();
+
+    try g.addMember(2, .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 });
+
+    // a trusted member piggybacks claims about strangers and one real change
+    try g.handlePing(.{
+        .from = 2,
+        .sequence = 1,
+        .updates = BoundedUpdates.fromSlice(&.{
+            .{ .id = 99, .addr = .{ .ip = .{ 10, 0, 0, 99 }, .port = 7000 }, .state = .alive, .incarnation = 1 },
+            .{ .id = 100, .addr = .{ .ip = .{ 10, 0, 0, 100 }, .port = 7000 }, .state = .suspect, .incarnation = 1 },
+            .{ .id = 2, .addr = .{ .ip = .{ 10, 0, 0, 2 }, .port = 7000 }, .state = .suspect, .incarnation = 5 },
+        }),
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), g.members.count());
+    try std.testing.expectEqual(MemberState.suspect, g.members.get(2).?.state);
+
+    const actions = try g.drainActions();
+    defer g.freeActions(actions);
+    for (actions) |action| switch (action) {
+        .member_alive, .member_dead => return error.TestUnexpectedResult,
+        .member_suspect => |event| try std.testing.expectEqual(@as(u64, 2), event.id),
+        .send_message => {},
+    };
 }
 
 test "handlePing from unknown sender still processes updates" {
