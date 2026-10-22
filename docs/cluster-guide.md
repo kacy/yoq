@@ -189,6 +189,17 @@ clustered service applies are rollout-aware:
 - active rollouts persist checkpoint state and can be paused, resumed, canceled, and recovered after restart or leadership handoff
 - status/history show rollout state, control state, target counts, failure details, and checkpoint metadata
 
+### host paths
+
+bind mounts, `host` volumes and `parallel` volumes give a workload access to the agent's own filesystem. an apply that uses any of them needs a token with `cluster:admin`. an `apps:write` token gets a 403 response.
+
+agents refuse these mounts by default. pass `--host-path-root` once for each directory that assignments may use. each bind source and each host or parallel path must exist, and its resolved path, with symlinks followed, must be inside one of those directories. otherwise the assignment fails with `host_path_not_allowed` before yoq creates or mounts any volume. named `local` and `nfs` volumes are managed by yoq and are not affected.
+
+```sh
+sudo -H "$(command -v yoq)" join 10.0.0.1 --token "$TOKEN" \
+  --host-path-root /srv/shared --host-path-root /mnt/lustre
+```
+
 ---
 
 ## sizing a cluster
