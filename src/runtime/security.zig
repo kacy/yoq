@@ -57,6 +57,8 @@ const BPF_RET = 0x06;
 const BPF_W = 0x00;
 const BPF_ABS = 0x20;
 const BPF_JEQ = 0x10;
+const BPF_JGE = 0x30;
+const BPF_JSET = 0x40;
 const BPF_K = 0x00;
 
 // offsets into seccomp_data struct
@@ -194,51 +196,11 @@ const blocked_syscalls = [_]linux.SYS{
 
 /// install a seccomp-bpf filter that blocks dangerous syscalls.
 ///
-/// the filter architecture:
-/// 1. verify the syscall architecture matches (prevents
-///    syscall number confusion across ABIs)
-/// 2. check syscall number against a deny list
-/// 3. allow everything not explicitly blocked
-///
 /// we use a denylist approach (block known-dangerous) rather than
 /// an allowlist (allow known-safe) for pragmatic reasons: an
 /// allowlist breaks too many programs. Docker uses the same approach.
-///
-/// the filter is generated at comptime from blocked_syscalls, so
-/// adding/removing entries never causes jump offset bugs.
 fn installSeccompFilter() SecurityError!void {
-    const arch = comptime archValue();
-
-    // build the BPF program at comptime from the blocked_syscalls list.
-    // layout: arch check (3 insns) + load nr (1) + N deny jumps + allow + deny return
-    const syscall_count = blocked_syscalls.len;
-    const filter_len = 4 + syscall_count + 2; // 3 arch + 1 load + N checks + 1 allow + 1 deny
-    const filter = comptime blk: {
-        var f: [filter_len]SockFilter = undefined;
-
-        // load architecture from seccomp_data
-        f[0] = bpfStmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARCH);
-        // if arch matches, skip to syscall check; otherwise kill
-        f[1] = bpfJump(BPF_JMP | BPF_JEQ | BPF_K, arch, 1, 0);
-        f[2] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.KILL_PROCESS);
-        // load syscall number
-        f[3] = bpfStmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR);
-
-        // each blocked syscall: if match, jump to the deny return.
-        // jump offset = remaining checks after this one (to skip) + 1 (allow stmt)
-        for (blocked_syscalls, 0..) |sc, i| {
-            const remaining = syscall_count - 1 - i; // checks still to come
-            f[4 + i] = bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(sc), @intCast(remaining + 1), 0);
-        }
-
-        // allow everything not blocked
-        f[4 + syscall_count] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ALLOW);
-        // deny: return EPERM
-        f[4 + syscall_count + 1] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ERRNO | 1);
-
-        break :blk f;
-    };
-
+    const filter = comptime buildFilter();
     const prog = SockFprog{
         .len = @intCast(filter.len),
         .filter = &filter,
@@ -252,6 +214,74 @@ fn installSeccompFilter() SecurityError!void {
         @intFromPtr(&prog),
     );
     if (syscall_util.isError(rc)) return SecurityError.SeccompFailed;
+}
+
+/// x32 syscalls report AUDIT_ARCH_X86_64 but set this bit in the number,
+/// so they would slip past every plain-number comparison below.
+const x32_syscall_bit: u32 = 0x40000000;
+const has_x32_abi = @import("builtin").cpu.arch == .x86_64;
+
+/// clone flags that create namespaces. CLONE_NEWTIME (0x80) is left out
+/// because it overlaps the exit signal bits in clone(2).
+const clone_namespace_flags: u32 = 0x7E020000;
+
+/// offset of the low 32 bits of args[0] in seccomp_data. every supported
+/// target is little-endian and passes the clone flags first.
+const SECCOMP_DATA_ARG0 = 16;
+
+const errno_eperm = 1;
+const errno_enosys = 38;
+
+/// The filter, in order:
+///   1. kill anything not using the native architecture
+///   2. on x86_64, refuse the x32 abi
+///   3. clone: refuse namespace flags. clone3: refuse outright, since its
+///      flags sit behind a pointer we cannot read; libc falls back to clone
+///   4. refuse everything in blocked_syscalls with EPERM
+///   5. allow the rest
+///
+/// BPF jumps only go forward, so the return statements sit at the end and
+/// every offset is computed from these positions.
+fn buildFilter() [filter_len]SockFilter {
+    const N = blocked_syscalls.len;
+    const x32: usize = @intFromBool(has_x32_abi);
+    const at_x32 = 4;
+    const at_clone = 4 + x32;
+    const at_clone3 = at_clone + 1;
+    const at_denylist = at_clone3 + 1;
+    const at_allow = at_denylist + N;
+    const at_clone_flags = at_allow + 1;
+    const at_clone_check = at_allow + 2;
+    const at_allow_clone = at_allow + 3;
+    const at_eperm = at_allow + 4;
+    const at_enosys = at_allow + 5;
+
+    var f: [filter_len]SockFilter = undefined;
+    f[0] = bpfStmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARCH);
+    f[1] = bpfJump(BPF_JMP | BPF_JEQ | BPF_K, archValue(), 1, 0);
+    f[2] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.KILL_PROCESS);
+    f[3] = bpfStmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR);
+    if (has_x32_abi) f[at_x32] = bpfJump(BPF_JMP | BPF_JGE | BPF_K, x32_syscall_bit, jumpTo(at_x32, at_enosys), 0);
+    f[at_clone] = bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(.clone), jumpTo(at_clone, at_clone_flags), 0);
+    f[at_clone3] = bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(.clone3), jumpTo(at_clone3, at_enosys), 0);
+    for (blocked_syscalls, 0..) |sc, i| {
+        const at = at_denylist + i;
+        f[at] = bpfJump(BPF_JMP | BPF_JEQ | BPF_K, syscallNum(sc), jumpTo(at, at_eperm), 0);
+    }
+    f[at_allow] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ALLOW);
+    f[at_clone_flags] = bpfStmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARG0);
+    f[at_clone_check] = bpfJump(BPF_JMP | BPF_JSET | BPF_K, clone_namespace_flags, jumpTo(at_clone_check, at_eperm), 0);
+    f[at_allow_clone] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ALLOW);
+    f[at_eperm] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ERRNO | errno_eperm);
+    f[at_enosys] = bpfStmt(BPF_RET | BPF_K, linux.SECCOMP.RET.ERRNO | errno_enosys);
+    return f;
+}
+
+const filter_len = 4 + @as(usize, @intFromBool(has_x32_abi)) + 2 + blocked_syscalls.len + 6;
+
+/// BPF jump offsets count the instructions skipped after the jump itself.
+fn jumpTo(from: usize, to: usize) u8 {
+    return @intCast(to - from - 1);
 }
 
 /// helper: create a BPF statement (no jump)
