@@ -465,3 +465,65 @@ test "default_caps can be mapped to data array indices" {
         try std.testing.expect(idx == 0 or idx == 1);
     }
 }
+
+/// Run the classic BPF program the way the kernel would, for the handful of
+/// instructions the filter uses.
+fn evaluateFilter(filter: []const SockFilter, nr: u32, arch: u32, arg0: u64) u32 {
+    var data: [64]u8 = @splat(0);
+    std.mem.writeInt(u32, data[SECCOMP_DATA_NR..][0..4], nr, .little);
+    std.mem.writeInt(u32, data[SECCOMP_DATA_ARCH..][0..4], arch, .little);
+    std.mem.writeInt(u64, data[SECCOMP_DATA_ARG0..][0..8], arg0, .little);
+
+    var acc: u32 = 0;
+    var pc: usize = 0;
+    while (true) {
+        const insn = filter[pc];
+        switch (insn.code) {
+            BPF_LD | BPF_W | BPF_ABS => acc = std.mem.readInt(u32, data[insn.k..][0..4], .little),
+            BPF_RET | BPF_K => return insn.k,
+            BPF_JMP | BPF_JEQ | BPF_K, BPF_JMP | BPF_JGE | BPF_K, BPF_JMP | BPF_JSET | BPF_K => {
+                const taken = switch (insn.code & 0xF0) {
+                    BPF_JEQ => acc == insn.k,
+                    BPF_JGE => acc >= insn.k,
+                    else => acc & insn.k != 0,
+                };
+                pc += if (taken) insn.jt else insn.jf;
+            },
+            else => unreachable,
+        }
+        pc += 1;
+    }
+}
+
+test "seccomp filter decisions" {
+    const filter = comptime buildFilter();
+    const native = archValue();
+    const allow = linux.SECCOMP.RET.ALLOW;
+    const eperm = linux.SECCOMP.RET.ERRNO | errno_eperm;
+    const enosys = linux.SECCOMP.RET.ERRNO | errno_enosys;
+    const run = struct {
+        fn f(nr: linux.SYS, arg0: u64) u32 {
+            return evaluateFilter(&filter, syscallNum(nr), archValue(), arg0);
+        }
+    }.f;
+
+    try std.testing.expectEqual(allow, run(.read, 0));
+    try std.testing.expectEqual(eperm, run(.mount, 0));
+    try std.testing.expectEqual(eperm, run(.unshare, 0));
+    // every denylist entry, including the last one, reaches the EPERM return
+    for (blocked_syscalls) |sc| try std.testing.expectEqual(eperm, run(sc, 0));
+    try std.testing.expectEqual(linux.SECCOMP.RET.KILL_PROCESS, evaluateFilter(&filter, syscallNum(.read), native ^ 1, 0));
+
+    // plain fork-style clone is fine; namespace flags are refused
+    const sigchld: u64 = @intFromEnum(linux.SIG.CHLD);
+    try std.testing.expectEqual(allow, run(.clone, sigchld));
+    try std.testing.expectEqual(eperm, run(.clone, linux.CLONE.NEWUSER | sigchld));
+    try std.testing.expectEqual(eperm, run(.clone, linux.CLONE.NEWNET));
+    try std.testing.expectEqual(enosys, run(.clone3, 0));
+
+    if (has_x32_abi) {
+        // the x32 form of a denied call and of an allowed one
+        try std.testing.expectEqual(enosys, evaluateFilter(&filter, syscallNum(.mount) | x32_syscall_bit, native, 0));
+        try std.testing.expectEqual(enosys, evaluateFilter(&filter, syscallNum(.read) | x32_syscall_bit, native, 0));
+    }
+}
