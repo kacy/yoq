@@ -434,6 +434,16 @@ test "parse refuses a workload with a missing or unusable image instead of skipp
     , true));
 }
 
+test "parse refuses relative bind sources" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(ParseError.RelativeBindSource, parse(alloc,
+        \\{"app_name":"demo","services":[{"name":"web","image":"nginx","command":[],"volumes":[{"source":"./data","target":"/data","kind":"bind"}]}]}
+    , true));
+    try std.testing.expectError(ParseError.RelativeBindSource, parse(alloc,
+        \\{"app_name":"demo","services":[],"crons":[{"name":"tick","image":"alpine","every":60,"volumes":[{"source":"../data","target":"/data","kind":"bind"}]}]}
+    , true));
+}
+
 test "manifest apply rejects undeclared named volumes in every workload collection" {
     const alloc = std.testing.allocator;
     for ([_][]const u8{ "services", "workers", "crons", "training_jobs" }) |kind| {

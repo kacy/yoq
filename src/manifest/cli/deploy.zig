@@ -569,6 +569,37 @@ test "up remote dry run skips cluster apply" {
     try std.testing.expectEqualStrings("127.0.0.1:7700", harness.cluster_addr.?);
 }
 
+test "up to a cluster refuses relative bind sources before posting" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "manifest.toml",
+        .data =
+        \\[service.web]
+        \\image = "nginx:latest"
+        \\volumes = ["./data:/data"]
+        \\
+        ,
+    });
+    var dir_buf: [4096]u8 = undefined;
+    const dir_len = try tmp.dir.realPathFile(std.testing.io, ".", &dir_buf);
+    const manifest_path = try std.fs.path.join(alloc, &.{ dir_buf[0..dir_len], "manifest.toml" });
+    defer alloc.free(manifest_path);
+
+    for ([_][]const []const u8{
+        &.{ "-f", manifest_path, "--server", "127.0.0.1:7700" },
+        &.{ "-f", manifest_path, "--dry-run", "--server", "127.0.0.1:7700" },
+    }) |tokens| {
+        var options = try parseUpTokens(alloc, tokens);
+        defer options.deinit(alloc);
+        var harness = UpHarness{};
+        try std.testing.expectError(DeployError.InvalidArgument, runUpOptions(std.testing.io, alloc, &options, harness.deps()));
+        try std.testing.expectEqual(@as(u32, 0), harness.cluster_calls);
+        try std.testing.expectEqual(@as(u32, 0), harness.cluster_dry_run_calls);
+    }
+}
+
 const UpHarness = struct {
     preflight_status: doctor.CheckStatus = .pass,
     preflight_calls: u32 = 0,
