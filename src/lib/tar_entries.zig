@@ -10,6 +10,11 @@ pub const Iterator = struct {
     link_name_buffer: []u8,
     unread_file_bytes: u64 = 0,
     padding: usize = 0,
+    pax_buffer: [max_pax_bytes]u8 = undefined,
+
+    /// Largest PAX extended header we accept. Real headers hold a path, a
+    /// link target, a size and some xattrs, which fit in far less.
+    pub const max_pax_bytes = 64 * 1024;
 
     pub const File = struct {
         name: []const u8,
@@ -61,7 +66,15 @@ pub const Iterator = struct {
                     name = null;
                     link_name = null;
                     extended_size = null;
-                    var attributes: std.tar.PaxIterator = .{ .reader = self.reader, .size = @intCast(size) };
+                    // std.tar.PaxIterator scans for delimiters without a length
+                    // limit. On a flate or zstd reader that trips an assertion
+                    // or spins forever, so read the block whole and parse it
+                    // from a fixed reader that cannot run past its end.
+                    if (size > max_pax_bytes) return error.TarHeader;
+                    const block = self.pax_buffer[0..@intCast(size)];
+                    try self.reader.readSliceAll(block);
+                    var block_reader: std.Io.Reader = .fixed(block);
+                    var attributes: std.tar.PaxIterator = .{ .reader = &block_reader, .size = block.len };
                     while (try attributes.next()) |attribute| switch (attribute.kind) {
                         .path => name = try attribute.value(self.file_name_buffer),
                         .linkpath => link_name = try attribute.value(self.link_name_buffer),
