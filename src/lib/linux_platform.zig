@@ -876,20 +876,30 @@ pub const posix = struct {
         try connectResult(std.os.linux.connect(fd, addr, len));
     }
 
-    /// Close every descriptor above stderr except `keep`. A child cloned from
-    /// a daemon starts with a copy of the daemon's whole fd table, and
-    /// close-on-exec does not help a child that never execs, such as a
-    /// container's init.
-    pub fn closeInheritedFds(keep: ?std.posix.fd_t) void {
-        const first: std.posix.fd_t = 3;
+    /// Close every descriptor above stderr except those in `keep`. A child
+    /// cloned from a daemon starts with a copy of the daemon's whole fd
+    /// table, and close-on-exec does not help a child that never execs, such
+    /// as a container's init.
+    pub fn closeInheritedFds(keep: []const std.posix.fd_t) void {
         const last: std.posix.fd_t = std.math.maxInt(std.posix.fd_t);
         const flags: std.os.linux.CLOSE_RANGE = .{ .UNSHARE = false, .CLOEXEC = false };
-        if (keep) |fd| if (fd >= first) {
-            if (fd > first) _ = std.os.linux.close_range(first, fd - 1, flags);
-            if (fd < last) _ = std.os.linux.close_range(fd + 1, last, flags);
-            return;
-        };
-        _ = std.os.linux.close_range(first, last, flags);
+        // close the gaps between kept descriptors, lowest first
+        var next: std.posix.fd_t = 3;
+        while (true) {
+            var stop: std.posix.fd_t = last;
+            var found = false;
+            for (keep) |fd| if (fd >= next and fd <= stop) {
+                stop = fd;
+                found = true;
+            };
+            if (!found) {
+                _ = std.os.linux.close_range(next, last, flags);
+                return;
+            }
+            if (stop > next) _ = std.os.linux.close_range(next, stop - 1, flags);
+            if (stop == last) return;
+            next = stop + 1;
+        }
     }
 
     pub fn pipe() ![2]std.posix.fd_t {
