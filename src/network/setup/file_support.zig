@@ -21,7 +21,6 @@ pub fn writeNetworkFiles(rootfs_path: []const u8, container_ip: [4]u8, gateway_i
     var resolv_buf: [128]u8 = undefined;
     const resolv = std.fmt.bufPrint(&resolv_buf,
         \\nameserver {s}
-        \\nameserver 8.8.8.8
         \\
     , .{gateway_str}) catch return error.PathTooLong;
     try writeFileInRootfs(rootfs_path, "etc/resolv.conf", resolv);
