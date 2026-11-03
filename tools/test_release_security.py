@@ -115,6 +115,12 @@ class ReleaseSecurityTests(unittest.TestCase):
         ])
         self.assertEqual(sqlite_findings('3.49.0', [affected_field]), [affected_field])
         self.assertEqual(sqlite_findings('3.53.4', [affected_field]), [])
+        # DESCRIPTION carries a range parsed from the advisory text, as in CVE-2026-119586.
+        description = self.sqlite_advisory('CVE-description', [
+            {'source': 'DESCRIPTION', 'range': [{'introduced': '0'}, {'last_affected': '3.54.1'}]},
+        ])
+        self.assertEqual(sqlite_findings('3.53.4', [description]), [description])
+        self.assertEqual(sqlite_findings('3.54.2', [description]), [])
 
         commit_only = self.sqlite_advisory('CVE-2026-50812', [
             {'source': 'REFERENCES_COMMIT', 'range': [{'fixed': 'b869ed6b067d623cb1383549f2a18aa35508385d'}]},
