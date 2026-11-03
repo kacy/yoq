@@ -111,7 +111,7 @@ fn parseUpTokens(alloc: std.mem.Allocator, tokens: []const []const u8) DeployErr
 
 fn runUpOptions(io: std.Io, alloc: std.mem.Allocator, options: *const UpOptions, deps: UpDeps) !void {
     var manifest = manifest_loader.load(alloc, options.manifest_path) catch |err| {
-        writeErr("failed to load manifest: {s} ({})", .{ options.manifest_path, err });
+        writeErr("failed to load manifest: {s} ({})\n", .{ options.manifest_path, err });
         writeErr("hint: create one with 'yoq init'\n", .{});
         return DeployError.ManifestLoadFailed;
     };
@@ -371,7 +371,7 @@ pub fn down(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocat
     }
 
     var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
-        writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
+        writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
         writeErr("hint: create one with 'yoq init'\n", .{});
         return DeployError.ManifestLoadFailed;
     };

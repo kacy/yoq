@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
                 else => @errorName(err),
             };
             writeErr("error: {s}\n", .{error_msg});
-            return err;
+            std.process.exit(1);
         };
     } else {
         writeErr("unknown command: {s}\n", .{command});

@@ -1231,7 +1231,7 @@ pub fn runWorker(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Al
     }
 
     var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
-        writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
+        writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
         writeErr("hint: create one with 'yoq init'\n", .{});
         return OpsError.ManifestLoadFailed;
     };

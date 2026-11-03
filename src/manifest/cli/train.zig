@@ -71,7 +71,7 @@ fn trainStart(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloc
     }
 
     var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
-        writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
+        writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
         return TrainError.ManifestLoadFailed;
     };
     defer manifest.deinit();
@@ -143,7 +143,7 @@ fn trainStatus(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allo
     }
 
     var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
-        writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
+        writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
         return TrainError.ManifestLoadFailed;
     };
     defer manifest.deinit();
@@ -318,7 +318,7 @@ fn loadTrainJobContextFromParsed(parsed: TrainArgs, io: std.Io, alloc: std.mem.A
     };
 
     var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
-        writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
+        writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
         return TrainError.ManifestLoadFailed;
     };
     errdefer manifest.deinit();
