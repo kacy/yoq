@@ -5,7 +5,7 @@ thanks for your interest in contributing. this document covers the basics.
 ## requirements
 
 - Linux kernel 6.1+ (user namespace support required)
-- Zig 0.16.0
+- Zig 0.17.0
 
 ## building
 

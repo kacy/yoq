@@ -499,4 +499,4 @@ these commands cover the local database. cluster recovery uses a separate offlin
 ### requirements
 
 - Linux kernel 6.1+
-- Zig 0.16.0 (for building from source)
+- Zig 0.17.0 (for building from source)
