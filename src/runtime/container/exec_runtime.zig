@@ -106,7 +106,7 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
         log.err("container identity resolution failed: {}", .{err});
         return @backingInt(ExitCode.security_failed);
     };
-    security.apply() catch |err| {
+    security.applyForInit() catch |err| {
         log.err("container security configuration failed: {}", .{err});
         return @backingInt(ExitCode.security_failed);
     };
@@ -184,6 +184,7 @@ fn completeFilesystem(ctx: *const ChildExecContext, files: startup.NetworkFiles,
 
 fn execCommandWrapper(arg: ?*anyopaque) callconv(.c) u8 {
     const ctx: *const ChildExecContext = @ptrCast(@alignCast(arg));
+    security.dropInitCapabilities() catch return @backingInt(ExitCode.security_failed);
     return execCommand(ctx.command, ctx.args, ctx.env);
 }
 

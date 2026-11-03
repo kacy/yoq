@@ -41,7 +41,7 @@ PSI (pressure stall information) metrics are read from cgroups for resource moni
 ### security
 
 - **seccomp** — classic BPF syscall allowlist. only approved syscalls can execute.
-- **capabilities** — dropped to a minimal set: CHOWN, DAC_OVERRIDE, NET_RAW, NET_BIND_SERVICE, SETUID/SETGID, KILL.
+- **capabilities** — dropped to a minimal set: CHOWN, DAC_OVERRIDE, FSETID, FOWNER, SETUID/SETGID, NET_BIND_SERVICE, SYS_CHROOT. PID 1 also keeps KILL to forward signals; workloads do not have it.
 - **no_new_privs** — prevents privilege re-escalation after exec.
 
 ### lifecycle
