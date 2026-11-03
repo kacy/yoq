@@ -42,6 +42,7 @@ PSI (pressure stall information) metrics are read from cgroups for resource moni
 
 - **seccomp** — classic BPF syscall allowlist. only approved syscalls can execute.
 - **capabilities** — dropped to a minimal set: CHOWN, DAC_OVERRIDE, FSETID, FOWNER, SETUID/SETGID, NET_BIND_SERVICE, SYS_CHROOT. PID 1 also keeps KILL to forward signals; workloads do not have it.
+- **host firewall** — on a host whose `INPUT` policy is `DROP`, yoq adds a narrow rule so containers can reach their DNS resolver. see [host firewall changes](container-networks.md#host-firewall-changes).
 - **no_new_privs** — prevents privilege re-escalation after exec.
 
 ### lifecycle

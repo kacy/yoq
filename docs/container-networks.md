@@ -55,3 +55,33 @@ an omitted or zero host port requests an available port at creation. equal-lengt
 bridge networking requires Linux network namespaces, veth pairs, IPv4 forwarding, and working `iptables` filter and NAT tables. container startup needs the privileges required by the local runtime; see [local containers](local-containers.md). use the same account and data directory for network and container commands.
 
 named bridges permit same-network traffic and outgoing traffic, with masquerading for egress. forwarding rules isolate them from other local managed bridges. published ports use NAT on the selected bridge. dns binds UDP port 53 on its gateway, so host loopback DNS can coexist. network removal requires enough privilege to delete its bridge and firewall rules.
+
+## host firewall changes
+
+containers resolve names through a resolver on their bridge gateway. a host whose `INPUT` policy is `DROP`, such as one running ufw with its usual defaults, discards those queries. on such a host, yoq appends one rule to `INPUT` for each bridge that needs DNS:
+
+```bash
+iptables -A INPUT -i yoq0 -d 10.42.0.1 -p udp --dport 53 -m comment --comment yoq-dns -j ACCEPT
+```
+
+the rule matches one bridge, its gateway, and udp port 53. yoq adds it only when the policy is `DROP`, and only for bridges named `yoq*` with a private gateway address. it is appended, so an earlier drop or reject rule still applies, and DNS then fails until you allow it. a host with a separate nftables ruleset must allow this traffic in that ruleset.
+
+the rule on the default bridge is removed when the last container using that bridge stops. the rule on a named network is removed by `network rm`. cleanup only matches rules tagged `yoq-dns`. if a container crashed without cleanup, its address allocation keeps the rule until it is removed. rules live in the kernel and are not written to your firewall configuration, so a reboot also clears them.
+
+`run`, `start`, `restart`, `stop`, `rm`, `up`, `down`, and `network rm` print a `host firewall:` line when they change a rule. for a container started with `--rm -d` or restarted by its policy, no command is waiting to print it. every change is also recorded:
+
+```bash
+sudo -H "$(command -v yoq)" audit            # host_firewall_add and host_firewall_remove
+sudo -H "$(command -v yoq)" doctor           # current rule count and INPUT policy
+sudo iptables -S INPUT | grep yoq-dns        # the rules themselves
+```
+
+set `YOQ_HOST_FIREWALL=off` for every yoq process, including `sudo` commands and boot units, to stop yoq from adding this rule. containers then cannot resolve names on a `DROP` host until you allow the traffic yourself. the setting does not stop cleanup of rules yoq already added. to allow DNS with ufw instead:
+
+```bash
+sudo ufw allow in on yoq0 to 10.42.0.1 port 53 proto udp
+```
+
+a failure to add the rule, or to remove it when a container stops, prints a warning and does not stop the container. `network rm` reports a failed removal and keeps the network, so you can retry it.
+
+yoq also manages `FORWARD` and NAT rules, and enables IPv4 forwarding, for container traffic. rules for a named network are removed by `network rm`. rules for the default bridge stay until reboot.
