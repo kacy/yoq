@@ -8,9 +8,9 @@ c_include_dirs:
 c_source_files:
   - c/workaround.c
 dependencies:
-- src: http https://sqlite.org/2026/sqlite-amalgamation-3530400.zip sha256-1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d
+- src: http https://sqlite.org/2026/sqlite-amalgamation-3540100.zip sha256-0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9
   license: blessing
   c_include_dirs:
-    - sqlite-amalgamation-3530400
+    - sqlite-amalgamation-3540100
   c_source_files:
-    - sqlite-amalgamation-3530400/sqlite3.c
+    - sqlite-amalgamation-3540100/sqlite3.c
