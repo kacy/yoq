@@ -92,8 +92,9 @@ def sqlite_version_intervals(extracted_events):
     {'introduced': '0'}. Newer records group events by origin, such as
     {'source': 'CPE_RANGE', 'cpe': ..., 'range': [...]}. SQLite version
     numbers come from CPE entries for sqlite:sqlite and from AFFECTED_FIELD
-    entries, which copy the advisory's own affected range for this
-    repository. Commit references and CPEs for other products are skipped.
+    and DESCRIPTION entries, which state the advisory's own affected range
+    for this repository. Commit references and CPEs for other products are
+    skipped.
     """
     if all(isinstance(event, dict) and 'range' not in event for event in extracted_events):
         return [extracted_events]
@@ -104,7 +105,7 @@ def sqlite_version_intervals(extracted_events):
         source = entry.get('source')
         if source == 'REFERENCES_COMMIT':
             continue
-        if source == 'AFFECTED_FIELD':
+        if source in ('AFFECTED_FIELD', 'DESCRIPTION'):
             intervals.append(entry['range'])
             continue
         if source not in ('CPE_RANGE', 'CPE_STRING'):
