@@ -72,17 +72,6 @@ pub fn ensureContainerForwarding(bridge: []const u8, subnet: []const u8) NatErro
     }
 }
 
-/// Permit containers on a bridge to reach the resolver on its gateway, which a
-/// default-deny host firewall would otherwise drop. Appended so explicit
-/// administrator drops keep precedence.
-pub fn ensureDnsInput(bridge: []const u8, gateway: []const u8) NatError!void {
-    const check = buildDnsInputArgs(.check, bridge, gateway);
-    exec(&check) catch {
-        const add = buildDnsInputArgs(.add, bridge, gateway);
-        try exec(&add);
-    };
-}
-
 /// add port mapping rules (DNAT + FORWARD).
 ///
 /// equivalent to:
@@ -293,12 +282,6 @@ fn buildMasqueradeArgs(action: Action, bridge: []const u8, subnet: []const u8) A
     args[9] = bridge;
     args[10] = "-j";
     args[11] = "MASQUERADE";
-    return args;
-}
-
-fn buildDnsInputArgs(action: Action, bridge: []const u8, gateway: []const u8) ArgList {
-    var args: ArgList = @splat(null);
-    for ([_][]const u8{ "iptables", "-w", "5", actionFlag(action), "INPUT", "-i", bridge, "-d", gateway, "-p", "udp", "--dport", "53", "-j", "ACCEPT" }, 0..) |arg, i| args[i] = arg;
     return args;
 }
 
@@ -521,13 +504,6 @@ test "loopback dnat args target OUTPUT chain" {
     try std.testing.expectEqualStrings("--to-destination", args[13].?);
     try std.testing.expectEqualStrings("10.42.0.2:80", args[14].?);
     try std.testing.expect(args[15] == null);
-}
-
-test "dns input args admit udp to one gateway from its own bridge" {
-    const args = buildDnsInputArgs(.add, "yoq0", "10.42.0.1");
-    const expected = [_][]const u8{ "iptables", "-w", "5", "-A", "INPUT", "-i", "yoq0", "-d", "10.42.0.1", "-p", "udp", "--dport", "53", "-j", "ACCEPT" };
-    for (expected, 0..) |value, i| try std.testing.expectEqualStrings(value, args[i].?);
-    try std.testing.expect(args[expected.len] == null);
 }
 
 test "forward args construction" {

@@ -138,6 +138,7 @@ pub const replaceCronSchedulesForAppInDb = @import("store/crons.zig").replaceCro
 pub const listCronSchedulesByApp = @import("store/crons.zig").listCronSchedulesByApp;
 pub const listCronSchedulesByAppInDb = @import("store/crons.zig").listCronSchedulesByAppInDb;
 pub const appendAuditEntry = @import("store/audit_log.zig").appendAuditEntry;
+pub const appendAuditEntryInDb = @import("store/audit_log.zig").appendAuditEntryInDb;
 pub const listAuditEntries = @import("store/audit_log.zig").listAuditEntries;
 pub const createToken = @import("store/tokens.zig").createToken;
 pub const listTokens = @import("store/tokens.zig").listTokens;

@@ -2,6 +2,7 @@ const std = @import("std");
 const cli = @import("lib/cli.zig");
 const AppContext = @import("lib/app_context.zig").AppContext;
 const command_registry = @import("lib/command_registry.zig");
+const dns_firewall = @import("network/dns_firewall.zig");
 
 const writeErr = cli.writeErr;
 
@@ -37,7 +38,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (command_registry.findCommand(command)) |spec| {
+        const firewall_mark = if (dns_firewall.commandReportsChanges(command)) dns_firewall.changeMark() else null;
+        defer if (firewall_mark) |mark| dns_firewall.printChangesSince(mark);
         spec.handler(&args, app_ctx) catch |err| {
+            if (firewall_mark) |mark| dns_firewall.printChangesSince(mark);
             // print user-friendly error message
             const error_msg = switch (err) {
                 error.OutOfMemory => "out of memory",

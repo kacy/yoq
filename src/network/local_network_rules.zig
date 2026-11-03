@@ -49,8 +49,6 @@ pub fn ensure(bridge_name: []const u8, base: [4]u8) !void {
     try nat.enableForwarding();
     try nat.ensureContainerForwarding(bridge_name, subnet);
     try nat.ensureMasquerade(bridge_name, subnet);
-    var gateway_buf: [16]u8 = undefined;
-    try nat.ensureDnsInput(bridge_name, ip.formatIp(.{ base[0], base[1], base[2], 1 }, &gateway_buf));
 }
 
 fn isolationRules(bridge_name: []const u8, deleting: bool) !void {
@@ -68,9 +66,6 @@ pub fn remove(bridge_name: []const u8, base: [4]u8) !void {
     const subnet = try std.fmt.bufPrint(&subnet_buf, "{s}/24", .{ip.formatIp(base, &address_buf)});
     try rule(&.{ "iptables", "--wait", "5", "-t", "nat", "-D", "POSTROUTING", "-s", subnet, "!", "-o", bridge_name, "-j", "MASQUERADE" }, true);
     try rule(&.{ "iptables", "--wait", "5", "-D", "FORWARD", "-i", bridge_name, "-s", subnet, "-j", "ACCEPT" }, true);
-    var gateway_buf: [16]u8 = undefined;
-    const gateway = ip.formatIp(.{ base[0], base[1], base[2], 1 }, &gateway_buf);
-    try rule(&.{ "iptables", "--wait", "5", "-D", "INPUT", "-i", bridge_name, "-d", gateway, "-p", "udp", "--dport", "53", "-j", "ACCEPT" }, true);
     try rule(&.{ "iptables", "--wait", "5", "-D", "FORWARD", "-o", bridge_name, "-d", subnet, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT" }, true);
 }
 

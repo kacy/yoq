@@ -42,7 +42,7 @@ pub const Check = struct {
     }
 };
 
-pub const max_checks = 10;
+pub const max_checks = 11;
 
 pub const CheckResult = struct {
     checks: [max_checks]Check,
@@ -109,6 +109,9 @@ pub fn runAllChecks() CheckResult {
     result.count += 1;
 
     result.checks[result.count] = checkMtu();
+    result.count += 1;
+
+    result.checks[result.count] = checkDnsFirewall();
     result.count += 1;
 
     return result;
@@ -252,6 +255,21 @@ pub fn checkBpfJit() Check {
     };
 }
 
+/// reports what yoq has added to the host's INPUT chain.
+pub fn checkDnsFirewall() Check {
+    const dns_firewall = @import("../network/dns_firewall.zig");
+    const alloc = std.heap.page_allocator;
+    const rules = dns_firewall.readInputRules(alloc) orelse
+        return makeCheck("dns-firewall", .warn, "cannot read INPUT; run as root to see yoq's rules");
+    defer alloc.free(rules);
+    var msg_buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "{d} yoq-dns rule(s) in INPUT; default policy {s}", .{
+        dns_firewall.countTagged(rules),
+        if (dns_firewall.policyDrops(rules)) "DROP" else "not DROP",
+    }) catch "yoq-dns rules present";
+    return makeCheck("dns-firewall", .pass, msg);
+}
+
 pub fn checkMtu() Check {
     const fd = netlink.openSocket() catch {
         return makeCheck("mtu", .warn, "could not open netlink socket");
@@ -347,7 +365,7 @@ test "checkMtu runs without crash" {
 
 test "runAllChecks returns all checks" {
     const result = runAllChecks();
-    try std.testing.expectEqual(@as(u8, 10), result.count);
+    try std.testing.expectEqual(@as(u8, 11), result.count);
 }
 
 test "statusLabel returns correct strings" {

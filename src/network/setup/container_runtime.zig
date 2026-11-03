@@ -15,6 +15,7 @@ const service_reconciler = @import("../service_reconciler.zig");
 const policy = @import("../policy.zig");
 const local_networks = @import("../local_networks.zig");
 const local_rules = @import("../local_network_rules.zig");
+const dns_firewall = @import("../dns_firewall.zig");
 const port_mappings = @import("port_mappings.zig");
 
 pub fn setupContainer(
@@ -86,11 +87,7 @@ fn setupContainerImpl(container_id: []const u8, pid: posix.pid_t, config: common
         log.warn("failed to permit container forwarding on {s}: {}", .{ bridge.default_bridge, e });
         return common.SetupError.NatFailed;
     };
-    var default_gateway_buf: [16]u8 = undefined;
-    nat.ensureDnsInput(bridge.default_bridge, ip.formatIp(bridge.gateway_ip, &default_gateway_buf)) catch |e| {
-        log.warn("failed to permit dns on {s}: {}", .{ bridge.default_bridge, e });
-        return common.SetupError.NatFailed;
-    };
+    dns_firewall.ensure(db, bridge.default_bridge, if (subnet_config) |sc| sc.gateway else bridge.gateway_ip);
     nat.ensureMasquerade(bridge.default_bridge, "10.42.0.0/16") catch |e| {
         log.warn("failed to set up masquerade on {s}: {}", .{ bridge.default_bridge, e });
         return common.SetupError.NatFailed;
@@ -159,6 +156,10 @@ pub fn teardownContainerChecked(container_id: []const u8, net_info: *const commo
     for (config.port_maps) |pm| mapping.removeChecked(pm) catch return error.NatFailed;
     bridge.deleteVethChecked(net_info.vethName()) catch return error.VethFailed;
     ip.release(db, container_id) catch return error.IpAllocationFailed;
+    if (config.network_name == null) {
+        const gateway = if (config.node_id) |nid| (ip.subnetForNode(nid) catch return error.IpAllocationFailed).gateway else bridge.gateway_ip;
+        dns_firewall.removeDefaultIfUnused(db, bridge.default_bridge, gateway);
+    }
 }
 
 pub const writeNetworkFiles = file_support.writeNetworkFiles;
@@ -177,6 +178,7 @@ fn setupNamedContainer(container_id: []const u8, pid: posix.pid_t, config: commo
     local_networks.markProvisioned(name) catch return error.DbFailed;
     bridge.ensureBridgeWithConfig(.{ .name = network.bridge_name, .gateway_ip = subnet.gateway, .prefix_len = subnet.prefix_len }) catch return error.BridgeFailed;
     local_rules.ensure(network.bridge_name, subnet.base) catch return error.NatFailed;
+    dns_firewall.ensure(db, network.bridge_name, subnet.gateway);
     const address = ip.allocateWithSubnet(db, container_id, subnet) catch return error.IpAllocationFailed;
     errdefer if (pending == null) ip.release(db, container_id) catch {};
     var veth_buf: [32]u8 = undefined;

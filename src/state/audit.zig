@@ -12,6 +12,7 @@
 // on different threads never clobber each other's actor.
 
 const std = @import("std");
+const sqlite = @import("sqlite");
 const store = @import("store.zig");
 const log = @import("../lib/log.zig");
 
@@ -46,6 +47,8 @@ pub const Action = enum {
     restore,
     token_create,
     token_revoke,
+    host_firewall_add,
+    host_firewall_remove,
 
     /// the wire label is exactly the tag name (e.g. .secret_set -> "secret_set").
     pub fn label(self: Action) []const u8 {
@@ -108,6 +111,13 @@ fn nowSeconds() i64 {
 /// the operation it is recording.
 pub fn record(action: Action, target: ?[]const u8, outcome: Outcome) void {
     store.appendAuditEntry(actorLabel(), action.label(), target, outcome.label(), nowSeconds()) catch |err| {
+        log.warn("audit: failed to record {s} ({s}): {}", .{ action.label(), outcome.label(), err });
+    };
+}
+
+/// record() for a caller already holding a database connection or transaction.
+pub fn recordInDb(db: *sqlite.Db, action: Action, target: ?[]const u8, outcome: Outcome) void {
+    store.appendAuditEntryInDb(db, actorLabel(), action.label(), target, outcome.label(), nowSeconds()) catch |err| {
         log.warn("audit: failed to record {s} ({s}): {}", .{ action.label(), outcome.label(), err });
     };
 }
