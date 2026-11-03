@@ -1,7 +1,7 @@
 const std = @import("std");
 
 // sqlite wrapper cache key - bump this when updating the vendored wrapper.
-const SQLITE_HASH = "sqlite-3.53.4-N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8";
+const SQLITE_HASH = "sqlite-3.54.1-N-V-__8AAETTsABEodUZZFAyfdAm9hEyqBXuLw9pRSO0vFh9";
 
 /// check if we have a cached sqlite build matching current version
 fn hasCachedSqlite(b: *std.Build) bool {
