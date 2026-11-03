@@ -593,6 +593,10 @@ fn publishContainer(id: []const u8, name: ?[]const u8, saved: *const run_state.S
     const creation_lock = try control.lock(id, .command, true);
     defer creation_lock.deinit();
     control.register(id, name) catch |err| {
+        if (err == error.NameInUse) {
+            writeErr("container name already in use: {s}\n", .{name orelse ""});
+            return ContainerError.NameInUse;
+        }
         writeErr("cannot reserve container name: {}\n", .{err});
         return ContainerError.ConfigSaveFailed;
     };
