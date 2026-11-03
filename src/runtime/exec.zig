@@ -84,7 +84,7 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
             return ExecError.NamespaceOpenFailed;
     }
 
-    var channels = session.ProcessIo.init(config.interactive, config.tty) catch return ExecError.SessionFailed;
+    var channels = session.ProcessIo.initForProcess(config.interactive, config.tty, config.pid) catch return ExecError.SessionFailed;
     defer channels.deinit();
 
     // namespace entry stays in a helper process. the client retains its host

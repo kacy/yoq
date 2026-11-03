@@ -10,7 +10,7 @@ reviewed 2026-09-20 against the current source tree. this table describes native
 | identity | implemented | unique standalone names, separate hostname, rename, explicit duplicate legacy-name errors; full ids or names, without short-id lookup |
 | inspection | implemented | container inspect shows saved config/state/health; ps supports all/quiet/json and status/name/id filters |
 | process overrides | implemented | entrypoint, command, env/env-file, workdir, user, hostname, stop signal/timeout |
-| sessions | implemented | stdin pipes, raw stdout/stderr, terminals, resize, detach, attach; eight clients and one stdin owner; signals/resize continue with full stdin; keyboard detach can wait behind unread local input |
+| sessions | implemented | stdin pipes, raw stdout/stderr, terminals, resize, detach, attach; eight clients and one stdin owner; signals/resize continue with full stdin; keyboard detach can wait behind unread local input; `tty` works under `exec -it`, but `run -it` terminals come from the host devpts instance, so `ttyname()` fails there |
 | restart | partial | no/always/on-failure[:N]/unless-stopped, bounded backoff, optional boot recovery; host recovery must be invoked after reboot |
 | volumes | implemented | named/anonymous local volumes, image VOLUME initialization, nocopy, reference tracking, explicit anonymous cleanup |
 | bind mounts | partial | structured mounts default writable; legacy colon mounts retain yoq's read-only default |
