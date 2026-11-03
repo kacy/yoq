@@ -1,6 +1,6 @@
 {
   "sqlite_version": "3.53.4",
-  "build_sha256": "bfc75362c926283db03ca813057b96485144e4f76b111d74261a3530f6c58c20",
+  "build_sha256": "44b31ee093736a2f7f0f4cb532710f3b33ab876b51ced05b0c782eae2104cb51",
   "not_affected": {
     "CVE-2026-39113": "Concerns the optional sqlar extension; sqlarUncompressFunc is absent from the verified SQLite 3.53.4 amalgamation bundled by this build.",
     "CVE-2026-50812": "Concerns the Session extension. The bundled amalgamation guards this code with SQLITE_ENABLE_SESSION and SQLITE_ENABLE_PREUPDATE_HOOK; this build enables neither.",
