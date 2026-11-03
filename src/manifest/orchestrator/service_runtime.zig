@@ -203,7 +203,8 @@ pub fn resolveServiceVolumes(
             alloc.free(owned);
             return error.VolumeFailed;
         };
-        result.bind_mounts.append(alloc, .{ .source = owned, .target = vol.target }) catch return error.VolumeFailed;
+        // named volumes hold service data. a host path keeps the read-only default.
+        result.bind_mounts.append(alloc, .{ .source = owned, .target = vol.target, .read_only = vol.kind == .bind }) catch return error.VolumeFailed;
     }
 
     return result;
@@ -406,6 +407,24 @@ test "volume resolution releases earlier mounts when a required source is missin
         .{ .source = missing, .target = "/required", .kind = .bind },
     };
     try std.testing.expectError(error.VolumeFailed, resolveServiceVolumes(std.testing.allocator, &mounts, &.{}, "app"));
+}
+
+test "named volumes are writable and bind mounts stay read-only" {
+    try @import("../../state/store/common.zig").initTestDb();
+    defer @import("../../state/store/common.zig").deinitTestDb();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source_buf: [4096]u8 = undefined;
+    const length = try tmp.dir.realPathFile(std.Options.debug_io, ".", &source_buf);
+    const definitions = [_]spec.Volume{.{ .name = "data", .driver = .{ .local = .{} } }};
+    const mounts = [_]spec.VolumeMount{
+        .{ .source = "data", .target = "/data", .kind = .named },
+        .{ .source = source_buf[0..length], .target = "/src", .kind = .bind },
+    };
+    var resolved = try resolveServiceVolumes(std.testing.allocator, &mounts, &definitions, "app");
+    defer resolved.deinit(std.testing.allocator);
+    try std.testing.expect(!resolved.bind_mounts.items[0].read_only);
+    try std.testing.expect(resolved.bind_mounts.items[1].read_only);
 }
 
 test "volume resolution fails rather than omitting a mount after allocation failure" {

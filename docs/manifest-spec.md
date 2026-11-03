@@ -115,6 +115,8 @@ volumes = [
 ]
 ```
 
+named volumes are writable. bind mounts are read-only inside the container.
+
 relative bind sources only work with a local `yoq up`. for `yoq up --server`, use an absolute host path.
 
 ### restart policy
