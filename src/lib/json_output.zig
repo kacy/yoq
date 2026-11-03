@@ -157,14 +157,14 @@ pub const JsonWriter = struct {
 
         if (self.truncated) {
             var err_buf: [128]u8 = undefined;
-            var err_w = std.Io.File.stderr().writer(io, &err_buf);
+            var err_w = std.Io.File.stderr().writerStreaming(io, &err_buf);
             err_w.interface.writeAll("warning: JSON output truncated (exceeded 8192 byte buffer)\n") catch {};
             err_w.interface.flush() catch {};
         }
 
         const data = self.buf[0..self.pos];
         var buf: [4096]u8 = undefined;
-        var w = std.Io.File.stdout().writer(io, &buf);
+        var w = std.Io.File.stdout().writerStreaming(io, &buf);
         const out = &w.interface;
 
         out.writeAll(data) catch {

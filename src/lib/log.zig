@@ -96,7 +96,7 @@ fn logMsg(level: Level, comptime fmt: []const u8, args: anytype) void {
     defer _ = io.swapCancelProtection(prev);
 
     var buf: [8192]u8 = undefined;
-    var w = std.Io.File.stderr().writer(io, &buf);
+    var w = std.Io.File.stderr().writerStreaming(io, &buf);
     const out = &w.interface;
 
     switch (log_format) {
@@ -287,4 +287,27 @@ test "Level jsonLabel" {
     try std.testing.expectEqualStrings("info", Level.info.jsonLabel());
     try std.testing.expectEqualStrings("warn", Level.warn.jsonLabel());
     try std.testing.expectEqualStrings("error", Level.err.jsonLabel());
+}
+
+test "log lines append when stderr is a regular file" {
+    const linux = std.os.linux;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "stderr", .{ .read = true });
+    defer file.close(io);
+    const forked = linux.fork();
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(forked));
+    if (forked == 0) {
+        linux_platform.posix.dup2(file.handle, std.posix.STDERR_FILENO) catch linux.exit_group(1);
+        info("first", .{});
+        info("second", .{});
+        linux.exit_group(0);
+    }
+    var status: u32 = 0;
+    _ = linux.waitpid(@intCast(forked), @ptrCast(&status), 0);
+    try std.testing.expectEqual(@as(u32, 0), status);
+    const contents = try tmp.dir.readFileAlloc(io, "stderr", std.testing.allocator, .limited(100));
+    defer std.testing.allocator.free(contents);
+    try std.testing.expectEqualStrings("[INF] first\n[INF] second\n", contents);
 }

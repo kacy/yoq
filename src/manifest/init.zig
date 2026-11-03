@@ -136,14 +136,14 @@ fn promptPort(io: std.Io, reader: *std.Io.Reader, label: []const u8, default: []
 
 fn writeToStdout(io: std.Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &buf);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &buf);
     stdout_writer.interface.print(fmt, args) catch return;
     stdout_writer.interface.flush() catch {};
 }
 
 fn writeToStderr(io: std.Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &buf);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &buf);
     stderr_writer.interface.print(fmt, args) catch return;
     stderr_writer.interface.flush() catch {};
 }

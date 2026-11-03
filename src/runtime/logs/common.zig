@@ -20,7 +20,7 @@ pub fn writeToStdoutWithIo(io: std.Io, data: []const u8) LogError!void {
     defer _ = io.swapCancelProtection(prev);
 
     var buf: [4096]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io, &buf);
+    var writer = std.Io.File.stdout().writerStreaming(io, &buf);
     writer.interface.writeAll(data) catch return LogError.WriteFailed;
     writer.interface.flush() catch return LogError.WriteFailed;
 }
