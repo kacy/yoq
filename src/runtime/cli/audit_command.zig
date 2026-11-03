@@ -1,10 +1,12 @@
-// audit_command — `yoq audit` lists recent audit log entries from the local
-// agent's GET /v1/audit endpoint.
+// audit_command — `yoq audit` lists recent audit log entries from an agent's
+// GET /v1/audit endpoint. without --server, it reads this host's database when
+// no local agent is running.
 
 const std = @import("std");
 const cli = @import("../../lib/cli.zig");
 const http_client = @import("../../cluster/http_client.zig");
 const json_helpers = @import("../../lib/json_helpers.zig");
+const store = @import("../../state/store.zig");
 
 const write = cli.write;
 const writeErr = cli.writeErr;
@@ -19,6 +21,7 @@ const AuditError = error{
 
 pub fn audit(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Allocator) !void {
     var server = cli.ServerAddr{};
+    var server_given = false;
     var limit: u32 = 50;
 
     while (args.next()) |arg| {
@@ -30,6 +33,7 @@ pub fn audit(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloca
                 return AuditError.InvalidArgument;
             };
             server = cli.parseServerAddr(addr_str);
+            server_given = true;
         } else if (std.mem.eql(u8, arg, "--limit")) {
             const n = args.next() orelse {
                 writeErr("--limit requires a number\n", .{});
@@ -52,6 +56,7 @@ pub fn audit(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloca
     const path = std.fmt.bufPrint(&path_buf, "/v1/audit?limit={d}", .{limit}) catch return AuditError.InvalidArgument;
 
     var resp = http_client.getWithAuth(alloc, server.ip, server.port, path, token) catch {
+        if (!server_given) return printLocalEntries(alloc, limit);
         writeErr("failed to connect to server at {d}.{d}.{d}.{d}:{d}\n", .{ server.ip[0], server.ip[1], server.ip[2], server.ip[3], server.port });
         return AuditError.ConnectionFailed;
     };
@@ -67,7 +72,7 @@ pub fn audit(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloca
         return;
     }
 
-    write("{s:<12} {s:<16} {s:<16} {s:<28} {s}\n", .{ "TIME", "ACTOR", "ACTION", "TARGET", "OUTCOME" });
+    write("{s:<12} {s:<16} {s:<22} {s:<28} {s}\n", .{ "TIME", "ACTOR", "ACTION", "TARGET", "OUTCOME" });
     var iter = json_helpers.extractJsonObjects(resp.body);
     while (iter.next()) |obj| {
         const recorded_at = extractJsonInt(obj, "recorded_at") orelse 0;
@@ -75,6 +80,22 @@ pub fn audit(args: *std.process.Args.Iterator, io: std.Io, alloc: std.mem.Alloca
         const action = extractJsonString(obj, "action") orelse "?";
         const target = extractJsonString(obj, "target") orelse "-";
         const outcome = extractJsonString(obj, "outcome") orelse "?";
-        write("{d:<12} {s:<16} {s:<16} {s:<28} {s}\n", .{ recorded_at, actor, action, target, outcome });
+        write("{d:<12} {s:<16} {s:<22} {s:<28} {s}\n", .{ recorded_at, actor, action, target, outcome });
+    }
+}
+
+fn printLocalEntries(alloc: std.mem.Allocator, limit: u32) !void {
+    var entries = try store.listAuditEntries(alloc, limit);
+    defer {
+        for (entries.items) |entry| entry.deinit(alloc);
+        entries.deinit(alloc);
+    }
+    if (cli.output_mode == .json) {
+        write("{f}\n", .{std.json.fmt(entries.items, .{})});
+        return;
+    }
+    write("{s:<12} {s:<16} {s:<22} {s:<28} {s}\n", .{ "TIME", "ACTOR", "ACTION", "TARGET", "OUTCOME" });
+    for (entries.items) |entry| {
+        write("{d:<12} {s:<16} {s:<22} {s:<28} {s}\n", .{ entry.recorded_at, entry.actor, entry.action, entry.target orelse "-", entry.outcome });
     }
 }
