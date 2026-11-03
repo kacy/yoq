@@ -86,6 +86,11 @@ fn setupContainerImpl(container_id: []const u8, pid: posix.pid_t, config: common
         log.warn("failed to permit container forwarding on {s}: {}", .{ bridge.default_bridge, e });
         return common.SetupError.NatFailed;
     };
+    var default_gateway_buf: [16]u8 = undefined;
+    nat.ensureDnsInput(bridge.default_bridge, ip.formatIp(bridge.gateway_ip, &default_gateway_buf)) catch |e| {
+        log.warn("failed to permit dns on {s}: {}", .{ bridge.default_bridge, e });
+        return common.SetupError.NatFailed;
+    };
     nat.ensureMasquerade(bridge.default_bridge, "10.42.0.0/16") catch |e| {
         log.warn("failed to set up masquerade on {s}: {}", .{ bridge.default_bridge, e });
         return common.SetupError.NatFailed;
