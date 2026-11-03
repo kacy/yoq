@@ -27,7 +27,7 @@ test "fuzz WireGuard handshake: base64 key decode with arbitrary bytes" {
             // if decode succeeded, try to derive a public key from it
             // (treats the decoded bytes as a private key)
             const X25519 = std.crypto.dh.X25519;
-            const pk = X25519.recoverPublicKey(decoded) catch return;
+            const pk = X25519.recoverPublicKey(decoded);
 
             // encode the public key back to base64 — should not crash
             const encoder = std.base64.standard.Encoder;
@@ -44,7 +44,7 @@ test "fuzz WireGuard handshake: base64 key decode with arbitrary bytes" {
             // invalid base64 characters
             "!@#$%^&*()_+{}|:<>?~`-=[]\\;',./",
             // 44 chars but invalid base64
-            &([_]u8{0xFF} ** 44),
+            &(@as([44]u8, @splat(0xFF))),
             // binary garbage
             &([_]u8{ 0x00, 0x01, 0x02, 0x03, 0xFE, 0xFF }),
             // almost valid — 43 chars (missing padding)
@@ -100,7 +100,7 @@ test "fuzz WireGuard handshake: PeerConfig construction with arbitrary strings" 
                 if (decoder.decode(&decoded, parts[0])) |_| {
                     // if it's valid base64, try to use it as a key
                     const X25519 = std.crypto.dh.X25519;
-                    _ = X25519.recoverPublicKey(decoded) catch {};
+                    _ = X25519.recoverPublicKey(decoded);
                 } else |_| {}
             }
         }
@@ -113,11 +113,11 @@ test "fuzz WireGuard handshake: PeerConfig construction with arbitrary strings" 
             // all empty
             "",
             // binary garbage
-            &([_]u8{0xFF} ** 128),
+            &(@as([128]u8, @splat(0xFF))),
             // extremely long key field
-            &([_]u8{'A'} ** 256),
+            &(@as([256]u8, @splat('A'))),
             // null bytes everywhere
-            &([_]u8{0} ** 16),
+            &(@as([16]u8, @splat(0))),
         },
     });
 }
@@ -137,7 +137,7 @@ test "fuzz WireGuard handshake: X25519 key exchange with arbitrary seed" {
             @memcpy(&secret, input[0..32]);
 
             // try to compute public key — some inputs are rejected
-            const pk = X25519.recoverPublicKey(secret) catch return;
+            const pk = X25519.recoverPublicKey(secret);
 
             // if we have another 32 bytes, try a DH exchange
             if (input.len >= 64) {
@@ -161,13 +161,13 @@ test "fuzz WireGuard handshake: X25519 key exchange with arbitrary seed" {
     }.testOne, .{
         .corpus = &.{
             // 32 zero bytes (low-order point)
-            &([_]u8{0} ** 32),
+            &(@as([32]u8, @splat(0))),
             // 64 bytes — two keys for DH exchange
-            &([_]u8{1} ** 64),
+            &(@as([64]u8, @splat(1))),
             // 32 bytes of 0xFF
-            &([_]u8{0xFF} ** 32),
+            &(@as([32]u8, @splat(0xFF))),
             // known weak point patterns
-            &([_]u8{0} ** 31 ++ [_]u8{1}),
+            &(@as([31]u8, @splat(0)) ++ [_]u8{1}),
             // random-looking bytes
             &.{ 0x4a, 0x5d, 0x9d, 0x5b, 0xa4, 0xce, 0x2d, 0xe1, 0x72, 0x8e, 0x3b, 0xf4, 0x80, 0x35, 0x0f, 0x25, 0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33, 0x76, 0xf0, 0x9b, 0x3c, 0x1e, 0x16, 0x17, 0x42 },
         },

@@ -140,7 +140,7 @@ pub fn spawnWithIo(
 
     var args = CloneArgs{
         .flags = ns_flags.toCloneFlags(),
-        .exit_signal = @intFromEnum(linux.SIG.CHLD),
+        .exit_signal = @backingInt(linux.SIG.CHLD),
     };
     const rc = linux.syscall2(.clone3, @intFromPtr(&args), @sizeOf(CloneArgs));
     const pid = syscall_util.unwrap(rc) catch return NamespaceError.CloneFailed;
@@ -162,7 +162,7 @@ pub fn spawnWithIo(
             .outer_gid = std.os.linux.getgid(),
         };
         writeUserMapping(child_pid, mapping) catch {
-            _ = linux.syscall2(.kill, @as(usize, @bitCast(@as(isize, child_pid))), @intFromEnum(linux.SIG.KILL));
+            _ = linux.syscall2(.kill, @as(usize, @bitCast(@as(isize, child_pid))), @backingInt(linux.SIG.KILL));
             while (linux.errno(linux.syscall4(.wait4, @as(usize, @bitCast(@as(isize, child_pid))), 0, 0, 0)) == .INTR) {}
             return NamespaceError.WriteFailed;
         };

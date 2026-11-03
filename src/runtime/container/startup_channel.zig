@@ -59,13 +59,13 @@ fn receive(fd: posix.fd_t, bytes: []u8) Error!void {
 }
 
 pub fn notify(fd: posix.fd_t, stage: Stage) Error!void {
-    try send(fd, &.{@intFromEnum(stage)});
+    try send(fd, &.{@backingInt(stage)});
 }
 
 pub fn expect(fd: posix.fd_t, stage: Stage) Error!void {
     var byte: [1]u8 = undefined;
     try receive(fd, &byte);
-    if (byte[0] != @intFromEnum(stage)) return error.StartupAborted;
+    if (byte[0] != @backingInt(stage)) return error.StartupAborted;
 }
 
 pub fn sendNetwork(fd: posix.fd_t, files: NetworkFiles) Error!void {

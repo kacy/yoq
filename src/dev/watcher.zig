@@ -489,6 +489,6 @@ test "path too long" {
     defer w.deinit();
 
     // create a path that's too long (4096+ bytes)
-    const long_path = "a" ** 4096;
+    const long_path = &@as([4096:0]u8, @splat('a'));
     try std.testing.expectError(error.PathTooLong, w.addDir(long_path, 0));
 }

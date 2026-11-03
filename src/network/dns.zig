@@ -422,7 +422,7 @@ test "registerService ignores name exceeding max length" {
     resetRegistryForTest();
 
     // 64 chars — exceeds max_name_len (63)
-    const long_name = "a" ** 64;
+    const long_name = &@as([64:0]u8, @splat('a'));
     registerService(long_name, "ctr_001", .{ 10, 42, 0, 50 });
 
     try std.testing.expect(lookupService(long_name) == null);

@@ -55,7 +55,7 @@ test "static membership survives database reopen and permits address changes" {
     var dir_buf: [512]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &dir_buf);
     var path_buf: [600]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/raft.db", .{dir_buf[0..len]});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/raft.db", .{dir_buf[0..len]}, 0);
     const peers = [_]Peer{.{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 }};
     {
         var db = try sqlite.Db.init(.{ .mode = .{ .File = path }, .open_flags = .{ .write = true, .create = true } });

@@ -179,6 +179,11 @@ test "granted scopes fail closed and honor the request's token" {
     setGrantedScopes(null);
     try std.testing.expect(grantedAllows("cluster:admin"));
     // a scope list too long to keep grants nothing
-    setGrantedScopes("apps:write," ** 100);
+    setGrantedScopes(comptime blk: {
+        @setEvalBranchQuota(100_000);
+        var repeated: []const u8 = "";
+        for (0..100) |_| repeated = repeated ++ "apps:write,";
+        break :blk repeated;
+    });
     try std.testing.expect(!grantedAllows("apps:write"));
 }

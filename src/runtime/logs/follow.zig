@@ -76,7 +76,7 @@ fn drainNewBytes(io: std.Io, file_reader: *std.Io.File.Reader, buf: []u8) bool {
     defer _ = io.swapCancelProtection(prev);
 
     var out_buf: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &out_buf);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &out_buf);
     var saw_bytes = false;
     while (true) {
         const bytes_read = file_reader.interface.readSliceShort(buf) catch return saw_bytes;

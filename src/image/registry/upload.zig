@@ -30,7 +30,7 @@ pub fn checkBlobExists(
 
     const uri = std.Uri.parse(url) catch return common.RegistryError.NetworkError;
     var req = http_helpers.requestWithTimeout(client, .HEAD, uri, .{
-        .redirect_behavior = @enumFromInt(3),
+        .redirect_behavior = @fromBackingInt(@intCast(3)),
         .keep_alive = false,
         .headers = .{
             .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,
@@ -172,18 +172,18 @@ fn resolveUploadTarget(registry_host: []const u8, location: []const u8) ?UploadT
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return null;
     if (protocol != .tls) return null;
 
-    var host_buf: [255]u8 = undefined;
-    const upload_host = uri.getHost(&host_buf) catch return null;
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const upload_host = common.uriHost(uri, &host_buf) catch return null;
 
     var registry_url_buf: [1024]u8 = undefined;
     const registry_url = std.fmt.bufPrint(&registry_url_buf, "https://{s}", .{registry_host}) catch return null;
     const registry_uri = std.Uri.parse(registry_url) catch return null;
-    var registry_host_buf: [255]u8 = undefined;
-    const registry_name = registry_uri.getHost(&registry_host_buf) catch return null;
+    var registry_host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const registry_name = common.uriHost(registry_uri, &registry_host_buf) catch return null;
 
     return .{
         .url = location,
-        .send_auth = std.ascii.eqlIgnoreCase(upload_host.bytes, registry_name.bytes) and
+        .send_auth = std.ascii.eqlIgnoreCase(upload_host, registry_name) and
             (uri.port orelse 443) == (registry_uri.port orelse 443),
     };
 }
@@ -207,7 +207,7 @@ fn initiateUpload(
 
     const init_uri = std.Uri.parse(init_url) catch return common.RegistryError.UploadInitFailed;
     var init_req = http_helpers.requestWithTimeout(client, .POST, init_uri, .{
-        .redirect_behavior = @enumFromInt(3),
+        .redirect_behavior = @fromBackingInt(@intCast(3)),
         .keep_alive = false,
         .headers = .{
             .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,

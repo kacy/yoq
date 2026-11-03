@@ -68,7 +68,7 @@ fn reserved(db: *sqlite.Db, mapping: common.PortMap) Error!bool {
         "SELECT COUNT(*) FROM local_port_reservations WHERE host_port = ? AND protocol = ? " ++
             "AND (host_ip = 0 OR ? = 0 OR host_ip = ?);",
         .{},
-        .{ mapping.host_port, @as(i64, @intFromEnum(mapping.protocol)), address, address },
+        .{ mapping.host_port, @as(i64, @backingInt(mapping.protocol)), address, address },
     ) catch return error.DbError;
     return (count orelse 0) != 0;
 }
@@ -151,7 +151,7 @@ pub fn reserve(id: []const u8, mappings: []common.PortMap) Error!void {
             break;
         }
         lease.db.exec("INSERT INTO local_port_reservations (container_id, ordinal, host_ip, host_port, protocol) VALUES (?, ?, ?, ?, ?);", .{}, .{
-            sqlite.Text{ .data = id }, ordinal, addressNumber(mapping.*), mapping.host_port, @as(i64, @intFromEnum(mapping.protocol)),
+            sqlite.Text{ .data = id }, ordinal, addressNumber(mapping.*), mapping.host_port, @as(i64, @backingInt(mapping.protocol)),
         }) catch return error.DbError;
     }
     lease.db.exec("COMMIT;", .{}, .{}) catch return error.DbError;

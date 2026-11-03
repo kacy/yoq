@@ -40,7 +40,7 @@ pub const Lease = struct {
             if (vram_min_mb) |minimum| if (gpu.vram_mb < minimum) continue;
             if (model) |wanted| if (std.mem.indexOf(u8, gpu.getName(), wanted) == null) continue;
             var buf: [40]u8 = undefined;
-            const name = try std.fmt.bufPrintZ(&buf, "gpu-{d}.lock", .{gpu.index});
+            const name = try std.fmt.bufPrintSentinel(&buf, "gpu-{d}.lock", .{gpu.index}, 0);
             const opened = linux.openat(dir.handle, name, .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600);
             if (linux.errno(opened) != .SUCCESS) return error.LockFailed;
             const fd: std.posix.fd_t = @intCast(opened);

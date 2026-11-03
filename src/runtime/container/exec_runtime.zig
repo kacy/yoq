@@ -66,56 +66,56 @@ pub fn childMain(arg: ?*anyopaque) callconv(.c) u8 {
         const result = prepareFilesystemRoot(ctx);
         if (result != .success) {
             log.err("container filesystem preparation failed: {s}", .{@tagName(result)});
-            return @intFromEnum(result);
+            return @backingInt(result);
         }
     }
 
-    startup.notify(ctx.startup_fd, .overlay_ready) catch return @intFromEnum(ExitCode.general_error);
-    startup.expect(ctx.startup_fd, .volumes_ready) catch return @intFromEnum(ExitCode.general_error);
+    startup.notify(ctx.startup_fd, .overlay_ready) catch return @backingInt(ExitCode.general_error);
+    startup.expect(ctx.startup_fd, .volumes_ready) catch return @backingInt(ExitCode.general_error);
     if (!host_mode) {
         const result = mountContainerFilesystems(ctx);
-        if (result != .success) return @intFromEnum(result);
+        if (result != .success) return @backingInt(result);
     }
 
     // Parent network setup needs the child's PID, while generated files must
     // target mounts visible only in this namespace. Hand off data, not paths.
-    startup.notify(ctx.startup_fd, .filesystem_ready) catch return @intFromEnum(ExitCode.general_error);
-    const network_files = startup.receiveNetwork(ctx.startup_fd) catch return @intFromEnum(ExitCode.general_error);
+    startup.notify(ctx.startup_fd, .filesystem_ready) catch return @backingInt(ExitCode.general_error);
+    const network_files = startup.receiveNetwork(ctx.startup_fd) catch return @backingInt(ExitCode.general_error);
     if (!host_mode) {
         const result = completeFilesystem(ctx, network_files, gpu_passthrough.setupGpuPassthrough);
         if (result != .success) {
             log.err("container root finalization failed: {s}", .{@tagName(result)});
-            return @intFromEnum(result);
+            return @backingInt(result);
         }
     }
 
     if (host_mode) {
-        if (ctx.user != null) return @intFromEnum(ExitCode.security_failed);
-        startup.notify(ctx.startup_fd, .prepared) catch return @intFromEnum(ExitCode.general_error);
-        startup.expect(ctx.startup_fd, .execute) catch return @intFromEnum(ExitCode.general_error);
-        linux_platform.posix.chdir(ctx.working_dir) catch return @intFromEnum(ExitCode.filesystem_error);
+        if (ctx.user != null) return @backingInt(ExitCode.security_failed);
+        startup.notify(ctx.startup_fd, .prepared) catch return @backingInt(ExitCode.general_error);
+        startup.expect(ctx.startup_fd, .execute) catch return @backingInt(ExitCode.general_error);
+        linux_platform.posix.chdir(ctx.working_dir) catch return @backingInt(ExitCode.filesystem_error);
         return execCommandWrapper(@ptrCast(@constCast(ctx)));
     }
 
     setHostname(ctx.hostname);
     _ = linux.syscall1(.umask, 0o022);
 
-    linux_platform.posix.chdir(ctx.working_dir) catch return @intFromEnum(ExitCode.filesystem_error);
+    linux_platform.posix.chdir(ctx.working_dir) catch return @backingInt(ExitCode.filesystem_error);
 
     const account = identity.resolve(ctx.user) catch |err| {
         log.err("container identity resolution failed: {}", .{err});
-        return @intFromEnum(ExitCode.security_failed);
+        return @backingInt(ExitCode.security_failed);
     };
-    security.apply() catch |err| {
+    security.applyForInit() catch |err| {
         log.err("container security configuration failed: {}", .{err});
-        return @intFromEnum(ExitCode.security_failed);
+        return @backingInt(ExitCode.security_failed);
     };
     identity.apply(account, ctx.rootless and ctx.user == null) catch |err| {
         log.err("container identity change failed: {}", .{err});
-        return @intFromEnum(ExitCode.security_failed);
+        return @backingInt(ExitCode.security_failed);
     };
-    startup.notify(ctx.startup_fd, .prepared) catch return @intFromEnum(ExitCode.general_error);
-    startup.expect(ctx.startup_fd, .execute) catch return @intFromEnum(ExitCode.general_error);
+    startup.notify(ctx.startup_fd, .prepared) catch return @backingInt(ExitCode.general_error);
+    startup.expect(ctx.startup_fd, .execute) catch return @backingInt(ExitCode.general_error);
     return init.run(execCommandWrapper, @ptrCast(@constCast(ctx)));
 }
 
@@ -184,6 +184,7 @@ fn completeFilesystem(ctx: *const ChildExecContext, files: startup.NetworkFiles,
 
 fn execCommandWrapper(arg: ?*anyopaque) callconv(.c) u8 {
     const ctx: *const ChildExecContext = @ptrCast(@alignCast(arg));
+    security.dropInitCapabilities() catch return @backingInt(ExitCode.security_failed);
     return execCommand(ctx.command, ctx.args, ctx.env);
 }
 
@@ -219,7 +220,7 @@ test "startup mounted overlay and raw root retain generated network and device f
     const Fixture = struct {
         fn device(root: []const u8, _: []const u32, buffer: *[4096]u8) ![]const u8 {
             var path_buf: [4096]u8 = undefined;
-            const path = try std.fmt.bufPrintZ(&path_buf, "{s}/dev/startup-gpu", .{root});
+            const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/dev/startup-gpu", .{root}, 0);
             const fd = try linux_platform.posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, 0o600);
             defer linux_platform.posix.close(fd);
             if (try linux_platform.posix.write(fd, "visible") != 7) return error.WriteFailed;
@@ -257,15 +258,15 @@ test "startup mounted overlay and raw root retain generated network and device f
         fn run(ctx: *const ChildExecContext) u8 {
             if (linux.errno(linux.unshare(linux.CLONE.NEWNS)) != .SUCCESS) return 10;
             const prepared = prepareFilesystemRoot(ctx);
-            if (prepared != .success) return @intFromEnum(prepared);
+            if (prepared != .success) return @backingInt(prepared);
             const mounted = mountContainerFilesystems(ctx);
-            if (mounted != .success) return @intFromEnum(mounted);
+            if (mounted != .success) return @backingInt(mounted);
             const completed = completeFilesystem(ctx, .{
                 .enabled = true,
                 .address = .{ 10, 42, 0, 7 },
                 .gateway = .{ 10, 42, 0, 1 },
             }, device);
-            if (completed != .success) return @intFromEnum(completed);
+            if (completed != .success) return @backingInt(completed);
             if (!contains("/etc/hosts", "10.42.0.7\tstartup-test")) return 20;
             if (!contains("/etc/resolv.conf", "nameserver 10.42.0.1")) return 21;
             if (!contains("/dev/startup-gpu", "visible")) return 22;

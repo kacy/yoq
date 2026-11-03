@@ -145,7 +145,7 @@ pub fn saveTrainingJobInDb(db: *sqlite.Db, record: TrainingJobRecord) StoreError
             record.restart_count,
             record.created_at,
             record.updated_at,
-            @intFromEnum(record.execution_mode),
+            @backingInt(record.execution_mode),
         },
     ) catch return StoreError.WriteFailed;
 }
@@ -497,7 +497,7 @@ test "local owner migrates legacy names and resolves old replayed training inser
         defer record.deinit(alloc);
         try std.testing.expectEqual(case.mode, record.execution_mode);
         const mode = (try db.one(i64, "SELECT execution_mode FROM training_jobs WHERE id = ?;", .{}, .{case.id})).?;
-        try std.testing.expectEqual(@as(i64, @intFromEnum(case.mode)), mode);
+        try std.testing.expectEqual(@as(i64, @backingInt(case.mode)), mode);
     }
     // an older raft entry can arrive after the startup migration has finished.
     try db.exec("INSERT INTO training_jobs (id, app_name, name, image, gpus, created_at, updated_at) VALUES ('cluster-replay-train-0123456789ab', 'replay', 'train', 'scratch', 1, 1, 1);", .{}, .{});

@@ -14,7 +14,7 @@ pub const Lock = struct {
             if (err != error.PathAlreadyExists) return err;
         };
         var path: [80]u8 = undefined;
-        const name = try std.fmt.bufPrintZ(&path, ".locks/{s}", .{hex});
+        const name = try std.fmt.bufPrintSentinel(&path, ".locks/{s}", .{hex}, 0);
         const opened = linux.openat(parent.handle, name, .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600);
         if (linux.errno(opened) != .SUCCESS) return error.LockFailed;
         const fd: std.posix.fd_t = @intCast(opened);

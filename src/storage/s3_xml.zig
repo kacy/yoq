@@ -39,7 +39,7 @@ pub fn formatTimestamp(buf: *[20]u8, epoch: i64) []const u8 {
     const ds = es.getDaySeconds();
     return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
         yd.year,
-        @as(u16, @intFromEnum(md.month)),
+        @as(u16, @backingInt(md.month)),
         @as(u16, md.day_index) + 1,
         ds.getHoursIntoDay(),
         ds.getMinutesIntoHour(),

@@ -148,7 +148,7 @@ fn fetchSingle(alloc: std.mem.Allocator, client: *std.http.Client, host: []const
     var headers: [1]std.http.Header = .{accept_header};
 
     var req = http_helpers.requestWithTimeout(client, .GET, uri, .{
-        .redirect_behavior = @enumFromInt(3),
+        .redirect_behavior = @fromBackingInt(@intCast(3)),
         .keep_alive = false,
         .headers = .{
             .authorization = if (auth_value.len > 0) .{ .override = auth_value } else .default,
@@ -218,7 +218,7 @@ test "registry transfer verifies pinned manifests with and without server digest
     const body = "{\"schemaVersion\":2}";
     var digest_buf: [71]u8 = undefined;
     const digest = blob_store.computeDigest(body).string(&digest_buf);
-    const wrong = "sha256:" ++ "0" ** 64;
+    const wrong = "sha256:" ++ &@as([64:0]u8, @splat('0'));
     var headers_buf: [128]u8 = undefined;
     const headers = try std.fmt.bufPrint(&headers_buf, "Docker-Content-Digest: {s}\r\n", .{digest});
     for ([_]bool{ false, true }) |has_header| {
@@ -250,7 +250,7 @@ test "registry transfer validates selected index descriptor syntax and content" 
     const body = "{\"schemaVersion\":2}";
     var digest_buf: [71]u8 = undefined;
     const digest = blob_store.computeDigest(body).string(&digest_buf);
-    const descriptors = [_][]const u8{ digest, "sha256:" ++ "0" ** 64, "latest" };
+    const descriptors = [_][]const u8{ digest, "sha256:" ++ &@as([64:0]u8, @splat('0')), "latest" };
     for (descriptors, 0..) |descriptor, index| {
         const index_body = try std.fmt.allocPrint(
             alloc,

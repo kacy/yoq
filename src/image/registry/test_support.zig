@@ -94,7 +94,7 @@ pub const Server = struct {
         }
         try writeAll(fd, "\r\n");
         var remaining = size;
-        const repeated = [_]u8{'x'} ** 8192;
+        const repeated = @as([8192]u8, @splat('x'));
         while (remaining > 0) {
             const count = @min(remaining, repeated.len);
             if (reply.framing == .chunked)

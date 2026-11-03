@@ -67,7 +67,7 @@ pub fn writeLine(service_name: []const u8, color_idx: usize, line: []const u8) v
     // write to stderr (stdout is reserved for machine-readable output)
     // use a separate buffer for the writer to avoid reuse confusion
     var write_buf: [max_line_len]u8 = undefined;
-    var w = std.Io.File.stderr().writer(io, &write_buf);
+    var w = std.Io.File.stderr().writerStreaming(io, &write_buf);
     const out = &w.interface;
 
     out.writeAll(formatted) catch |e| {

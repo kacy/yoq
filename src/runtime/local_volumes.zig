@@ -295,7 +295,7 @@ fn copyInitialContents(io: std.Io, alloc: std.mem.Allocator, source: []const u8,
     defer std.Io.Dir.cwd().deleteTree(io, staging) catch {};
     const contents = std.fmt.allocPrint(alloc, "{s}/.", .{source}) catch return error.OutOfMemory;
     defer alloc.free(contents);
-    var argv: cmd.ArgList = .{null} ** cmd.max_args;
+    var argv: cmd.ArgList = @splat(null);
     argv[0] = "cp";
     argv[1] = "-a";
     argv[2] = "--";
@@ -384,7 +384,7 @@ test "standalone volume initialization preserves data across later containers" {
 }
 
 test "standalone volume names cannot be empty or contain path components" {
-    for ([_][]const u8{ "", ".", "..", "/tmp/data", "a/b", "-name", "a" ** 129 }) |name| try std.testing.expect(!validName(name));
+    for ([_][]const u8{ "", ".", "..", "/tmp/data", "a/b", "-name", &@as([129:0]u8, @splat('a')) }) |name| try std.testing.expect(!validName(name));
     try std.testing.expect(validName("data_1.cache"));
 }
 

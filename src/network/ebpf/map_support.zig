@@ -39,7 +39,7 @@ pub fn createMap(
     const fd = BPF.map_create(map_type, key_size, value_size, max_entries) catch |e| {
         resource_support.releaseBpfFd();
         log.warn("ebpf: map_create failed (type={d}, key={d}, val={d}): {}", .{
-            @intFromEnum(map_type), key_size, value_size, e,
+            @backingInt(map_type), key_size, value_size, e,
         });
         return common.EbpfError.MapCreateFailed;
     };

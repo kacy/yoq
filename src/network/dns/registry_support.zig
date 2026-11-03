@@ -12,7 +12,7 @@ const store = @import("../../state/store.zig");
 const ebpf = if (builtin.os.tag == .linux) @import("../ebpf.zig") else struct {
     pub const LoadBalancerBackends = struct {
         count: u32 = 0,
-        ips: [16]u32 = [_]u32{0} ** 16,
+        ips: [16]u32 = @splat(0),
     };
 
     pub const DnsInterceptor = struct {
@@ -129,23 +129,23 @@ pub const LoadBalancerFaultMode = enum {
     }
 };
 
-var registry: [max_services]ServiceEntry = [_]ServiceEntry{.{
+var registry: [max_services]ServiceEntry = @splat(.{
     .name = undefined,
     .name_len = 0,
     .container_id = undefined,
     .container_id_len = 0,
     .ip = .{ 0, 0, 0, 0 },
     .active = false,
-}} ** max_services;
+});
 var registry_count: usize = 0;
-var service_views: [max_services]ServiceView = [_]ServiceView{.{
+var service_views: [max_services]ServiceView = @splat(.{
     .name = undefined,
     .name_len = 0,
     .dns_ip = .{ 0, 0, 0, 0 },
     .backend_count = 0,
     .backends = undefined,
     .active = false,
-}} ** max_services;
+});
 var registry_mutex: std.Io.Mutex = .init;
 
 var cluster_db: ?*sqlite.Db = null;

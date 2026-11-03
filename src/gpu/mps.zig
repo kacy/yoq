@@ -19,9 +19,9 @@ const env_buffer = @import("env_buffer.zig");
 /// per-GPU MPS state
 pub const MpsInstance = struct {
     gpu_index: u32,
-    pipe_dir: [128]u8 = .{0} ** 128,
+    pipe_dir: [128]u8 = @splat(0),
     pipe_dir_len: u8 = 0,
-    log_dir: [128]u8 = .{0} ** 128,
+    log_dir: [128]u8 = @splat(0),
     log_dir_len: u8 = 0,
     active: bool = false,
 

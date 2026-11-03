@@ -662,7 +662,7 @@ test "resolveNodeId matches configured peer" {
         .id = 1,
         .port = 0,
         .peers = peers,
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -727,7 +727,7 @@ test "handleMessage drops request_vote with mismatched sender id" {
         .id = 1,
         .port = 0,
         .peers = peers,
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -764,7 +764,7 @@ test "handleMessage accepts append_entries only from authenticated leader" {
         .id = 1,
         .port = 0,
         .peers = peers,
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -814,7 +814,7 @@ test "leader_id defaults to null" {
         .id = 1,
         .port = 0,
         .peers = peers,
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -838,7 +838,7 @@ test "become_leader sets leader_id to self" {
         .id = 1,
         .port = 0,
         .peers = peers,
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -864,7 +864,7 @@ test "become_follower sets leader_id to provided id" {
         .id = 1,
         .port = 0,
         .peers = peers,
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -890,7 +890,7 @@ test "leaderAddrBuf returns null when leader is self" {
         .id = 1,
         .port = 0,
         .peers = peers,
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -916,7 +916,7 @@ test "leaderAddrBuf returns null when no leader known" {
         .id = 1,
         .port = 0,
         .peers = peers,
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -942,7 +942,7 @@ test "leaderAddrBuf returns peer address when leader is a peer" {
         .port = 0,
         .api_port = 7700,
         .peers = peers,
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = tmp_path,
     });
     defer node.deinit();
@@ -1067,7 +1067,7 @@ test "install_snapshot restart preserves recovered state and future applies" {
             .id = 1,
             .port = 0,
             .peers = peers,
-            .shared_key = [_]u8{7} ** 32,
+            .shared_key = @as([32]u8, @splat(7)),
             .data_dir = tmp_path,
         });
         defer node.deinit();
@@ -1110,7 +1110,7 @@ test "install_snapshot restart preserves recovered state and future applies" {
         .id = 1,
         .port = 0,
         .peers = peers,
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = tmp_path,
     });
     defer restarted.deinit();
@@ -1189,7 +1189,7 @@ test "install_snapshot restart ignores stale snapshot older than recovered bound
             .id = 1,
             .port = 0,
             .peers = peers,
-            .shared_key = [_]u8{7} ** 32,
+            .shared_key = @as([32]u8, @splat(7)),
             .data_dir = tmp_path,
         });
         defer node.deinit();
@@ -1217,7 +1217,7 @@ test "install_snapshot restart ignores stale snapshot older than recovered bound
         .id = 1,
         .port = 0,
         .peers = peers,
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = tmp_path,
     });
     defer restarted.deinit();
@@ -1499,7 +1499,7 @@ test "snapshot installation refuses an unpersisted leader term" {
         .port = 0,
         .peers = &.{.{ .id = 2, .addr = .{ 127, 0, 0, 2 }, .port = 9700 }},
         .data_dir = root,
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
     });
     defer node.deinit();
     node.fixPointers();
@@ -1650,7 +1650,7 @@ test "committed mutation waits for quorum and fences leadership loss" {
         .id = 1,
         .port = 0,
         .peers = &.{.{ .id = 2, .addr = .{ 127, 0, 0, 1 }, .port = 9700 }},
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = try testDirPath(tmp.dir, &path_buf),
     });
     defer node.deinit();
@@ -1727,7 +1727,7 @@ test "agent recovery learns leader hints on existing follower append and snapsho
             .port = 0,
             .api_port = 7700,
             .peers = &.{.{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 }},
-            .shared_key = [_]u8{7} ** 32,
+            .shared_key = @as([32]u8, @splat(7)),
             .data_dir = "/unused",
         });
         defer node.deinit();

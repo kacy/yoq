@@ -98,7 +98,7 @@ pub fn load(bridge_if_index: u32) common.EbpfError!PolicyEnforcer {
 pub fn loadWithRules(bridge_if_index: u32, snapshot: rules.Snapshot) common.EbpfError!PolicyEnforcer {
     if (snapshot.rules.len > rules.max_rules or snapshot.isolated.len > rules.max_isolated) return error.MapFull;
     const policy_fd = try map_support.createMap(
-        @enumFromInt(policy_prog.maps[0].map_type),
+        @fromBackingInt(@intCast(policy_prog.maps[0].map_type)),
         policy_prog.maps[0].key_size,
         policy_prog.maps[0].value_size,
         policy_prog.maps[0].max_entries,
@@ -109,7 +109,7 @@ pub fn loadWithRules(bridge_if_index: u32, snapshot: rules.Snapshot) common.Ebpf
     }
 
     const isolation_fd = try map_support.createMap(
-        @enumFromInt(policy_prog.maps[1].map_type),
+        @fromBackingInt(@intCast(policy_prog.maps[1].map_type)),
         policy_prog.maps[1].key_size,
         policy_prog.maps[1].value_size,
         policy_prog.maps[1].max_entries,
@@ -120,7 +120,7 @@ pub fn loadWithRules(bridge_if_index: u32, snapshot: rules.Snapshot) common.Ebpf
     }
 
     for (snapshot.rules) |rule| {
-        const action: u8 = @intFromEnum(rule.action);
+        const action: u8 = @backingInt(rule.action);
         try map_support.mapUpdate(policy_fd, std.mem.asBytes(&rule.key), std.mem.asBytes(&action));
     }
     for (snapshot.isolated) |source| {

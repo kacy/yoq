@@ -22,6 +22,7 @@ comptime {
     _ = @import("runtime/filesystem/proc_mask.zig");
     _ = @import("manifest/names.zig");
     _ = @import("network/local_network_rules.zig");
+    _ = @import("network/dns_firewall.zig");
     _ = @import("runtime/cli/network_command.zig");
     _ = @import("network/policy.zig");
     _ = @import("network/policy_rules.zig");
@@ -178,6 +179,7 @@ comptime {
     _ = @import("manifest/cli/ops.zig");
     _ = @import("manifest/loader.zig");
     _ = @import("manifest/orchestrator.zig");
+    _ = @import("manifest/orchestrator/service_runtime.zig");
     _ = @import("manifest/orchestrator/route_inputs.zig");
     _ = @import("manifest/orchestrator/ownership.zig");
     _ = @import("manifest/orchestrator/tls_resources.zig");

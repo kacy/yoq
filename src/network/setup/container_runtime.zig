@@ -15,6 +15,7 @@ const service_reconciler = @import("../service_reconciler.zig");
 const policy = @import("../policy.zig");
 const local_networks = @import("../local_networks.zig");
 const local_rules = @import("../local_network_rules.zig");
+const dns_firewall = @import("../dns_firewall.zig");
 const port_mappings = @import("port_mappings.zig");
 
 pub fn setupContainer(
@@ -86,6 +87,7 @@ fn setupContainerImpl(container_id: []const u8, pid: posix.pid_t, config: common
         log.warn("failed to permit container forwarding on {s}: {}", .{ bridge.default_bridge, e });
         return common.SetupError.NatFailed;
     };
+    dns_firewall.ensure(db, bridge.default_bridge, if (subnet_config) |sc| sc.gateway else bridge.gateway_ip);
     nat.ensureMasquerade(bridge.default_bridge, "10.42.0.0/16") catch |e| {
         log.warn("failed to set up masquerade on {s}: {}", .{ bridge.default_bridge, e });
         return common.SetupError.NatFailed;
@@ -104,7 +106,7 @@ fn setupContainerImpl(container_id: []const u8, pid: posix.pid_t, config: common
 
     const gateway = if (subnet_config) |sc| sc.gateway else bridge.gateway_ip;
     dns.startResolverAt(gateway);
-    if (!config.skip_dns and !dns.resolverRunningAt(gateway)) {
+    if (!dns.resolverRunningAt(gateway)) {
         return common.SetupError.ConfigFailed;
     }
     if (dns.resolverOwnedByCurrentProcess()) {
@@ -114,16 +116,14 @@ fn setupContainerImpl(container_id: []const u8, pid: posix.pid_t, config: common
     // every supervisor must retry DNS ownership if the current listener exits.
     service_reconciler.startAuditLoopIfEnabled();
 
-    if (!config.skip_dns) {
-        service_registry_bridge.registerContainerService(
-            config.dns_name orelse hostname,
-            container_id,
-            container_ip,
-            if (config.node_id) |node_id| @as(i64, node_id) else null,
-        );
-    }
+    service_registry_bridge.registerContainerService(
+        config.dns_name orelse hostname,
+        container_id,
+        container_ip,
+        if (config.node_id) |node_id| @as(i64, node_id) else null,
+    );
 
-    errdefer if (pending == null and !config.skip_dns) service_registry_bridge.unregisterContainerService(container_id);
+    errdefer if (pending == null) service_registry_bridge.unregisterContainerService(container_id);
     policy.requireForContainer(hostname, container_ip, std.heap.page_allocator) catch |err| {
         log.err("network policy must be enforced before container startup: {}", .{err});
         return common.SetupError.ConfigFailed;
@@ -154,6 +154,10 @@ pub fn teardownContainerChecked(container_id: []const u8, net_info: *const commo
     for (config.port_maps) |pm| mapping.removeChecked(pm) catch return error.NatFailed;
     bridge.deleteVethChecked(net_info.vethName()) catch return error.VethFailed;
     ip.release(db, container_id) catch return error.IpAllocationFailed;
+    if (config.network_name == null) {
+        const gateway = if (config.node_id) |nid| (ip.subnetForNode(nid) catch return error.IpAllocationFailed).gateway else bridge.gateway_ip;
+        dns_firewall.removeDefaultIfUnused(db, bridge.default_bridge, gateway);
+    }
 }
 
 pub const writeNetworkFiles = file_support.writeNetworkFiles;
@@ -172,6 +176,7 @@ fn setupNamedContainer(container_id: []const u8, pid: posix.pid_t, config: commo
     local_networks.markProvisioned(name) catch return error.DbFailed;
     bridge.ensureBridgeWithConfig(.{ .name = network.bridge_name, .gateway_ip = subnet.gateway, .prefix_len = subnet.prefix_len }) catch return error.BridgeFailed;
     local_rules.ensure(network.bridge_name, subnet.base) catch return error.NatFailed;
+    dns_firewall.ensure(db, network.bridge_name, subnet.gateway);
     const address = ip.allocateWithSubnet(db, container_id, subnet) catch return error.IpAllocationFailed;
     errdefer if (pending == null) ip.release(db, container_id) catch {};
     var veth_buf: [32]u8 = undefined;
@@ -186,10 +191,8 @@ fn setupNamedContainer(container_id: []const u8, pid: posix.pid_t, config: commo
     errdefer if (pending == null) {
         for (config.port_maps) |port| mappings.remove(port);
     };
-    if (!config.skip_dns) {
-        dns.startScopedResolverAt(subnet.gateway, network.bridge_name, name);
-        if (!dns.resolverRunningAt(subnet.gateway)) return error.ConfigFailed;
-    }
+    dns.startScopedResolverAt(subnet.gateway, network.bridge_name, name);
+    if (!dns.resolverRunningAt(subnet.gateway)) return error.ConfigFailed;
     local_networks.activate(container_id, address) catch return error.DbFailed;
     var info: common.NetworkInfo = .{ .ip = address, .veth_host = undefined, .veth_host_len = host_veth.len };
     @memcpy(info.veth_host[0..host_veth.len], host_veth);

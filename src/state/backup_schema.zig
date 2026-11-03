@@ -46,7 +46,7 @@ pub fn validate(candidate: *c.sqlite3) Error!void {
         // sqlite does not expose check expressions through a pragma. these
         // tables have no legacy column-order variants, so compare their ddl.
         const definition = columnText(tables, 1);
-        if (std.ascii.indexOfIgnoreCase(definition, "CHECK") != null) {
+        if (std.ascii.findIgnoreCase(definition, "CHECK") != null) {
             const actual = try prepare(candidate, "SELECT sql FROM sqlite_master WHERE type='table' AND name=?;", table);
             defer _ = c.sqlite3_finalize(actual);
             if (c.sqlite3_step(actual) != c.SQLITE_ROW or !sameDefinition(definition, columnText(actual, 0))) {

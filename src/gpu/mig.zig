@@ -10,7 +10,7 @@ pub const max_profiles = 7;
 pub const max_instances = 8;
 
 pub const MigProfile = struct {
-    name: [12]u8 = .{0} ** 12,
+    name: [12]u8 = @splat(0),
     name_len: u8 = 0,
     profile_id: u32,
     compute_slices: u32,
@@ -26,7 +26,7 @@ pub const MigInstance = struct {
     gi_id: u32 = 0,
     ci_id: u32 = 0,
     profile_id: u32 = 0,
-    profile_name: [12]u8 = .{0} ** 12,
+    profile_name: [12]u8 = @splat(0),
     profile_name_len: u8 = 0,
     memory_mb: u64 = 0,
     compute_slices: u32 = 0,
@@ -37,7 +37,7 @@ pub const MigInstance = struct {
 };
 
 pub const MigInventory = struct {
-    instances: [max_instances]MigInstance = .{MigInstance{}} ** max_instances,
+    instances: [max_instances]MigInstance = @splat(MigInstance{}),
     count: u8 = 0,
 };
 

@@ -46,8 +46,8 @@ test "image tag creates a reference without changing the source image" {
     try store.initTestDb();
     defer store.deinitTestDb();
     const alloc = std.testing.allocator;
-    const digest = "sha256:" ++ "1" ** 64;
-    try store.saveImage(.{ .id = digest, .repository = "source", .tag = "latest", .manifest_digest = digest, .config_digest = "sha256:" ++ "2" ** 64, .total_size = 12, .created_at = 10 });
+    const digest = "sha256:" ++ &@as([64:0]u8, @splat('1'));
+    try store.saveImage(.{ .id = digest, .repository = "source", .tag = "latest", .manifest_digest = digest, .config_digest = "sha256:" ++ &@as([64:0]u8, @splat('2')), .total_size = 12, .created_at = 10 });
     try tagImage(alloc, "source", "localhost:5000/team/target:stable");
     const original = try store.findImage(alloc, "docker.io", "source", "latest");
     defer original.deinit(alloc);

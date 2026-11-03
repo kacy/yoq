@@ -26,11 +26,11 @@ fn readExactly(wire: anytype, bytes: []u8) !void {
 
 pub fn readEncrypted(wire: socket.Stream, buffer: *Buffer, keys: handshake.TrafficKeys, seq: *u64, allow_ccs: bool) !struct { plaintext: []u8, content_type: record.ContentType } {
     var full = try read(wire, buffer);
-    if (allow_ccs and full[0] == @intFromEnum(record.ContentType.change_cipher_spec)) {
+    if (allow_ccs and full[0] == @backingInt(record.ContentType.change_cipher_spec)) {
         if (!std.mem.eql(u8, full, &.{ 20, 3, 3, 0, 1, 1 })) return error.InvalidContentType;
         full = try read(wire, buffer);
     }
-    if (full[0] != @intFromEnum(record.ContentType.application_data)) return error.InvalidContentType;
+    if (full[0] != @backingInt(record.ContentType.application_data)) return error.InvalidContentType;
     const result = try record.decryptRecord(keys.key, keys.iv, seq.*, full[5..], full[0..5].*);
     seq.* += 1;
     return .{ .plaintext = result.plaintext, .content_type = result.content_type };

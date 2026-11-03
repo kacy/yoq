@@ -266,7 +266,7 @@ fn reserveGangPort(session: mutation.Session, preferred: u16, pending: []const u
     session.node.mu.lockUncancelable(std.Options.debug_io);
     defer session.node.mu.unlock(std.Options.debug_io);
     try session.checkLocked();
-    var used = [_]bool{false} ** 65536;
+    var used = @as([65536]bool, @splat(false));
     for (pending) |port| used[port] = true;
     const Row = struct { port: i64 };
     var statement = session.node.stateMachineDb().prepare("SELECT DISTINCT gang_master_port AS port FROM assignments WHERE gang_rank = 0 AND gang_master_port IS NOT NULL AND status IN ('pending', 'running');") catch return error.InternalError;

@@ -52,7 +52,7 @@ pub const AgentResources = struct {
 
     /// fixed-size buffer for gpu_health so it can be copied by value in the heartbeat batcher.
     pub const GpuHealthBuf = struct {
-        data: [16]u8 = .{0} ** 16,
+        data: [16]u8 = @splat(0),
         len: u8 = 0,
 
         pub fn fromSlice(s: []const u8) GpuHealthBuf {

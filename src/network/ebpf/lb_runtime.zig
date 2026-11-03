@@ -146,7 +146,7 @@ pub fn ipToNetworkOrder(ip_bytes: [4]u8) u32 {
 
 pub fn load(bridge_if_index: u32) common.EbpfError!LoadBalancer {
     const backends_fd = try map_support.createMap(
-        @enumFromInt(lb_prog.maps[0].map_type),
+        @fromBackingInt(@intCast(lb_prog.maps[0].map_type)),
         lb_prog.maps[0].key_size,
         lb_prog.maps[0].value_size,
         lb_prog.maps[0].max_entries,
@@ -157,7 +157,7 @@ pub fn load(bridge_if_index: u32) common.EbpfError!LoadBalancer {
     }
 
     const conntrack_fd = try map_support.createMap(
-        @enumFromInt(lb_prog.maps[1].map_type),
+        @fromBackingInt(@intCast(lb_prog.maps[1].map_type)),
         lb_prog.maps[1].key_size,
         lb_prog.maps[1].value_size,
         lb_prog.maps[1].max_entries,
@@ -168,7 +168,7 @@ pub fn load(bridge_if_index: u32) common.EbpfError!LoadBalancer {
     }
 
     const rev_conntrack_fd = try map_support.createMap(
-        @enumFromInt(lb_prog.maps[2].map_type),
+        @fromBackingInt(@intCast(lb_prog.maps[2].map_type)),
         lb_prog.maps[2].key_size,
         lb_prog.maps[2].value_size,
         lb_prog.maps[2].max_entries,

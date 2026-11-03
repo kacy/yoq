@@ -259,7 +259,7 @@ test "parseClientHelloFields with X25519 and TLS 1.3" {
     try std.testing.expect(info.offers_h2_alpn);
     try std.testing.expect(info.offers_http11_alpn);
 
-    const expected_random = [_]u8{0xAA} ** 32;
+    const expected_random = @as([32]u8, @splat(0xAA));
     try std.testing.expectEqualSlices(u8, &expected_random, &info.client_random);
 }
 

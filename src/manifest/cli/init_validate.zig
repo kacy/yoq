@@ -61,7 +61,7 @@ pub fn validate(args: *std.process.Args.Iterator, alloc: std.mem.Allocator) !voi
 
     var manifest = manifest_loader.load(alloc, manifest_path) catch |err| {
         if (!quiet) {
-            writeErr("failed to load manifest: {s} ({})", .{ manifest_path, err });
+            writeErr("failed to load manifest: {s} ({})\n", .{ manifest_path, err });
             writeErr("hint: create one with 'yoq init'\n", .{});
         }
         return InitValidateError.ManifestLoadFailed;

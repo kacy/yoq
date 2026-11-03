@@ -48,9 +48,9 @@ pub const EventSource = enum {
 pub const Event = struct {
     kind: EventKind,
     source: EventSource,
-    service_name_buf: [64]u8 = [_]u8{0} ** 64,
+    service_name_buf: [64]u8 = @splat(0),
     service_name_len: u8 = 0,
-    container_id_buf: [64]u8 = [_]u8{0} ** 64,
+    container_id_buf: [64]u8 = @splat(0),
     container_id_len: u8 = 0,
     ip: ?[4]u8 = null,
     recorded_at: i64,
@@ -159,10 +159,10 @@ var mutex: std.Io.Mutex = .init;
 var recent_events: [max_recent_events]Event = undefined;
 var recent_start: usize = 0;
 var recent_len: usize = 0;
-var event_counts: [@typeInfo(EventKind).@"enum".fields.len]u64 = [_]u64{0} ** @typeInfo(EventKind).@"enum".fields.len;
-var event_counts_by_source: [@typeInfo(EventSource).@"enum".fields.len][@typeInfo(EventKind).@"enum".fields.len]u64 = [_][@typeInfo(EventKind).@"enum".fields.len]u64{
-    [_]u64{0} ** @typeInfo(EventKind).@"enum".fields.len,
-} ** @typeInfo(EventSource).@"enum".fields.len;
+const event_kind_count = @typeInfo(EventKind).@"enum".field_names.len;
+const event_source_count = @typeInfo(EventSource).@"enum".field_names.len;
+var event_counts: [event_kind_count]u64 = @splat(0);
+var event_counts_by_source: [event_source_count][event_kind_count]u64 = @splat(@splat(0));
 var logged_authoritative_flag_notice: bool = false;
 var authoritative_bootstrapped: bool = false;
 var applied_services: std.ArrayList(AppliedService) = .empty;
@@ -232,13 +232,13 @@ pub fn noteEndpointUnhealthyFrom(source: EventSource, service_name: []const u8, 
 pub fn eventCount(kind: EventKind) u64 {
     mutex.lockUncancelable(std.Options.debug_io);
     defer mutex.unlock(std.Options.debug_io);
-    return event_counts[@intFromEnum(kind)];
+    return event_counts[@backingInt(kind)];
 }
 
 pub fn eventCountBySource(source: EventSource, kind: EventKind) u64 {
     mutex.lockUncancelable(std.Options.debug_io);
     defer mutex.unlock(std.Options.debug_io);
-    return event_counts_by_source[@intFromEnum(source)][@intFromEnum(kind)];
+    return event_counts_by_source[@backingInt(source)][@backingInt(kind)];
 }
 
 pub fn snapshotRecentEvents(out: []Event) usize {
@@ -265,10 +265,8 @@ pub fn resetForTest() void {
     defer mutex.unlock(std.Options.debug_io);
     recent_start = 0;
     recent_len = 0;
-    event_counts = [_]u64{0} ** event_counts.len;
-    event_counts_by_source = [_][@typeInfo(EventKind).@"enum".fields.len]u64{
-        [_]u64{0} ** @typeInfo(EventKind).@"enum".fields.len,
-    } ** @typeInfo(EventSource).@"enum".fields.len;
+    event_counts = @splat(0);
+    event_counts_by_source = @splat(@splat(0));
     logged_authoritative_flag_notice = false;
     authoritative_bootstrapped = false;
     deinitAppliedServicesLocked();
@@ -445,8 +443,8 @@ fn noteEvent(event: Event) void {
         recent_start = (recent_start + 1) % max_recent_events;
     }
 
-    event_counts[@intFromEnum(event.kind)] += 1;
-    event_counts_by_source[@intFromEnum(event.source)][@intFromEnum(event.kind)] += 1;
+    event_counts[@backingInt(event.kind)] += 1;
+    event_counts_by_source[@backingInt(event.source)][@backingInt(event.kind)] += 1;
 
     log.debug(
         "service reconciler: event source={s} kind={s} service={s} container={s}",

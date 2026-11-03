@@ -87,7 +87,7 @@ pub const Orchestrator = struct {
     alloc: std.mem.Allocator,
     manifest: *spec.Manifest,
     app_name: []const u8,
-    supervisor_token: [12]u8 = [_]u8{0} ** 12,
+    supervisor_token: [12]u8 = @splat(0),
     states: []ServiceState,
     dev_mode: bool = false,
     restart_requested: []std.atomic.Value(bool),
@@ -110,7 +110,7 @@ pub const Orchestrator = struct {
         errdefer alloc.free(states);
         for (states) |*s| {
             s.* = .{
-                .container_id = [_]u8{0} ** 12,
+                .container_id = @as([12]u8, @splat(0)),
                 .thread = null,
                 .status = .pending,
             };

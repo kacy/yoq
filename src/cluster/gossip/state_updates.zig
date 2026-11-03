@@ -27,7 +27,7 @@ pub fn applyStateUpdate(self: anytype, update: anytype) !void {
 
     if (update.incarnation < member.incarnation) return;
     if (update.incarnation == member.incarnation) {
-        if (@intFromEnum(update.state) <= @intFromEnum(member.state)) return;
+        if (@backingInt(update.state) <= @backingInt(member.state)) return;
     } else {
         member.incarnation = update.incarnation;
         // refutations may advertise overlay or wildcard addresses. keep registered

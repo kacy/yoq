@@ -77,8 +77,7 @@ const PreparedService = struct {
             try gpu_runtime.appendRequiredEnv(alloc, &merged_env, data);
         }
 
-        const has_health_check = svc.health_check != null;
-        const net_config: ?net_setup.NetworkConfig = .{ .skip_dns = has_health_check };
+        const net_config: ?net_setup.NetworkConfig = .{};
 
         return .{
             .alloc = alloc,
@@ -188,7 +187,8 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
         var c = prepared.createContainer(orch, idx, id, svc.name);
         const start_time = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
 
-        c.start() catch {
+        c.start() catch |err| {
+            log.err("failed to start container for {s}: {}", .{ svc.name, err });
             cleanupContainerArtifacts(id);
             orch.states[idx].setStatus(.failed);
             return;
@@ -235,6 +235,9 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
             log.warn("failed to release published ports for {s}: {}", .{ svc.name, err });
         };
         const run_duration_ns = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds() - start_time;
+        if (!shutdown_requested.load(.acquire) and !orch.states[idx].stop_requested.load(.acquire)) {
+            reportUnexpectedExit(orch.alloc, svc.name, id, exit_code);
+        }
         cleanupContainerArtifacts(id);
 
         if (shutdown_requested.load(.acquire) or orch.states[idx].stop_requested.load(.acquire) or
@@ -287,6 +290,14 @@ pub fn watcherThread(orch: anytype, w: *watcher_mod.Watcher, shutdown_requested:
             }
         }
     }
+}
+
+/// Cleanup deletes the logs, so this is the last chance to show why it exited.
+fn reportUnexpectedExit(alloc: std.mem.Allocator, service_name: []const u8, id: []const u8, exit_code: u8) void {
+    writeErr("service {s} exited with code {d}\n", .{ service_name, exit_code });
+    const tail = logs.readTail(alloc, id, 20) catch return;
+    defer alloc.free(tail);
+    if (tail.len != 0) writeErr("last output from {s}:\n{s}\n", .{ service_name, tail });
 }
 
 fn cleanupContainerArtifacts(id: []const u8) void {

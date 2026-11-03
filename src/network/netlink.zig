@@ -133,7 +133,7 @@ test "tcmsg struct layout" {
 test "tc message builder" {
     var buf: [buf_size]u8 align(4) = undefined;
     var mb = MessageBuilder.init(&buf);
-    const hdr = try mb.putHeader(@enumFromInt(44), NLM_F.REQUEST | NLM_F.ACK, TcMsg);
+    const hdr = try mb.putHeader(@fromBackingInt(@intCast(44)), NLM_F.REQUEST | NLM_F.ACK, TcMsg);
     const msg = mb.getPayload(hdr, TcMsg);
     msg.ifindex = 3;
     msg.parent = TC_H.CLSACT;
@@ -151,7 +151,7 @@ test "putHeaderGenl builds correct message" {
     const hdr = try mb.putHeaderGenl(42, NLM_F.REQUEST, CTRL_CMD_GETFAMILY);
     const genl = mb.getPayload(hdr, GenlMsgHdr);
     try std.testing.expectEqual(@as(u8, CTRL_CMD_GETFAMILY), genl.cmd);
-    try std.testing.expectEqual(@as(u16, 42), @intFromEnum(hdr.type));
+    try std.testing.expectEqual(@as(u16, 42), @backingInt(hdr.type));
 }
 
 test "putAttrU16 and putAttrU8" {

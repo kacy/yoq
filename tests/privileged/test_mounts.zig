@@ -89,7 +89,7 @@ fn runCase(recursive: bool) !void {
     }
     var status: u32 = 0;
     while (true) {
-        const waited = linux.waitpid(@intCast(pid), &status, 0);
+        const waited = linux.waitpid(@intCast(pid), @ptrCast(&status), 0);
         if (linux.errno(waited) == .INTR) continue;
         if (linux.errno(waited) != .SUCCESS) return error.WaitFailed;
         break;

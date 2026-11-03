@@ -873,13 +873,13 @@ const LocalApplyBackend = struct {
                 runner_self.orch.finishRuntimeSetup();
             }
 
-            fn reportProgress(runner_self: *@This(), completed_targets: usize, failed_targets: usize) void {
+            pub fn reportProgress(runner_self: *@This(), completed_targets: usize, failed_targets: usize) void {
                 if (runner_self.progress) |progress| {
                     progress.mark(.in_progress, null, completed_targets, failed_targets) catch {};
                 }
             }
 
-            fn reportProgressDetails(
+            pub fn reportProgressDetails(
                 runner_self: *@This(),
                 completed_targets: usize,
                 failed_targets: usize,
@@ -900,14 +900,14 @@ const LocalApplyBackend = struct {
                 }
             }
 
-            fn awaitControl(runner_self: *@This()) bool {
+            pub fn awaitControl(runner_self: *@This()) bool {
                 if (runner_self.progress) |progress| {
                     return progress.waitWhilePaused() catch false;
                 }
                 return false;
             }
 
-            fn waitHealthyResults(
+            pub fn waitHealthyResults(
                 runner_self: *@This(),
                 alloc: std.mem.Allocator,
                 indexes: []const usize,
@@ -990,6 +990,8 @@ const ScopedApplyRunner = struct {
 
 test "PreparedLocalApply init resolves filtered start set" {
     const alloc = std.testing.allocator;
+    try store.initTestDb();
+    defer store.deinitTestDb();
     const loader = @import("loader.zig");
 
     var manifest = try loader.loadFromString(alloc,
@@ -1283,7 +1285,7 @@ test "runReplacementPlan emits live target progress after each update" {
 
         fn finish(_: *@This()) void {}
 
-        fn reportProgress(self: *@This(), completed_targets: usize, failed_targets: usize) void {
+        pub fn reportProgress(self: *@This(), completed_targets: usize, failed_targets: usize) void {
             self.progress_updates.append(alloc, .{
                 .completed_targets = completed_targets,
                 .failed_targets = failed_targets,
@@ -1322,7 +1324,7 @@ test "runReplacementPlan reports readiness timeout details" {
         fn start(_: *@This(), _: usize, _: *std.StringHashMapUnmanaged(void)) !void {}
         fn stop(_: *@This(), _: usize) !void {}
         fn finish(_: *@This()) void {}
-        fn waitHealthy(_: *@This(), _: []const usize, _: u32) ReplacementHealthResult {
+        pub fn waitHealthy(_: *@This(), _: []const usize, _: u32) ReplacementHealthResult {
             return .timeout;
         }
     };
@@ -1355,7 +1357,7 @@ test "runReplacementPlan tracks mixed per-target readiness outcomes" {
         fn start(_: *@This(), _: usize, _: *std.StringHashMapUnmanaged(void)) !void {}
         fn stop(_: *@This(), _: usize) !void {}
         fn finish(_: *@This()) void {}
-        fn waitHealthyResults(_: *@This(), alloc_inner: std.mem.Allocator, _: []const usize, _: u32) ![]ReplacementHealthResult {
+        pub fn waitHealthyResults(_: *@This(), alloc_inner: std.mem.Allocator, _: []const usize, _: u32) ![]ReplacementHealthResult {
             const results = try alloc_inner.alloc(ReplacementHealthResult, 2);
             results[0] = .healthy;
             results[1] = .failed;
@@ -1445,7 +1447,7 @@ test "runReplacementPlan reports canceled rollout before mutation" {
         fn stop(_: *@This(), _: usize) !void {}
         fn finish(_: *@This()) void {}
 
-        fn awaitControl(self: *@This()) bool {
+        pub fn awaitControl(self: *@This()) bool {
             self.control_checks += 1;
             return self.control_checks >= 1;
         }
@@ -1484,7 +1486,7 @@ test "runReplacementPlan reports canceled rollout after mutation" {
         fn stop(_: *@This(), _: usize) !void {}
         fn finish(_: *@This()) void {}
 
-        fn awaitControl(self: *@This()) bool {
+        pub fn awaitControl(self: *@This()) bool {
             self.control_checks += 1;
             return self.control_checks >= 2;
         }

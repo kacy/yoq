@@ -40,7 +40,7 @@ pub const MessageBuilder = struct {
 
         const hdr: *linux.nlmsghdr = @ptrCast(@alignCast(&self.buf[self.pos]));
         hdr.len = @intCast(total);
-        hdr.type = @enumFromInt(family_id);
+        hdr.type = @fromBackingInt(@intCast(family_id));
         hdr.flags = flags;
         hdr.seq = 1;
         hdr.pid = 0;

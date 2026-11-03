@@ -1,9 +1,9 @@
 FROM alpine:3.20 AS builder
 
 RUN apk add --no-cache curl tar xz
-ARG ZIG_VERSION=0.16.0
+ARG ZIG_VERSION=0.17.0
 ARG ZIG_TARGET=x86_64-linux
-ARG ZIG_SHA256=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+ARG ZIG_SHA256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
 RUN set -eux; \
     zig_archive="zig-${ZIG_TARGET}-${ZIG_VERSION}.tar.xz"; \
     zig_url="https://ziglang.org/download/${ZIG_VERSION}/${zig_archive}"; \

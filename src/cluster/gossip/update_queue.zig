@@ -11,7 +11,7 @@ pub fn collectPiggybackUpdates(self: anytype, BoundedUpdates: type, max_piggybac
     // their current queue order until expired entries are removed below.
     std.sort.insertion(PendingUpdate, self.pending_updates.items, {}, struct {
         fn lessThan(_: void, lhs: PendingUpdate, rhs: PendingUpdate) bool {
-            return @intFromEnum(lhs.update.state) > @intFromEnum(rhs.update.state);
+            return @backingInt(lhs.update.state) > @backingInt(rhs.update.state);
         }
     }.lessThan);
 
@@ -64,8 +64,8 @@ fn evictionIndex(pending_updates: anytype) usize {
     var selected: usize = 0;
     for (pending_updates[1..], 1..) |pending, index| {
         const candidate = pending_updates[selected];
-        const priority = @intFromEnum(pending.update.state);
-        const selected_priority = @intFromEnum(candidate.update.state);
+        const priority = @backingInt(pending.update.state);
+        const selected_priority = @backingInt(candidate.update.state);
 
         // evict the lowest state priority first. within that state, prefer
         // fewer remaining transmissions and keep the first entry on a tie.

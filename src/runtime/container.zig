@@ -591,7 +591,7 @@ test "validateContainerId returns error on invalid id" {
 
 test "container config validates hostname length" {
     // hostname should be reasonable length
-    const long_hostname = "a" ** 64;
+    const long_hostname = &@as([64:0]u8, @splat('a'));
     const config = ContainerConfig{
         .id = "abc123def456",
         .rootfs = "/tmp/rootfs",
@@ -617,20 +617,20 @@ test "container config with empty args and env" {
 
 test "ExitCode enum values follow conventions" {
     // success should be 0
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(ExitCode.success));
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(ExitCode.success));
 
     // permission denied follows bash convention (126)
-    try std.testing.expectEqual(@as(u8, 126), @intFromEnum(ExitCode.permission_denied));
+    try std.testing.expectEqual(@as(u8, 126), @backingInt(ExitCode.permission_denied));
 
     // command not found follows bash convention (127)
-    try std.testing.expectEqual(@as(u8, 127), @intFromEnum(ExitCode.command_not_found));
+    try std.testing.expectEqual(@as(u8, 127), @backingInt(ExitCode.command_not_found));
 
     // filesystem errors should be distinct
-    try std.testing.expect(@intFromEnum(ExitCode.filesystem_error) >= 120);
-    try std.testing.expect(@intFromEnum(ExitCode.filesystem_error) < 126);
+    try std.testing.expect(@backingInt(ExitCode.filesystem_error) >= 120);
+    try std.testing.expect(@backingInt(ExitCode.filesystem_error) < 126);
 
     // bind mount denied should be distinct from general filesystem error
-    try std.testing.expect(@intFromEnum(ExitCode.bind_mount_denied) != @intFromEnum(ExitCode.filesystem_error));
+    try std.testing.expect(@backingInt(ExitCode.bind_mount_denied) != @backingInt(ExitCode.filesystem_error));
 }
 
 test "startup refuses filesystem setup in the host mount namespace" {

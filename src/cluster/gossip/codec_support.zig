@@ -98,7 +98,7 @@ pub fn encodeUpdates(buf: []u8, start: usize, updates: anytype) usize {
         buf[pos] = @intCast(u.addr.port & 0xFF);
         buf[pos + 1] = @intCast((u.addr.port >> 8) & 0xFF);
         pos += 2;
-        buf[pos] = @intFromEnum(u.state);
+        buf[pos] = @backingInt(u.state);
         pos += 1;
         writeU64(buf[pos..], u.incarnation);
         pos += 8;

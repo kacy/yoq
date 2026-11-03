@@ -16,7 +16,7 @@ pub fn main() !void {
     var created: usize = 0;
     defer for (map_fds[0..created]) |fd| close(fd);
     for (bytecode.maps, &map_fds) |definition, *fd| {
-        fd.* = try maps.createMap(@enumFromInt(definition.map_type), definition.key_size, definition.value_size, definition.max_entries);
+        fd.* = try maps.createMap(@fromBackingInt(@intCast(definition.map_type)), definition.key_size, definition.value_size, definition.max_entries);
         created += 1;
     }
     const ingress = try programs.loadProgram(bytecode, &map_fds);
@@ -56,7 +56,7 @@ fn clientHash(client: [4]u8) u32 {
 }
 
 fn tcpPacket(source: [4]u8, destination: [4]u8, source_port: u16, destination_port: u16) [54]u8 {
-    var packet = [_]u8{0} ** 54;
+    var packet = @as([54]u8, @splat(0));
     std.mem.writeInt(u16, packet[12..14], 0x0800, .big);
     packet[14] = 0x45;
     std.mem.writeInt(u16, packet[16..18], 40, .big);

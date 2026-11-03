@@ -593,6 +593,10 @@ fn publishContainer(id: []const u8, name: ?[]const u8, saved: *const run_state.S
     const creation_lock = try control.lock(id, .command, true);
     defer creation_lock.deinit();
     control.register(id, name) catch |err| {
+        if (err == error.NameInUse) {
+            writeErr("container name already in use: {s}\n", .{name orelse ""});
+            return ContainerError.NameInUse;
+        }
         writeErr("cannot reserve container name: {}\n", .{err});
         return ContainerError.ConfigSaveFailed;
     };
@@ -853,13 +857,13 @@ test "run flags parse cpu affinity shared memory and typed tmpfs" {
 
 test "run name parser enforces hostname-compatible boundaries" {
     const alloc = std.testing.allocator;
-    for ([_][]const u8{ "a", "A1", "web-2", "a" ** 63 }) |name| {
+    for ([_][]const u8{ "a", "A1", "web-2", &@as([63:0]u8, @splat('a')) }) |name| {
         var args: TestArgs = .{ .values = &.{ "--name", name, "image" } };
         var flags = try parseRunFlags(&args, alloc, std.testing.io);
         defer flags.deinit(alloc);
         try std.testing.expectEqualStrings(name, flags.container_name.?);
     }
-    for ([_][]const u8{ "", "a" ** 64, "-web", "web-", "web_api", "web.api", "web api", "a\x00b", "caf\xc3\xa9" }) |name| {
+    for ([_][]const u8{ "", &@as([64:0]u8, @splat('a')), "-web", "web-", "web_api", "web.api", "web api", "a\x00b", "caf\xc3\xa9" }) |name| {
         var args: TestArgs = .{ .values = &.{ "--name", name, "image" } };
         try std.testing.expectError(ContainerError.InvalidArgument, parseRunFlags(&args, alloc, std.testing.io));
     }

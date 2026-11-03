@@ -269,7 +269,7 @@ const max_args = cmd.max_args;
 const ArgList = cmd.ArgList;
 
 fn buildMasqueradeArgs(action: Action, bridge: []const u8, subnet: []const u8) ArgList {
-    var args: ArgList = .{null} ** max_args;
+    var args: ArgList = @splat(null);
     args[0] = "iptables";
     args[1] = "-t";
     args[2] = "nat";
@@ -286,7 +286,7 @@ fn buildMasqueradeArgs(action: Action, bridge: []const u8, subnet: []const u8) A
 }
 
 fn buildContainerForwardArgs(action: Action, bridge: []const u8, subnet: []const u8, returning: bool) ArgList {
-    var args: ArgList = .{null} ** max_args;
+    var args: ArgList = @splat(null);
     args[0] = "iptables";
     args[1] = "-w";
     args[2] = "5";
@@ -326,7 +326,7 @@ fn buildDnatArgsAt(
     port_buf: *[8]u8,
     dest_buf: *[32]u8,
 ) ArgList {
-    var args: ArgList = .{null} ** max_args;
+    var args: ArgList = @splat(null);
     const host_port_str = cmd.portStr(port_buf, host_port);
     const dest_str = destStr(dest_buf, container_ip, container_port);
 
@@ -369,7 +369,7 @@ fn buildForwardArgs(
     protocol: Protocol,
     port_buf: *[8]u8,
 ) ArgList {
-    var args: ArgList = .{null} ** max_args;
+    var args: ArgList = @splat(null);
     const port_str = cmd.portStr(port_buf, container_port);
 
     args[0] = "iptables";
@@ -393,7 +393,7 @@ fn buildLoopbackMasqueradeArgs(
     protocol: Protocol,
     port_buf: *[8]u8,
 ) ArgList {
-    var args: ArgList = .{null} ** max_args;
+    var args: ArgList = @splat(null);
     const port_str = cmd.portStr(port_buf, container_port);
 
     args[0] = "iptables";
@@ -601,7 +601,7 @@ test "checked nat removal accepts absence and preserves command failures" {
 }
 
 test "nat cleanup subprocesses allocate arguments and preserve absent-rule exit status" {
-    var args: ArgList = .{null} ** max_args;
+    var args: ArgList = @splat(null);
     args[0] = "sh";
     args[1] = "-c";
     args[2] = "test -n \"$PATH\" && exit 1";

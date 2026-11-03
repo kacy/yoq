@@ -92,7 +92,7 @@ test "log capture preserves oversized lines and unterminated tails from a real p
         fn run(fd: posix.fd_t, failed: *std.atomic.Value(bool)) void {
             const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
             defer file.close(std.Options.debug_io);
-            const input = "x" ** (Sink.chunk_size * 3 + 71) ++ "\n\nlast-byte";
+            const input = &@as([Sink.chunk_size * 3 + 71:0]u8, @splat('x')) ++ "\n\nlast-byte";
             file.writeStreamingAll(std.Options.debug_io, input) catch failed.store(true, .release);
         }
     };
@@ -107,7 +107,7 @@ test "log capture preserves oversized lines and unterminated tails from a real p
     try std.testing.expect(!failed.load(.acquire));
     const raw = try tmp.dir.readFileAlloc(std.testing.io, "raw-output", alloc, .limited(32 * 1024));
     defer alloc.free(raw);
-    try std.testing.expectEqualStrings("x" ** (Sink.chunk_size * 3 + 71) ++ "\n\nlast-byte", raw);
+    try std.testing.expectEqualStrings(&@as([Sink.chunk_size * 3 + 71:0]u8, @splat('x')) ++ "\n\nlast-byte", raw);
     const data = try tmp.dir.readFileAlloc(std.testing.io, "capture.log", alloc, .limited(32 * 1024));
     defer alloc.free(data);
     try std.testing.expectEqual(@as(usize, Sink.chunk_size * 3 + 71), std.mem.count(u8, data, "x"));

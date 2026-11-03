@@ -27,7 +27,7 @@ pub const RateLimiter = struct {
 
     pub fn init() RateLimiter {
         return .{
-            .entries = [_]RateEntry{empty_entry} ** rate_table_size,
+            .entries = @as([rate_table_size]RateEntry, @splat(empty_entry)),
             .mutex = .init,
         };
     }
@@ -86,7 +86,7 @@ pub const RateLimiter = struct {
     pub fn reset(self: *RateLimiter) void {
         self.mutex.lockUncancelable(std.Options.debug_io);
         defer self.mutex.unlock(std.Options.debug_io);
-        self.entries = [_]RateEntry{empty_entry} ** rate_table_size;
+        self.entries = @as([rate_table_size]RateEntry, @splat(empty_entry));
     }
 };
 

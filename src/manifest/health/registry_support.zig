@@ -10,7 +10,7 @@ pub var health_states: std.ArrayList(types.ServiceHealth) = .empty;
 pub var health_mutex: std.Io.Mutex = .init;
 
 pub var scheduler_thread: ?std.Thread = null;
-pub var worker_threads: [types.max_worker_threads]?std.Thread = [_]?std.Thread{null} ** types.max_worker_threads;
+pub var worker_threads: [types.max_worker_threads]?std.Thread = @splat(null);
 pub var worker_thread_count: usize = 0;
 pub var checker_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 

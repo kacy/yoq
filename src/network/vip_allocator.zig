@@ -16,7 +16,7 @@ const VipRow = struct {
 };
 
 pub fn allocate(db: *sqlite.Db) VipError![4]u8 {
-    var allocated = std.StaticBitSet(65536).initEmpty();
+    var allocated: std.StaticBitSet(65536) = .empty;
     var count: usize = 0;
 
     var stmt = db.prepare("SELECT vip_address FROM services;") catch return VipError.AllocationFailed;

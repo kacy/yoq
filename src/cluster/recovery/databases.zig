@@ -48,7 +48,7 @@ pub fn open(alloc: std.mem.Allocator, dir: std.Io.Dir, name: []const u8, write: 
     // the caller holds the private directory and server ownership lock.
     const path = try dir.realPathFileAlloc(io, name, alloc);
     defer alloc.free(path);
-    const terminated = try alloc.dupeZ(u8, path);
+    const terminated = try alloc.dupeSentinel(u8, path, 0);
     defer alloc.free(terminated);
     return sqlite.Db.init(.{ .mode = .{ .File = terminated }, .open_flags = .{ .write = write } });
 }

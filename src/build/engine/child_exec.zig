@@ -82,7 +82,7 @@ fn executeInRoot(ctx: *const BuildChildContext, root: []const u8) u8 {
 /// Mount setup is complete. Remove this capability from every set, including
 /// the bounding set, so exec as UID 0 cannot restore writable host binds.
 pub fn dropMountCapability() !void {
-    if (linux.errno(linux.prctl(@intFromEnum(linux.PR.CAPBSET_DROP), linux.CAP.SYS_ADMIN, 0, 0, 0)) != .SUCCESS) return error.CapabilityFailed;
+    if (linux.errno(linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), linux.CAP.SYS_ADMIN, 0, 0, 0)) != .SUCCESS) return error.CapabilityFailed;
     var header = linux.cap_user_header_t{ .version = 0x20080522, .pid = 0 };
     var data: [2]linux.cap_user_data_t = undefined;
     if (linux.errno(linux.syscall2(.capget, @intFromPtr(&header), @intFromPtr(&data))) != .SUCCESS) return error.CapabilityFailed;
@@ -98,7 +98,7 @@ pub fn execShellCommand(command: []const u8, env: []const []const u8, shell: ?[]
     var str_buf: [string_buf_capacity]u8 = undefined;
     var str_pos: usize = 0;
 
-    var argv: [max_argv]?[*:0]const u8 = .{null} ** max_argv;
+    var argv: [max_argv]?[*:0]const u8 = @splat(null);
     var argv_len: usize = 0;
 
     if (shell) |sh| {
@@ -121,7 +121,7 @@ pub fn execShellCommand(command: []const u8, env: []const []const u8, shell: ?[]
 
     argv[argv_len] = exec_helpers.packString(&str_buf, &str_pos, command) orelse return exit_not_found;
 
-    var envp: [max_envp]?[*:0]const u8 = .{null} ** max_envp;
+    var envp: [max_envp]?[*:0]const u8 = @splat(null);
     for (env, 0..) |e, i| {
         if (i >= envp.len - 1) break;
         envp[i] = exec_helpers.packString(&str_buf, &str_pos, e) orelse return exit_not_found;

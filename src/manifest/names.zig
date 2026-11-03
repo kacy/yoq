@@ -19,8 +19,8 @@ pub fn isValid(name: []const u8) bool {
 }
 
 test "isValid accepts ordinary names and refuses anything path-like" {
-    for ([_][]const u8{ "data-1", "pg.v2", "web_api", "A", "a" ** max_len }) |name|
+    for ([_][]const u8{ "data-1", "pg.v2", "web_api", "A", &@as([max_len:0]u8, @splat('a')) }) |name|
         try std.testing.expect(isValid(name));
-    for ([_][]const u8{ "", ".", "..", "../etc", "a/b", "-x", ".hidden", "a\x00b", "a b", "a\\b", "a" ** (max_len + 1) }) |name|
+    for ([_][]const u8{ "", ".", "..", "../etc", "a/b", "-x", ".hidden", "a\x00b", "a b", "a\\b", &@as([max_len + 1:0]u8, @splat('a')) }) |name|
         try std.testing.expect(!isValid(name));
 }

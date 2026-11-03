@@ -327,7 +327,8 @@ pub fn lock(name: []const u8) Error!Lock {
 }
 
 const KernelCleanup = struct {
-    fn run(_: KernelCleanup, record: Record) !void {
+    fn run(_: KernelCleanup, record: Record, db: *sqlite.Db) !void {
+        try @import("dns_firewall.zig").remove(db, record.bridge_name, record.subnet.gateway);
         try firewall.remove(record.bridge_name, record.subnet.base);
         try bridge.deleteBridgeChecked(record.bridge_name);
     }
@@ -348,7 +349,7 @@ fn removeWith(name: []const u8, cleanup: anytype) Error!void {
     defer record.deinit(std.heap.page_allocator);
     if (record.references != 0) return error.InUse;
     if (record.provisioned) {
-        cleanup.run(record) catch return error.CleanupFailed;
+        cleanup.run(record, lease.db) catch return error.CleanupFailed;
     }
     lease.db.exec("DELETE FROM local_networks WHERE name = ?;", .{}, .{sqlite.Text{ .data = name }}) catch return error.DbError;
     lease.db.exec("COMMIT;", .{}, .{}) catch return error.DbError;
@@ -439,7 +440,7 @@ test "named network removal keeps metadata when kernel cleanup fails" {
     try markProvisioned(record.name);
     const Cleanup = struct {
         fail: bool,
-        fn run(self: @This(), _: Record) !void {
+        fn run(self: @This(), _: Record, _: *sqlite.Db) !void {
             if (self.fail) return error.InjectedFailure;
         }
     };

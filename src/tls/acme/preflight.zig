@@ -172,7 +172,7 @@ test "preflight reports missing referenced secret" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
 
-    const key = [_]u8{0xAB} ** secrets.key_length;
+    const key = @as([secrets.key_length]u8, @splat(0xAB));
     var store = try secrets.SecretsStore.initWithKey(&db, alloc, key);
     const config = config_mod.ManagedConfig{
         .email = "ops@example.com",

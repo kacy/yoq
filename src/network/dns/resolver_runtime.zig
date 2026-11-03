@@ -23,7 +23,7 @@ var upstream_dns: [4]u8 = .{ 8, 8, 8, 8 };
 var upstream_initialized: bool = false;
 const ListenerConfig = struct {
     address: [4]u8,
-    device: [16]u8 = [_]u8{0} ** 16,
+    device: [16]u8 = @splat(0),
     device_len: usize,
     scope: [63]u8 = undefined,
     scope_len: usize = 0,
@@ -45,16 +45,16 @@ const Listener = struct {
     external: bool = false,
 };
 // Gateway sockets stay bound to their own bridge, including named networks.
-var listeners: [256]?Listener = .{null} ** 256;
+var listeners: [256]?Listener = @splat(null);
 var retry_running = std.atomic.Value(bool).init(false);
 var retry_thread: ?std.Thread = null;
 var resolver_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var resolver_mutex: std.Io.Mutex = .init;
-var rate_limits: [256]RateLimitEntry = [_]RateLimitEntry{.{
+var rate_limits: [256]RateLimitEntry = @splat(.{
     .ip = 0,
     .tokens = rate_limit_max_tokens,
     .last_refill = 0,
-}} ** 256;
+});
 var rate_limit_mutex: std.Io.Mutex = .init;
 
 pub fn startResolver() void {

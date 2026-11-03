@@ -10,7 +10,7 @@ pub fn allocate(db: *sqlite.Db, container_id: []const u8) common.IpError![4]u8 {
     db.exec("BEGIN IMMEDIATE;", .{}, .{}) catch return common.IpError.AllocationFailed;
     errdefer db.exec("ROLLBACK;", .{}, .{}) catch {};
 
-    var allocated = std.StaticBitSet(65536).initEmpty();
+    var allocated: std.StaticBitSet(65536) = .empty;
     var count: usize = 0;
 
     const IpRow = struct { ip_address: sqlite.Text };
@@ -62,7 +62,7 @@ pub fn allocateWithSubnet(db: *sqlite.Db, container_id: []const u8, config: comm
         config.base[0], config.base[1], config.base[2],
     }) catch return common.IpError.AllocationFailed;
 
-    var allocated = std.StaticBitSet(256).initEmpty();
+    var allocated: std.StaticBitSet(256) = .empty;
 
     const IpRow = struct { ip_address: sqlite.Text };
     var stmt = db.prepare("SELECT ip_address FROM ip_allocations WHERE ip_address LIKE ?;") catch

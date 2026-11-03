@@ -362,7 +362,7 @@ test "schema migrations reserve the writer before reading an existing wal schema
     var directory_buf: [4096]u8 = undefined;
     const directory_len = try tmp.dir.realPathFile(std.testing.io, ".", &directory_buf);
     var path_buf: [4096]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/migration.db", .{directory_buf[0..directory_len]});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/migration.db", .{directory_buf[0..directory_len]}, 0);
     var migrator = try sqlite.Db.init(.{ .mode = .{ .File = path }, .open_flags = .{ .write = true, .create = true } });
     defer migrator.deinit();
     try schema.init(&migrator);

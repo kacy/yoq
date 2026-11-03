@@ -135,15 +135,15 @@ test "decodeKey invalid length" {
 }
 
 test "decodeKey rejects keys that do not decode to exactly 32 bytes" {
-    try std.testing.expect(decodeKey("A" ** 43 ++ "=") != null);
+    try std.testing.expect(decodeKey(&@as([43:0]u8, @splat('A')) ++ "=") != null);
 
     // 44 alphabet characters with no padding would decode to 33 bytes
-    try std.testing.expect(decodeKey("A" ** 44) == null);
+    try std.testing.expect(decodeKey(&@as([44:0]u8, @splat('A'))) == null);
     // "==" padding would decode to 31 bytes
-    try std.testing.expect(decodeKey("A" ** 42 ++ "==") == null);
-    try std.testing.expect(decodeKey("A" ** 42 ++ "=") == null);
-    try std.testing.expect(decodeKey("A" ** 44 ++ "=") == null);
-    try std.testing.expect(decodeKey("A" ** 42 ++ "!=") == null);
+    try std.testing.expect(decodeKey(&@as([42:0]u8, @splat('A')) ++ "==") == null);
+    try std.testing.expect(decodeKey(&@as([42:0]u8, @splat('A')) ++ "=") == null);
+    try std.testing.expect(decodeKey(&@as([44:0]u8, @splat('A')) ++ "=") == null);
+    try std.testing.expect(decodeKey(&@as([42:0]u8, @splat('A')) ++ "!=") == null);
 }
 
 test "parseEndpoint valid" {
@@ -235,7 +235,7 @@ test "addPeer builds correct genetlink message" {
     const peer_nest = try mb.startNested(hdr, 0);
 
     // 32 bytes of fake key
-    var fake_key: [32]u8 = .{0xAB} ** 32;
+    var fake_key: [32]u8 = @splat(0xAB);
     try mb.putAttr(hdr, nl.WGPEER_A.PUBLIC_KEY, &fake_key);
 
     // endpoint
@@ -274,7 +274,7 @@ test "removePeer builds correct genetlink message" {
     const peers_nest = try mb.startNested(hdr, nl.WGDEVICE_A.PEERS);
     const peer_nest = try mb.startNested(hdr, 0);
 
-    var fake_key: [32]u8 = .{0xCD} ** 32;
+    var fake_key: [32]u8 = @splat(0xCD);
     try mb.putAttr(hdr, nl.WGPEER_A.PUBLIC_KEY, &fake_key);
     try mb.putAttrU32(hdr, nl.WGPEER_A.FLAGS, nl.WGPEER_F_REMOVE_ME);
 

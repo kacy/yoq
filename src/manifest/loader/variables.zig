@@ -56,7 +56,7 @@ pub fn expandVariables(alloc: std.mem.Allocator, input: []const u8) common.LoadE
 }
 
 fn getEnvVarOwned(alloc: std.mem.Allocator, name: []const u8) error{OutOfMemory}!?[]u8 {
-    const name_z = try alloc.dupeZ(u8, name);
+    const name_z = try alloc.dupeSentinel(u8, name, 0);
     defer alloc.free(name_z);
 
     const value = std.c.getenv(name_z.ptr) orelse return null;
@@ -89,7 +89,7 @@ test "variable expansion uses fallback only when the environment value is absent
     const alloc = std.testing.allocator;
     const name = "YOQ_TEST_VARIABLE_EXPANSION_EMPTY_VALUE";
     const original = if (std.c.getenv(name)) |value|
-        try alloc.dupeZ(u8, std.mem.span(value))
+        try alloc.dupeSentinel(u8, std.mem.span(value), 0)
     else
         null;
     defer if (original) |value| alloc.free(value);

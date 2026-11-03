@@ -28,9 +28,9 @@ pub const DetectPaths = struct {
 var detect_paths = DetectPaths{};
 
 pub const IbDevice = struct {
-    name: [32]u8 = .{0} ** 32,
+    name: [32]u8 = @splat(0),
     name_len: u8 = 0,
-    pci_bus_id: [16]u8 = .{0} ** 16,
+    pci_bus_id: [16]u8 = @splat(0),
     pci_bus_id_len: u8 = 0,
     active_ports: u8 = 0,
     rate_gbps: u32 = 0,

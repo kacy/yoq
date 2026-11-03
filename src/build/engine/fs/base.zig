@@ -263,11 +263,11 @@ test "build base gzip diff IDs survive exported config and reject invalid metada
 
 test "build base preserves config layer order" {
     const alloc = std.testing.allocator;
-    const first = "sha256:" ++ "1" ** 64;
-    const second = "sha256:" ++ "2" ** 64;
+    const first = "sha256:" ++ &@as([64:0]u8, @splat('1'));
+    const second = "sha256:" ++ &@as([64:0]u8, @splat('2'));
     const layers = [_]spec.Descriptor{
-        .{ .mediaType = spec.media_type.oci_layer_gzip, .digest = "sha256:" ++ "a" ** 64, .size = 10 },
-        .{ .mediaType = spec.media_type.oci_layer_gzip, .digest = "sha256:" ++ "b" ** 64, .size = 20 },
+        .{ .mediaType = spec.media_type.oci_layer_gzip, .digest = "sha256:" ++ &@as([64:0]u8, @splat('a')), .size = 10 },
+        .{ .mediaType = spec.media_type.oci_layer_gzip, .digest = "sha256:" ++ &@as([64:0]u8, @splat('b')), .size = 20 },
     };
     var state = types.BuildState.init(alloc);
     defer state.deinit();

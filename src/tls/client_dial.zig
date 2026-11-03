@@ -103,7 +103,7 @@ fn openTcp(address: []const u8, port: u16, connect_timeout_ms: u32) !posix.fd_t 
         .family = posix.AF.INET,
         .port = std.mem.nativeToBig(u16, port),
         .addr = std.mem.bytesToValue(u32, &ip_bytes),
-        .zero = .{0} ** 8,
+        .zero = @splat(0),
     };
     const socket = transport.Stream{ .fd = fd, .deadline = transport.Deadline.afterMilliseconds(connect_timeout_ms) };
     linux_platform.posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch |err| switch (err) {
@@ -181,7 +181,7 @@ fn openTestListener() !struct { fd: posix.fd_t, port: u16 } {
         .family = posix.AF.INET,
         .port = 0,
         .addr = std.mem.bytesToValue(u32, &[_]u8{ 127, 0, 0, 1 }),
-        .zero = .{0} ** 8,
+        .zero = @splat(0),
     };
     try linux_platform.posix.bind(listen_fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in));
     try linux_platform.posix.listen(listen_fd, 1);

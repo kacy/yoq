@@ -51,5 +51,5 @@ fn openDirectory(root_fd: std.posix.fd_t, relative: []const u8) !std.posix.fd_t 
 }
 
 fn fdPath(fd: std.posix.fd_t, buf: []u8) ![:0]const u8 {
-    return std.fmt.bufPrintZ(buf, "/proc/self/fd/{d}", .{fd});
+    return std.fmt.bufPrintSentinel(buf, "/proc/self/fd/{d}", .{fd}, 0);
 }

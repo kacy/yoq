@@ -599,7 +599,7 @@ test "registration rejects a wireguard key that does not decode to 32 bytes" {
 
     // 44 alphabet characters without padding: every agent's decoder used to
     // panic on this once it reached the wireguard_peers table
-    const body = "{\"token\":\"join-secret\",\"address\":\"10.0.0.2\",\"cpu_cores\":2,\"memory_mb\":512,\"wg_public_key\":\"" ++ "A" ** 44 ++ "\"}";
+    const body = "{\"token\":\"join-secret\",\"address\":\"10.0.0.2\",\"cpu_cores\":2,\"memory_mb\":512,\"wg_public_key\":\"" ++ &@as([44:0]u8, @splat('A')) ++ "\"}";
     const response = handleAgentRegisterImpl(alloc, .{
         .method = .POST,
         .path = "/agents/register",
@@ -620,10 +620,10 @@ test "registration rejects a wireguard key that does not decode to 32 bytes" {
     try std.testing.expectEqual(@as(usize, 0), agents.len);
 }
 
-const retry_test_key = "0123456789abcdef" ** 4;
-const test_wg_key = "test" ++ "A" ** 39 ++ "=";
-const original_wg_key = "orig" ++ "A" ** 39 ++ "=";
-const different_wg_key = "diff" ++ "A" ** 39 ++ "=";
+const retry_test_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const test_wg_key = "test" ++ &@as([39:0]u8, @splat('A')) ++ "=";
+const original_wg_key = "orig" ++ &@as([39:0]u8, @splat('A')) ++ "=";
+const different_wg_key = "diff" ++ &@as([39:0]u8, @splat('A')) ++ "=";
 
 fn registerRetryForTest(node: *@import("../../../cluster/node.zig").Node, key: []const u8, public_key: []const u8, address: []const u8) !Response {
     const alloc = std.testing.allocator;
@@ -805,7 +805,7 @@ test "registration lists the other voters as gossip seeds" {
             .{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 },
             .{ .id = 3, .addr = .{ 10, 0, 0, 3 }, .port = 9710 },
         },
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = "/unused",
     });
     defer node.deinit();
@@ -915,7 +915,7 @@ test "agent recovery mutations reject success without a quorum" {
         .id = 1,
         .port = 0,
         .peers = &.{.{ .id = 2, .addr = .{ 127, 0, 0, 1 }, .port = 0 }},
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = "/unused",
     });
     defer node.deinit();
@@ -946,7 +946,7 @@ test "agent recovery refuses follower heartbeats with or without a leader hint" 
         .port = 0,
         .api_port = 7700,
         .peers = &.{.{ .id = 2, .addr = .{ 10, 0, 0, 2 }, .port = 9700 }},
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = "/unused",
     });
     defer node.deinit();

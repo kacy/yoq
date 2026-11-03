@@ -296,7 +296,7 @@ pub const ReverseProxy = struct {
                 const internal = http2_response.formatSimpleStreamResponse(
                     self.allocator,
                     1,
-                    @intFromEnum(http.StatusCode.internal_server_error),
+                    @backingInt(http.StatusCode.internal_server_error),
                     "application/json",
                     "{\"error\":\"proxy request failed\"}",
                 ) catch return;
@@ -344,7 +344,7 @@ pub const ReverseProxy = struct {
                         const internal = http2_response.formatSimpleResponse(
                             self.allocator,
                             plan.http2_stream_id orelse 1,
-                            @intFromEnum(http.StatusCode.internal_server_error),
+                            @backingInt(http.StatusCode.internal_server_error),
                             "application/json",
                             "{\"error\":\"proxy request failed\"}",
                         ) catch return;
@@ -921,7 +921,7 @@ fn formatProxyResponse(alloc: std.mem.Allocator, response: ProxyResponse) ![]u8 
         alloc,
         "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}",
         .{
-            @intFromEnum(response.status),
+            @backingInt(response.status),
             response.status.phrase(),
             response.body.len,
             response.body,
@@ -933,7 +933,7 @@ fn formatResponseForProtocol(alloc: std.mem.Allocator, response: ProxyResponse) 
     return switch (response.protocol) {
         .http1 => formatProxyResponse(alloc, response),
         .http2 => if (response.http2_stream_id) |stream_id|
-            http2_response.formatSimpleResponse(alloc, stream_id, @intFromEnum(response.status), "application/json", response.body)
+            http2_response.formatSimpleResponse(alloc, stream_id, @backingInt(response.status), "application/json", response.body)
         else
             alloc.dupe(u8, ""),
     };
@@ -2069,7 +2069,7 @@ const TestUpstreamServer = struct {
     actions: []const TestUpstreamAction,
     thread: ?std.Thread = null,
     request_bufs: [4][2048]u8 = undefined,
-    request_lens: [4]usize = [_]usize{0} ** 4,
+    request_lens: [4]usize = @splat(0),
     accepted: usize = 0,
     websocket_payload: [16]u8 = undefined,
     websocket_length: usize = 0,
@@ -4665,7 +4665,7 @@ const PeerForwardFixture = struct {
     const session_runtime = @import("../../tls/proxy/session_runtime.zig");
     const client_session = @import("../../tls/client_session.zig");
     const record = @import("../../tls/record.zig");
-    const key = [_]u8{9} ** secrets.key_length;
+    const key = @as([secrets.key_length]u8, @splat(9));
 
     fd: posix.fd_t,
     ca: []const u8,
@@ -4753,7 +4753,7 @@ const PeerForwardFixture = struct {
         if (!std.mem.startsWith(u8, request[0..n], "GET /")) return error.InvalidRequest;
         if (self.streaming) {
             _ = try session.write("HTTP/1.1 200 OK\r\nContent-Length: 2097152\r\nConnection: close\r\n\r\n");
-            const chunk = [_]u8{'x'} ** 8192;
+            const chunk = @as([8192]u8, @splat('x'));
             var sent: usize = 0;
             while (sent < 2097152) sent += try session.write(&chunk);
         } else {

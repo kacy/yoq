@@ -103,7 +103,7 @@ fn saveInDb(db: *sqlite.Db, record: ContainerRecord) StoreError!void {
             record.veth_host,
             record.app_name,
             record.created_at,
-            @intFromEnum(record.startup_outcome),
+            @backingInt(record.startup_outcome),
         },
     ) catch return StoreError.WriteFailed;
 }
@@ -196,7 +196,7 @@ fn updateStatusInDb(db: *sqlite.Db, id: []const u8, status: []const u8, pid: ?i3
 pub fn setStartupOutcome(id: []const u8, outcome: StartupOutcome) StoreError!void {
     var lease = try common.leaseDb();
     defer lease.deinit();
-    lease.db.exec("UPDATE containers SET startup_outcome = ? WHERE id = ?;", .{}, .{ @intFromEnum(outcome), id }) catch return StoreError.WriteFailed;
+    lease.db.exec("UPDATE containers SET startup_outcome = ? WHERE id = ?;", .{}, .{ @backingInt(outcome), id }) catch return StoreError.WriteFailed;
     if (lease.db.rowsAffected() != 1) return StoreError.NotFound;
 }
 

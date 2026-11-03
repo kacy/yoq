@@ -71,6 +71,7 @@ const SECCOMP_DATA_ARCH = 4; // architecture
 /// DAC bypass by default.
 pub const default_caps = [_]u8{
     linux.CAP.CHOWN, // change file ownership
+    linux.CAP.DAC_OVERRIDE, // root entrypoints in official images manage files owned by other users
     linux.CAP.FSETID, // don't clear setuid/setgid on file modification
     linux.CAP.FOWNER, // bypass permission checks on operations requiring file owner
     linux.CAP.SETGID, // set process GID
@@ -83,16 +84,39 @@ pub const default_caps = [_]u8{
 /// call this inside the child process after namespace setup
 /// but before exec.
 pub fn apply() SecurityError!void {
-    try dropCapabilities();
+    try applyWith(0);
+}
+
+/// apply() for the container init process, which also keeps CAP_KILL so it can
+/// forward signals to a workload that changed to another uid. The workload must
+/// call dropInitCapabilities() before it runs image code.
+pub fn applyForInit() SecurityError!void {
+    try applyWith(linux.CAP.TO_MASK(linux.CAP.KILL));
+}
+
+fn applyWith(extra_low_caps: u32) SecurityError!void {
+    try dropCapabilities(extra_low_caps);
     try clearAmbientCaps();
     try setNoNewPrivs();
     try installSeccompFilter();
 }
 
+/// removes what applyForInit() kept. An explicit --user has already cleared
+/// these sets, so this only ever removes capabilities.
+pub fn dropInitCapabilities() SecurityError!void {
+    var hdr = linux.cap_user_header_t{ .version = CAPABILITY_VERSION_3, .pid = 0 };
+    var data: [2]linux.cap_user_data_t = undefined;
+    if (syscall_util.isError(linux.syscall2(.capget, @intFromPtr(&hdr), @intFromPtr(&data)))) return SecurityError.CapabilityFailed;
+    const kill_mask = linux.CAP.TO_MASK(linux.CAP.KILL);
+    data[0].effective &= ~kill_mask;
+    data[0].permitted &= ~kill_mask;
+    if (syscall_util.isError(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&data)))) return SecurityError.CapabilityFailed;
+}
+
 /// drop all capabilities except the default allowlist.
 /// capability v3 requires a 2-element data array (caps 0-63).
 /// future: if capabilities >63 are needed, extend the array size.
-fn dropCapabilities() SecurityError!void {
+fn dropCapabilities(extra_low_caps: u32) SecurityError!void {
     var hdr = linux.cap_user_header_t{
         .version = CAPABILITY_VERSION_3,
         .pid = 0, // current process
@@ -112,6 +136,9 @@ fn dropCapabilities() SecurityError!void {
         data[idx].permitted |= mask;
         data[idx].inheritable |= mask;
     }
+
+    data[0].effective |= extra_low_caps;
+    data[0].permitted |= extra_low_caps;
 
     // use raw syscall because the stdlib capset() wrapper takes a pointer
     // to a single cap_user_data_t, but v3 requires a 2-element array
@@ -310,7 +337,7 @@ fn archValue() u32 {
 
 /// get syscall number for the current architecture
 fn syscallNum(sc: linux.SYS) u32 {
-    return @intCast(@intFromEnum(sc));
+    return @intCast(@backingInt(sc));
 }
 
 // -- tests --
@@ -330,7 +357,6 @@ test "default capabilities set" {
 
 test "default capabilities exclude high-risk defaults" {
     const denied = [_]u8{
-        linux.CAP.DAC_OVERRIDE,
         linux.CAP.NET_RAW,
         linux.CAP.SETPCAP,
         linux.CAP.KILL,
@@ -343,6 +369,26 @@ test "default capabilities exclude high-risk defaults" {
             try std.testing.expect(cap != forbidden);
         }
     }
+}
+
+test "default capabilities let root entrypoints manage other users' files" {
+    try std.testing.expect(std.mem.indexOfScalar(u8, &default_caps, linux.CAP.DAC_OVERRIDE) != null);
+}
+
+test "dropping init capabilities never fails for a process without them" {
+    const rc = linux.fork();
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+    if (rc == 0) {
+        dropInitCapabilities() catch linux.exit_group(1);
+        var hdr = linux.cap_user_header_t{ .version = CAPABILITY_VERSION_3, .pid = 0 };
+        var data: [2]linux.cap_user_data_t = undefined;
+        if (syscall_util.isError(linux.syscall2(.capget, @intFromPtr(&hdr), @intFromPtr(&data)))) linux.exit_group(2);
+        if (data[0].effective & linux.CAP.TO_MASK(linux.CAP.KILL) != 0) linux.exit_group(3);
+        linux.exit_group(0);
+    }
+    var status: u32 = 0;
+    _ = linux.waitpid(@intCast(rc), @ptrCast(&status), 0);
+    try std.testing.expectEqual(@as(u32, 0), status);
 }
 
 test "bpf instruction construction" {
@@ -515,7 +561,7 @@ test "seccomp filter decisions" {
     try std.testing.expectEqual(linux.SECCOMP.RET.KILL_PROCESS, evaluateFilter(&filter, syscallNum(.read), native ^ 1, 0));
 
     // plain fork-style clone is fine; namespace flags are refused
-    const sigchld: u64 = @intFromEnum(linux.SIG.CHLD);
+    const sigchld: u64 = @backingInt(linux.SIG.CHLD);
     try std.testing.expectEqual(allow, run(.clone, sigchld));
     try std.testing.expectEqual(eperm, run(.clone, linux.CLONE.NEWUSER | sigchld));
     try std.testing.expectEqual(eperm, run(.clone, linux.CLONE.NEWNET));

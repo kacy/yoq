@@ -157,7 +157,7 @@ test "tcp frame receive verifies authentication before decoding and permits ephe
     const alloc = std.testing.allocator;
     var transport = try Transport.initForTests(alloc);
     defer transport.deinit();
-    const key = [_]u8{7} ** 32;
+    const key = @as([32]u8, @splat(7));
     transport.shared_key = key;
     try transport.addPeer(7, .{ 127, 0, 0, 1 }, 9700);
 
@@ -170,7 +170,7 @@ test "tcp frame receive verifies authentication before decoding and permits ephe
     try std.testing.expectEqual(@as(u64, 3), received.message.install_snapshot_reply.term);
 
     const malformed = [_]u8{ 1, 0, 0, 0, 0xff };
-    const bad_signature = try auth_support.applyHmac(alloc, [_]u8{8} ** 32, 7, &malformed);
+    const bad_signature = try auth_support.applyHmac(alloc, @as([32]u8, @splat(8)), 7, &malformed);
     defer alloc.free(bad_signature);
     try std.testing.expectError(error.AuthenticationFailed, readTestFrame(&transport, alloc, bad_signature));
     const bad_message = try auth_support.applyHmac(alloc, key, 7, &malformed);

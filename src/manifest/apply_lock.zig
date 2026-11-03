@@ -30,7 +30,7 @@ pub fn acquire(alloc: std.mem.Allocator, app_name: []const u8) ApplyLockError!Ap
         .truncate = false,
         .lock = .exclusive,
         .lock_nonblocking = true,
-        .permissions = @enumFromInt(0o600),
+        .permissions = @fromBackingInt(@intCast(0o600)),
     }) catch |err| return if (err == error.WouldBlock) error.AlreadyLocked else error.CreateFailed;
     errdefer file.close(std.Options.debug_io);
 
@@ -51,7 +51,7 @@ pub fn acquire(alloc: std.mem.Allocator, app_name: []const u8) ApplyLockError!Ap
 
 fn pidAlive(pid: i32) bool {
     if (pid <= 0) return false;
-    std.posix.kill(pid, @enumFromInt(0)) catch |err| return err == error.PermissionDenied;
+    std.posix.kill(pid, @fromBackingInt(@intCast(0))) catch |err| return err == error.PermissionDenied;
     return true;
 }
 
@@ -95,7 +95,7 @@ test "apply lock recovers stale pid file" {
         const file = try std.Io.Dir.cwd().createFile(std.Options.debug_io, path, .{
             .read = true,
             .truncate = true,
-            .permissions = @enumFromInt(0o600),
+            .permissions = @fromBackingInt(@intCast(0o600)),
         });
         defer file.close(std.Options.debug_io);
         try file.writePositionalAll(std.Options.debug_io, "99999999\n", 0);

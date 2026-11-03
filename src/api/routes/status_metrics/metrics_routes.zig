@@ -495,8 +495,8 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
 
     try writer.writeAll("# HELP yoq_service_l7_proxy_control_plane_last_trigger Active label for the most recent control-plane sync trigger\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_control_plane_last_trigger gauge\n");
-    inline for (comptime std.meta.fields(proxy_control_plane.SyncTrigger)) |field| {
-        const trigger = @field(proxy_control_plane.SyncTrigger, field.name);
+    inline for (comptime std.meta.fieldNames(proxy_control_plane.SyncTrigger)) |field_name| {
+        const trigger = @field(proxy_control_plane.SyncTrigger, field_name);
         try writer.print(
             "yoq_service_l7_proxy_control_plane_last_trigger{{trigger=\"{s}\"}} {d}\n",
             .{ trigger.label(), @intFromBool(l7_control_plane.last_trigger == trigger) },
@@ -513,8 +513,8 @@ fn writeServiceRolloutPrometheus(writer: anytype) !void {
 
     try writer.writeAll("# HELP yoq_service_l7_proxy_steering_blocked_reason Active VIP steering blocked reason by label\n");
     try writer.writeAll("# TYPE yoq_service_l7_proxy_steering_blocked_reason gauge\n");
-    inline for (comptime std.meta.fields(steering_runtime.BlockedReason)) |field| {
-        const reason = @field(steering_runtime.BlockedReason, field.name);
+    inline for (comptime std.meta.fieldNames(steering_runtime.BlockedReason)) |field_name| {
+        const reason = @field(steering_runtime.BlockedReason, field_name);
         try writer.print(
             "yoq_service_l7_proxy_steering_blocked_reason{{reason=\"{s}\"}} {d}\n",
             .{ reason.label(), @intFromBool(l7_steering.blocked_reason == reason) },

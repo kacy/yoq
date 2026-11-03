@@ -373,7 +373,7 @@ test "generateCsr different domains produce different CSRs" {
 
 test "generateCsr rejects domain too long" {
     const alloc = std.testing.allocator;
-    const long_domain = "a" ** 254;
+    const long_domain = &@as([254:0]u8, @splat('a'));
     try std.testing.expectError(CsrError.DomainTooLong, generateCsr(std.testing.io, alloc, long_domain));
 }
 
@@ -447,6 +447,6 @@ test "derKeyToPem produces valid PEM" {
 test "derKeyToPem rejects wrong key length" {
     const alloc = std.testing.allocator;
 
-    const short_key = [_]u8{0} ** 16;
+    const short_key = @as([16]u8, @splat(0));
     try std.testing.expectError(CsrError.EncodingFailed, derKeyToPem(alloc, &short_key));
 }

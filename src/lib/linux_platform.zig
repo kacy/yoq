@@ -14,7 +14,7 @@ pub const net = struct {
                 .family = std.posix.AF.INET,
                 .port = std.mem.nativeToBig(u16, port),
                 .addr = @bitCast(addr),
-                .zero = [_]u8{0} ** 8,
+                .zero = @as([8]u8, @splat(0)),
             } };
         }
 
@@ -44,7 +44,7 @@ pub fn randomBytes(buffer: []u8) void {
 }
 
 pub fn isatty(fd: std.posix.fd_t) bool {
-    _ = std.posix.tcgetattr(fd) catch return false;
+    _ = posix.tcgetattr(fd) catch return false;
     return true;
 }
 
@@ -120,7 +120,7 @@ fn statFromLinux(statx: *const std.os.linux.Statx) File.Stat {
 
 fn realpathFd(fd: std.posix.fd_t, buffer: []u8) ![]u8 {
     var proc_path_buf: [64]u8 = undefined;
-    const proc_path = try std.fmt.bufPrintZ(&proc_path_buf, "/proc/self/fd/{d}", .{fd});
+    const proc_path = try std.fmt.bufPrintSentinel(&proc_path_buf, "/proc/self/fd/{d}", .{fd}, 0);
     const len = try linuxUsize(std.os.linux.readlink(proc_path, buffer.ptr, buffer.len));
     if (len == buffer.len) return error.NameTooLong;
     return buffer[0..len];
@@ -137,7 +137,7 @@ fn realpathFdAlloc(alloc: std.mem.Allocator, fd: std.posix.fd_t) ![:0]u8 {
             },
             else => |e| return e,
         };
-        return alloc.dupeZ(u8, path);
+        return alloc.dupeSentinel(u8, path, 0);
     }
     return error.NameTooLong;
 }
@@ -833,7 +833,7 @@ pub const posix = struct {
             &len,
         ));
         if (value == 0) return;
-        return switch (@as(std.os.linux.E, @enumFromInt(value))) {
+        return switch (@as(std.os.linux.E, @fromBackingInt(@intCast(value)))) {
             .TIMEDOUT => error.ConnectionTimedOut,
             .CONNREFUSED => error.ConnectionRefused,
             .HOSTUNREACH, .NETUNREACH => error.NetworkUnreachable,
@@ -850,11 +850,38 @@ pub const posix = struct {
     }
 
     pub fn lseek(fd: std.posix.fd_t, offset: i64, whence: usize) !usize {
-        return usizeResult(std.os.linux.lseek(fd, offset, whence));
+        return usizeResult(std.os.linux.lseek(fd, offset, @intCast(whence)));
     }
 
     pub fn dup(fd: std.posix.fd_t) !std.posix.fd_t {
         return fdResult(std.os.linux.dup(fd));
+    }
+
+    /// Uses the ioctl directly because std.posix.tcgetattr passes the 44-byte
+    /// kernel termios to glibc, which writes its own 60-byte struct and
+    /// overflows the caller's stack.
+    pub fn tcgetattr(fd: std.posix.fd_t) !std.posix.termios {
+        while (true) {
+            var value: std.posix.termios = undefined;
+            switch (syscallErrno(std.os.linux.tcgetattr(fd, &value))) {
+                .SUCCESS => return value,
+                .INTR => continue,
+                .NOTTY => return error.NotATerminal,
+                else => |err| return std.posix.unexpectedErrno(err),
+            }
+        }
+    }
+
+    pub fn tcsetattr(fd: std.posix.fd_t, action: std.posix.TCSA, value: std.posix.termios) !void {
+        while (true) {
+            switch (syscallErrno(std.os.linux.tcsetattr(fd, action, &value))) {
+                .SUCCESS => return,
+                .INTR => continue,
+                .NOTTY => return error.NotATerminal,
+                .IO => return error.ProcessOrphaned,
+                else => |err| return std.posix.unexpectedErrno(err),
+            }
+        }
     }
 
     pub fn dup2(old_fd: std.posix.fd_t, new_fd: std.posix.fd_t) !void {
@@ -970,7 +997,7 @@ pub const posix = struct {
 
     fn int(comptime T: type, value: anytype) T {
         return switch (@typeInfo(@TypeOf(value))) {
-            .@"enum" => @intCast(@intFromEnum(value)),
+            .@"enum" => @intCast(@backingInt(value)),
             else => @intCast(value),
         };
     }
@@ -1033,7 +1060,7 @@ pub const posix = struct {
         // errno values. Normalize those before deciding the call succeeded.
         const low_error_base = (@as(usize, 1) << 32) - 4096;
         if (rc >= low_error_base and rc <= std.math.maxInt(u32)) {
-            return @enumFromInt((@as(usize, 1) << 32) - rc);
+            return @fromBackingInt(@intCast((@as(usize, 1) << 32) - rc));
         }
         return .SUCCESS;
     }

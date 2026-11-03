@@ -62,7 +62,7 @@ pub const ActionReason = enum {
 pub const Action = struct {
     kind: ActionKind = .reconcile_service,
     reason: ActionReason,
-    service_name_buf: [128]u8 = [_]u8{0} ** 128,
+    service_name_buf: [128]u8 = @splat(0),
     service_name_len: u8 = 0,
 
     pub fn serviceName(self: *const Action) []const u8 {

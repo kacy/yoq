@@ -54,15 +54,15 @@ test "fuzz gossip decode with arbitrary bytes" {
     }.testOne, .{
         .corpus = &.{
             // ping (type 0x10 + 17 bytes header + 0 updates)
-            &[_]u8{0x10} ++ &[_]u8{0} ** 17,
+            &[_]u8{0x10} ++ &@as([17]u8, @splat(0)),
             // ping_ack (type 0x11 + 17 bytes header + 0 updates)
-            &[_]u8{0x11} ++ &[_]u8{0} ** 17,
+            &[_]u8{0x11} ++ &@as([17]u8, @splat(0)),
             // ping_req (type 0x12 + 25 bytes header + 0 updates)
-            &[_]u8{0x12} ++ &[_]u8{0} ** 25,
+            &[_]u8{0x12} ++ &@as([25]u8, @splat(0)),
             // ping with 1 update (17 + 23 = 40 bytes after type)
-            &[_]u8{0x10} ++ &[_]u8{0} ** 16 ++ &[_]u8{1} ++ &[_]u8{0} ** 23,
+            &[_]u8{0x10} ++ &@as([16]u8, @splat(0)) ++ &[_]u8{1} ++ &@as([23]u8, @splat(0)),
             // ping with invalid state byte in update
-            &[_]u8{0x10} ++ &[_]u8{0} ** 16 ++ &[_]u8{1} ++ &[_]u8{0} ** 14 ++ &[_]u8{0xFF} ++ &[_]u8{0} ** 8,
+            &[_]u8{0x10} ++ &@as([16]u8, @splat(0)) ++ &[_]u8{1} ++ &@as([14]u8, @splat(0)) ++ &[_]u8{0xFF} ++ &@as([8]u8, @splat(0)),
             // too short
             "",
             // invalid type

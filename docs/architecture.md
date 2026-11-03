@@ -49,7 +49,7 @@ container isolation using Linux primitives directly — no daemon, no shim.
 
 **resource limits:** cgroups v2 with configurable CPU weight, memory max (default 512MB), and pids max (default 4096). safe minimums are enforced (4MB memory, 1 process). PSI (pressure stall information) metrics are read from cgroups for monitoring.
 
-**security:** seccomp filters (classic BPF) restrict syscalls to a safe allowlist. capabilities are dropped to a minimal set (CHOWN, DAC_OVERRIDE, NET_RAW, NET_BIND_SERVICE, SETUID/SETGID, KILL). `no_new_privs` prevents re-escalation.
+**security:** seccomp filters (classic BPF) restrict syscalls to a safe allowlist. capabilities are dropped to a minimal set (CHOWN, DAC_OVERRIDE, FSETID, FOWNER, SETUID/SETGID, NET_BIND_SERVICE, SYS_CHROOT). PID 1 also keeps KILL to forward signals; workloads do not have it. `no_new_privs` prevents re-escalation.
 
 key files:
 - `container.zig` — process attempts and config types

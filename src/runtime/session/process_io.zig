@@ -19,21 +19,45 @@ pub const ProcessIo = struct {
     child_input: posix.fd_t = -1,
     child_stdout: posix.fd_t = -1,
     child_stderr: posix.fd_t = -1,
-    close_in_child: [9]posix.fd_t = .{-1} ** 9,
+    close_in_child: [9]posix.fd_t = @splat(-1),
     tty: bool = false,
     interactive: bool = false,
 
     pub fn init(interactive: bool, tty: bool) !ProcessIo {
+        return initInPts(interactive, tty, "/dev");
+    }
+
+    /// Allocates an exec terminal from the devpts instance of a running
+    /// container, so its path resolves there and ttyname() works. Containers
+    /// without an accessible instance use the host's.
+    pub fn initForProcess(interactive: bool, tty: bool, pid: posix.pid_t) !ProcessIo {
+        if (!tty) return init(interactive, false);
+        var root_buf: [64]u8 = undefined;
+        const root = try std.fmt.bufPrint(&root_buf, "/proc/{d}/root/dev/pts", .{pid});
+        var ptmx_buf: [80]u8 = undefined;
+        const ptmx = try std.fmt.bufPrintSentinel(&ptmx_buf, "{s}/ptmx", .{root}, 0);
+        const fd = platform.open(ptmx, .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true }, 0) catch
+            return initInPts(interactive, tty, "/dev");
+        platform.close(fd);
+        return initInPts(interactive, tty, root);
+    }
+
+    /// `pts_dir` is /dev for the host's default instance, which keeps its
+    /// multiplexer at /dev/ptmx and its terminals in /dev/pts.
+    fn initInPts(interactive: bool, tty: bool, pts_dir: []const u8) !ProcessIo {
         var self: ProcessIo = .{ .interactive = interactive, .tty = tty };
         errdefer self.deinit();
         if (tty) {
-            self.stdout = try platform.open("/dev/ptmx", .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true }, 0);
+            const host = std.mem.eql(u8, pts_dir, "/dev");
+            var ptmx_buf: [80]u8 = undefined;
+            const ptmx = try std.fmt.bufPrintSentinel(&ptmx_buf, "{s}/ptmx", .{pts_dir}, 0);
+            self.stdout = try platform.open(ptmx, .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true }, 0);
             var unlock: c_int = 0;
             if (linux.errno(linux.ioctl(self.stdout, linux.T.IOCSPTLCK, @intFromPtr(&unlock))) != .SUCCESS) return error.TerminalFailed;
             var number: c_uint = 0;
             if (linux.errno(linux.ioctl(self.stdout, linux.T.IOCGPTN, @intFromPtr(&number))) != .SUCCESS) return error.TerminalFailed;
-            var path_buf: [64]u8 = undefined;
-            const path = try std.fmt.bufPrintZ(&path_buf, "/dev/pts/{d}", .{number});
+            var path_buf: [96]u8 = undefined;
+            const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}{s}/{d}", .{ pts_dir, if (host) "/pts" else "", number }, 0);
             self.child_input = try platform.open(path, .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true }, 0);
             self.child_stdout = self.child_input;
             self.child_stderr = self.child_input;

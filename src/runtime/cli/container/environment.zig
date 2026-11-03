@@ -12,7 +12,7 @@ pub fn append(alloc: std.mem.Allocator, env: *std.ArrayList([]const u8), value: 
     const owned = if (eq != null)
         try alloc.dupe(u8, value)
     else blk: {
-        const key = try alloc.dupeZ(u8, name);
+        const key = try alloc.dupeSentinel(u8, name, 0);
         defer alloc.free(key);
         if (std.c.getenv(key)) |host_value| {
             break :blk try std.fmt.allocPrint(alloc, "{s}={s}", .{ name, std.mem.span(host_value) });

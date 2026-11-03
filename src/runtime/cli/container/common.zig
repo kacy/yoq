@@ -16,6 +16,7 @@ pub const ContainerError = error{
     PullFailed,
     CommandResolveFailed,
     ConfigSaveFailed,
+    NameInUse,
     InvalidLimits,
     StoreError,
 };

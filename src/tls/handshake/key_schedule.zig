@@ -1,8 +1,8 @@
 const common = @import("common.zig");
 
 pub fn deriveEarlySecret() [common.hash_len]u8 {
-    const zero_ikm = [_]u8{0} ** common.hash_len;
-    const zero_salt = [_]u8{0} ** common.hash_len;
+    const zero_ikm = @as([common.hash_len]u8, @splat(0));
+    const zero_salt = @as([common.hash_len]u8, @splat(0));
     return common.HkdfSha384.extract(&zero_salt, &zero_ikm);
 }
 
@@ -39,7 +39,7 @@ pub fn deriveTrafficKeys(secret: [common.hash_len]u8) common.TrafficKeys {
 pub fn deriveMasterSecret(handshake_secret: [common.hash_len]u8) [common.hash_len]u8 {
     const empty_hash = hashEmpty();
     const derived = expandLabel(handshake_secret, "derived", &empty_hash, common.hash_len);
-    const zero_ikm = [_]u8{0} ** common.hash_len;
+    const zero_ikm = @as([common.hash_len]u8, @splat(0));
     return common.HkdfSha384.extract(&derived, &zero_ikm);
 }
 

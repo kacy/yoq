@@ -244,7 +244,7 @@ test "image reliability prune propagates mark allocation failure and invalid dig
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkMarkAllocation, .{});
     var referenced = DigestSet.init(std.testing.allocator);
     defer referenced.deinit();
-    try std.testing.expectError(error.InvalidDigest, markDigest(&referenced, "sha256:" ++ "z" ** 64));
+    try std.testing.expectError(error.InvalidDigest, markDigest(&referenced, "sha256:" ++ &@as([64:0]u8, @splat('z'))));
 }
 
 test "image reliability prune rejects conflicting config references before deletion" {

@@ -108,7 +108,7 @@ test "closeInheritedFds keeps stdio and the requested descriptors only" {
     }
 
     var status: u32 = 0;
-    _ = std.os.linux.waitpid(@intCast(rc), &status, 0);
+    _ = std.os.linux.waitpid(@intCast(rc), @ptrCast(&status), 0);
     try std.testing.expect(std.os.linux.W.IFEXITED(status));
     try std.testing.expectEqual(@as(u32, 0), std.os.linux.W.EXITSTATUS(status));
 }

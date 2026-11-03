@@ -68,7 +68,7 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
     sqlite_lib.root_module.addIncludePath(sqlite_dep.path("c"));
 
     // create the sqlite module using zig-sqlite's Zig wrapper but our static lib
-    const sqlite_mod = b.addModule("sqlite-import", .{
+    const sqlite_mod = b.createModule(.{
         .root_source_file = sqlite_dep.path("sqlite.zig"),
         .target = mod_target,
         .optimize = mod_optimize,
@@ -77,6 +77,15 @@ fn addSqlite(module: *std.Build.Module, b: *std.Build) void {
     sqlite_mod.addIncludePath(sqlite_dep.path("c"));
     sqlite_mod.addIncludePath(sqlite_upstream.path("."));
     sqlite_mod.linkLibrary(sqlite_lib);
+
+    const sqlite_c = b.addTranslateC(.{
+        .root_source_file = sqlite_dep.path("c/sqlite_c.h"),
+        .target = mod_target,
+        .optimize = mod_optimize,
+    });
+    sqlite_c.addIncludePath(sqlite_dep.path("c"));
+    sqlite_c.addIncludePath(sqlite_upstream.path("."));
+    sqlite_mod.addImport("c", sqlite_c.createModule());
 
     module.addImport("sqlite", sqlite_mod);
     addLinuxImport(module, b);
@@ -95,9 +104,7 @@ fn createArtifactRunner(
     if (skip_slow_tests) {
         run.setEnvironmentVariable("YOQ_SKIP_SLOW_TESTS", "1");
     }
-    if (b.args) |args| {
-        run.addArgs(args);
-    }
+    run.addPassthruArgs();
     return run;
 }
 
@@ -105,7 +112,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     // Default to ReleaseSafe to keep local and CI behavior aligned for the
     // heavier integration-style test lanes.
-    const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode") orelse .ReleaseSafe;
+    const optimize = b.option(std.lang.Optimize, "optimize", "Optimization mode") orelse .safe;
     const test_filter = b.option([]const u8, "test-filter", "Only compile unit tests matching this substring");
     const run_privileged_tests = b.option(
         bool,
@@ -152,9 +159,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     // -- unit tests (require sqlite, run without root) --
     const test_mod = b.createModule(.{
@@ -742,7 +747,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/bpf_gen.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
         }),
     });
 

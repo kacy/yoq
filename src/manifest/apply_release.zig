@@ -524,19 +524,19 @@ pub fn execute(tracker: anytype, backend: anytype) !ApplyResult {
 const TestTracker = struct {
     alloc: std.mem.Allocator,
     release_id: []const u8,
-    statuses: [4]?update_common.DeploymentStatus = [_]?update_common.DeploymentStatus{null} ** 4,
-    messages: [4]?[]const u8 = [_]?[]const u8{null} ** 4,
-    completed_targets: [4]usize = [_]usize{0} ** 4,
-    failed_targets: [4]usize = [_]usize{0} ** 4,
+    statuses: [4]?update_common.DeploymentStatus = @splat(null),
+    messages: [4]?[]const u8 = @splat(null),
+    completed_targets: [4]usize = @splat(0),
+    failed_targets: [4]usize = @splat(0),
     mark_count: usize = 0,
     resuming: bool = false,
     finished: bool = false,
 
-    fn isResuming(self: *@This()) bool {
+    pub fn isResuming(self: *@This()) bool {
         return self.resuming;
     }
 
-    fn finish(self: *@This(), _: []const u8) void {
+    pub fn finish(self: *@This(), _: []const u8) void {
         self.finished = true;
     }
 
@@ -552,7 +552,7 @@ const TestTracker = struct {
         self.mark_count += 1;
     }
 
-    fn markProgress(
+    pub fn markProgress(
         self: *@This(),
         id: []const u8,
         status: update_common.DeploymentStatus,
@@ -642,7 +642,7 @@ test "execute attaches a live progress recorder when backend supports it" {
         attached: bool = false,
         progress: ?ProgressRecorder = null,
 
-        fn attachProgressRecorder(self: *@This(), recorder: ProgressRecorder) void {
+        pub fn attachProgressRecorder(self: *@This(), recorder: ProgressRecorder) void {
             self.attached = true;
             self.progress = recorder;
         }
@@ -679,7 +679,7 @@ test "execute preserves live progress counts when backend fails after mutation" 
     const Backend = struct {
         progress: ?ProgressRecorder = null,
 
-        fn attachProgressRecorder(self: *@This(), recorder: ProgressRecorder) void {
+        pub fn attachProgressRecorder(self: *@This(), recorder: ProgressRecorder) void {
             self.progress = recorder;
         }
 

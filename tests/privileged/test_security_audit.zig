@@ -165,7 +165,7 @@ test "security audit: WG key file permissions" {
 
 test "security audit: WG key material zeroed after use" {
     // verify that secureZero works on key material
-    var secret: [32]u8 = .{0x42} ** 32;
+    var secret: [32]u8 = @splat(0x42);
     std.crypto.secureZero(u8, &secret);
 
     // all bytes should be zero
@@ -192,7 +192,7 @@ test "security audit: auth tokens constant-time comparison" {
         // empty
         "",
         // very long
-        "a" ** 256,
+        &@as([256:0]u8, @splat('a')),
         // null bytes
         "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
     };
@@ -256,7 +256,7 @@ test "security audit: concurrent deploy with different auth tokens" {
 
     // fire concurrent deploys — mix of valid and invalid tokens
     var threads: [10]std.Thread = undefined;
-    var results: [10]u16 = .{0} ** 10;
+    var results: [10]u16 = @splat(0);
     var started: usize = 0;
 
     for (0..10) |i| {

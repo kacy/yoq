@@ -142,9 +142,9 @@ pub const AlertTracker = struct {
     rules: [max_rules]AlertRule = undefined,
     rule_count: usize = 0,
     /// consecutive breach count per rule (for debounce)
-    breach_counts: [max_rules]u32 = .{0} ** max_rules,
+    breach_counts: [max_rules]u32 = @splat(0),
     /// current state per rule
-    states: [max_rules]AlertState = .{.ok} ** max_rules,
+    states: [max_rules]AlertState = @splat(.ok),
 
     /// add an alert rule. returns false if the tracker is full.
     pub fn addRule(self: *AlertTracker, rule: AlertRule) bool {

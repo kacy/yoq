@@ -275,9 +275,9 @@ test "snapshot restart repairs activation before restore and preserves later app
     var generation_buf: [512]u8 = undefined;
     try artifact.publishBytes(try generationPath(&generation_buf, dir, meta), data);
     var log_buf: [512]u8 = undefined;
-    const log_path = try std.fmt.bufPrintZ(&log_buf, "{s}/raft.db", .{dir});
+    const log_path = try std.fmt.bufPrintSentinel(&log_buf, "{s}/raft.db", .{dir}, 0);
     var state_buf: [512]u8 = undefined;
-    const state_path = try std.fmt.bufPrintZ(&state_buf, "{s}/state.db", .{dir});
+    const state_path = try std.fmt.bufPrintSentinel(&state_buf, "{s}/state.db", .{dir}, 0);
     const Log = @import("../log.zig").Log;
     const StateMachine = @import("../state_machine.zig").StateMachine;
     {
@@ -458,9 +458,9 @@ test "snapshot lifecycle survives process death at every local and received tran
             const data = try testSnapshot(dir);
             defer std.testing.allocator.free(data);
             var log_buf: [512]u8 = undefined;
-            const log_path = try std.fmt.bufPrintZ(&log_buf, "{s}/raft.db", .{dir});
+            const log_path = try std.fmt.bufPrintSentinel(&log_buf, "{s}/raft.db", .{dir}, 0);
             var state_buf: [512]u8 = undefined;
-            const state_path = try std.fmt.bufPrintZ(&state_buf, "{s}/state.db", .{dir});
+            const state_path = try std.fmt.bufPrintSentinel(&state_buf, "{s}/state.db", .{dir}, 0);
             const child = linux.fork();
             if (linux.errno(child) != .SUCCESS) return error.ForkFailed;
             if (child == 0) {
@@ -472,7 +472,7 @@ test "snapshot lifecycle survives process death at every local and received tran
             }
             var status: u32 = 0;
             while (true) {
-                const result = linux.waitpid(@intCast(child), &status, 0);
+                const result = linux.waitpid(@intCast(child), @ptrCast(&status), 0);
                 switch (linux.errno(result)) {
                     .SUCCESS => break,
                     .INTR => continue,

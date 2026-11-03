@@ -1,6 +1,6 @@
 # development
 
-build with zig 0.16.0 on linux:
+build with zig 0.17.0 on linux:
 
 ```bash
 make build

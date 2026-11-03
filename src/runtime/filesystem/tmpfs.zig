@@ -72,9 +72,9 @@ pub fn mountAt(root: []const u8, config: TmpfsMount) !void {
     const target_fd = try mount_ops.prepareDirectory(root_fd, config.target);
     defer platform.posix.close(target_fd);
     var path_buffer: [64]u8 = undefined;
-    const target = try std.fmt.bufPrintZ(&path_buffer, "/proc/self/fd/{d}", .{target_fd});
+    const target = try std.fmt.bufPrintSentinel(&path_buffer, "/proc/self/fd/{d}", .{target_fd}, 0);
     var options_buffer: [96]u8 = undefined;
-    const options = try std.fmt.bufPrintZ(&options_buffer, "size={d},mode={o}", .{ config.size_bytes, config.mode });
+    const options = try std.fmt.bufPrintSentinel(&options_buffer, "size={d},mode={o}", .{ config.size_bytes, config.mode }, 0);
     var flags: u32 = 0;
     if (config.read_only) flags |= linux.MS.RDONLY;
     if (config.noexec) flags |= linux.MS.NOEXEC;

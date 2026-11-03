@@ -417,7 +417,7 @@ fn acceptClientAuthAndFinished(
             const msg = opt_msg orelse break;
 
             switch (msg.msg_type) {
-                @intFromEnum(message_parse.HandshakeType.certificate) => {
+                @backingInt(message_parse.HandshakeType.certificate) => {
                     if (opts == null or saw_certificate) return error.InvalidClientFinished;
                     saw_certificate = true;
                     const der = message_parse.parseCertificateMessage(msg.body) catch return error.InvalidClientFinished;
@@ -427,7 +427,7 @@ fn acceptClientAuthAndFinished(
                     }
                     transcript.update(msg.raw);
                 },
-                @intFromEnum(message_parse.HandshakeType.certificate_verify) => {
+                @backingInt(message_parse.HandshakeType.certificate_verify) => {
                     if (client_cert_der == null or got_cert_verify_sig != null) return error.InvalidClientFinished;
                     const cv = message_parse.parseCertificateVerify(msg.body) catch return error.InvalidClientFinished;
                     if (cv.algorithm != 0x0403) return error.InvalidClientFinished;
@@ -435,7 +435,7 @@ fn acceptClientAuthAndFinished(
                     got_cert_verify_sig = try alloc.dupe(u8, cv.signature_der);
                     transcript.update(msg.raw);
                 },
-                @intFromEnum(message_parse.HandshakeType.finished) => {
+                @backingInt(message_parse.HandshakeType.finished) => {
                     const fin = message_parse.parseFinished(msg.body) catch return error.InvalidClientFinished;
                     const expected = handshake.computeFinished(hs_keys.client_handshake_traffic_secret, transcript.peek());
                     if (!std.mem.eql(u8, fin.verify_data, &expected)) return error.FinishedVerifyFailed;
@@ -788,7 +788,7 @@ test "mTLS — warn mode accepts an empty client cert (no identity)" {
 test "request buffering rejects oversized and expired incomplete headers" {
     var pending = RequestBuffer.init();
     defer pending.deinit();
-    const chunk = [_]u8{'x'} ** 16384;
+    const chunk = @as([16384]u8, @splat('x'));
     for (0..4) |_| try pending.append(&chunk);
     try std.testing.expectError(error.RequestTooLarge, pending.append("x"));
     try std.testing.expectEqual(@as(usize, max_request_bytes), pending.bytes.items.len);

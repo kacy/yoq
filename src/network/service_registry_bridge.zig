@@ -43,8 +43,9 @@ pub const FaultMode = enum {
 };
 
 var fault_mutex: std.Io.Mutex = .init;
-var fault_modes: [@typeInfo(BridgeOperation).@"enum".fields.len]FaultMode = [_]FaultMode{.none} ** @typeInfo(BridgeOperation).@"enum".fields.len;
-var fault_counts: [@typeInfo(BridgeOperation).@"enum".fields.len]u64 = [_]u64{0} ** @typeInfo(BridgeOperation).@"enum".fields.len;
+const bridge_operation_count = @typeInfo(BridgeOperation).@"enum".field_names.len;
+var fault_modes: [bridge_operation_count]FaultMode = @splat(.none);
+var fault_counts: [bridge_operation_count]u64 = @splat(0);
 
 pub fn registerContainerService(service_name: []const u8, container_id: []const u8, container_ip: [4]u8, node_id: ?i64) void {
     var endpoint_id_buf: [96]u8 = undefined;
@@ -102,40 +103,40 @@ pub fn markEndpointUnhealthy(service_name: []const u8, container_id: []const u8,
 pub fn faultInjectionCount(operation: BridgeOperation) u64 {
     fault_mutex.lockUncancelable(std.Options.debug_io);
     defer fault_mutex.unlock(std.Options.debug_io);
-    return fault_counts[@intFromEnum(operation)];
+    return fault_counts[@backingInt(operation)];
 }
 
 pub fn faultMode(operation: BridgeOperation) FaultMode {
     fault_mutex.lockUncancelable(std.Options.debug_io);
     defer fault_mutex.unlock(std.Options.debug_io);
-    return fault_modes[@intFromEnum(operation)];
+    return fault_modes[@backingInt(operation)];
 }
 
 pub fn setFaultModeForTest(operation: BridgeOperation, mode: FaultMode) void {
     fault_mutex.lockUncancelable(std.Options.debug_io);
     defer fault_mutex.unlock(std.Options.debug_io);
-    fault_modes[@intFromEnum(operation)] = mode;
+    fault_modes[@backingInt(operation)] = mode;
 }
 
 pub fn resetFaultsForTest() void {
     fault_mutex.lockUncancelable(std.Options.debug_io);
     defer fault_mutex.unlock(std.Options.debug_io);
-    fault_modes = [_]FaultMode{.none} ** fault_modes.len;
-    fault_counts = [_]u64{0} ** fault_counts.len;
+    fault_modes = @as([fault_modes.len]FaultMode, @splat(.none));
+    fault_counts = @as([fault_counts.len]u64, @splat(0));
 }
 
 fn activeFaultMode(operation: BridgeOperation) FaultMode {
     fault_mutex.lockUncancelable(std.Options.debug_io);
     defer fault_mutex.unlock(std.Options.debug_io);
-    return fault_modes[@intFromEnum(operation)];
+    return fault_modes[@backingInt(operation)];
 }
 
 fn noteFaultInjection(operation: BridgeOperation) void {
     fault_mutex.lockUncancelable(std.Options.debug_io);
     defer fault_mutex.unlock(std.Options.debug_io);
-    fault_counts[@intFromEnum(operation)] += 1;
+    fault_counts[@backingInt(operation)] += 1;
     log.warn("service registry bridge: injected fault mode={s} operation={s}", .{
-        fault_modes[@intFromEnum(operation)].label(),
+        fault_modes[@backingInt(operation)].label(),
         operation.label(),
     });
 }

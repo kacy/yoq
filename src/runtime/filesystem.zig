@@ -134,8 +134,8 @@ test "bindMount path construction" {
     // the function returns PathTooLong for oversized inputs
 
     // target_root + target too long should also fail
-    const long_root = "x" ** 2048;
-    const long_target = "y" ** 2048;
+    const long_root = &@as([2048:0]u8, @splat('x'));
+    const long_target = &@as([2048:0]u8, @splat('y'));
     const result2 = bindMount(long_root, "/tmp", long_target, false);
     try std.testing.expectError(FilesystemError.PathTooLong, result2);
 }

@@ -1,6 +1,13 @@
 const std = @import("std");
 const spec = @import("../spec.zig");
 
+/// Returns a URI's raw host. std.Io.net.HostName.fromUri is not used here because
+/// it rejects IPv6 literals, which are valid registry hosts.
+pub fn uriHost(uri: std.Uri, buffer: *[std.Io.net.HostName.max_len]u8) ![]const u8 {
+    const component = uri.host orelse return error.UriMissingHost;
+    return component.toRaw(buffer);
+}
+
 pub const RegistryError = error{
     InvalidSizeLimit,
     AuthFailed,
@@ -131,7 +138,7 @@ pub fn contentTypeBase(value: []const u8) []const u8 {
 }
 
 pub fn isRedirectStatus(status: std.http.Status) bool {
-    const code = @intFromEnum(status);
+    const code = @backingInt(status);
     return code >= 300 and code < 400;
 }
 

@@ -42,7 +42,7 @@ pub fn harden(proc_path: []const u8) error{ PathTooLong, MountFailed }!void {
 }
 
 fn entryPath(buf: []u8, proc_path: []const u8, name: []const u8) error{PathTooLong}![:0]const u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/{s}", .{ proc_path, name }) catch error.PathTooLong;
+    return std.fmt.bufPrintSentinel(buf, "{s}/{s}", .{ proc_path, name }, 0) catch error.PathTooLong;
 }
 
 /// Mount, treating a target the kernel does not provide as nothing to hide.
@@ -69,7 +69,7 @@ test "harden masks host-global entries in a proc-like tree" {
     if (rc == 0) linux.exit_group(hardenFakeProc());
 
     var status: u32 = 0;
-    _ = linux.waitpid(@intCast(rc), &status, 0);
+    _ = linux.waitpid(@intCast(rc), @ptrCast(&status), 0);
     try std.testing.expect(linux.W.IFEXITED(status));
     switch (linux.W.EXITSTATUS(status)) {
         0 => {},

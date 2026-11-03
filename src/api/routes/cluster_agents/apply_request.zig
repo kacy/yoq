@@ -408,7 +408,7 @@ test "parse keeps replica instances under one logical service request" {
 
 test "parse refuses a workload with a missing or unusable image instead of skipping it" {
     const alloc = std.testing.allocator;
-    const long_image = "r/" ++ "a" ** 300;
+    const long_image = "r/" ++ &@as([300:0]u8, @splat('a'));
     const bad_services = [_][]const u8{
         "{\"name\":\"api\",\"command\":[]}",
         "{\"name\":\"api\",\"image\":\"\",\"command\":[]}",

@@ -81,6 +81,9 @@ test "writeNetworkFiles sets resolv.conf to bridge gateway" {
     defer alloc.free(content);
 
     try std.testing.expect(std.mem.indexOf(u8, content, "10.42.0.1") != null);
+    // musl queries every nameserver at once, so a public fallback could answer
+    // before the local resolver and would see container names.
+    try std.testing.expect(std.mem.indexOf(u8, content, "8.8.8.8") == null);
 }
 
 test "writeNetworkFiles sets etc/hosts with hostname" {
@@ -181,7 +184,7 @@ test "hostname validation — rejects invalid hostnames" {
     try std.testing.expect(!isValidHostname("host\rname"));
     try std.testing.expect(!isValidHostname("host\tname"));
     try std.testing.expect(!isValidHostname("host name"));
-    try std.testing.expect(!isValidHostname("a" ** 254));
+    try std.testing.expect(!isValidHostname(&@as([254:0]u8, @splat('a'))));
 }
 
 test "hostname validation — rejects control characters" {

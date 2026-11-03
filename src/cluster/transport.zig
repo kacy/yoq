@@ -190,7 +190,7 @@ test "tcp transport receives an authenticated message through its listener" {
     const alloc = std.testing.allocator;
     var transport = try Transport.init(alloc, 0);
     defer transport.deinit();
-    transport.shared_key = [_]u8{0x5a} ** 32;
+    transport.shared_key = @as([32]u8, @splat(0x5a));
     transport.setLocalNodeId(7);
     try std.testing.expect((try transport.receive(alloc)) == null);
 
@@ -342,14 +342,14 @@ test "encode/decode round-trip: empty append entries (heartbeat)" {
 
 test "decode rejects invalid message type" {
     const alloc = std.testing.allocator;
-    const buf = [_]u8{0xFF} ++ [_]u8{0} ** 32;
+    const buf = [_]u8{0xFF} ++ @as([32]u8, @splat(0));
     const result = decode(alloc, &buf);
     try std.testing.expectError(error.InvalidMessage, result);
 }
 
 test "decode rejects truncated message" {
     const alloc = std.testing.allocator;
-    const buf = [_]u8{msg_request_vote} ++ [_]u8{0} ** 10; // need 32, only 10
+    const buf = [_]u8{msg_request_vote} ++ @as([10]u8, @splat(0)); // need 32, only 10
     const result = decode(alloc, &buf);
     try std.testing.expectError(error.InvalidMessage, result);
 }
@@ -556,7 +556,7 @@ test "decode rejects truncated install snapshot reply" {
 
 test "hmac round-trip: compute and verify succeeds" {
     const key: [32]u8 = "test-key-for-hmac-verification!!".*;
-    const message = [_]u8{msg_request_vote} ++ [_]u8{0} ** 32;
+    const message = [_]u8{msg_request_vote} ++ @as([32]u8, @splat(0));
 
     // compute HMAC
     var tag: [32]u8 = undefined;
@@ -571,7 +571,7 @@ test "hmac round-trip: compute and verify succeeds" {
 test "hmac rejects message with wrong key" {
     const key_a: [32]u8 = "key-aaaaaaaaaaaaaaaaaaaaaaaaaaaa".*;
     const key_b: [32]u8 = "key-bbbbbbbbbbbbbbbbbbbbbbbbbbbb".*;
-    const message = [_]u8{msg_append_entries} ++ [_]u8{1} ** 44;
+    const message = [_]u8{msg_append_entries} ++ @as([44]u8, @splat(1));
 
     var tag_a: [32]u8 = undefined;
     HmacSha256.create(&tag_a, &message, &key_a);
@@ -870,7 +870,7 @@ test "cluster reliability: replication budget sends append entries beyond the st
     var address_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
     try linux_platform.posix.getsockname(transport.listen_fd, @ptrCast(&address), &address_len);
     try transport.addPeer(7, .{ 127, 0, 0, 1 }, std.mem.bigToNative(u16, address.port));
-    const payload = [_]u8{'x'} ** 9000;
+    const payload = @as([9000]u8, @splat('x'));
     try transport.send(7, .{ .append_entries = .{
         .term = 1,
         .leader_id = 7,

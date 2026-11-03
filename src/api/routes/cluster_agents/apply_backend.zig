@@ -246,7 +246,7 @@ pub const ClusterApplyBackend = struct {
         try self.reportProgress("schedule", batch_start, batch_end, counters.*, failure_details, rollout_targets);
     }
 
-    fn reportProgress(
+    pub fn reportProgress(
         self: *const ClusterApplyBackend,
         phase: []const u8,
         batch_start: usize,
@@ -276,7 +276,7 @@ pub const ClusterApplyBackend = struct {
         }
     }
 
-    fn awaitControl(self: *const ClusterApplyBackend) ClusterApplyError!bool {
+    pub fn awaitControl(self: *const ClusterApplyBackend) ClusterApplyError!bool {
         try self.session.check();
         if (self.progress) |progress| {
             return progress.waitWhilePaused() catch |err| return mutation_session.mapError(err);

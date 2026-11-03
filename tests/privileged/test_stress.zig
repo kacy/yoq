@@ -73,7 +73,7 @@ test "stress: concurrent API requests during cluster operation" {
 
     // fire 20 concurrent GET requests at the leader
     var threads: [20]std.Thread = undefined;
-    var results: [20]u16 = .{0} ** 20;
+    var results: [20]u16 = @splat(0);
     var started: usize = 0;
 
     for (0..20) |i| {

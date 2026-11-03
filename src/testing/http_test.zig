@@ -72,25 +72,25 @@ pub fn extractJsonString(json: []const u8, key: []const u8) ?[]const u8 {
 
 /// Check if response status is success (2xx)
 pub fn isSuccessStatus(status: http.StatusCode) bool {
-    return @intFromEnum(status) >= 200 and @intFromEnum(status) < 300;
+    return @backingInt(status) >= 200 and @backingInt(status) < 300;
 }
 
 /// Check if response status is client error (4xx)
 pub fn isClientError(status: http.StatusCode) bool {
-    return @intFromEnum(status) >= 400 and @intFromEnum(status) < 500;
+    return @backingInt(status) >= 400 and @backingInt(status) < 500;
 }
 
 /// Check if response status is server error (5xx)
 pub fn isServerError(status: http.StatusCode) bool {
-    return @intFromEnum(status) >= 500 and @intFromEnum(status) < 600;
+    return @backingInt(status) >= 500 and @backingInt(status) < 600;
 }
 
 /// Assert response status equals expected
 pub fn expectStatus(response: http.Response, expected: http.StatusCode) !void {
     if (response.status != expected) {
         std.debug.print("Expected status {d}, got {d}: {s}\n", .{
-            @intFromEnum(expected),
-            @intFromEnum(response.status),
+            @backingInt(expected),
+            @backingInt(response.status),
             response.body,
         });
         return error.UnexpectedStatus;

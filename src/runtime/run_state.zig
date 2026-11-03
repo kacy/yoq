@@ -157,7 +157,7 @@ pub fn saveConfig(id: []const u8, cfg: SavedRunConfig) RunStateError!void {
     out.writeByte(if (cfg.network_enabled) 1 else 0) catch return RunStateError.WriteFailed;
     writePortMaps(out, cfg.port_maps) catch return RunStateError.WriteFailed;
     writeLimits(out, cfg.limits) catch return RunStateError.WriteFailed;
-    out.writeByte(@intFromEnum(cfg.restart_policy)) catch return RunStateError.WriteFailed;
+    out.writeByte(@backingInt(cfg.restart_policy)) catch return RunStateError.WriteFailed;
     writeString(out, cfg.user orelse "") catch return RunStateError.WriteFailed;
     writeString(out, cfg.image_reference orelse "") catch return RunStateError.WriteFailed;
     out.writeByte(cfg.stop_signal) catch return RunStateError.WriteFailed;
@@ -439,7 +439,7 @@ fn writePortMaps(writer: anytype, port_maps: []const net_setup.PortMap) !void {
     for (port_maps) |pm| {
         try writeInt(writer, u16, pm.host_port);
         try writeInt(writer, u16, pm.container_port);
-        try writer.writeByte(@intFromEnum(pm.protocol));
+        try writer.writeByte(@backingInt(pm.protocol));
         try writer.writeByte(@intFromBool(pm.host_ip != null));
         if (pm.host_ip) |address| try writer.writeAll(&address);
     }

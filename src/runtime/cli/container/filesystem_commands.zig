@@ -104,7 +104,7 @@ pub fn helper(args: *std.process.Args.Iterator, ctx: AppContext) !void {
         var upper = try std.Io.Dir.cwd().openDir(io, dirs.upperPath(), .{ .iterate = true, .follow_symlinks = false });
         defer upper.close(io);
         var buffer: [4096]u8 = undefined;
-        var output = std.Io.File.stdout().writer(io, &buffer);
+        var output = std.Io.File.stdout().writerStreaming(io, &buffer);
         try diff_support.diff(io, ctx.alloc, upper, lower, &output.interface);
         try output.interface.flush();
         return;

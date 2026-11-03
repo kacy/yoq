@@ -11,17 +11,17 @@ pub const DetectSource = enum {
 
 pub const GpuInfo = struct {
     index: u32,
-    uuid: [96]u8 = .{0} ** 96,
+    uuid: [96]u8 = @splat(0),
     uuid_len: u8 = 0,
-    name: [64]u8 = .{0} ** 64,
+    name: [64]u8 = @splat(0),
     name_len: u8 = 0,
     vram_mb: u64 = 0,
-    pci_bus_id: [16]u8 = .{0} ** 16,
+    pci_bus_id: [16]u8 = @splat(0),
     pci_bus_id_len: u8 = 0,
     numa_node: i32 = -1,
     mig_capable: bool = false,
     compute_capability: u16 = 0,
-    nvlink_peers: [max_gpus]u8 = .{0} ** max_gpus,
+    nvlink_peers: [max_gpus]u8 = @splat(0),
     nvlink_peer_count: u8 = 0,
 
     pub fn getUuid(self: *const GpuInfo) []const u8 {

@@ -83,11 +83,11 @@ pub fn create(root: std.Io.Dir, name: []const u8, target: []const u8, comptime e
     // link from a pinned descriptor, never a second lookup of an archive path.
     // /proc/self/fd also works without the capability required by AT_EMPTY_PATH.
     var source_buffer: [64]u8 = undefined;
-    const source_path = try std.fmt.bufPrintZ(&source_buffer, "/proc/self/fd/{d}", .{source.handle});
+    const source_path = try std.fmt.bufPrintSentinel(&source_buffer, "/proc/self/fd/{d}", .{source.handle}, 0);
     var random: [16]u8 = undefined;
     platform.randomBytes(&random);
     var temporary_buffer: [64]u8 = undefined;
-    const temporary = try std.fmt.bufPrintZ(&temporary_buffer, ".yoq-hardlink-{s}", .{std.fmt.bytesToHex(random, .lower)});
+    const temporary = try std.fmt.bufPrintSentinel(&temporary_buffer, ".yoq-hardlink-{s}", .{std.fmt.bytesToHex(random, .lower)}, 0);
     const result = linux.linkat(linux.AT.FDCWD, source_path, parent.handle, temporary, linux.AT.SYMLINK_FOLLOW);
     if (linux.errno(result) != .SUCCESS) return error.HardLinkFailed;
     defer parent.deleteFile(std.Options.debug_io, temporary) catch {};
