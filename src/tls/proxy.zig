@@ -829,7 +829,7 @@ test "peer trust listener preserves off and warn and never downgrades require" {
     defer alloc.free(client_key);
     var db = try @import("sqlite").Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
-    var certs = try cert_store.CertStore.initWithKey(&db, alloc, [_]u8{0xAB} ** cert_store.key_length);
+    var certs = try cert_store.CertStore.initWithKey(&db, alloc, @as([cert_store.key_length]u8, @splat(0xAB)));
     try certs.install("peer.test", server.cert_pem, server_key, "manual");
 
     for ([_]PeerTrustFixture.PeerMode{ .off, .warn, .require }) |mode| {
@@ -867,7 +867,7 @@ test "listener lifecycle TLS and HTTP share admission and join idle workers befo
     const alloc = std.testing.allocator;
     var db = try @import("sqlite").Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
-    var certs = try cert_store.CertStore.initWithKey(&db, alloc, [_]u8{0xAB} ** cert_store.key_length);
+    var certs = try cert_store.CertStore.initWithKey(&db, alloc, @as([cert_store.key_length]u8, @splat(0xAB)));
     var backends = backend_mod.BackendRegistry.init(alloc);
     defer backends.deinit();
     var proxy = try TlsProxy.init(alloc, &backends, &certs, 0, 0);
@@ -917,7 +917,7 @@ test "listener lifecycle TLS fatal listener state can reopen" {
     const alloc = std.testing.allocator;
     var db = try @import("sqlite").Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
-    var certs = try cert_store.CertStore.initWithKey(&db, alloc, [_]u8{0xAB} ** cert_store.key_length);
+    var certs = try cert_store.CertStore.initWithKey(&db, alloc, @as([cert_store.key_length]u8, @splat(0xAB)));
     var backends = backend_mod.BackendRegistry.init(alloc);
     defer backends.deinit();
     var proxy = try TlsProxy.init(alloc, &backends, &certs, 0, 0);

@@ -136,7 +136,7 @@ pub const PortMapper = struct {
 
 pub fn load(if_index: u32) common.EbpfError!PortMapper {
     const map_fd = try map_support.createMap(
-        @enumFromInt(port_map_prog.maps[0].map_type),
+        @fromBackingInt(@intCast(port_map_prog.maps[0].map_type)),
         port_map_prog.maps[0].key_size,
         port_map_prog.maps[0].value_size,
         port_map_prog.maps[0].max_entries,

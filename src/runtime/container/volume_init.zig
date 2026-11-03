@@ -37,7 +37,7 @@ pub fn initVolumes(args: *std.process.Args.Iterator, ctx: AppContext) !void {
     const pid = std.fmt.parseUnsigned(u31, pid_text, 10) catch return error.InvalidArgument;
     if (pid == 0 or rootfs.len == 0 or rootfs[0] != '/') return error.InvalidArgument;
     var ns_buf: [64]u8 = undefined;
-    const ns_path = try std.fmt.bufPrintZ(&ns_buf, "/proc/{d}/ns/mnt", .{pid});
+    const ns_path = try std.fmt.bufPrintSentinel(&ns_buf, "/proc/{d}/ns/mnt", .{pid}, 0);
     const fd = try platform.posix.open(ns_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     defer platform.posix.close(fd);
     if (linux.errno(linux.unshare(linux.CLONE.FS)) != .SUCCESS) return error.SetNsFailed;

@@ -61,7 +61,7 @@ pub fn isValidOverlayPath(path: []const u8) bool {
 
 pub fn sentinelize(path: *const []const u8) ![:0]const u8 {
     const S = struct {
-        threadlocal var buf: [4096:0]u8 = .{0} ** 4096;
+        threadlocal var buf: [4096:0]u8 = @splat(0);
     };
     if (path.len >= S.buf.len) return error.PathTooLong;
     @memcpy(S.buf[0..path.len], path.*);

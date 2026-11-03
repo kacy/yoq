@@ -242,7 +242,7 @@ test "http1 upload rejects ambiguous framing malformed chunks and oversized deco
     var limited: Body = .{ .state = .size_line, .limit = 4 };
     try std.testing.expectError(error.BodyTooLarge, limited.consume("3\r\nabc\r\n2\r\n"));
     var line: Body = .{ .state = .size_line };
-    try std.testing.expectError(error.MalformedRequestBody, line.consume(&([_]u8{'f'} ** (max_chunk_line + 1))));
+    try std.testing.expectError(error.MalformedRequestBody, line.consume(&(@as([max_chunk_line + 1]u8, @splat('f')))));
 }
 
 const UploadFixture = struct {
@@ -286,7 +286,7 @@ const UploadFixture = struct {
             try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", &interim);
         }
         var hash: Sha256 = .init(.{});
-        const block = [_]u8{'x'} ** buffer_size;
+        const block = @as([buffer_size]u8, @splat('x'));
         for (0..upload_size / block.len) |index| {
             if (self.chunked) try writeHashed(socket, &hash, "4000\r\n");
             try writeHashed(socket, &hash, &block);

@@ -24,10 +24,10 @@ pub fn exec(args: *const ArgList) ExecError!void {
         count += 1;
     }
 
-    var argv_z: [max_args + 1]?[*:0]const u8 = .{null} ** (max_args + 1);
+    var argv_z: [max_args + 1]?[*:0]const u8 = @splat(null);
     var owned_args: [max_args][:0]u8 = undefined;
     for (0..count) |i| {
-        owned_args[i] = std.heap.page_allocator.dupeZ(u8, args[i].?) catch return ExecError.ExecFailed;
+        owned_args[i] = std.heap.page_allocator.dupeSentinel(u8, args[i].?, 0) catch return ExecError.ExecFailed;
         argv_z[i] = owned_args[i].ptr;
     }
     defer for (owned_args[0..count]) |arg| std.heap.page_allocator.free(arg);
@@ -46,7 +46,7 @@ pub fn exec(args: *const ArgList) ExecError!void {
     const pid: linux.pid_t = @intCast(fork_rc);
     var status: u32 = 0;
     while (true) {
-        const wait_rc = linux.waitpid(pid, &status, 0);
+        const wait_rc = linux.waitpid(pid, @ptrCast(&status), 0);
         switch (linux.errno(wait_rc)) {
             .SUCCESS => break,
             .INTR => continue,
@@ -74,7 +74,7 @@ fn execInChild(argv: [*:null]const ?[*:0]const u8) noreturn {
     var it = std.mem.tokenizeScalar(u8, path_env, ':');
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     while (it.next()) |dir| {
-        const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ dir, arg0_slice }) catch continue;
+        const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ dir, arg0_slice }, 0) catch continue;
         _ = linux.execve(path.ptr, argv, envp);
     }
 
@@ -90,14 +90,14 @@ pub fn portStr(buf: *[8]u8, port: u16) []const u8 {
 
 test "exec handles zero exit code" {
     // Test that a command that exits with code 0 succeeds
-    var argv: ArgList = .{null} ** max_args;
+    var argv: ArgList = @splat(null);
     argv[0] = "true"; // 'true' always exits 0
     try exec(&argv);
 }
 
 test "exec handles non-zero exit code" {
     // Test that a command that exits with non-zero code fails
-    var argv: ArgList = .{null} ** max_args;
+    var argv: ArgList = @splat(null);
     argv[0] = "false"; // 'false' always exits 1
     try std.testing.expectError(ExecError.ExecFailed, exec(&argv));
 }

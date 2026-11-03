@@ -6,7 +6,7 @@ const peer_identity = @import("../../tls/peer_identity.zig");
 const client_session = @import("../../tls/client_session.zig");
 pub const x509 = @import("../../tls/x509_gen.zig");
 pub const csr = @import("../../tls/csr.zig");
-pub const key = [_]u8{9} ** 32;
+pub const key = @as([32]u8, @splat(9));
 
 pub fn exec(sql: []const u8) !void {
     var lease = try @import("../../state/store/common.zig").leaseDb();

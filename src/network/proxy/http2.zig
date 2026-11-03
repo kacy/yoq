@@ -80,7 +80,7 @@ pub fn writeFrameHeader(dest: []u8, header: FrameHeader) Error!void {
     dest[0] = @intCast((header.length >> 16) & 0xff);
     dest[1] = @intCast((header.length >> 8) & 0xff);
     dest[2] = @intCast(header.length & 0xff);
-    dest[3] = @intFromEnum(header.frame_type);
+    dest[3] = @backingInt(header.frame_type);
     dest[4] = header.flags;
     std.mem.writeInt(u32, dest[5..9], header.stream_id, .big);
 }

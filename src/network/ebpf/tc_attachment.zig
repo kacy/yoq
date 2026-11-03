@@ -42,7 +42,7 @@ pub const Attachment = struct {
     }
 
     fn matches(self: Attachment, filter: Filter) bool {
-        return filter.priority == @intFromEnum(self.component) and filter.handle == 1 and
+        return filter.priority == @backingInt(self.component) and filter.handle == 1 and
             filter.program_id == self.program_id and std.mem.eql(u8, filter.name(), self.component.name());
     }
 
@@ -85,13 +85,13 @@ pub fn attachWithStatus(if_index: u32, direction: common.Direction, program_fd: 
     defer filters.deinit(alloc);
     var replace = false;
     for (filters.items) |filter| {
-        if (filter.priority == @intFromEnum(component) and filter.handle == 1) {
+        if (filter.priority == @backingInt(component) and filter.handle == 1) {
             // A colliding administrator-owned filter must remain untouched.
             if (!std.mem.eql(u8, filter.name(), component.name())) return error.AttachFailed;
             replace = true;
         }
     }
-    try attach_support.attachTCWithOptions(if_index, direction, program_fd, @intFromEnum(component), .{
+    try attach_support.attachTCWithOptions(if_index, direction, program_fd, @backingInt(component), .{
         .handle = 1,
         .name = component.name(),
         .replace = replace,

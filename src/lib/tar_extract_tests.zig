@@ -365,7 +365,7 @@ test "gzip tar extraction accepts a long PAX path" {
     defer tmp.cleanup();
     try prepareDest(tmp);
 
-    const name = "d" ** 200;
+    const name = &@as([200:0]u8, @splat('d'));
     const record = "210 path=" ++ name ++ "\n";
     try std.testing.expectEqual(@as(usize, 210), record.len);
 
@@ -480,8 +480,8 @@ test "tar hard links retain GNU long names and link targets" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try prepareDest(tmp);
-    const target = "target-" ++ "x" ** 120;
-    const alias = "alias-" ++ "y" ** 120;
+    const target = "target-" ++ &@as([120:0]u8, @splat('x'));
+    const alias = "alias-" ++ &@as([120:0]u8, @splat('y'));
     try extractEntries(tmp, &.{
         .{ .name = target, .content = "long target" },
         .{ .name = alias, .kind = .hardlink, .content = target },

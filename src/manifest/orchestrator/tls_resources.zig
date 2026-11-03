@@ -82,7 +82,7 @@ const TestDeps = struct {
     }
 
     fn initCerts(db: *sqlite.Db, alloc: std.mem.Allocator) cert_store.CertError!cert_store.CertStore {
-        return cert_store.CertStore.initWithKey(db, alloc, [_]u8{0x42} ** cert_store.key_length);
+        return cert_store.CertStore.initWithKey(db, alloc, @as([cert_store.key_length]u8, @splat(0x42)));
     }
 
     fn failCerts(_: *sqlite.Db, _: std.mem.Allocator) cert_store.CertError!cert_store.CertStore {

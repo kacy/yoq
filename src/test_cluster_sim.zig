@@ -220,9 +220,9 @@ fn electLeader(node1: *SimNode, node2: *SimNode, node3: *SimNode) !void {
 }
 
 const RandomFaultPlan = struct {
-    drop_requests: [8]bool = [_]bool{false} ** 8,
-    drop_replies: [8]bool = [_]bool{false} ** 8,
-    duplicate_targets: [8]bool = [_]bool{false} ** 8,
+    drop_requests: [8]bool = @splat(false),
+    drop_replies: [8]bool = @splat(false),
+    duplicate_targets: [8]bool = @splat(false),
 
     fn clear(self: *RandomFaultPlan) void {
         self.* = .{};
@@ -514,7 +514,7 @@ fn runRandomSeed(seed: u64, trace: *std.ArrayList(u8)) !void {
 
     const nodes = [_]*SimNode{ &node1, &node2, &node3 };
     var faults = RandomFaultPlan{};
-    var prev_commit: [8]u64 = [_]u64{0} ** 8;
+    var prev_commit: [8]u64 = @splat(0);
     var command_seq: usize = 0;
 
     for (nodes) |node| {

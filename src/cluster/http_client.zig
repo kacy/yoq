@@ -301,7 +301,7 @@ test "http client frees failed responses once and handles the next request" {
     var address_len = address.getOsSockLen();
     try socket.getsockname(listener, &address.any, &address_len);
 
-    const oversized = [_]u8{'x'} ** (64 * 1024 + 1);
+    const oversized = @as([64 * 1024 + 1]u8, @splat('x'));
     const failures = [_][]const u8{ "", "not an HTTP response", &oversized };
     const healthy = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
     const Peer = struct {
@@ -340,7 +340,12 @@ test "http client posts a multiline manifest larger than the header buffer over 
     var address_len = address.getOsSockLen();
     try socket.getsockname(listener, &address.any, &address_len);
 
-    const body = "{\n  \"app_name\": \"demo\",\n  \"notes\": \"" ++ ("manifest payload " ** 512) ++ "\"\n}\n";
+    const body = "{\n  \"app_name\": \"demo\",\n  \"notes\": \"" ++ (comptime blk: {
+        @setEvalBranchQuota(100_000);
+        var repeated: []const u8 = "";
+        for (0..512) |_| repeated = repeated ++ "manifest payload ";
+        break :blk repeated;
+    }) ++ "\"\n}\n";
     const Peer = struct {
         received: [16 * 1024]u8 = undefined,
         len: usize = 0,
@@ -390,7 +395,7 @@ test "http client rejects oversized posts before connecting" {
     defer std.testing.allocator.free(largest);
     const body_start = (std.mem.indexOf(u8, largest, "\r\n\r\n") orelse return error.MissingRequestHeaders) + 4;
     try std.testing.expectEqualSlices(u8, body[0..max_post_body_bytes], largest[body_start..]);
-    const oversized_path = [_]u8{'x'} ** 2048;
+    const oversized_path = @as([2048]u8, @splat('x'));
     try std.testing.expectError(error.RequestTooLarge, post(std.testing.allocator, .{ 127, 0, 0, 1 }, 0, &oversized_path, ""));
 }
 

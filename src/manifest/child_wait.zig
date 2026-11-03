@@ -72,7 +72,7 @@ const TestChild = struct {
         var child: TestChild = .{ .pid = pid, .fd = @intCast(fd) };
         errdefer child.deinit();
         var status: u32 = 0;
-        if (linux.errno(linux.wait4(pid, &status, linux.W.UNTRACED, null)) != .SUCCESS) return error.WaitFailed;
+        if (linux.errno(linux.wait4(pid, @ptrCast(&status), linux.W.UNTRACED, null)) != .SUCCESS) return error.WaitFailed;
         _ = linux.pidfd_send_signal(child.fd, .CONT, null, 0);
         return child;
     }

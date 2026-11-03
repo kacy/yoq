@@ -372,7 +372,7 @@ fn recordRouteRequestStartWithRole(role: RouteTrafficRole, route_name: []const u
 }
 
 pub fn recordResponse(status: http.StatusCode) void {
-    recordResponseCode(@intFromEnum(status));
+    recordResponseCode(@backingInt(status));
 }
 
 pub fn recordResponseCode(status_code: u16) void {

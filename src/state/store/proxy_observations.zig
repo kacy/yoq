@@ -85,7 +85,7 @@ test "proxy history batch rolls back earlier services when a later history is in
     try store.initTestDb();
     defer store.deinitTestDb();
     const sample = Sample{ .at_ns = 100, .duration_ns = 20, .failed = false };
-    const too_many = [_]Sample{sample} ** (samples_per_writer + 1);
+    const too_many = @as([samples_per_writer + 1]Sample, @splat(sample));
     try std.testing.expectError(error.TooManySamples, saveBatch(std.testing.allocator, "writer", "boot", &.{
         .{ .service = "valid", .samples = &.{sample} },
         .{ .service = "invalid", .samples = &too_many },

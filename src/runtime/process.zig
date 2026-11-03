@@ -59,7 +59,7 @@ pub fn wait(pid: posix.pid_t, no_hang: bool) ProcessError!WaitResult {
         );
 
         if (syscall_util.isError(rc)) {
-            if (syscall_util.getErrno(rc) == @intFromEnum(linux.E.INTR)) {
+            if (syscall_util.getErrno(rc) == @backingInt(linux.E.INTR)) {
                 eintr_count += 1;
                 continue;
             }
@@ -96,7 +96,7 @@ pub fn waitForExit(pid: posix.pid_t) ProcessError!WaitResult {
 /// send a signal to a process.
 pub fn sendSignal(pid: posix.pid_t, sig: anytype) ProcessError!void {
     const sig_num: u32 = switch (@typeInfo(@TypeOf(sig))) {
-        .@"enum" => @intFromEnum(sig),
+        .@"enum" => @backingInt(sig),
         else => @intCast(sig),
     };
     const rc = linux.syscall2(
@@ -123,7 +123,7 @@ pub fn hasExited(pid: posix.pid_t) bool {
     if (pid <= 0) return false;
     const platform = @import("linux_platform").posix;
     var path_buffer: [64]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buffer, "/proc/{d}/stat", .{pid}) catch return false;
+    const path = std.fmt.bufPrintSentinel(&path_buffer, "/proc/{d}/stat", .{pid}, 0) catch return false;
     const fd = platform.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch |err| return err == error.FileNotFound;
     defer platform.close(fd);
     var buffer: [4096]u8 = undefined;

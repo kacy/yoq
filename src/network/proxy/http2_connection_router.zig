@@ -997,9 +997,9 @@ const ConnectionRouter = struct {
             if (index) |value| try self.streams.items[value].downstream_send.consume(payload.len);
         }
         const response = if (self.sent_settings)
-            try http2_response.formatSimpleStreamResponse(self.allocator, stream_id, @intFromEnum(status), "application/json", payload)
+            try http2_response.formatSimpleStreamResponse(self.allocator, stream_id, @backingInt(status), "application/json", payload)
         else
-            try http2_response.formatSimpleResponse(self.allocator, stream_id, @intFromEnum(status), "application/json", payload);
+            try http2_response.formatSimpleResponse(self.allocator, stream_id, @backingInt(status), "application/json", payload);
         defer self.allocator.free(response);
         self.sent_settings = true;
         try self.queueDownstreamControl(response);
@@ -1616,7 +1616,7 @@ test "http2 partial tls record does not block another stream or its timeout" {
     const tls = @import("../../tls/client_session.zig");
     const framing = @import("../../tls/record_transport.zig");
     const handshake = @import("../../tls/handshake.zig");
-    const keys = handshake.deriveTrafficKeys([_]u8{13} ** handshake.hash_len);
+    const keys = handshake.deriveTrafficKeys(@as([handshake.hash_len]u8, @splat(13)));
     var downstream: [2]i32 = undefined;
     var partial: [2]i32 = undefined;
     var ready: [2]i32 = undefined;
@@ -2052,7 +2052,7 @@ test "http2 compression fragments a small indexed block after literal expansion"
     defer block.deinit(alloc);
     try block.append(alloc, 0x88);
     try block.appendSlice(alloc, indexed_literal);
-    try block.appendSlice(alloc, &([_]u8{0xbe} ** 20));
+    try block.appendSlice(alloc, &(@as([20]u8, @splat(0xbe))));
     try std.testing.expect(block.items.len < flow.max_frame_payload);
     const frame = try http2.buildFrame(alloc, .{ .length = @intCast(block.items.len), .frame_type = .headers, .flags = 5, .stream_id = 1 }, block.items);
     defer alloc.free(frame);

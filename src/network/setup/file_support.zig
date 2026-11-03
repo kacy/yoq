@@ -82,8 +82,8 @@ test "required network files report write failures and accept maximum hostname" 
         return error.ExpectedNetworkWriteFailure;
     } else |_| {}
     try tmp.dir.deleteFile(std.testing.io, "etc/resolv.conf");
-    try writeNetworkFiles(root_buf[0..length], .{ 10, 42, 0, 2 }, .{ 10, 42, 0, 1 }, "a" ** 253);
+    try writeNetworkFiles(root_buf[0..length], .{ 10, 42, 0, 2 }, .{ 10, 42, 0, 1 }, &@as([253:0]u8, @splat('a')));
     var buffer: [512]u8 = undefined;
     const hosts = try tmp.dir.readFile(std.testing.io, "etc/hosts", &buffer);
-    try std.testing.expect(std.mem.indexOf(u8, hosts, "a" ** 253) != null);
+    try std.testing.expect(std.mem.indexOf(u8, hosts, &@as([253:0]u8, @splat('a'))) != null);
 }

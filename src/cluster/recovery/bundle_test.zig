@@ -48,9 +48,9 @@ fn fixture(root: []const u8, node_id: u64, selected_snapshot: bool, ca: Ca) !voi
     const dir = try files.openDir(root);
     defer dir.close(io);
     try dir.createDir(io, "cluster", .fromMode(0o700));
-    try files.write(dir, "api_token", "a" ** 64);
+    try files.write(dir, "api_token", &@as([64:0]u8, @splat('a')));
     try files.write(dir, "join_token", join_token);
-    try files.write(dir, "secrets.key", "k" ** 32);
+    try files.write(dir, "secrets.key", &@as([32:0]u8, @splat('k')));
     const raft_path = try joinPath(root, "cluster/raft.db");
     defer alloc.free(raft_path);
     var log = try Log.init(raft_path);
@@ -88,7 +88,7 @@ fn fixture(root: []const u8, node_id: u64, selected_snapshot: bool, ca: Ca) !voi
     var local = try @import("sqlite").Db.init(.{ .mode = .{ .File = local_path }, .open_flags = .{ .write = true, .create = true } });
     defer local.deinit();
     try @import("../../state/schema.zig").init(&local);
-    var secrets = try @import("../../state/secrets.zig").SecretsStore.initWithKey(&local, alloc, ("k" ** 32).*);
+    var secrets = try @import("../../state/secrets.zig").SecretsStore.initWithKey(&local, alloc, @splat('k'));
     try secrets.set("database_password", "preserved-secret");
 }
 
@@ -157,7 +157,7 @@ test "cluster bundle restores three fixed voters and elects a leader with existi
         defer alloc.free(local_path);
         var local = try @import("sqlite").Db.init(.{ .mode = .{ .File = local_path }, .open_flags = .{ .write = true } });
         defer local.deinit();
-        var secrets = try @import("../../state/secrets.zig").SecretsStore.initWithKey(&local, alloc, ("k" ** 32).*);
+        var secrets = try @import("../../state/secrets.zig").SecretsStore.initWithKey(&local, alloc, @splat('k'));
         const password = try secrets.get("database_password");
         defer alloc.free(password);
         try std.testing.expectEqualStrings("preserved-secret", password);
@@ -336,10 +336,10 @@ test "cluster bundle rejects wrong secret keys invalid ca keys and reused token 
     const dir = try files.openDir(root);
     defer dir.close(io);
     try dir.deleteFile(io, "secrets.key");
-    try files.write(dir, "secrets.key", "w" ** 32);
+    try files.write(dir, "secrets.key", &@as([32:0]u8, @splat('w')));
     try std.testing.expectError(error.InvalidSecretsKey, capture(root, destination));
     try dir.deleteFile(io, "secrets.key");
-    try files.write(dir, "secrets.key", "k" ** 32);
+    try files.write(dir, "secrets.key", &@as([32:0]u8, @splat('k')));
     try capture(root, destination);
     const other_root = try joinPath(base, "other-source");
     defer alloc.free(other_root);
@@ -389,7 +389,7 @@ test "cluster bundle requires the encryption key for stored certificates without
         var db = try @import("sqlite").Db.init(.{ .mode = .{ .File = local_path }, .open_flags = .{ .write = true } });
         defer db.deinit();
         try db.exec("DELETE FROM secrets;", .{}, .{});
-        const encrypted = try @import("../../state/secrets.zig").encrypt(alloc, "stored certificate key", ("k" ** 32).*);
+        const encrypted = try @import("../../state/secrets.zig").encrypt(alloc, "stored certificate key", @splat('k'));
         defer alloc.free(encrypted.ciphertext);
         const Blob = @import("sqlite").Blob;
         try db.exec("INSERT INTO certificates (domain,cert_pem,encrypted_key,key_nonce,key_tag,not_after,source,created_at,updated_at) VALUES ('app.example','certificate',?,?,?,2000000000,'manual',1,1);", .{}, .{ Blob{ .data = encrypted.ciphertext }, Blob{ .data = &encrypted.nonce }, Blob{ .data = &encrypted.tag } });
@@ -398,6 +398,6 @@ test "cluster bundle requires the encryption key for stored certificates without
     defer dir.close(io);
     try dir.deleteFile(io, "secrets.key");
     try std.testing.expectError(error.MissingSecretsKey, capture(root, destination));
-    try files.write(dir, "secrets.key", "w" ** 32);
+    try files.write(dir, "secrets.key", &@as([32:0]u8, @splat('w')));
     try std.testing.expectError(error.InvalidSecretsKey, capture(root, destination));
 }

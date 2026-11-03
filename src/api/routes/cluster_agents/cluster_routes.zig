@@ -263,8 +263,8 @@ test "cluster certificate route reads the node database while the local store is
     defer store.deinitTestDb();
     var node = try cluster_node.Node.initForTests(alloc, .{ .id = 1, .port = 0, .peers = &.{}, .data_dir = "/tmp" });
     defer node.deinit();
-    const nonce = [_]u8{0} ** 12;
-    const tag = [_]u8{0} ** 16;
+    const nonce = @as([12]u8, @splat(0));
+    const tag = @as([16]u8, @splat(0));
     const sql = try store.buildClusterCaInsertSql(alloc, "replicated public certificate", "encrypted private key", &nonce, &tag, 1, 100);
     defer alloc.free(sql);
     try node.stateMachineDb().execDynamic(sql, .{}, .{});

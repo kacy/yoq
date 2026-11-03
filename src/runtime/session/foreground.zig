@@ -171,10 +171,10 @@ test "foreground relay drains output while a child delays reading large stdin" {
         const command_fork = linux.fork();
         if (linux.errno(command_fork) != .SUCCESS) linux.exit_group(122);
         if (command_fork == 0) {
-            if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_PDEATHSIG), @intFromEnum(linux.SIG.KILL), 0, 0, 0)) != .SUCCESS or linux.getppid() != relay_pid)
+            if (linux.errno(linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), @backingInt(linux.SIG.KILL), 0, 0, 0)) != .SUCCESS or linux.getppid() != relay_pid)
                 linux.exit_group(114);
             channels.applyChild() catch linux.exit_group(121);
-            const output = [_]u8{'o'} ** 4096;
+            const output = @as([4096]u8, @splat('o'));
             for (0..64) |_| writeAll(posix.STDOUT_FILENO, &output) catch linux.exit_group(120);
             var input: [4096]u8 = undefined;
             var total: usize = 0;
@@ -203,7 +203,7 @@ test "foreground relay drains output while a child delays reading large stdin" {
     if (linux.errno(feeder_fork) != .SUCCESS) return error.ForkFailed;
     if (feeder_fork == 0) {
         platform.close(sink[0]);
-        const input = [_]u8{'i'} ** 4096;
+        const input = @as([4096]u8, @splat('i'));
         for (0..64) |_| writeAll(source[1], &input) catch linux.exit_group(115);
         platform.close(source[1]);
         linux.exit_group(0);

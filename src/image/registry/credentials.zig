@@ -1,4 +1,5 @@
 const std = @import("std");
+const common = @import("common.zig");
 
 pub const Credentials = struct {
     encoded_auth: []u8,
@@ -86,11 +87,11 @@ pub fn permitsTokenUrl(host: []const u8, credentials: Credentials, uri: std.Uri)
 fn sameOrigin(origin: []const u8, uri: std.Uri) bool {
     const expected = std.Uri.parse(origin) catch return false;
     if (!std.ascii.eqlIgnoreCase(expected.scheme, "https") or expected.user != null or expected.password != null or expected.query != null or expected.fragment != null or !expected.path.isEmpty()) return false;
-    var expected_buffer: [255]u8 = undefined;
-    var actual_buffer: [255]u8 = undefined;
-    const expected_host = expected.getHost(&expected_buffer) catch return false;
-    const actual_host = uri.getHost(&actual_buffer) catch return false;
-    return std.ascii.eqlIgnoreCase(expected_host.bytes, actual_host.bytes) and (expected.port orelse 443) == (uri.port orelse 443);
+    var expected_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    var actual_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const expected_host = common.uriHost(expected, &expected_buffer) catch return false;
+    const actual_host = common.uriHost(uri, &actual_buffer) catch return false;
+    return std.ascii.eqlIgnoreCase(expected_host, actual_host) and (expected.port orelse 443) == (uri.port orelse 443);
 }
 
 test "registry credentials match exact hosts and keep token services scoped" {

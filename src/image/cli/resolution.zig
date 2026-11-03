@@ -104,7 +104,7 @@ fn resolveWithPull(io: std.Io, alloc: std.mem.Allocator, target: []const u8, pol
 // use a complete empty tar so its extraction shares the ordinary cache lifetime.
 fn assembleLayers(alloc: std.mem.Allocator, descriptors: []const spec.Descriptor) ![]const []const u8 {
     if (descriptors.len > 0) return layer.assembleRootfsDescriptors(alloc, descriptors);
-    const empty_tar = [_]u8{0} ** 1024;
+    const empty_tar = @as([1024]u8, @splat(0));
     const digest = try blob_store.putBlob(&empty_tar);
     var digest_buf: [71]u8 = undefined;
     const empty_layer = spec.Descriptor{

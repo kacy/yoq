@@ -310,7 +310,7 @@ fn archValue() u32 {
 
 /// get syscall number for the current architecture
 fn syscallNum(sc: linux.SYS) u32 {
-    return @intCast(@intFromEnum(sc));
+    return @intCast(@backingInt(sc));
 }
 
 // -- tests --
@@ -515,7 +515,7 @@ test "seccomp filter decisions" {
     try std.testing.expectEqual(linux.SECCOMP.RET.KILL_PROCESS, evaluateFilter(&filter, syscallNum(.read), native ^ 1, 0));
 
     // plain fork-style clone is fine; namespace flags are refused
-    const sigchld: u64 = @intFromEnum(linux.SIG.CHLD);
+    const sigchld: u64 = @backingInt(linux.SIG.CHLD);
     try std.testing.expectEqual(allow, run(.clone, sigchld));
     try std.testing.expectEqual(eperm, run(.clone, linux.CLONE.NEWUSER | sigchld));
     try std.testing.expectEqual(eperm, run(.clone, linux.CLONE.NEWNET));

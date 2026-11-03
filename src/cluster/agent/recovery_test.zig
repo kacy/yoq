@@ -10,7 +10,7 @@ const http = @import("../../api/http.zig");
 const routes = @import("../../api/routes/cluster_agents/agent_routes.zig");
 const loop = @import("loop_runtime.zig");
 const assignments = @import("assignment_runtime.zig");
-const credential = "a" ** 64;
+const credential = &@as([64:0]u8, @splat('a'));
 
 const Listener = struct {
     fd: posix.fd_t,
@@ -203,7 +203,7 @@ test "agent recovery retries follower heartbeat refusal without a leader hint" {
         .port = 0,
         .api_port = second.endpoint.port,
         .peers = &.{.{ .id = 2, .addr = second.endpoint.address, .port = 9700 }},
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = "/unused",
     });
     defer follower.deinit();

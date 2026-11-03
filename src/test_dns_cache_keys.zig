@@ -8,7 +8,7 @@ pub fn main(_: std.process.Init) !void {
     defer platform.posix.close(socket);
     const index = try nl.getIfIndex(socket, "yoq0");
     const interceptor = try dns_runtime.load(index);
-    for ([_][]const u8{ "web", "fixture.local", "a" ** 61 }) |name| {
+    for ([_][]const u8{ "web", "fixture.local", &@as([61:0]u8, @splat('a')) }) |name| {
         interceptor.updateService(name, .{ 10, 43, 0, 2 });
         const address = interceptor.lookupService(name) orelse return error.MissingCacheEntry;
         if (!std.mem.eql(u8, &address, &.{ 10, 43, 0, 2 })) return error.WrongCacheEntry;

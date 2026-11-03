@@ -597,7 +597,7 @@ test "parse image config with labels" {
 }
 
 test "parse image ref preserves registry ports and namespaces before digest suffix" {
-    const digest = "sha256:" ++ "a" ** 64;
+    const digest = "sha256:" ++ &@as([64:0]u8, @splat('a'));
     const cases = [_]struct { input: []const u8, host: []const u8, repository: []const u8 }{
         .{ .input = "registry.example:5000/team/image@" ++ digest, .host = "registry.example:5000", .repository = "team/image" },
         .{ .input = "team/image@" ++ digest, .host = "registry-1.docker.io", .repository = "team/image" },

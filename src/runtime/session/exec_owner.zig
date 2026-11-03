@@ -51,7 +51,7 @@ pub fn parentHandle() !posix.fd_t {
 // setting credentials clears PDEATHSIG, so arm it again after identity setup.
 // the pidfd closes the race where the helper died before prctl took effect.
 pub fn armChild(parent: posix.fd_t) !void {
-    if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_PDEATHSIG), @intFromEnum(linux.SIG.KILL), 0, 0, 0)) != .SUCCESS)
+    if (linux.errno(linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), @backingInt(linux.SIG.KILL), 0, 0, 0)) != .SUCCESS)
         return error.ParentWatchFailed;
     var poll = [_]linux.pollfd{.{ .fd = parent, .events = linux.POLL.IN, .revents = 0 }};
     const rc = linux.poll(&poll, 1, 0);

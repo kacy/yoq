@@ -272,7 +272,7 @@ fn doHandshakeInner(
 
     var sh_pos: usize = 0;
     const sh_msg = (message_parse.nextMessage(sh_record, &sh_pos) catch return ClientError.InvalidServerHello) orelse return ClientError.InvalidServerHello;
-    if (sh_msg.msg_type != @intFromEnum(message_parse.HandshakeType.server_hello)) return ClientError.InvalidServerHello;
+    if (sh_msg.msg_type != @backingInt(message_parse.HandshakeType.server_hello)) return ClientError.InvalidServerHello;
     const sh = message_parse.parseServerHello(sh_msg.body) catch return ClientError.InvalidServerHello;
     transcript.update(sh_msg.raw);
 
@@ -320,28 +320,28 @@ fn doHandshakeInner(
             const msg = opt_msg orelse break;
 
             switch (msg.msg_type) {
-                @intFromEnum(message_parse.HandshakeType.encrypted_extensions) => {
+                @backingInt(message_parse.HandshakeType.encrypted_extensions) => {
                     transcript.update(msg.raw);
                 },
-                @intFromEnum(message_parse.HandshakeType.certificate_request) => {
+                @backingInt(message_parse.HandshakeType.certificate_request) => {
                     received_certificate_request = true;
                     transcript.update(msg.raw);
                 },
-                @intFromEnum(message_parse.HandshakeType.certificate) => {
+                @backingInt(message_parse.HandshakeType.certificate) => {
                     const der = message_parse.parseCertificateMessage(msg.body) catch return ClientError.HandshakeFailed;
                     if (der.len == 0) return ClientError.UntrustedServerCert;
                     server_cert_der = alloc.dupe(u8, der) catch return ClientError.AllocFailed;
                     server_cert_pem = derToPem(alloc, der) catch return ClientError.AllocFailed;
                     transcript.update(msg.raw);
                 },
-                @intFromEnum(message_parse.HandshakeType.certificate_verify) => {
+                @backingInt(message_parse.HandshakeType.certificate_verify) => {
                     const cv = message_parse.parseCertificateVerify(msg.body) catch return ClientError.HandshakeFailed;
                     if (cv.algorithm != 0x0403) return ClientError.HandshakeFailed;
                     transcript_hash_at_cv = transcript.peek();
                     server_cert_verify_sig = alloc.dupe(u8, cv.signature_der) catch return ClientError.AllocFailed;
                     transcript.update(msg.raw);
                 },
-                @intFromEnum(message_parse.HandshakeType.finished) => {
+                @backingInt(message_parse.HandshakeType.finished) => {
                     const fin = message_parse.parseFinished(msg.body) catch return ClientError.HandshakeFailed;
                     const expected = handshake.computeFinished(hs_keys.server_handshake_traffic_secret, transcript.peek());
                     if (!std.mem.eql(u8, fin.verify_data, &expected)) return ClientError.HandshakeFailed;
@@ -436,7 +436,7 @@ fn mapRecordError(err: anyerror) ClientError {
 fn readPlaintextHandshakeRecord(alloc: std.mem.Allocator, fd: anytype) ClientError![]u8 {
     const full = try readWireRecord(alloc, fd);
     defer alloc.free(full);
-    const ct: record.ContentType = @enumFromInt(full[0]);
+    const ct: record.ContentType = @fromBackingInt(@intCast(full[0]));
     if (ct != .handshake) return ClientError.InvalidServerHello;
     const payload = full[5..];
     return alloc.dupe(u8, payload) catch ClientError.AllocFailed;
@@ -905,12 +905,12 @@ test "TLS deadline on a partially written record preserves sequence and poisons 
     var session = ClientSession{
         .fd = fds[0],
         .alloc = std.testing.allocator,
-        .client_app = handshake.deriveTrafficKeys([_]u8{7} ** hash_len),
+        .client_app = handshake.deriveTrafficKeys(@as([hash_len]u8, @splat(7))),
         .server_app = undefined,
         .deadline = transport.Deadline.afterMilliseconds(30),
     };
     defer session.deinit();
-    const data = [_]u8{42} ** (record.max_record_size);
+    const data = @as([record.max_record_size]u8, @splat(42));
     try std.testing.expectError(error.TimedOut, session.write(&data));
     try std.testing.expectEqual(@as(u64, 0), session.client_seq);
     try std.testing.expect(session.failed);
@@ -924,7 +924,7 @@ test "TLS incremental reads retain fragments and drain plaintext without another
     const fds = try deadlineTestPair();
     defer linux_platform.posix.close(fds[0]);
     defer linux_platform.posix.close(fds[1]);
-    const keys = handshake.deriveTrafficKeys([_]u8{7} ** hash_len);
+    const keys = handshake.deriveTrafficKeys(@as([hash_len]u8, @splat(7)));
     var session = ClientSession{ .fd = fds[0], .alloc = std.testing.allocator, .client_app = keys, .server_app = keys };
     defer session.deinit();
     var encrypted: [128]u8 = undefined;
@@ -974,12 +974,12 @@ test "TLS queued writes preserve sequence and allow reads while the socket is fu
     defer linux_platform.posix.close(fds[1]);
     const small_buffer: i32 = 1024;
     try posix.setsockopt(fds[0], posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&small_buffer));
-    const keys = handshake.deriveTrafficKeys([_]u8{8} ** hash_len);
+    const keys = handshake.deriveTrafficKeys(@as([hash_len]u8, @splat(8)));
     var sender = ClientSession{ .fd = fds[0], .alloc = std.testing.allocator, .client_app = keys, .server_app = keys };
     defer sender.deinit();
     var receiver = ClientSession{ .fd = fds[1], .alloc = std.testing.allocator, .client_app = keys, .server_app = keys };
     defer receiver.deinit();
-    const body = [_]u8{'x'} ** record.max_record_size;
+    const body = @as([record.max_record_size]u8, @splat('x'));
     try std.testing.expectEqual(body.len, try sender.writeAvailable(&body));
     try std.testing.expect(sender.pendingWrite());
     try std.testing.expectEqual(@as(usize, 0), try sender.writeAvailable("must wait"));
@@ -1006,7 +1006,7 @@ test "TLS queued writes preserve sequence and allow reads while the socket is fu
 }
 
 test "TLS incremental reads require authenticated close notify at record boundaries" {
-    const keys = handshake.deriveTrafficKeys([_]u8{11} ** hash_len);
+    const keys = handshake.deriveTrafficKeys(@as([hash_len]u8, @splat(11)));
     for ([_]u8{ 0, 1, 2 }) |ending| {
         const fds = try deadlineTestPair();
         defer linux_platform.posix.close(fds[0]);

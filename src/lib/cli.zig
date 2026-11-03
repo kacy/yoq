@@ -576,7 +576,7 @@ test "invalid container names" {
     try std.testing.expect(!isValidContainerName("db-"));
     try std.testing.expect(!isValidContainerName("my db"));
     try std.testing.expect(!isValidContainerName("../../etc/passwd"));
-    try std.testing.expect(!isValidContainerName("a" ** 64));
+    try std.testing.expect(!isValidContainerName(&@as([64:0]u8, @splat('a'))));
     try std.testing.expect(!isValidContainerName("hello_world"));
 }
 
@@ -812,7 +812,7 @@ test "cli redirected output preserves consecutive writes to regular files" {
     }
     var status: u32 = 0;
     while (true) {
-        const rc = linux.waitpid(@intCast(forked), &status, 0);
+        const rc = linux.waitpid(@intCast(forked), @ptrCast(&status), 0);
         if (linux.errno(rc) == .INTR) continue;
         try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
         break;

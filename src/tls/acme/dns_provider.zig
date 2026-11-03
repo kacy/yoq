@@ -476,7 +476,7 @@ fn sendDnsRequest(
 }
 
 fn requireSuccess(status: http.Status) types.AcmeError!void {
-    if (@intFromEnum(status) / 100 != 2) return types.AcmeError.ChallengeFailed;
+    if (@backingInt(status) / 100 != 2) return types.AcmeError.ChallengeFailed;
 }
 
 fn bearerAuth(buf: []u8, token: []const u8) types.AcmeError![]const u8 {
@@ -759,7 +759,7 @@ test "Runtime.init frees partial cloudflare state when config is invalid" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
 
-    const key = [_]u8{0xAB} ** secrets.key_length;
+    const key = @as([secrets.key_length]u8, @splat(0xAB));
     var store = try secrets.SecretsStore.initWithKey(&db, alloc, key);
     try store.set("cf-token", "secret-token");
 
@@ -786,7 +786,7 @@ test "Runtime.init resolves exec secret environment pairs" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
 
-    const key = [_]u8{0xCD} ** secrets.key_length;
+    const key = @as([secrets.key_length]u8, @splat(0xCD));
     var store = try secrets.SecretsStore.initWithKey(&db, alloc, key);
     try store.set("hook-token", "resolved-token");
 

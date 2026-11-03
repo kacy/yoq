@@ -172,7 +172,7 @@ const PrivateDatabase = struct {
             };
             self.directory_len = directory.len;
             errdefer self.deinit();
-            const filename = std.fmt.bufPrintZ(&self.filename, "{s}/database", .{directory}) catch return error.PathError;
+            const filename = std.fmt.bufPrintSentinel(&self.filename, "{s}/database", .{directory}, 0) catch return error.PathError;
             self.filename_len = filename.len;
             var file = std.Io.Dir.cwd().createFile(io, filename, .{ .exclusive = true, .permissions = .fromMode(0o600) }) catch return error.IoFailed;
             file.close(io);
@@ -342,7 +342,7 @@ fn readWholeFile(alloc: std.mem.Allocator, path: [:0]const u8) ![]u8 {
 }
 
 fn writeFileBytes(path: [:0]const u8, bytes: []const u8) !void {
-    const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true, .permissions = @enumFromInt(0o600) });
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true, .permissions = @fromBackingInt(@intCast(0o600)) });
     defer file.close(io);
     try file.writePositionalAll(io, bytes, 0);
 }
@@ -420,7 +420,7 @@ test "validateBackupSchema rejects incomplete database" {
     const path = tmp_path_buf[0..path_len];
 
     var path_buf: [paths.max_path]u8 = undefined;
-    const db_path = try std.fmt.bufPrintZ(&path_buf, "{s}/bad.db", .{path});
+    const db_path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/bad.db", .{path}, 0);
 
     var db: ?*c.sqlite3 = null;
     try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_open(db_path.ptr, &db));
@@ -432,7 +432,7 @@ test "validateBackupSchema rejects incomplete database" {
 
 test "artifact encode/decode round-trips the plaintext" {
     const alloc = std.testing.allocator;
-    const key = [_]u8{7} ** secrets.key_length;
+    const key = @as([secrets.key_length]u8, @splat(7));
     const plaintext = "SQLite format 3\x00 ... pretend database bytes ...";
 
     const artifact = try encodeArtifact(alloc, plaintext, key);
@@ -446,7 +446,7 @@ test "artifact encode/decode round-trips the plaintext" {
 
 test "decodeArtifact rejects a tampered checksum, body, and wrong key" {
     const alloc = std.testing.allocator;
-    const key = [_]u8{7} ** secrets.key_length;
+    const key = @as([secrets.key_length]u8, @splat(7));
     const plaintext = "pretend database bytes";
 
     const artifact = try encodeArtifact(alloc, plaintext, key);
@@ -470,14 +470,14 @@ test "decodeArtifact rejects a tampered checksum, body, and wrong key" {
 
     // wrong key → AEAD auth fails.
     {
-        const wrong_key = [_]u8{9} ** secrets.key_length;
+        const wrong_key = @as([secrets.key_length]u8, @splat(9));
         try std.testing.expectError(BackupError.IntegrityCheckFailed, decodeArtifact(alloc, artifact, wrong_key));
     }
 }
 
 test "decodeArtifact rejects a too-short or unmagicked buffer" {
     const alloc = std.testing.allocator;
-    const key = [_]u8{7} ** secrets.key_length;
+    const key = @as([secrets.key_length]u8, @splat(7));
     try std.testing.expectError(BackupError.IntegrityCheckFailed, decodeArtifact(alloc, magic ++ "tooshort", key));
     try std.testing.expectError(BackupError.IntegrityCheckFailed, decodeArtifact(alloc, "not a backup at all", key));
 }
@@ -545,7 +545,7 @@ test "restore locking verifies and restores encrypted real databases" {
     try createRestoreTestDb(destination, "live-container");
     const plaintext = try readWholeFile(std.testing.allocator, source);
     defer std.testing.allocator.free(plaintext);
-    const key = [_]u8{23} ** secrets.key_length;
+    const key = @as([secrets.key_length]u8, @splat(23));
     const artifact = try encodeArtifact(std.testing.allocator, plaintext, key);
     defer std.testing.allocator.free(artifact);
     try writeFileBytes(artifact_path, artifact);
@@ -645,7 +645,7 @@ test "private backup real raw and encrypted artifacts replace symlinks without t
     try createRestoreTestDb(source, "backed-up");
     const victim = "must remain untouched";
     try tmp.dir.writeFile(io, .{ .sub_path = "victim", .data = victim });
-    const key = [_]u8{42} ** secrets.key_length;
+    const key = @as([secrets.key_length]u8, @splat(42));
     for ([_]bool{ false, true }) |encrypted| {
         const name = if (encrypted) "encrypted.backup" else "raw.backup";
         const output = try restoreTestPath(tmp, name);

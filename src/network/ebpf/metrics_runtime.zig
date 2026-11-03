@@ -99,7 +99,7 @@ pub const MetricsCollector = struct {
 pub fn load(bridge_if_index: u32) common.EbpfError!MetricsCollector {
     const map0_def = metrics_prog.maps[0];
     const map_fd = try map_support.createMap(
-        @enumFromInt(map0_def.map_type),
+        @fromBackingInt(@intCast(map0_def.map_type)),
         map0_def.key_size,
         map0_def.value_size,
         map0_def.max_entries,
@@ -111,7 +111,7 @@ pub fn load(bridge_if_index: u32) common.EbpfError!MetricsCollector {
 
     const map1_def = metrics_prog.maps[1];
     const pair_fd = try map_support.createMap(
-        @enumFromInt(map1_def.map_type),
+        @fromBackingInt(@intCast(map1_def.map_type)),
         map1_def.key_size,
         map1_def.value_size,
         map1_def.max_entries,

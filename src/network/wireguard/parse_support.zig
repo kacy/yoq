@@ -24,7 +24,7 @@ pub fn parseEndpoint(endpoint: []const u8) ?[16]u8 {
     const addr = ip_mod.parseIp(endpoint[0..colon]) orelse return null;
     const port = std.fmt.parseInt(u16, endpoint[colon + 1 ..], 10) catch return null;
 
-    var sa: [16]u8 = .{0} ** 16;
+    var sa: [16]u8 = @splat(0);
     sa[0] = nl.AF.INET;
     sa[2] = @intCast(port >> 8);
     sa[3] = @intCast(port & 0xff);

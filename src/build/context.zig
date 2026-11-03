@@ -66,7 +66,7 @@ test "hash single file" {
 
     const digest = try hashFiles(alloc, dir_path, "test.txt");
 
-    try std.testing.expect(!std.mem.eql(u8, &digest.hash, &([_]u8{0} ** 32)));
+    try std.testing.expect(!std.mem.eql(u8, &digest.hash, &(@as([32]u8, @splat(0)))));
 }
 
 test "hash determinism" {
@@ -126,7 +126,7 @@ test "hash directory" {
 
     const digest = try hashFiles(alloc, dir_path, "mydir");
 
-    try std.testing.expect(!std.mem.eql(u8, &digest.hash, &([_]u8{0} ** 32)));
+    try std.testing.expect(!std.mem.eql(u8, &digest.hash, &(@as([32]u8, @splat(0)))));
 }
 
 test "copy single file" {

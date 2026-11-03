@@ -125,7 +125,7 @@ test "health output keeps valid utf8 within its rendered byte limit" {
     try std.testing.expect(!text.truncated);
 
     raw = .{};
-    raw.append(&([_]u8{'x'} ** (max_bytes - 2)));
+    raw.append(&(@as([max_bytes - 2]u8, @splat('x'))));
     raw.append("\xe2\x82\xac");
     const cut = raw.utf8();
     try std.testing.expect(cut.truncated);
@@ -133,7 +133,7 @@ test "health output keeps valid utf8 within its rendered byte limit" {
     try std.testing.expect(std.unicode.utf8ValidateSlice(cut.text()));
 
     raw = .{};
-    raw.append(&([_]u8{0xff} ** max_bytes));
+    raw.append(&(@as([max_bytes]u8, @splat(0xff))));
     const expanded = raw.utf8();
     try std.testing.expect(expanded.truncated);
     try std.testing.expect(expanded.len <= max_bytes);
@@ -153,7 +153,7 @@ test "health output drains both streams beyond its retained bytes" {
     };
     var capture = try Capture.take(&child);
     defer capture.deinit();
-    const bytes = [_]u8{'x'} ** max_bytes;
+    const bytes = @as([max_bytes]u8, @splat('x'));
     for (0..16) |_| {
         try std.testing.expectEqual(bytes.len, try platform.write(stdout[1], &bytes));
         try std.testing.expectEqual(bytes.len, try platform.write(stderr[1], &bytes));

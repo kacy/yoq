@@ -55,7 +55,7 @@ pub fn parseHeader(data: []const u8) RecordError!RecordHeader {
     if (length > max_ciphertext_size) return RecordError.RecordTooLarge;
 
     return .{
-        .content_type = @enumFromInt(data[0]),
+        .content_type = @fromBackingInt(@intCast(data[0])),
         .length = length,
     };
 }
@@ -65,7 +65,7 @@ pub fn parseHeader(data: []const u8) RecordError!RecordHeader {
 pub fn writeHeader(buf: []u8, content_type: ContentType, payload_len: u16) RecordError!void {
     if (buf.len < record_header_size) return RecordError.BufferTooShort;
 
-    buf[0] = @intFromEnum(content_type);
+    buf[0] = @backingInt(content_type);
     buf[1] = 0x03; // legacy: TLS 1.2
     buf[2] = 0x03;
     buf[3] = @intCast(payload_len >> 8);
@@ -107,7 +107,7 @@ pub fn encryptRecord(
 
     // build inner plaintext: data + content_type byte
     @memcpy(out[0..plaintext.len], plaintext);
-    out[plaintext.len] = @intFromEnum(inner_type);
+    out[plaintext.len] = @backingInt(inner_type);
 
     const nonce = buildNonce(iv, seq);
 
@@ -169,7 +169,7 @@ pub fn decryptRecord(
 
     if (inner_len == 0) return RecordError.InvalidContentType;
 
-    const real_type: ContentType = @enumFromInt(ciphertext[inner_len - 1]);
+    const real_type: ContentType = @fromBackingInt(@intCast(ciphertext[inner_len - 1]));
     return .{
         .plaintext = ciphertext[0 .. inner_len - 1],
         .content_type = real_type,
@@ -251,10 +251,10 @@ test "decrypt fails with wrong sequence number" {
 }
 
 test "nonce construction" {
-    const iv = [_]u8{0} ** aead_nonce_size;
+    const iv = @as([aead_nonce_size]u8, @splat(0));
 
     const nonce0 = buildNonce(iv, 0);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** aead_nonce_size), &nonce0);
+    try std.testing.expectEqualSlices(u8, &(@as([aead_nonce_size]u8, @splat(0))), &nonce0);
 
     const nonce1 = buildNonce(iv, 1);
     // last byte should be 1
@@ -263,7 +263,7 @@ test "nonce construction" {
 }
 
 test "nonce XOR with IV" {
-    const iv = [_]u8{0xFF} ** aead_nonce_size;
+    const iv = @as([aead_nonce_size]u8, @splat(0xFF));
     const nonce = buildNonce(iv, 0);
 
     // first 4 bytes unchanged (seq only affects last 8)
@@ -307,14 +307,14 @@ test "encrypt preserves content type" {
 }
 
 test "full size application record includes inner content type overhead" {
-    const key = [_]u8{0} ** aead_key_size;
-    const iv = [_]u8{0} ** aead_nonce_size;
-    const plaintext = [_]u8{'x'} ** max_record_size;
+    const key = @as([aead_key_size]u8, @splat(0));
+    const iv = @as([aead_nonce_size]u8, @splat(0));
+    const plaintext = @as([max_record_size]u8, @splat('x'));
     var ciphertext: [max_ciphertext_size]u8 = undefined;
     const n = try encryptRecord(key, iv, 0, &plaintext, .application_data, &ciphertext);
     var header: [5]u8 = undefined;
     try writeHeader(&header, .application_data, @intCast(n));
     const decrypted = try decryptRecord(key, iv, 0, ciphertext[0..n], header);
     try std.testing.expectEqualSlices(u8, &plaintext, decrypted.plaintext);
-    try std.testing.expectError(error.RecordTooLarge, encryptRecord(key, iv, 1, &([_]u8{'x'} ** (max_record_size + 1)), .application_data, &ciphertext));
+    try std.testing.expectError(error.RecordTooLarge, encryptRecord(key, iv, 1, &(@as([max_record_size + 1]u8, @splat('x'))), .application_data, &ciphertext));
 }

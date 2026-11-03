@@ -179,7 +179,7 @@ test "log tail scans past 64 KiB and the former whole-log size limit" {
     const file = try tmp.dir.createFile(io, "large.log", .{ .read = true });
     defer file.close(io);
     try file.writeStreamingAll(io, "first\n");
-    const block = "x" ** (64 * 1024);
+    const block = &@as([64 * 1024:0]u8, @splat('x'));
     for (0..161) |_| try file.writeStreamingAll(io, block);
     try file.writeStreamingAll(io, "\nlast");
     const end = try file.length(io);

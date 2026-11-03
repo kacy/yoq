@@ -63,7 +63,7 @@ pub fn validateSettings(frame: http2.FrameHeader) !void {
 
 pub fn windowUpdate(stream_id: u32, count: u32) [13]u8 {
     // this frame has a fixed four-byte payload and no flags.
-    var frame = [_]u8{ 0, 0, 4, @intFromEnum(http2.FrameType.window_update), 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var frame = [_]u8{ 0, 0, 4, @backingInt(http2.FrameType.window_update), 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     std.mem.writeInt(u32, frame[5..9], stream_id & 0x7fffffff, .big);
     std.mem.writeInt(u32, frame[9..13], count, .big);
     return frame;

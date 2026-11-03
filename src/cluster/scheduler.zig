@@ -84,7 +84,7 @@ test "schedule preserves agent order when tracked capacity ties" {
         .cpu_limit = 1000,
         .memory_limit_mb = 256,
     };
-    const requests = [_]PlacementRequest{request} ** 3;
+    const requests = @as([3]PlacementRequest, @splat(request));
 
     const results = try schedule(alloc, &requests, &agents);
     defer alloc.free(results);

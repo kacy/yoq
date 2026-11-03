@@ -68,8 +68,8 @@ test "cluster certificate binding reads replicated records without redirecting l
     defer db.deinit();
     try schema.init(&db);
     var mutex: std.Io.Mutex = .init;
-    const nonce = [_]u8{0} ** 12;
-    const tag = [_]u8{0} ** 16;
+    const nonce = @as([12]u8, @splat(0));
+    const tag = @as([16]u8, @splat(0));
     const seed = try ca.buildInsertSql(alloc, "replicated ca", "private key", &nonce, &tag, 1, 100);
     defer alloc.free(seed);
     try db.execDynamic(seed, .{}, .{});

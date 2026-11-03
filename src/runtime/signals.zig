@@ -5,12 +5,12 @@ pub const forwarded = [_]std.os.linux.SIG{ .HUP, .INT, .QUIT, .TERM, .USR1, .USR
 pub fn parse(value: []const u8) ?u8 {
     const text = if (std.mem.startsWith(u8, value, "SIG")) value[3..] else value;
     for (forwarded) |signal| {
-        if (std.ascii.eqlIgnoreCase(text, @tagName(signal))) return @intCast(@intFromEnum(signal));
+        if (std.ascii.eqlIgnoreCase(text, @tagName(signal))) return @intCast(@backingInt(signal));
     }
     if (std.ascii.eqlIgnoreCase(text, "KILL")) return 9;
     if (std.fmt.parseInt(u8, text, 10)) |number| {
         if (number == 9) return number;
-        for (forwarded) |signal| if (number == @intFromEnum(signal)) return number;
+        for (forwarded) |signal| if (number == @backingInt(signal)) return number;
     } else |_| {}
     return null;
 }

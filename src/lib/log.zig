@@ -43,7 +43,7 @@ var min_level: Level = .info;
 var log_format: LogFormat = .text;
 
 /// per-request trace ID (hex string, up to 16 bytes = 32 hex chars)
-var trace_id_buf: [32]u8 = .{0} ** 32;
+var trace_id_buf: [32]u8 = @splat(0);
 var trace_id_len: u8 = 0;
 
 /// tracks number of stderr write failures (for debugging)
@@ -89,7 +89,7 @@ pub fn err(comptime fmt: []const u8, args: anytype) void {
 }
 
 fn logMsg(level: Level, comptime fmt: []const u8, args: anytype) void {
-    if (@intFromEnum(level) < @intFromEnum(min_level)) return;
+    if (@backingInt(level) < @backingInt(min_level)) return;
 
     const io = std.Options.debug_io;
     const prev = io.swapCancelProtection(.blocked);

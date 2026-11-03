@@ -220,8 +220,8 @@ test "create layer from dir — round trip" {
         return error.ExpectedNonNull;
 
     // both digests should be valid
-    try std.testing.expect(!std.mem.eql(u8, &result.compressed_digest.hash, &([_]u8{0} ** 32)));
-    try std.testing.expect(!std.mem.eql(u8, &result.uncompressed_digest.hash, &([_]u8{0} ** 32)));
+    try std.testing.expect(!std.mem.eql(u8, &result.compressed_digest.hash, &(@as([32]u8, @splat(0)))));
+    try std.testing.expect(!std.mem.eql(u8, &result.uncompressed_digest.hash, &(@as([32]u8, @splat(0)))));
 
     // compressed and uncompressed digests should differ (gzip changes content)
     try std.testing.expect(!result.compressed_digest.eql(result.uncompressed_digest));

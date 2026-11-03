@@ -139,7 +139,7 @@ fn fetchBlobFromUrl(
         var location_summary_buf: [256]u8 = undefined;
         const location_summary = common.summarizeUrl(location, &location_summary_buf);
         log.debug("blob fetch: redirect {d} from {s} to {s} (auth={})", .{
-            @intFromEnum(response.head.status),
+            @backingInt(response.head.status),
             url_summary,
             location_summary,
             send_auth,
@@ -149,7 +149,7 @@ fn fetchBlobFromUrl(
     }
 
     if (response.head.status != .ok) {
-        log.warn("blob fetch: unexpected status {d} for {s}", .{ @intFromEnum(response.head.status), url_summary });
+        log.warn("blob fetch: unexpected status {d} for {s}", .{ @backingInt(response.head.status), url_summary });
         return error.BlobNotFound;
     }
 
@@ -237,7 +237,7 @@ fn downloadBlobUrlToStore(
     }
 
     if (response.head.status != .ok) {
-        log.warn("layer fetch: unexpected status {d} for {s}", .{ @intFromEnum(response.head.status), url_summary });
+        log.warn("layer fetch: unexpected status {d} for {s}", .{ @backingInt(response.head.status), url_summary });
         return error.BlobNotFound;
     }
 
@@ -311,7 +311,7 @@ test "registry transfer verifies config digests before returning downloaded byte
         var client: std.http.Client = .{ .io = std.testing.io, .allocator = alloc };
         defer client.deinit();
         var host_buf: [64]u8 = undefined;
-        const result = fetchBlobWithScheme(alloc, &client, try server.host(&host_buf), "test", if (wrong_pin) "sha256:" ++ "0" ** 64 else digest, .{ .value = "" }, "http");
+        const result = fetchBlobWithScheme(alloc, &client, try server.host(&host_buf), "test", if (wrong_pin) "sha256:" ++ &@as([64:0]u8, @splat('0')) else digest, .{ .value = "" }, "http");
         if (wrong_pin) {
             try std.testing.expectError(error.DigestMismatch, result);
         } else {
@@ -322,7 +322,7 @@ test "registry transfer verifies config digests before returning downloaded byte
     }
     var client: std.http.Client = .{ .io = std.testing.io, .allocator = alloc };
     defer client.deinit();
-    for ([_][]const u8{ "not-a-digest", "sha256:short", "sha256:" ++ ("+a" ** 32) }) |malformed| {
+    for ([_][]const u8{ "not-a-digest", "sha256:short", "sha256:" ++ "+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a+a" }) |malformed| {
         // Public path must reject before opening any network connection.
         try std.testing.expectError(error.DigestMismatch, fetchBlob(alloc, &client, "unused.invalid", "test", malformed, .{ .value = "" }));
     }
@@ -346,7 +346,7 @@ test "registry transfer uses the small config cap for chunked and unknown length
             &client,
             try server.host(&host_buf),
             "test",
-            "sha256:" ++ "0" ** 64,
+            "sha256:" ++ &@as([64:0]u8, @splat('0')),
             .{ .value = "" },
             "http",
         ));

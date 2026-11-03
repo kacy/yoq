@@ -56,7 +56,7 @@ pub const DnsInterceptor = struct {
 pub fn makeKey(name: []const u8) ?[64]u8 {
     if (name.len == 0 or name.len > 62) return null;
 
-    var key: [64]u8 = [_]u8{0} ** 64;
+    var key: [64]u8 = @splat(0);
     var pos: usize = 0;
     var label_start: usize = 0;
 
@@ -87,7 +87,7 @@ pub fn makeKey(name: []const u8) ?[64]u8 {
 pub fn load(bridge_if_index: u32) common.EbpfError!DnsInterceptor {
     const map_def = dns_intercept.maps[0];
     const map_fd = try map_support.createMap(
-        @enumFromInt(map_def.map_type),
+        @fromBackingInt(@intCast(map_def.map_type)),
         map_def.key_size,
         map_def.value_size,
         map_def.max_entries,

@@ -148,7 +148,7 @@ test "assignmentSql omits metadata when any workload identifier is missing" {
         .health_check_json = "{}",
     };
 
-    var incomplete_requests = [_]PlacementRequest{request} ** 3;
+    var incomplete_requests = @as([3]PlacementRequest, @splat(request));
     incomplete_requests[0].app_name = null;
     incomplete_requests[1].workload_kind = null;
     incomplete_requests[2].workload_name = null;
@@ -193,7 +193,7 @@ test "assignmentSqlGang preserves metadata order and escapes health checks" {
 test "assignmentSql rejects metadata that exceeds its value buffer" {
     var buf: [2048]u8 = undefined;
     // the escaped health check fits its own buffer, but not the metadata buffer.
-    const health_check = "x" ** 768;
+    const health_check = &@as([768:0]u8, @splat('x'));
     try std.testing.expectError(error.NoSpaceLeft, assignmentSql(&buf, "assignment", "agent", .{
         .image = "nginx",
         .command = "",

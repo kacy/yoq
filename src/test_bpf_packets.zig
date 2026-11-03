@@ -29,7 +29,7 @@ fn Loaded(comptime code: type) type {
             var created: usize = 0;
             errdefer for (self.fds[0..created]) |fd| close(fd);
             for (code.maps, &self.fds) |definition, *fd| {
-                fd.* = try maps.createMap(@enumFromInt(definition.map_type), definition.key_size, definition.value_size, definition.max_entries);
+                fd.* = try maps.createMap(@fromBackingInt(@intCast(definition.map_type)), definition.key_size, definition.value_size, definition.max_entries);
                 created += 1;
             }
             self.fd = try programs.loadProgramWithType(code, &self.fds, kind);
@@ -312,7 +312,7 @@ fn testDns() !void {
     const loaded = try Loaded(@import("dns_bytecode")).init(.sched_cls);
     defer loaded.deinit();
     const name = "\x03api\x03yoq\x00";
-    var key = [_]u8{0} ** 64;
+    var key = @as([64]u8, @splat(0));
     @memcpy(key[0..name.len], name);
     try maps.mapUpdate(loaded.fds[0], &key, &backend);
     const good = dnsPacket(name);
@@ -327,7 +327,7 @@ fn testDns() !void {
     try equal(@as(u16, 1), get16(&result.packet, 48));
     try equal(@as(u16, 0), get16(&result.packet, 40));
     // a maximum supported name must leave room for the question fields.
-    var long_name = [_]u8{'a'} ** 63;
+    var long_name = @as([63]u8, @splat('a'));
     long_name[0] = 61;
     long_name[62] = 0;
     key = @splat(0);

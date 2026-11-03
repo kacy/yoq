@@ -1,6 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
+const platform = @import("linux_platform").posix;
 
 pub const Size = extern struct { rows: u16 = 24, columns: u16 = 80, x_pixels: u16 = 0, y_pixels: u16 = 0 };
 
@@ -19,7 +20,7 @@ pub const Raw = struct {
     previous: posix.termios,
 
     pub fn enter(fd: posix.fd_t) !Raw {
-        const previous = try posix.tcgetattr(fd);
+        const previous = try platform.tcgetattr(fd);
         var value = previous;
         value.iflag.BRKINT = false;
         value.iflag.ICRNL = false;
@@ -32,13 +33,13 @@ pub const Raw = struct {
         value.lflag.ICANON = false;
         value.lflag.IEXTEN = false;
         value.lflag.ISIG = false;
-        value.cc[@intFromEnum(linux.V.MIN)] = 1;
-        value.cc[@intFromEnum(linux.V.TIME)] = 0;
-        try posix.tcsetattr(fd, .FLUSH, value);
+        value.cc[@backingInt(linux.V.MIN)] = 1;
+        value.cc[@backingInt(linux.V.TIME)] = 0;
+        try platform.tcsetattr(fd, .FLUSH, value);
         return .{ .fd = fd, .previous = previous };
     }
 
     pub fn deinit(self: Raw) void {
-        posix.tcsetattr(self.fd, .FLUSH, self.previous) catch {};
+        platform.tcsetattr(self.fd, .FLUSH, self.previous) catch {};
     }
 };

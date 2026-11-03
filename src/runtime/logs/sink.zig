@@ -55,7 +55,7 @@ pub const Sink = struct {
         const month = year.calculateMonthDay();
         var buf: [chunk_size + 128]u8 = undefined;
         const record = try std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z {s}{s} | {s}\n", .{
-            year.year,             @as(u32, @intFromEnum(month.month)),   @as(u32, month.day_index) + 1,
+            year.year,             @as(u32, @backingInt(month.month)),    @as(u32, month.day_index) + 1,
             day.getHoursIntoDay(), day.getMinutesIntoHour(),              day.getSecondsIntoMinute(),
             stream,                if (continued) " [continued]" else "", line,
         });

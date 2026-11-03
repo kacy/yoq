@@ -52,7 +52,7 @@ fn loadOrCreateAt(dir: std.Io.Dir, address: [4]u8, port: u16, token: []const u8)
     // server does not disclose the worker's WireGuard private key.
     var bytes = try private_bytes.loadOrCreateBytesAt(64, dir, &name);
     defer std.crypto.secureZero(u8, &bytes);
-    var keypair = try std.crypto.dh.X25519.KeyPair.generateDeterministic(bytes[32..64].*);
+    var keypair = std.crypto.dh.X25519.KeyPair.generateDeterministic(bytes[32..64].*);
     defer std.crypto.secureZero(u8, &keypair.secret_key);
     var identity: Identity = .{ .registration_key = std.fmt.bytesToHex(bytes[0..32].*, .lower), .keypair = undefined };
     _ = std.base64.standard.Encoder.encode(&identity.keypair.private_key, &keypair.secret_key);
@@ -99,7 +99,7 @@ test "enrollment identity rejects incomplete persisted data" {
 }
 
 test "enrollment identity validates acknowledged credential and accepts legacy response" {
-    const identity = Identity{ .registration_key = [_]u8{'a'} ** 64, .keypair = undefined };
+    const identity = Identity{ .registration_key = @as([64]u8, @splat('a')), .keypair = undefined };
     try identity.validateResponse(std.testing.allocator, "{\"registration_key_accepted\":true}", &identity.registration_key);
     try std.testing.expectError(error.IdentityMismatch, identity.validateResponse(std.testing.allocator, "{\"registration_key_accepted\":true}", "wrong"));
     try identity.validateResponse(std.testing.allocator, "{}", "legacy-credential");

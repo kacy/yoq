@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
 // -- tests --
 
 test "command name length validation" {
-    const long_name = "a" ** (MAX_COMMAND_NAME_LEN + 1);
+    const long_name = &@as([MAX_COMMAND_NAME_LEN + 1:0]u8, @splat('a'));
     try std.testing.expect(long_name.len > MAX_COMMAND_NAME_LEN);
 }
 

@@ -98,7 +98,7 @@ fn populateNvmlGpuInfo(nvml: *NvmlHandle, index: u32) ?GpuInfo {
 }
 
 fn populateGpuName(nvml: *NvmlHandle, device: NvmlDevice, gpu: *GpuInfo) void {
-    var buf: [64]u8 = .{0} ** 64;
+    var buf: [64]u8 = @splat(0);
     if (nvml.device_get_name_fn(device, &buf, buf.len) != .success) return;
     gpu.name_len = copyNullTerminated(&gpu.name, &buf);
 }
@@ -110,7 +110,7 @@ fn populateGpuMemory(nvml: *NvmlHandle, device: NvmlDevice, gpu: *GpuInfo) void 
 }
 
 fn populateGpuUuid(nvml: *NvmlHandle, device: NvmlDevice, gpu: *GpuInfo) void {
-    var buf: [96]u8 = .{0} ** 96;
+    var buf: [96]u8 = @splat(0);
     if (nvml.device_get_uuid_fn(device, &buf, buf.len) != .success) return;
     gpu.uuid_len = copyNullTerminated(&gpu.uuid, &buf);
 }

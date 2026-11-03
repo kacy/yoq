@@ -319,7 +319,7 @@ test "decode releases entries and payloads after any allocation failure" {
 }
 
 test "decode rejects snapshot lengths near the u32 limit" {
-    var body = [_]u8{0} ** 37;
+    var body = @as([37]u8, @splat(0));
     body[0] = common.msg_install_snapshot;
     for ([_]u32{ 1, std.math.maxInt(u32) - 36, std.math.maxInt(u32) - 35, std.math.maxInt(u32) }) |length| {
         common.writeU32(body[33..], length);

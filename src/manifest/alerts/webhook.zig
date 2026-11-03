@@ -44,7 +44,7 @@ fn sendInner(alloc: std.mem.Allocator, io: std.Io, url: []const u8, body: []cons
     const head = response.head.bytes;
     if (head.len < 12 or head[9] < '1' or head[9] > '5' or !std.ascii.isDigit(head[10]) or !std.ascii.isDigit(head[11]))
         return .{ .failure = "MalformedStatus" };
-    const status: u16 = @intFromEnum(response.head.status);
+    const status: u16 = @backingInt(response.head.status);
     return .{ .status = status, .failure = if (status >= 200 and status < 300) null else "UnexpectedStatus" };
 }
 

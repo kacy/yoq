@@ -27,7 +27,7 @@ const secureZero = key_support.secureZero;
 
 test "encrypt and decrypt round-trip" {
     const alloc = std.testing.allocator;
-    const key = [_]u8{0x42} ** key_length;
+    const key = @as([key_length]u8, @splat(0x42));
     const plaintext = "super secret database password";
 
     const result = try encrypt(alloc, plaintext, key);
@@ -41,7 +41,7 @@ test "encrypt and decrypt round-trip" {
 
 test "encrypt produces different ciphertext each time" {
     const alloc = std.testing.allocator;
-    const key = [_]u8{0x42} ** key_length;
+    const key = @as([key_length]u8, @splat(0x42));
     const plaintext = "same input";
 
     const r1 = try encrypt(alloc, plaintext, key);
@@ -55,8 +55,8 @@ test "encrypt produces different ciphertext each time" {
 
 test "decrypt fails with wrong key" {
     const alloc = std.testing.allocator;
-    const key = [_]u8{0x42} ** key_length;
-    const wrong_key = [_]u8{0x99} ** key_length;
+    const key = @as([key_length]u8, @splat(0x42));
+    const wrong_key = @as([key_length]u8, @splat(0x99));
     const plaintext = "secret";
 
     const result = try encrypt(alloc, plaintext, key);
@@ -68,7 +68,7 @@ test "decrypt fails with wrong key" {
 
 test "decrypt fails with tampered ciphertext" {
     const alloc = std.testing.allocator;
-    const key = [_]u8{0x42} ** key_length;
+    const key = @as([key_length]u8, @splat(0x42));
     const plaintext = "important data";
 
     const result = try encrypt(alloc, plaintext, key);
@@ -82,7 +82,7 @@ test "decrypt fails with tampered ciphertext" {
 
 test "encrypt and decrypt empty plaintext" {
     const alloc = std.testing.allocator;
-    const key = [_]u8{0x42} ** key_length;
+    const key = @as([key_length]u8, @splat(0x42));
     const plaintext = "";
 
     const result = try encrypt(alloc, plaintext, key);
@@ -99,7 +99,7 @@ test "store set and get round-trip" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var store = try SecretsStore.initWithKey(&db, alloc, key);
 
     try store.set("db_password", "hunter2");
@@ -115,7 +115,7 @@ test "store set overwrites existing" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var store = try SecretsStore.initWithKey(&db, alloc, key);
 
     try store.set("api_key", "old_value");
@@ -132,7 +132,7 @@ test "store get nonexistent returns not found" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var store = try SecretsStore.initWithKey(&db, alloc, key);
 
     const result = store.get("nonexistent");
@@ -144,7 +144,7 @@ test "store remove" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var store = try SecretsStore.initWithKey(&db, alloc, key);
 
     try store.set("temp_secret", "value");
@@ -162,7 +162,7 @@ test "readKeyFile rejects weak permissions" {
         .permissions = std.Io.File.Permissions.fromMode(0o644),
     });
     defer file.close(std.testing.io);
-    try file.writeStreamingAll(std.testing.io, &([_]u8{0x11} ** key_length));
+    try file.writeStreamingAll(std.testing.io, &(@as([key_length]u8, @splat(0x11))));
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path_len = try tmp.dir.realPathFile(std.testing.io, "secrets.key", &path_buf);
@@ -175,7 +175,7 @@ test "store remove nonexistent returns not found" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var store = try SecretsStore.initWithKey(&db, alloc, key);
 
     const result = store.remove("ghost");
@@ -187,7 +187,7 @@ test "store list returns sorted names" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var store = try SecretsStore.initWithKey(&db, alloc, key);
 
     try store.set("zebra", "z");
@@ -211,7 +211,7 @@ test "store list empty" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var store = try SecretsStore.initWithKey(&db, alloc, key);
 
     var names = try store.list();
@@ -225,7 +225,7 @@ test "store rotate re-encrypts with fresh nonce" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var store = try SecretsStore.initWithKey(&db, alloc, key);
 
     try store.set("rotate_me", "secret_value");
@@ -265,7 +265,7 @@ test "store rotate nonexistent returns not found" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var store = try SecretsStore.initWithKey(&db, alloc, key);
 
     const result = store.rotate("nope");
@@ -277,7 +277,7 @@ test "store preserves created_at on update" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var store = try SecretsStore.initWithKey(&db, alloc, key);
 
     try store.set("ts_test", "first");
@@ -311,7 +311,7 @@ test "secureZero clears buffer" {
 
 test "encrypt and decrypt large value" {
     const alloc = std.testing.allocator;
-    const key = [_]u8{0x42} ** key_length;
+    const key = @as([key_length]u8, @splat(0x42));
 
     const plaintext = try alloc.alloc(u8, 10240);
     defer alloc.free(plaintext);
@@ -331,8 +331,8 @@ test "store rotateKey re-encrypts all secrets with new key" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const old_key = [_]u8{0xAA} ** key_length;
-    const new_key = [_]u8{0xBB} ** key_length;
+    const old_key = @as([key_length]u8, @splat(0xAA));
+    const new_key = @as([key_length]u8, @splat(0xBB));
     var store_obj = try SecretsStore.initWithKey(&db, alloc, old_key);
 
     try store_obj.set("secret_a", "value_a");
@@ -356,8 +356,8 @@ test "store rotateKey with no secrets succeeds" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const old_key = [_]u8{0xAA} ** key_length;
-    const new_key = [_]u8{0xBB} ** key_length;
+    const old_key = @as([key_length]u8, @splat(0xAA));
+    const new_key = @as([key_length]u8, @splat(0xBB));
     var store_obj = try SecretsStore.initWithKey(&db, alloc, old_key);
 
     try store_obj.rotateKey(new_key);
@@ -385,8 +385,8 @@ test "store rotateKey rolls back on write failure" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const old_key = [_]u8{0x11} ** key_length;
-    const new_key = [_]u8{0x22} ** key_length;
+    const old_key = @as([key_length]u8, @splat(0x11));
+    const new_key = @as([key_length]u8, @splat(0x22));
     var store_obj = try SecretsStore.initWithKey(&db, alloc, old_key);
 
     try store_obj.set("secret_a", "value_a");

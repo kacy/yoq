@@ -48,7 +48,7 @@ fn bindDeviceFrom(dev_fd: std.posix.fd_t, name: [:0]const u8, source_path: []con
 }
 
 fn fdPath(fd: std.posix.fd_t, buf: []u8) ![:0]const u8 {
-    return std.fmt.bufPrintZ(buf, "/proc/self/fd/{d}", .{fd});
+    return std.fmt.bufPrintSentinel(buf, "/proc/self/fd/{d}", .{fd}, 0);
 }
 
 fn testDeviceMounts(runtime: bool) !void {

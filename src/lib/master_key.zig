@@ -116,13 +116,13 @@ test "master key refuses unsafe existing entries without overwriting them" {
     defer tmp.cleanup();
     for ([_]usize{ 0, 31, 33 }) |size| {
         var file = try tmp.dir.createFile(io, "key", .{ .permissions = .fromMode(0o600) });
-        try file.writeStreamingAll(io, ([_]u8{9} ** 33)[0..size]);
+        try file.writeStreamingAll(io, (@as([33]u8, @splat(9)))[0..size]);
         file.close(io);
         try std.testing.expectError(error.KeyLoadFailed, loadOrCreateAt(tmp.dir, "key"));
         try tmp.dir.deleteFile(io, "key");
     }
     var weak = try tmp.dir.createFile(io, "weak", .{ .permissions = .fromMode(0o644) });
-    try weak.writeStreamingAll(io, &([_]u8{3} ** key_length));
+    try weak.writeStreamingAll(io, &(@as([key_length]u8, @splat(3))));
     try weak.setPermissions(io, .fromMode(0o644));
     weak.close(io);
     try std.testing.expectError(error.KeyLoadFailed, loadOrCreateAt(tmp.dir, "weak"));

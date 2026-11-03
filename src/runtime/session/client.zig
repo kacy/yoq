@@ -10,7 +10,7 @@ const foreground = @import("foreground.zig");
 
 var pending_signal = std.atomic.Value(u8).init(0);
 fn receiveSignal(signal: linux.SIG) callconv(.c) void {
-    pending_signal.store(@intCast(@intFromEnum(signal)), .release);
+    pending_signal.store(@intCast(@backingInt(signal)), .release);
 }
 
 pub const Outcome = union(enum) { exited: u8, detached };
@@ -246,9 +246,9 @@ test "session client restores terminal on remote exit and detach" {
         if (rc == 0) {
             platform.close(sockets[0]);
             io.applyChild() catch linux.exit_group(125);
-            const before = posix.tcgetattr(posix.STDIN_FILENO) catch linux.exit_group(124);
+            const before = platform.tcgetattr(posix.STDIN_FILENO) catch linux.exit_group(124);
             const code = run(sockets[1]) catch linux.exit_group(123);
-            const after = posix.tcgetattr(posix.STDIN_FILENO) catch linux.exit_group(122);
+            const after = platform.tcgetattr(posix.STDIN_FILENO) catch linux.exit_group(122);
             if (!std.meta.eql(before, after)) linux.exit_group(121);
             linux.exit_group(code);
         }
@@ -264,7 +264,7 @@ test "session client restores terminal on remote exit and detach" {
         // resize is sent after entering raw mode and installing signal handlers.
         try protocol.receive(sockets[0], &packet, false);
         try std.testing.expectEqual(protocol.Kind.resize, try packet.kind());
-        const raw = try posix.tcgetattr(io.input);
+        const raw = try platform.tcgetattr(io.input);
         try std.testing.expect(!raw.lflag.ICANON and !raw.lflag.ECHO);
         if (detach) {
             try foreground.writeAll(io.input, "x\x10\x11");
@@ -313,7 +313,7 @@ test "session client keeps controls writable and orders EOF after credited input
     if (linux.socketpair(posix.AF.UNIX, posix.SOCK.SEQPACKET | posix.SOCK.CLOEXEC, 0, &sockets) != 0) return error.SocketFailed;
     defer platform.close(sockets[0]);
     defer platform.close(sockets[1]);
-    var outgoing: Outgoing = .{ .credit = 0, .len = 3, .eof = true, .signal = @intFromEnum(linux.SIG.TERM), .size = .{ .rows = 31, .columns = 83 } };
+    var outgoing: Outgoing = .{ .credit = 0, .len = 3, .eof = true, .signal = @backingInt(linux.SIG.TERM), .size = .{ .rows = 31, .columns = 83 } };
     @memcpy(outgoing.bytes[0..3], "abc");
     try outgoing.flush(sockets[0]);
     var packet: protocol.Packet = .{};
@@ -351,7 +351,7 @@ test "session client drains exit while a legacy server stops reading stdin" {
     defer platform.close(sockets[1]);
     const send_buffer: c_int = 8192;
     try posix.setsockopt(sockets[0], posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&send_buffer));
-    const bytes = [_]u8{'i'} ** protocol.max_payload;
+    const bytes = @as([protocol.max_payload]u8, @splat('i'));
     while (true) {
         protocol.send(sockets[0], .stdin, &bytes, true) catch |err| {
             if (err == error.WouldBlock) break;

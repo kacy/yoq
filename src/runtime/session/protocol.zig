@@ -26,7 +26,7 @@ pub const Packet = struct {
 pub fn send(fd: posix.fd_t, kind: Kind, data: []const u8, nonblocking: bool) !void {
     if (data.len > max_payload) return error.InvalidPacket;
     var buffer: [max_payload + 1]u8 = undefined;
-    buffer[0] = @intFromEnum(kind);
+    buffer[0] = @backingInt(kind);
     @memcpy(buffer[1..][0..data.len], data);
     const count = while (true) {
         break platform.send(fd, buffer[0 .. data.len + 1], posix.MSG.NOSIGNAL | @as(u32, if (nonblocking) posix.MSG.DONTWAIT else 0)) catch |err| {
@@ -96,5 +96,5 @@ test "session packets preserve stream tags and binary bytes" {
     try receive(fds[1], &packet, false);
     try std.testing.expectEqual(Kind.stderr, try packet.kind());
     try std.testing.expectEqualStrings("prompt\x00\r", packet.payload());
-    try std.testing.expectError(error.InvalidPacket, send(fds[0], .stdin, "x" ** (max_payload + 1), false));
+    try std.testing.expectError(error.InvalidPacket, send(fds[0], .stdin, &@as([max_payload + 1:0]u8, @splat('x')), false));
 }

@@ -12,7 +12,7 @@ pub fn acquire(owner: []const u8) !std.posix.fd_t {
     const namespace_hash = std.hash.Wyhash.hash(0, namespace_buf[0..namespace_len]);
     try std.Io.Dir.cwd().createDirPath(io, "/run/yoq");
     var path_buf: [128]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/run/yoq/published-{x}.lock", .{namespace_hash});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "/run/yoq/published-{x}.lock", .{namespace_hash}, 0);
     const opened = linux.open(path, .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600);
     if (linux.errno(opened) != .SUCCESS) return error.LockFailed;
     const fd: std.posix.fd_t = @intCast(opened);

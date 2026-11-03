@@ -56,7 +56,7 @@ pub const StatusCode = enum(u16) {
 
     /// true for 4xx/5xx responses.
     pub fn isError(self: StatusCode) bool {
-        return @intFromEnum(self) >= 400;
+        return @backingInt(self) >= 400;
     }
 };
 
@@ -219,7 +219,7 @@ pub fn formatResponse(buf: []u8, status: StatusCode, body: []const u8) []const u
 
 /// format only the HTTP response headers into a buffer.
 pub fn formatResponseHeaders(buf: []u8, status: StatusCode, content_type: []const u8, content_length: usize) []const u8 {
-    const code: u16 = @intFromEnum(status);
+    const code: u16 = @backingInt(status);
     const phrase = status.phrase();
 
     return std.fmt.bufPrint(buf, "HTTP/1.1 {d} {s}\r\n" ++
@@ -568,7 +568,7 @@ test "findHeaderValue handles empty headers" {
 
 test "parse request rejects long URI" {
     var uri_buf: [max_uri_bytes + 32]u8 = undefined;
-    const long_uri = std.fmt.bufPrint(&uri_buf, "/{s}", .{"a" ** max_uri_bytes}) catch unreachable;
+    const long_uri = std.fmt.bufPrint(&uri_buf, "/{s}", .{&@as([max_uri_bytes:0]u8, @splat('a'))}) catch unreachable;
     var raw_buf: [max_uri_bytes + 64]u8 = undefined;
     const raw = std.fmt.bufPrint(&raw_buf, "GET {s} HTTP/1.1\r\nHost: localhost\r\n\r\n", .{long_uri}) catch unreachable;
     try std.testing.expectError(HttpError.UriTooLong, parseRequest(raw));

@@ -190,7 +190,7 @@ test "listener lifecycle socket write deadline holds while peer slowly drains" {
         fixture.quit.store(true, .release);
         worker.join();
     }
-    const bytes = [_]u8{'x'} ** (256 * 1024);
+    const bytes = @as([256 * 1024]u8, @splat('x'));
     try std.testing.expectError(error.TimedOut, writeAll(fds[0], &bytes));
     try std.testing.expect(fixture.received.load(.acquire) > 0);
     try std.testing.expect(fixture.received.load(.acquire) < bytes.len);

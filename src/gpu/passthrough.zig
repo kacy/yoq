@@ -92,7 +92,7 @@ const Operations = struct {
 
 fn createDevNode(root: []const u8, name: []const u8, required: bool) !void {
     var host_buf: [64]u8 = undefined;
-    const host = try std.fmt.bufPrintZ(&host_buf, "/dev/{s}", .{name});
+    const host = try std.fmt.bufPrintSentinel(&host_buf, "/dev/{s}", .{name}, 0);
     var stat: linux.Statx = undefined;
     const result = linux.statx(linux.AT.FDCWD, host, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true }, &stat);
     switch (linux.errno(result)) {
@@ -108,7 +108,7 @@ fn createDevNode(root: []const u8, name: []const u8, required: bool) !void {
         ((@as(u64, stat.rdev_minor) & ~@as(u64, 0xff)) << 12) |
         ((@as(u64, stat.rdev_major) & ~@as(u64, 0xfff)) << 32);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/dev/{s}", .{ root, name });
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/dev/{s}", .{ root, name }, 0);
     const rc = linux.syscall4(.mknodat, @as(usize, @bitCast(@as(isize, linux.AT.FDCWD))), @intFromPtr(path.ptr), 0o020666, @intCast(device));
     if (linux.errno(rc) != .SUCCESS) return error.GpuDeviceCreateFailed;
 }

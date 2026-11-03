@@ -64,14 +64,14 @@ pub fn execInContainer(config: ExecConfig) ExecError!u8 {
     // setns changes mounts, but does not change the calling process root.
     // keep the target root open before its /proc path becomes inaccessible.
     var root_path_buf: [64]u8 = undefined;
-    const root_path = std.fmt.bufPrintZ(&root_path_buf, "/proc/{d}/root", .{config.pid}) catch return ExecError.RootOpenFailed;
+    const root_path = std.fmt.bufPrintSentinel(&root_path_buf, "/proc/{d}/root", .{config.pid}, 0) catch return ExecError.RootOpenFailed;
     const root_fd = linux_platform.posix.open(root_path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0) catch return ExecError.RootOpenFailed;
     defer linux_platform.posix.close(root_fd);
 
     // open all namespace fds first, before entering any.
     // this way we fail early if the container is gone, and
     // we don't end up half-entered into namespaces.
-    var ns_fds: [ns_count]posix.fd_t = .{-1} ** ns_count;
+    var ns_fds: [ns_count]posix.fd_t = @splat(-1);
     defer for (&ns_fds) |*fd| {
         if (fd.* >= 0) {
             linux_platform.posix.close(fd.*);
@@ -115,7 +115,7 @@ fn runHelper(
     // the command child joins the container's pid namespace, so container
     // root can see it before execve. a non-dumpable process keeps it out of
     // /proc/<pid>/fd and /proc/<pid>/mem. execve resets this for the command.
-    if (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_DUMPABLE), 0, 0, 0, 0)) != .SUCCESS) linux.exit_group(126);
+    if (linux.errno(linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0)) != .SUCCESS) linux.exit_group(126);
     if (config.cgroup_id) |id| {
         const group = @import("cgroups.zig").Cgroup.open(id) catch linux.exit_group(126);
         group.addProcess(linux.getpid()) catch linux.exit_group(126);
@@ -188,7 +188,7 @@ fn sysSetns(fd: posix.fd_t, nstype: u32) ExecError!void {
 fn sysFork() ExecError!posix.pid_t {
     const rc = linux.syscall2(
         .clone,
-        @intFromEnum(linux.SIG.CHLD),
+        @backingInt(linux.SIG.CHLD),
         @as(usize, 0),
     );
     if (syscall_util.isError(rc)) return ExecError.ForkFailed;

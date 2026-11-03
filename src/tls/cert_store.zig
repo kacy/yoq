@@ -33,7 +33,7 @@ test "install and get round-trip" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const cert_pem = @embedFile("testdata/cert.pem");
@@ -57,7 +57,7 @@ test "get nonexistent returns not found" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const result = cs.get("nonexistent.com");
@@ -69,7 +69,7 @@ test "remove certificate" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const cert_pem = @embedFile("testdata/cert.pem");
@@ -85,7 +85,7 @@ test "remove nonexistent returns not found" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const result = cs.remove("ghost.com");
@@ -97,7 +97,7 @@ test "list certificates sorted" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const cert_pem = @embedFile("testdata/cert.pem");
@@ -123,7 +123,7 @@ test "list empty" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     var certs = try cs.list();
@@ -137,13 +137,13 @@ test "encrypted key not readable without correct key" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const cert_pem = @embedFile("testdata/cert.pem");
     try cs.install("example.com", cert_pem, "secret-key-data", "manual");
 
-    const wrong_key = [_]u8{0x99} ** key_length;
+    const wrong_key = @as([key_length]u8, @splat(0x99));
     var cs2 = try CertStore.initWithKey(&db, alloc, wrong_key);
 
     const result = cs2.get("example.com");
@@ -155,7 +155,7 @@ test "install overwrites existing" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const cert_pem = @embedFile("testdata/cert.pem");
@@ -177,7 +177,7 @@ test "install overwrite preserves created_at" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const cert_pem = @embedFile("testdata/cert.pem");
@@ -213,7 +213,7 @@ test "needsRenewal checks expiry threshold" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const cert_pem = @embedFile("testdata/cert.pem");
@@ -231,7 +231,7 @@ test "needsRenewal nonexistent returns not found" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const result = cs.needsRenewal("ghost.com", 30);
@@ -243,7 +243,7 @@ test "listExpiringSoon with distant expiry" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const cert_pem = @embedFile("testdata/cert.pem");
@@ -263,7 +263,7 @@ test "acme config metadata round-trip" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const cert_pem = @embedFile("testdata/cert.pem");
@@ -314,7 +314,7 @@ test "manual install removes acme metadata" {
     defer db.deinit();
 
     const alloc = std.testing.allocator;
-    const key = [_]u8{0xAB} ** key_length;
+    const key = @as([key_length]u8, @splat(0xAB));
     var cs = try CertStore.initWithKey(&db, alloc, key);
 
     const cert_pem = @embedFile("testdata/cert.pem");
@@ -381,7 +381,7 @@ test "isLeapYear" {
 }
 
 fn checkCertificateRetrieval(alloc: std.mem.Allocator, db: *sqlite.Db) !void {
-    var cs = try CertStore.initWithKey(db, alloc, [_]u8{0xAB} ** key_length);
+    var cs = try CertStore.initWithKey(db, alloc, @as([key_length]u8, @splat(0xAB)));
     const result = cs.get("example.com") catch |err| switch (err) {
         // the fixture is valid; these errors wrap allocation failures in get.
         error.ReadFailed, error.DecryptionFailed, error.AllocFailed => return error.OutOfMemory,
@@ -399,7 +399,7 @@ fn checkCertificateRetrieval(alloc: std.mem.Allocator, db: *sqlite.Db) !void {
 test "certificate retrieval cleans up every allocation failure" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
-    var cs = try CertStore.initWithKey(&db, std.testing.allocator, [_]u8{0xAB} ** key_length);
+    var cs = try CertStore.initWithKey(&db, std.testing.allocator, @as([key_length]u8, @splat(0xAB)));
     try cs.install("example.com", @embedFile("testdata/cert.pem"), "private key fixture", "manual");
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkCertificateRetrieval, .{&db});
     // failed reads must leave the stored certificate usable.
@@ -409,7 +409,7 @@ test "certificate retrieval cleans up every allocation failure" {
 const CertificateListKind = enum { all, expiring, managed };
 
 fn checkCertificateList(alloc: std.mem.Allocator, db: *sqlite.Db, kind: CertificateListKind) !void {
-    var cs = try CertStore.initWithKey(db, alloc, [_]u8{0xAB} ** key_length);
+    var cs = try CertStore.initWithKey(db, alloc, @as([key_length]u8, @splat(0xAB)));
     if (kind == .all) {
         var records = cs.list() catch return error.OutOfMemory;
         defer {
@@ -435,7 +435,7 @@ fn checkCertificateList(alloc: std.mem.Allocator, db: *sqlite.Db, kind: Certific
 test "certificate lists clean up every allocation failure" {
     var db = try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{ .write = true } });
     defer db.deinit();
-    var cs = try CertStore.initWithKey(&db, std.testing.allocator, [_]u8{0xAB} ** key_length);
+    var cs = try CertStore.initWithKey(&db, std.testing.allocator, @as([key_length]u8, @splat(0xAB)));
     for ([_][]const u8{ "a.example", "b.example" }) |domain| {
         try cs.install(domain, @embedFile("testdata/cert.pem"), "key", "manual");
     }

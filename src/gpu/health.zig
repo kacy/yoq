@@ -116,7 +116,7 @@ pub fn pollMetrics(nvml: *NvmlHandle, index: u32) ?GpuMetrics {
 /// poll metrics for all GPUs.
 /// returns an array of optional metrics (null for devices that couldn't be queried).
 pub fn pollAllMetrics(nvml: *NvmlHandle, count: u8) [max_gpus]?GpuMetrics {
-    var results: [max_gpus]?GpuMetrics = .{null} ** max_gpus;
+    var results: [max_gpus]?GpuMetrics = @splat(null);
     const actual = @min(count, max_gpus);
     for (0..actual) |i| {
         results[i] = pollMetrics(nvml, @intCast(i));
@@ -252,7 +252,7 @@ test "GpuMetrics writeJson" {
 test "pollAllMetrics returns nulls without NVML" {
     // we can't test with a real NvmlHandle in CI, but we can verify
     // the return structure is correct
-    const results: [max_gpus]?GpuMetrics = .{null} ** max_gpus;
+    const results: [max_gpus]?GpuMetrics = @splat(null);
     for (results) |r| {
         try std.testing.expect(r == null);
     }
@@ -261,7 +261,7 @@ test "pollAllMetrics returns nulls without NVML" {
 test "writeMetricsJson empty" {
     var buf: [256]u8 = undefined;
     var fbs: std.Io.Writer = .fixed(&buf);
-    const metrics: [max_gpus]?GpuMetrics = .{null} ** max_gpus;
+    const metrics: [max_gpus]?GpuMetrics = @splat(null);
     try writeMetricsJson(&fbs, metrics, 0);
     try std.testing.expectEqualStrings("\"gpu_metrics\":[]", fbs.buffered());
 }
@@ -269,7 +269,7 @@ test "writeMetricsJson empty" {
 test "writeMetricsJson with one GPU" {
     var buf: [1024]u8 = undefined;
     var fbs: std.Io.Writer = .fixed(&buf);
-    var metrics: [max_gpus]?GpuMetrics = .{null} ** max_gpus;
+    var metrics: [max_gpus]?GpuMetrics = @splat(null);
     metrics[0] = .{ .temperature_c = 65, .utilization_gpu = 50, .memory_used_mb = 8000, .memory_total_mb = 16384 };
     try writeMetricsJson(&fbs, metrics, 1);
     const json = fbs.buffered();
@@ -280,7 +280,7 @@ test "writeMetricsJson with one GPU" {
 test "writePrometheus empty" {
     var buf: [4096]u8 = undefined;
     var fbs: std.Io.Writer = .fixed(&buf);
-    const metrics: [max_gpus]?GpuMetrics = .{null} ** max_gpus;
+    const metrics: [max_gpus]?GpuMetrics = @splat(null);
     try writePrometheus(&fbs, metrics, 0);
     const output = fbs.buffered();
     // should have HELP/TYPE headers but no data lines
@@ -291,7 +291,7 @@ test "writePrometheus empty" {
 test "writePrometheus with one GPU" {
     var buf: [4096]u8 = undefined;
     var fbs: std.Io.Writer = .fixed(&buf);
-    var metrics: [max_gpus]?GpuMetrics = .{null} ** max_gpus;
+    var metrics: [max_gpus]?GpuMetrics = @splat(null);
     metrics[0] = .{
         .temperature_c = 72,
         .utilization_gpu = 85,
@@ -314,7 +314,7 @@ test "writePrometheus with one GPU" {
 test "writePrometheus with multiple GPUs" {
     var buf: [8192]u8 = undefined;
     var fbs: std.Io.Writer = .fixed(&buf);
-    var metrics: [max_gpus]?GpuMetrics = .{null} ** max_gpus;
+    var metrics: [max_gpus]?GpuMetrics = @splat(null);
     metrics[0] = .{ .temperature_c = 70, .utilization_gpu = 80, .power_watts = 250 };
     metrics[1] = .{ .temperature_c = 65, .utilization_gpu = 50, .power_watts = 200 };
     try writePrometheus(&fbs, metrics, 2);

@@ -299,7 +299,7 @@ test "tls service routes select every eligible replica and fail closed" {
     var registry = BackendRegistry.init(alloc);
     defer registry.deinit();
     try registry.registerService("api.example", "api", 5432, .require);
-    var seen = [_]bool{false} ** 3;
+    var seen = @as([3]bool, @splat(false));
     for (0..3) |_| {
         const backend = (try registry.lookupOwned(alloc, "api.example")).?;
         defer alloc.free(backend.ip);

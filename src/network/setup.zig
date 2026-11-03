@@ -181,7 +181,7 @@ test "hostname validation — rejects invalid hostnames" {
     try std.testing.expect(!isValidHostname("host\rname"));
     try std.testing.expect(!isValidHostname("host\tname"));
     try std.testing.expect(!isValidHostname("host name"));
-    try std.testing.expect(!isValidHostname("a" ** 254));
+    try std.testing.expect(!isValidHostname(&@as([254:0]u8, @splat('a'))));
 }
 
 test "hostname validation — rejects control characters" {

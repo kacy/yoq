@@ -19,10 +19,10 @@ pub const CheckStatus = enum {
 };
 
 pub const Check = struct {
-    name: [32]u8 = .{0} ** 32,
+    name: [32]u8 = @splat(0),
     name_len: u8 = 0,
     status: CheckStatus = .fail,
-    message: [128]u8 = .{0} ** 128,
+    message: [128]u8 = @splat(0),
     message_len: u8 = 0,
 
     pub fn getName(self: *const Check) []const u8 {

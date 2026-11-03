@@ -72,7 +72,7 @@ fn extractLayerWithCompression(alloc: std.mem.Allocator, digest_str: []const u8,
     var random: [16]u8 = undefined;
     platform.randomBytes(&random);
     var stage_name_buf: [64]u8 = undefined;
-    const stage_name = std.fmt.bufPrintZ(&stage_name_buf, ".staging-{s}", .{std.fmt.bytesToHex(random, .lower)}) catch return error.PathTooLong;
+    const stage_name = std.fmt.bufPrintSentinel(&stage_name_buf, ".staging-{s}", .{std.fmt.bytesToHex(random, .lower)}, 0) catch return error.PathTooLong;
     parent.createDir(std.Options.debug_io, stage_name, .fromMode(0o700)) catch return error.ExtractionFailed;
     defer parent.deleteTree(std.Options.debug_io, stage_name) catch {};
     var stage = parent.openDir(std.Options.debug_io, stage_name, .{ .iterate = true }) catch return error.ExtractionFailed;

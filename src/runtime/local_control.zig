@@ -264,18 +264,18 @@ test "container rename and registration share hostname-compatible name limits" {
     const id = "0123456789ab";
     try store.save(.{ .id = id, .rootfs = "", .command = "sh", .hostname = "original", .status = "stopped", .pid = null, .exit_code = 0, .created_at = 0 });
     try register(id, "initial");
-    for ([_][]const u8{ "a", "A1", "web-2", "a" ** 63 }) |name| {
+    for ([_][]const u8{ "a", "A1", "web-2", &@as([63:0]u8, @splat('a')) }) |name| {
         try rename(id, name);
         const actual = (try nameForId(alloc, id)).?;
         defer alloc.free(actual);
         try std.testing.expectEqualStrings(name, actual);
     }
-    for ([_][]const u8{ "", "a" ** 64, "-web", "web-", "web_api", "web.api", "web api", "a\x00b", "caf\xc3\xa9" }) |name| {
+    for ([_][]const u8{ "", &@as([64:0]u8, @splat('a')), "-web", "web-", "web_api", "web.api", "web api", "a\x00b", "caf\xc3\xa9" }) |name| {
         try std.testing.expectError(error.InvalidName, rename(id, name));
         try std.testing.expectError(error.InvalidName, register("abcdef012345", name));
         const unchanged = (try nameForId(alloc, id)).?;
         defer alloc.free(unchanged);
-        try std.testing.expectEqualStrings("a" ** 63, unchanged);
+        try std.testing.expectEqualStrings(&@as([63:0]u8, @splat('a')), unchanged);
         try std.testing.expect((try nameForId(alloc, "abcdef012345")) == null);
     }
     const record = try store.load(alloc, id);

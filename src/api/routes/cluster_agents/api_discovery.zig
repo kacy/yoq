@@ -28,7 +28,7 @@ test "agent recovery discovery publishes the configured api port" {
         .port = 9700,
         .api_port = 8800,
         .peers = &.{.{ .id = 2, .addr = .{ 127, 0, 0, 2 }, .port = 9701 }},
-        .shared_key = [_]u8{7} ** 32,
+        .shared_key = @as([32]u8, @splat(7)),
         .data_dir = "/unused",
     });
     defer node.deinit();

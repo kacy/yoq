@@ -41,7 +41,7 @@ test "fuzz x509_verify.parseDer with arbitrary bytes" {
             "\x30\x00",
             "\x30\x82\x01\x00",
             "\x30\x03\x02\x01\x00",
-            &[_]u8{0xff} ** 64,
+            &@as([64]u8, @splat(0xff)),
         },
     });
 }
@@ -64,12 +64,12 @@ test "fuzz handshake message stream with arbitrary bytes" {
                 // feed each message body into the matching sub-parser; all of
                 // these must tolerate arbitrary bytes.
                 switch (m.msg_type) {
-                    @intFromEnum(message_parse.HandshakeType.server_hello) => _ = message_parse.parseServerHello(m.body) catch {},
-                    @intFromEnum(message_parse.HandshakeType.encrypted_extensions) => _ = message_parse.parseEncryptedExtensions(m.body) catch {},
-                    @intFromEnum(message_parse.HandshakeType.certificate) => _ = message_parse.parseCertificateMessage(m.body) catch {},
-                    @intFromEnum(message_parse.HandshakeType.certificate_request) => _ = message_parse.parseCertificateRequest(m.body) catch {},
-                    @intFromEnum(message_parse.HandshakeType.certificate_verify) => _ = message_parse.parseCertificateVerify(m.body) catch {},
-                    @intFromEnum(message_parse.HandshakeType.finished) => _ = message_parse.parseFinished(m.body) catch {},
+                    @backingInt(message_parse.HandshakeType.server_hello) => _ = message_parse.parseServerHello(m.body) catch {},
+                    @backingInt(message_parse.HandshakeType.encrypted_extensions) => _ = message_parse.parseEncryptedExtensions(m.body) catch {},
+                    @backingInt(message_parse.HandshakeType.certificate) => _ = message_parse.parseCertificateMessage(m.body) catch {},
+                    @backingInt(message_parse.HandshakeType.certificate_request) => _ = message_parse.parseCertificateRequest(m.body) catch {},
+                    @backingInt(message_parse.HandshakeType.certificate_verify) => _ = message_parse.parseCertificateVerify(m.body) catch {},
+                    @backingInt(message_parse.HandshakeType.finished) => _ = message_parse.parseFinished(m.body) catch {},
                     else => {},
                 }
             }
@@ -79,7 +79,7 @@ test "fuzz handshake message stream with arbitrary bytes" {
             "",
             "\x02\x00\x00\x00",
             "\x0b\x00\x00\x00",
-            &[_]u8{0xaa} ** 32,
+            &@as([32]u8, @splat(0xaa)),
         },
     });
 }

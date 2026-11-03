@@ -173,7 +173,7 @@ test "registry authenticated request methods refuse redirects before contacting 
             var client: std.http.Client = .{ .io = std.testing.io, .allocator = alloc };
             defer client.deinit();
             var request = try requestWithTimeout(&client, method, uri, .{
-                .redirect_behavior = @enumFromInt(3),
+                .redirect_behavior = @fromBackingInt(@intCast(3)),
                 .keep_alive = false,
                 .headers = .{ .authorization = .{ .override = authorization } },
             });
@@ -213,7 +213,7 @@ test "registry anonymous requests retain automatic redirect handling" {
     const uri = try std.Uri.parse(try std.fmt.bufPrint(&url_buffer, "http://{s}/registry", .{try source.host(&source_host)}));
     var client: std.http.Client = .{ .io = std.testing.io, .allocator = std.testing.allocator };
     defer client.deinit();
-    var request = try requestWithTimeout(&client, .GET, uri, .{ .redirect_behavior = @enumFromInt(3), .keep_alive = false });
+    var request = try requestWithTimeout(&client, .GET, uri, .{ .redirect_behavior = @fromBackingInt(@intCast(3)), .keep_alive = false });
     defer request.deinit();
     try request.sendBodiless();
     var redirects: [1024]u8 = undefined;

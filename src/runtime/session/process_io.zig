@@ -19,7 +19,7 @@ pub const ProcessIo = struct {
     child_input: posix.fd_t = -1,
     child_stdout: posix.fd_t = -1,
     child_stderr: posix.fd_t = -1,
-    close_in_child: [9]posix.fd_t = .{-1} ** 9,
+    close_in_child: [9]posix.fd_t = @splat(-1),
     tty: bool = false,
     interactive: bool = false,
 
@@ -33,7 +33,7 @@ pub const ProcessIo = struct {
             var number: c_uint = 0;
             if (linux.errno(linux.ioctl(self.stdout, linux.T.IOCGPTN, @intFromPtr(&number))) != .SUCCESS) return error.TerminalFailed;
             var path_buf: [64]u8 = undefined;
-            const path = try std.fmt.bufPrintZ(&path_buf, "/dev/pts/{d}", .{number});
+            const path = try std.fmt.bufPrintSentinel(&path_buf, "/dev/pts/{d}", .{number}, 0);
             self.child_input = try platform.open(path, .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true }, 0);
             self.child_stdout = self.child_input;
             self.child_stderr = self.child_input;

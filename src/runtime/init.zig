@@ -43,7 +43,7 @@ pub fn run(workload_fn: WorkloadFn, ctx: ?*anyopaque) u8 {
     installHandlers();
 
     // fork the workload process
-    const fork_rc = linux.syscall4(.clone, @intFromEnum(linux.SIG.CHLD), 0, 0, 0);
+    const fork_rc = linux.syscall4(.clone, @backingInt(linux.SIG.CHLD), 0, 0, 0);
     if (syscall_util.isError(fork_rc)) return 1;
 
     const child_pid: i32 = @intCast(@as(isize, @bitCast(fork_rc)));
@@ -83,8 +83,8 @@ fn reapLoop(target_pid: i32) u8 {
 
         if (syscall_util.isError(rc)) {
             const errno = syscall_util.getErrno(rc);
-            if (errno == @intFromEnum(linux.E.INTR)) continue;
-            if (errno == @intFromEnum(linux.E.CHILD)) return 0; // no more children
+            if (errno == @backingInt(linux.E.INTR)) continue;
+            if (errno == @backingInt(linux.E.CHILD)) return 0; // no more children
             unexpected_errors += 1;
             if (unexpected_errors >= 10) return 1;
             continue;
@@ -123,7 +123,7 @@ fn forwardSignal(sig: std.os.linux.SIG) callconv(.c) void {
         _ = linux.syscall2(
             .kill,
             @as(usize, @bitCast(@as(isize, pid))),
-            @intFromEnum(sig),
+            @backingInt(sig),
         );
     }
 }

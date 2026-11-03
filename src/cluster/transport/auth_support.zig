@@ -108,10 +108,10 @@ pub fn verifyAuthenticatedBody(
 }
 
 test "authenticated frames enforce buffer limits and allow empty payloads" {
-    const key = [_]u8{0x5a} ** 32;
+    const key = @as([32]u8, @splat(0x5a));
     var buf: [1500]u8 = undefined;
-    const max_payload = [_]u8{0xab} ** 1460;
-    const oversized_payload = [_]u8{0xab} ** 1461;
+    const max_payload = @as([1460]u8, @splat(0xab));
+    const oversized_payload = @as([1461]u8, @splat(0xab));
 
     try std.testing.expectError(TransportError.SendFailed, encodeAuthenticatedFrame(buf[0..39], key, 7, ""));
     try std.testing.expectError(TransportError.SendFailed, encodeAuthenticatedFrame(buf[0..40], key, 7, "x"));
@@ -130,8 +130,8 @@ test "authenticated frames enforce buffer limits and allow empty payloads" {
 }
 
 test "authenticated frames reject tampering truncation and a wrong key" {
-    const key = [_]u8{0x5a} ** 32;
-    const wrong_key = [_]u8{0xa5} ** 32;
+    const key = @as([32]u8, @splat(0x5a));
+    const wrong_key = @as([32]u8, @splat(0xa5));
     var buf: [43]u8 = undefined;
     const frame = try encodeAuthenticatedFrame(&buf, key, 7, "abc");
 
@@ -151,7 +151,7 @@ test "authenticated frames reject tampering truncation and a wrong key" {
 }
 
 test "authenticated tcp bodies require a payload and a known sender ip" {
-    const key = [_]u8{0x5a} ** 32;
+    const key = @as([32]u8, @splat(0x5a));
     var peers = std.AutoHashMap(NodeId, PeerAddr).init(std.testing.allocator);
     defer peers.deinit();
     try peers.put(7, .{ .addr = linux_platform.net.Address.initIp4(.{ 10, 0, 0, 7 }, 9700) });

@@ -79,7 +79,7 @@ pub const CachedGpuInfo = struct {
     model: ?[]const u8,
     vram_mb: u64,
     detect_result: ?*gpu_detect.DetectResult,
-    mig_inventories: [gpu_detect.max_gpus]gpu_mig.MigInventory = .{gpu_mig.MigInventory{}} ** gpu_detect.max_gpus,
+    mig_inventories: [gpu_detect.max_gpus]gpu_mig.MigInventory = @splat(gpu_mig.MigInventory{}),
     mig_gpu_count: u32 = 0,
 };
 
@@ -100,7 +100,7 @@ pub fn cachedGpuDetect() CachedGpuInfo {
         vram_mb = gpu.vram_mb;
     }
 
-    var mig_inventories: [gpu_detect.max_gpus]gpu_mig.MigInventory = .{gpu_mig.MigInventory{}} ** gpu_detect.max_gpus;
+    var mig_inventories: [gpu_detect.max_gpus]gpu_mig.MigInventory = @splat(gpu_mig.MigInventory{});
     var mig_gpu_count: u32 = 0;
     if (cached_detect_storage.nvml) |*nvml| {
         for (0..count) |i| {

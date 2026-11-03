@@ -356,7 +356,7 @@ fn openRooted(root: std.Io.Dir, path: []const u8, flags: linux.O) !std.posix.fd_
     while (true) {
         const rc = linux.syscall4(.openat2, @intCast(root.handle), @intFromPtr(&path_z), @intFromPtr(&how), @sizeOf(OpenHow));
         if (!syscall.isError(rc)) return @intCast(rc);
-        switch (@as(linux.E, @enumFromInt(syscall.getErrno(rc)))) {
+        switch (@as(linux.E, @fromBackingInt(@intCast(syscall.getErrno(rc))))) {
             .INTR => continue,
             .NOENT => return error.FileNotFound,
             .LOOP, .XDEV, .AGAIN => return error.UnsafeArchivePath,

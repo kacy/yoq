@@ -15,7 +15,7 @@ var lock: std.Io.Mutex = .init;
 var counters: [4]u64 = .{ 0, 0, 0, 0 };
 
 fn slot(side: Side, outcome: Outcome) usize {
-    return @as(usize, @intFromEnum(side)) * 2 + @as(usize, @intFromEnum(outcome));
+    return @as(usize, @backingInt(side)) * 2 + @as(usize, @backingInt(outcome));
 }
 
 pub fn record(side: Side, outcome: Outcome) void {

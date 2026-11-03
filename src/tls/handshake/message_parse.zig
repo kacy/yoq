@@ -312,9 +312,9 @@ const message_build = @import("message_build.zig");
 
 test "ServerHello round-trips through the builder" {
     var buf: [256]u8 = undefined;
-    const server_random = [_]u8{0xAB} ** 32;
-    const server_pub = [_]u8{0xCD} ** 32;
-    const len = try message_build.buildServerHello(&buf, [_]u8{0} ** 32, server_random, &.{}, server_pub);
+    const server_random = @as([32]u8, @splat(0xAB));
+    const server_pub = @as([32]u8, @splat(0xCD));
+    const len = try message_build.buildServerHello(&buf, @as([32]u8, @splat(0)), server_random, &.{}, server_pub);
 
     // skip the 4-byte handshake header (type + u24 len) to get the body
     const got = try parseServerHello(buf[4..len]);
@@ -355,7 +355,7 @@ test "nextMessage walks a packed stream" {
     pos += a;
     const b = try message_build.buildCertificate(buf[pos..], &cert_der);
     pos += b;
-    const c = try message_build.buildFinished(buf[pos..], [_]u8{0xFF} ** common.hash_len);
+    const c = try message_build.buildFinished(buf[pos..], @as([common.hash_len]u8, @splat(0xFF)));
     pos += c;
 
     var rp: usize = 0;
@@ -370,7 +370,7 @@ test "nextMessage walks a packed stream" {
 
 test "Finished returns the verify data slice" {
     var buf: [128]u8 = undefined;
-    const verify = [_]u8{0x42} ** common.hash_len;
+    const verify = @as([common.hash_len]u8, @splat(0x42));
     const len = try message_build.buildFinished(&buf, verify);
     const got = try parseFinished(buf[4..len]);
     try std.testing.expectEqualSlices(u8, &verify, got.verify_data);
@@ -388,8 +388,8 @@ test "Truncated message returns error" {
 test "ClientHello from buildClientHello parses with the existing server parser" {
     const client_hello = @import("client_hello.zig");
     var buf: [512]u8 = undefined;
-    const random = [_]u8{0xAA} ** 32;
-    const pub_key = [_]u8{0x42} ** 32;
+    const random = @as([32]u8, @splat(0xAA));
+    const pub_key = @as([32]u8, @splat(0x42));
     const len = try message_build.buildClientHello(&buf, random, pub_key, "billing.svc");
 
     // parseClientHelloFields takes the body bytes (after the 4-byte header)
@@ -406,8 +406,8 @@ test "ClientHello from buildClientHello parses with the existing server parser" 
 test "ClientHello without SNI still parses" {
     const client_hello = @import("client_hello.zig");
     var buf: [512]u8 = undefined;
-    const random = [_]u8{0x11} ** 32;
-    const pub_key = [_]u8{0x22} ** 32;
+    const random = @as([32]u8, @splat(0x11));
+    const pub_key = @as([32]u8, @splat(0x22));
     const len = try message_build.buildClientHello(&buf, random, pub_key, null);
     const info = try client_hello.parseClientHelloFields(buf[4..len]);
     try std.testing.expect(info.has_aes_256_gcm);
@@ -425,7 +425,7 @@ test "CertificateRequest from builder round-trips" {
 test "buildCertificateVerify picks the per-side context string" {
     var server_buf: [256]u8 = undefined;
     var client_buf: [256]u8 = undefined;
-    const transcript = [_]u8{0xCC} ** common.hash_len;
+    const transcript = @as([common.hash_len]u8, @splat(0xCC));
     const kp = common.EcdsaP256.KeyPair.generate(std.testing.io);
 
     const slen = try message_build.buildCertificateVerify(&server_buf, .server, transcript, kp.secret_key);

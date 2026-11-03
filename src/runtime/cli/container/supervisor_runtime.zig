@@ -321,7 +321,7 @@ fn forwardSignal(sig: std.os.linux.SIG) callconv(.c) void {
         _ = std.os.linux.syscall2(
             .kill,
             @as(usize, @bitCast(@as(isize, pid))),
-            @intFromEnum(sig),
+            @backingInt(sig),
         );
     }
 }
@@ -387,7 +387,7 @@ fn readSelfExePathAlloc(io: std.Io, alloc: std.mem.Allocator) ![:0]u8 {
             else => return error.Unexpected,
         };
         if (path_len < buffer.len) {
-            return alloc.dupeZ(u8, buffer[0..path_len]);
+            return alloc.dupeSentinel(u8, buffer[0..path_len], 0);
         }
     }
     return error.NameTooLong;

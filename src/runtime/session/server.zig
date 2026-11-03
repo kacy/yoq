@@ -36,7 +36,7 @@ pub const Server = struct {
     interactive: bool,
     tty: bool,
     mutex: std.Io.Mutex = .init,
-    clients: [max_clients]Client = .{Client{}} ** max_clients,
+    clients: [max_clients]Client = @splat(Client{}),
     input_client: ?posix.fd_t = null,
     input_fd: posix.fd_t = -1,
     pid: ?posix.pid_t = null,
@@ -138,7 +138,7 @@ pub const Server = struct {
             const end = offset + @min(protocol.max_payload, bytes.len - offset);
             const chunk = bytes[offset..end];
             const record = &self.history[self.history_next];
-            record.bytes[0] = @intFromEnum(kind);
+            record.bytes[0] = @backingInt(kind);
             @memcpy(record.bytes[1..][0..chunk.len], chunk);
             record.len = chunk.len + 1;
             self.history_next = (self.history_next + 1) % history_count;
@@ -288,7 +288,7 @@ pub const Server = struct {
         // queue. peek without consuming a legacy stdin packet we cannot fit.
         var kind: [1]u8 = undefined;
         const count = platform.recv(client.fd, &kind, posix.MSG.PEEK | posix.MSG.DONTWAIT) catch return false;
-        return count == 0 or kind[0] != @intFromEnum(protocol.Kind.stdin);
+        return count == 0 or kind[0] != @backingInt(protocol.Kind.stdin);
     }
 
     fn run(self: *Server) void {

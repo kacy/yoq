@@ -27,8 +27,8 @@ pub fn execCommand(command: []const u8, args: []const []const u8, env: []const [
     validate(command, args, env) catch return 126;
     var strings: [string_capacity]u8 = undefined;
     var position: usize = 0;
-    var argv: [max_args + 2]?[*:0]const u8 = .{null} ** (max_args + 2);
-    var envp: [max_env + 1]?[*:0]const u8 = .{null} ** (max_env + 1);
+    var argv: [max_args + 2]?[*:0]const u8 = @splat(null);
+    var envp: [max_env + 1]?[*:0]const u8 = @splat(null);
     argv[0] = exec_helpers.packString(&strings, &position, command).?;
     for (args, 1..) |arg, i| argv[i] = exec_helpers.packString(&strings, &position, arg).?;
     for (env, 0..) |entry, i| envp[i] = exec_helpers.packString(&strings, &position, entry).?;
@@ -47,7 +47,7 @@ pub fn execCommand(command: []const u8, args: []const []const u8, env: []const [
     var executable: [4096]u8 = undefined;
     var failure: u8 = 127;
     while (dirs.next()) |dir| {
-        const candidate = std.fmt.bufPrintZ(&executable, "{s}/{s}", .{ if (dir.len > 0) dir else ".", command }) catch {
+        const candidate = std.fmt.bufPrintSentinel(&executable, "{s}/{s}", .{ if (dir.len > 0) dir else ".", command }, 0) catch {
             failure = 126;
             continue;
         };
@@ -70,15 +70,15 @@ fn execFailure(err: linux.E) u8 {
 
 test "process arguments reject overflow and embedded zero without truncation" {
     try validate("sh", &.{}, &.{});
-    const args = [_][]const u8{"x"} ** (max_args + 1);
+    const args = @as([max_args + 1][]const u8, @splat("x"));
     try validate("sh", args[0..max_args], &.{});
     try std.testing.expectError(error.InvalidArguments, validate("sh", &args, &.{}));
-    const env = [_][]const u8{"K=V"} ** (max_env + 1);
+    const env = @as([max_env + 1][]const u8, @splat("K=V"));
     try validate("sh", &.{}, env[0..max_env]);
     try std.testing.expectError(error.InvalidArguments, validate("sh", &.{}, &env));
     try std.testing.expectError(error.InvalidArguments, validate("sh", &.{"x\x00y"}, &.{}));
     try std.testing.expectError(error.InvalidArguments, validate("", &.{}, &.{}));
-    const huge = "x" ** string_capacity;
+    const huge = &@as([string_capacity:0]u8, @splat('x'));
     try std.testing.expectError(error.InvalidArguments, validate("sh", &.{huge}, &.{}));
 }
 
@@ -105,7 +105,7 @@ test "process execution resolves custom and empty PATH in the working directory"
     try tmp.dir.symLink(std.testing.io, "/bin/sh", "local-shell", .{});
     var path_buf: [4096]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &path_buf);
-    const path = try alloc.dupeZ(u8, path_buf[0..len]);
+    const path = try alloc.dupeSentinel(u8, path_buf[0..len], 0);
     defer alloc.free(path);
     const env_path = try std.fmt.allocPrint(alloc, "PATH={s}", .{path});
     defer alloc.free(env_path);

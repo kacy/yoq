@@ -177,8 +177,8 @@ const LayerDownloads = struct {
 /// token data as well as this batch's error slots.
 fn downloadBatch(comptime Downloads: type, downloads: *Downloads, count: usize) RegistryError!void {
     std.debug.assert(count <= common.max_parallel_downloads);
-    var threads: [common.max_parallel_downloads]?Downloads.Thread = .{null} ** common.max_parallel_downloads;
-    var thread_errors: [common.max_parallel_downloads]?RegistryError = .{null} ** common.max_parallel_downloads;
+    var threads: [common.max_parallel_downloads]?Downloads.Thread = @splat(null);
+    var thread_errors: [common.max_parallel_downloads]?RegistryError = @splat(null);
     var failed: std.atomic.Value(bool) = .init(false);
     defer for (&threads) |*thread| {
         if (thread.*) |worker| worker.join();
@@ -461,8 +461,8 @@ const DownloadBatchFixture = struct {
             self.owner.joined[self.index] = true;
         }
     };
-    workers: [3]?Thread = .{null} ** 3,
-    joined: [3]bool = .{false} ** 3,
+    workers: [3]?Thread = @splat(null),
+    joined: [3]bool = @splat(false),
     released: std.atomic.Value(bool) = .init(false),
     fallback_error: ?RegistryError,
     worker_error: ?RegistryError = null,

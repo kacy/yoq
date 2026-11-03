@@ -329,7 +329,7 @@ fn appendRecord(writer: *std.Io.Writer, record: store.TrainingJobRecord) !void {
         record.restart_count,
         record.created_at,
         record.updated_at,
-        @intFromEnum(record.execution_mode),
+        @backingInt(record.execution_mode),
     });
 }
 

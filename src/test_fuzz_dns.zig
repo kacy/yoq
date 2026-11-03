@@ -27,7 +27,7 @@ test "fuzz DNS parseHeader with arbitrary bytes" {
             // too short
             &.{ 0x00, 0x01 },
             "",
-            &([_]u8{0xFF} ** 12),
+            &(@as([12]u8, @splat(0xFF))),
         },
     });
 }
@@ -45,7 +45,7 @@ test "fuzz DNS parseQuestion with arbitrary bytes" {
             // valid query for "web" (header + 3web0 + type + class)
             &.{ 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 'w', 'e', 'b', 0x00, 0x00, 0x01, 0x00, 0x01 },
             "",
-            &([_]u8{0xFF} ** 64),
+            &(@as([64]u8, @splat(0xFF))),
             // compression pointer in label
             &.{ 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x0C },
         },

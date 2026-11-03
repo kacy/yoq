@@ -480,7 +480,7 @@ test "schema startup waits for an existing database writer" {
     var directory_buf: [paths.max_path]u8 = undefined;
     const directory_len = try tmp.dir.realPathFile(std.testing.io, ".", &directory_buf);
     var file_buf: [paths.max_path]u8 = undefined;
-    const file = try std.fmt.bufPrintZ(&file_buf, "{s}/startup.db", .{directory_buf[0..directory_len]});
+    const file = try std.fmt.bufPrintSentinel(&file_buf, "{s}/startup.db", .{directory_buf[0..directory_len]}, 0);
     var writer = try sqlite.Db.init(.{ .mode = .{ .File = file }, .open_flags = .{ .write = true, .create = true } });
     defer writer.deinit();
     indexes.applyPragmas(&writer);

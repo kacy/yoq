@@ -13,7 +13,7 @@ test "shared key readers enforce the same owner-only permission policy" {
     defer tmp.cleanup();
     var file = try tmp.dir.createFile(io, "key", .{ .permissions = .fromMode(0o600) });
     defer file.close(io);
-    const expected = [_]u8{0xa5} ** master_key.key_length;
+    const expected = @as([master_key.key_length]u8, @splat(0xa5));
     try file.writeStreamingAll(io, &expected);
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
     const base_len = try tmp.dir.realPath(io, &base_buf);

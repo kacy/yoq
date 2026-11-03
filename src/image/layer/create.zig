@@ -232,7 +232,7 @@ fn writeLongName(writer: *std.tar.Writer, kind: std.tar.Writer.Header.FileType, 
 }
 
 fn writePadding(writer: *std.tar.Writer, size: u64) !void {
-    const zeros = [_]u8{0} ** 512;
+    const zeros = @as([512]u8, @splat(0));
     try writer.underlying_writer.writeAll(zeros[0..@intCast((512 - size % 512) % 512)]);
 }
 
@@ -317,8 +317,8 @@ test "layer metadata header preserves long names prefix and zero modes" {
     var bytes: std.Io.Writer.Allocating = .init(alloc);
     defer bytes.deinit();
     var writer: std.tar.Writer = .{ .underlying_writer = &bytes.writer, .prefix = "prefix" };
-    const name = "n" ** 300;
-    const link = "l" ** 300;
+    const name = &@as([300:0]u8, @splat('n'));
+    const link = &@as([300:0]u8, @splat('l'));
     try writeOwnedHeader(&writer, .symbolic_link, name, link, 0, .{ .uid = 4000000000, .gid = 2345, .mode = 0, .mtime = 123 });
     var reader: std.Io.Reader = .fixed(bytes.written());
     var name_buf: [4096]u8 = undefined;
