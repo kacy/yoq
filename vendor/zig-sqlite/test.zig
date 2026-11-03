@@ -31,7 +31,7 @@ fn tmpDbPath(allocator: mem.Allocator) ![:0]const u8 {
     });
     defer allocator.free(path);
 
-    return allocator.dupeZ(u8, path);
+    return allocator.dupeSentinel(u8, path, 0);
 }
 
 fn dbMode(allocator: mem.Allocator) Db.Mode {
@@ -39,7 +39,7 @@ fn dbMode(allocator: mem.Allocator) Db.Mode {
         break :blk .{ .Memory = {} };
     } else blk: {
         if (build_options.dbfile) |dbfile| {
-            return .{ .File = allocator.dupeZ(u8, dbfile) catch unreachable };
+            return .{ .File = allocator.dupeSentinel(u8, dbfile, 0) catch unreachable };
         }
 
         const path = tmpDbPath(allocator) catch unreachable;
