@@ -77,8 +77,7 @@ const PreparedService = struct {
             try gpu_runtime.appendRequiredEnv(alloc, &merged_env, data);
         }
 
-        const has_health_check = svc.health_check != null;
-        const net_config: ?net_setup.NetworkConfig = .{ .skip_dns = has_health_check };
+        const net_config: ?net_setup.NetworkConfig = .{};
 
         return .{
             .alloc = alloc,

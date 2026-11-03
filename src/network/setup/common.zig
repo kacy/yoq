@@ -31,7 +31,6 @@ pub const PeerInfo = struct {
 pub const NetworkConfig = struct {
     enabled: bool = true,
     port_maps: []const PortMap = &.{},
-    skip_dns: bool = false,
     node_id: ?u16 = null,
     network_name: ?[]const u8 = null,
     dns_name: ?[]const u8 = null,

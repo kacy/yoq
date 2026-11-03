@@ -106,7 +106,7 @@ fn setupContainerImpl(container_id: []const u8, pid: posix.pid_t, config: common
 
     const gateway = if (subnet_config) |sc| sc.gateway else bridge.gateway_ip;
     dns.startResolverAt(gateway);
-    if (!config.skip_dns and !dns.resolverRunningAt(gateway)) {
+    if (!dns.resolverRunningAt(gateway)) {
         return common.SetupError.ConfigFailed;
     }
     if (dns.resolverOwnedByCurrentProcess()) {
@@ -116,16 +116,14 @@ fn setupContainerImpl(container_id: []const u8, pid: posix.pid_t, config: common
     // every supervisor must retry DNS ownership if the current listener exits.
     service_reconciler.startAuditLoopIfEnabled();
 
-    if (!config.skip_dns) {
-        service_registry_bridge.registerContainerService(
-            config.dns_name orelse hostname,
-            container_id,
-            container_ip,
-            if (config.node_id) |node_id| @as(i64, node_id) else null,
-        );
-    }
+    service_registry_bridge.registerContainerService(
+        config.dns_name orelse hostname,
+        container_id,
+        container_ip,
+        if (config.node_id) |node_id| @as(i64, node_id) else null,
+    );
 
-    errdefer if (pending == null and !config.skip_dns) service_registry_bridge.unregisterContainerService(container_id);
+    errdefer if (pending == null) service_registry_bridge.unregisterContainerService(container_id);
     policy.requireForContainer(hostname, container_ip, std.heap.page_allocator) catch |err| {
         log.err("network policy must be enforced before container startup: {}", .{err});
         return common.SetupError.ConfigFailed;
@@ -193,10 +191,8 @@ fn setupNamedContainer(container_id: []const u8, pid: posix.pid_t, config: commo
     errdefer if (pending == null) {
         for (config.port_maps) |port| mappings.remove(port);
     };
-    if (!config.skip_dns) {
-        dns.startScopedResolverAt(subnet.gateway, network.bridge_name, name);
-        if (!dns.resolverRunningAt(subnet.gateway)) return error.ConfigFailed;
-    }
+    dns.startScopedResolverAt(subnet.gateway, network.bridge_name, name);
+    if (!dns.resolverRunningAt(subnet.gateway)) return error.ConfigFailed;
     local_networks.activate(container_id, address) catch return error.DbFailed;
     var info: common.NetworkInfo = .{ .ip = address, .veth_host = undefined, .veth_host_len = host_veth.len };
     @memcpy(info.veth_host[0..host_veth.len], host_veth);
