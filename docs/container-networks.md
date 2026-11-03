@@ -84,4 +84,4 @@ sudo ufw allow in on yoq0 to 10.42.0.1 port 53 proto udp
 
 a failure to add the rule, or to remove it when a container stops, prints a warning and does not stop the container. `network rm` reports a failed removal and keeps the network, so you can retry it.
 
-yoq also manages `FORWARD` and NAT rules, and enables IPv4 forwarding, for container traffic. rules for a named network are removed by `network rm`. rules for the default bridge stay until reboot.
+yoq also manages `FORWARD` and NAT rules, jumps to its `YOQ-PUBLISHED-*` chains, and enables IPv4 forwarding, for container traffic. rules for a named network are removed by `network rm`. rules for the default bridge and the jumps stay until reboot.
