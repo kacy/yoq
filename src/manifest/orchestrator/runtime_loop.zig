@@ -188,7 +188,8 @@ pub fn serviceThread(orch: anytype, idx: usize, shutdown_requested: *const std.a
         var c = prepared.createContainer(orch, idx, id, svc.name);
         const start_time = std.Io.Clock.awake.now(std.Options.debug_io).toNanoseconds();
 
-        c.start() catch {
+        c.start() catch |err| {
+            log.err("failed to start container for {s}: {}", .{ svc.name, err });
             cleanupContainerArtifacts(id);
             orch.states[idx].setStatus(.failed);
             return;
