@@ -1,9 +1,10 @@
 {
-  "sqlite_version": "3.53.4",
-  "build_sha256": "bfc75362c926283db03ca813057b96485144e4f76b111d74261a3530f6c58c20",
+  "sqlite_version": "3.54.1",
+  "build_sha256": "b5a9342fcec84a0811cd50ec5b98e814e277aeb924051294545e1148bd17e663",
   "not_affected": {
-    "CVE-2026-39113": "Concerns the optional sqlar extension; sqlarUncompressFunc is absent from the verified SQLite 3.53.4 amalgamation bundled by this build.",
+    "CVE-2026-39113": "Concerns the optional sqlar extension; sqlarUncompressFunc is absent from the verified SQLite 3.54.1 amalgamation bundled by this build.",
     "CVE-2026-50812": "Concerns the Session extension. The bundled amalgamation guards this code with SQLITE_ENABLE_SESSION and SQLITE_ENABLE_PREUPDATE_HOOK; this build enables neither.",
-    "CVE-2026-50813": "Concerns the Session extension. The bundled amalgamation guards this code with SQLITE_ENABLE_SESSION and SQLITE_ENABLE_PREUPDATE_HOOK; this build enables neither."
+    "CVE-2026-50813": "Concerns the Session extension. The bundled amalgamation guards this code with SQLITE_ENABLE_SESSION and SQLITE_ENABLE_PREUPDATE_HOOK; this build enables neither.",
+    "CVE-2026-119586": "Concerns the .recover command in the sqlite3 command-line shell. This build compiles only sqlite3.c and workaround.c; it does not compile or ship shell.c."
   }
 }

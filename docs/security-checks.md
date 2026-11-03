@@ -21,10 +21,11 @@ whole repository inventory. An empty inventory, unmapped advisory, malformed
 interval, or failed paginated lookup blocks release rather than reporting a
 clean dependency.
 
-Three records without version intervals have source-reviewed exclusions in
+Four records have source-reviewed exclusions in
 `tools/sqlite_advisory_triage.json`: CVE-2026-39113 concerns the absent sqlar
-extension; CVE-2026-50812 and CVE-2026-50813 concern the disabled Session extension.
-The review applies only to SQLite 3.53.4 and the recorded SHA-256 of `build.zig`.
+extension; CVE-2026-50812 and CVE-2026-50813 concern the disabled Session extension;
+CVE-2026-119586 concerns the command-line shell, which yoq does not compile or ship.
+The review applies only to SQLite 3.54.1 and the recorded SHA-256 of `build.zig`.
 Changing the dependency version or build configuration invalidates this review.
 The reasons are printed by the gate; new unmapped records still block release.
 
